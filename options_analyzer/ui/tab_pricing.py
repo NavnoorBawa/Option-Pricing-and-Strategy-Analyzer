@@ -164,6 +164,43 @@ def _heatmaps(inputs: Inputs) -> None:
         )
 
 
+def _chain(inputs: Inputs) -> None:
+    """Black-Scholes-Merton values and key Greeks across strikes at the sidebar expiry and volatility."""
+    S, T, r, sigma, q = inputs.spot, inputs.expiry, inputs.rate, inputs.volatility, inputs.dividend_yield
+    strikes = np.unique(np.round(inputs.strike * np.linspace(0.8, 1.2, 9), 2))
+    call = bs.greeks(S, strikes, T, r, sigma, q, "call")
+    put = bs.greeks(S, strikes, T, r, sigma, q, "put")
+    chain = pd.DataFrame(
+        {
+            "Call value": bs.price(S, strikes, T, r, sigma, q, "call"),
+            "Call delta": call["delta"],
+            "Call theta / day": call["theta"] / 365,
+            "Strike": strikes,
+            "Put value": bs.price(S, strikes, T, r, sigma, q, "put"),
+            "Put delta": put["delta"],
+            "Put theta / day": put["theta"] / 365,
+            "Gamma": call["gamma"],
+            "Vega / vol pt": call["vega"] / 100,
+        }
+    )
+    st.dataframe(
+        chain,
+        hide_index=True,
+        column_config={
+            "Strike": st.column_config.NumberColumn(format="%.2f"),
+            "Call value": st.column_config.NumberColumn(format="%.4f"),
+            "Put value": st.column_config.NumberColumn(format="%.4f"),
+            "Call delta": st.column_config.NumberColumn(format="%.3f"),
+            "Put delta": st.column_config.NumberColumn(format="%.3f"),
+            "Call theta / day": st.column_config.NumberColumn(format="%.4f"),
+            "Put theta / day": st.column_config.NumberColumn(format="%.4f"),
+            "Gamma": st.column_config.NumberColumn(format="%.5f"),
+            "Vega / vol pt": st.column_config.NumberColumn(format="%.4f"),
+        },
+    )
+    st.caption("Strikes from 80% to 120% of the sidebar strike, flat volatility (no smile), same expiry.")
+
+
 def _model_diagnostics(inputs: Inputs, prices: Prices) -> None:
     S, K, T, r, sigma, q = (
         inputs.spot,
@@ -303,6 +340,9 @@ def render(inputs: Inputs, prices: Prices) -> None:
 
     with st.expander("Price heatmaps (spot × volatility)"):
         _heatmaps(inputs)
+
+    with st.expander("Theoretical option chain"):
+        _chain(inputs)
 
     st.subheader("Model diagnostics")
     st.caption(inputs.model.label)

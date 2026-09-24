@@ -338,6 +338,16 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
     st.plotly_chart(
         charts.payoff_chart(spots, curves, market.spot, strategy.strikes, visible_be, band), key="payoff_chart"
     )
+    profile = pd.DataFrame({"Underlying price": spots} | {name: values for values, name, _, _ in curves})
+    st.download_button(
+        "Download P&L profile (CSV)",
+        profile.to_csv(index=False).encode(),
+        f"{strategy.name.lower().replace(' ', '_')}_pnl.csv",
+        "text/csv",
+        on_click="ignore",
+        icon=":material/download:",
+        key="dl_pnl",
+    )
 
     c = st.columns(3)
     c[0].metric(

@@ -1,133 +1,134 @@
-# Advanced Options Pricing & Analysis Tool
+# Options Pricing & Strategy Analyzer
 
-A comprehensive options pricing and analysis application built with Streamlit, implementing various quantitative finance models for option valuation, Greeks calculation, risk assessment, and strategy analysis.
+[![CI](https://github.com/NavnoorBawa/Option-Pricing-and-Strategy-Analyzer/actions/workflows/ci.yml/badge.svg)](https://github.com/NavnoorBawa/Option-Pricing-and-Strategy-Analyzer/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
-## Overview
+An interactive options analytics workbench built with Streamlit: price European and American options with three
+models, inspect Greeks to third order, build and analyse any multi-leg strategy, stress-test it against historical
+crises, measure its Value-at-Risk, and turn implied-volatility surfaces into arbitrage-checked local volatility.
 
-This application provides a robust framework for pricing and analyzing financial options, using three core pricing methodologies:
+The numerical core is a standalone, fully tested Python package (`options_analyzer`); the Streamlit app is a thin
+interface on top of it.
 
-- Black-Scholes Model
-- Cox-Ross-Rubinstein Binomial Model
-- Monte Carlo Simulation
-
-The tool extends beyond basic pricing to offer Greeks calculation, option strategy evaluation, volatility surface modeling, VaR (Value at Risk) calculations, and scenario analysis - making it suitable for both educational purposes and professional quantitative research.
+![Strategy Builder](docs/images/strategy.png)
 
 ## Features
 
-### Option Pricing Models
-- **Black-Scholes Model**: Closed-form solution for European options
-- **Binomial Model**: Discrete-time model supporting both European and American options
-- **Monte Carlo Simulation**: Path-dependent pricing with statistical error estimation
+**Pricing & Greeks**
+- Black–Scholes–Merton with continuous dividend yield, exact at every edge case (expiry, zero volatility).
+- Binomial trees: Cox–Ross–Rubinstein and Leisen–Reimer (≈O(1/n²) convergence), European or American exercise,
+  tree Greeks and the early-exercise boundary. Up to 2,000 steps in milliseconds.
+- Monte Carlo with exact terminal sampling, antithetic and control variates, reproducible seeds and 95 % confidence
+  intervals.
+- All 14 Greeks (delta … ultima, plus rho and dividend rho) for calls and puts, with explicit units, a sensitivity
+  explorer and spot × volatility price heatmaps.
 
-### Greeks and Risk Metrics
-- **First-order Greeks**: Delta, Gamma, Theta, Vega
-- **Higher-order Greeks**: Vanna, Charm, Volga, Veta, Speed, Zomma, Color, Ultima
-- **Strategy Greeks**: Combined risk metrics for option strategies
+**Strategy Builder**
+- 26 templates — verticals, straddles/strangles, iron butterfly/condor, butterflies, ratio backspreads, collars,
+  jade lizard, synthetics, calendars and diagonals — or any custom combination of calls, puts and stock.
+- Every leg is editable: side and size, strike, its own expiry and implied volatility, and your actual fill price.
+  Contract multiplier and commissions are included.
+- P&L at expiry, today and at any intermediate date, with an implied-volatility shift, exact breakevens,
+  unlimited-risk detection, probability of profit, expected P&L and position/per-leg Greeks.
 
-### Option Strategies
-- **Call-based**: Covered Call, Long Call, Bull Call Spread, Bear Call Spread
-- **Put-based**: Long Put, Protective Put, Bull Put Spread, Bear Put Spread
-- **Combined**: Long Straddle, Short Straddle, Iron Butterfly, Iron Condor
+**Risk & Scenarios** (for the position you built)
+- Spot × implied-vol P&L heatmap and time-decay curves from full re-pricing.
+- Stress tests calibrated to Black Monday, the dot-com bust, the 2008 crisis, Volmageddon, the COVID crash, the
+  2022 rate shock, the April 2025 tariff shock and the Fed's 2026 severely adverse scenario, plus custom shocks.
+- Monte Carlo VaR and Expected Shortfall with Normal, Student-t or GARCH(1,1) returns and optional implied-vol
+  dynamics, compared with delta-normal VaR.
 
-### Advanced Quantitative Tools
-- **Implied Volatility Calculator**: Numerical solver using optimization
-- **Local Volatility Surface**: Dupire's formula implementation
-- **Value at Risk (VaR)**: Monte Carlo simulation approach with Expected Shortfall
-- **Risk Scenario Analysis**: Stress testing across price, volatility, and time dimensions
+**Volatility Surface & Implied Volatility**
+- Arbitrage-free SSVI surfaces or your own quotes (CSV), smoothed and turned into local volatility with Gatheral's
+  formula; calendar and butterfly arbitrage are detected and reported, never silently patched.
+- Implied-volatility solver that checks no-arbitrage bounds and always converges.
+- Settings are stored in the URL, so any setup can be bookmarked or shared.
 
-### Strategy Analysis
-- Strategy P&L profiles with break-even points
-- Performance metrics including max profit/loss, profit probability, risk-reward ratio
-- Kelly criterion and Sharpe-like ratio calculations
-- Time decay visualization and analysis
+| Pricing & Greeks | Risk & Scenarios | Volatility Surface |
+| --- | --- | --- |
+| ![Pricing](docs/images/pricing.png) | ![Risk](docs/images/risk.png) | ![Surface](docs/images/surface.png) |
 
-## Installation
+## Quick start
 
-### Prerequisites
-- Python 3.7+
-- pip package manager
+Requires Python 3.10 or newer.
 
-### Dependencies
 ```bash
-pip install streamlit numpy pandas matplotlib seaborn scipy plotly
+git clone https://github.com/NavnoorBawa/Option-Pricing-and-Strategy-Analyzer.git
+cd Option-Pricing-and-Strategy-Analyzer
+pip install -r requirements.txt
+streamlit run main.py
 ```
 
-### Running the Application
+The app opens at <http://localhost:8501>. A dev container (VS Code / GitHub Codespaces) is included and starts the
+app automatically.
+
+## Using the library
+
+```python
+from options_analyzer import black_scholes as bs, binomial, implied_vol, strategies as st
+
+bs.price(100, 105, 0.5, 0.04, 0.22, q=0.01, option_type="put")                    # 8.1319
+bs.greeks(100, 105, 0.5, 0.04, 0.22, q=0.01, option_type="put")["vega"]           # 27.797 (per 1.00 of vol)
+binomial.price(100, 105, 0.5, 0.04, 0.22, 0.01, "put", 1001, american=True, method="lr")  # 8.3695
+implied_vol.implied_volatility(8.50, 100, 105, 0.5, 0.04, 0.01, "put")             # 0.2332
+
+market = st.Market(spot=100, rate=0.04, volatility=0.22, expiry=0.5, dividend_yield=0.01)
+condor = st.build_template("Iron Condor", strike=100, width=5)
+metrics = st.analyze(condor, market)
+metrics.breakevens              # [91.909, 108.091]
+metrics.max_loss                # 1.909 per share
+metrics.probability_of_profit   # 0.398
+```
+
+## Conventions
+
+- Time to expiry is calendar days / 365; rates and dividend yield are continuously compounded.
+- Greeks are displayed per calendar day (theta, charm, veta, color), per volatility point (vega, vanna, zomma …),
+  per 1 % rate move (rho) and per $1 spot move (delta, gamma, speed). Time Greeks measure the passage of time, so a
+  long option has negative theta.
+- VaR horizons are in trading days (252 per year).
+- Strategy quantities are signed (+ long, − short); one unit is an option on one share. P&L is shown for the whole
+  position (contracts × multiplier).
+
+The **Methodology** tab in the app documents every model, formula and assumption with references.
+
+## Project structure
+
+```
+main.py                     Streamlit entry point
+options_analyzer/
+  black_scholes.py          BSM prices and analytical Greeks
+  binomial.py               CRR / Leisen-Reimer trees, American exercise
+  monte_carlo.py            Variance-reduced Monte Carlo
+  implied_vol.py            Bounds-checked implied-volatility solver
+  strategies.py             Leg-based strategy engine and templates
+  scenarios.py              Stress tests and scenario grids
+  risk.py                   Monte Carlo VaR / Expected Shortfall
+  vol_surface.py            SSVI, quote fitting, Gatheral local volatility
+  ui/                       Streamlit interface (one module per tab, Plotly charts)
+tests/                      pytest suite (math, invariants, reference values, UI)
+```
+
+## Development
+
 ```bash
-streamlit run options_pricing_app.py
+pip install -r requirements.txt pytest mpmath ruff
+pytest              # ~1,100 tests: Greeks vs 40-digit derivatives, QuantLib references, UI smoke tests
+ruff check . && ruff format --check .
 ```
 
-## Mathematical Models
+Continuous integration runs the linters and the test-suite on Python 3.10–3.13 for every pull request.
 
-### Black-Scholes Model
-The application implements the classic Black-Scholes formula for European options:
+Version 2.0 is a ground-up rebuild following a full audit of the original single-file app; [AUDIT.md](AUDIT.md) lists
+every issue that was found and how it was resolved.
 
-For call options:
-```
-C = S * N(d1) - K * e^(-rT) * N(d2)
-```
+## Limitations
 
-For put options:
-```
-P = K * e^(-rT) * N(-d2) - S * N(-d1)
-```
-
-Where:
-- d1 = (ln(S/K) + (r + σ²/2)T) / (σ√T)
-- d2 = d1 - σ√T
-
-### Binomial Model
-The Cox-Ross-Rubinstein binomial model is implemented with:
-- up factor: u = e^(σ√Δt)
-- down factor: d = 1/u
-- risk-neutral probability: p = (e^(rΔt) - d) / (u - d)
-
-### Monte Carlo Simulation
-Stock price paths are simulated using Geometric Brownian Motion:
-```
-S(t+Δt) = S(t) * exp((r - σ²/2)Δt + σ√Δt * Z)
-```
-Where Z is a standard normal random variable.
-
-### Greeks Calculation
-First and higher-order Greeks are calculated using analytical formulas where possible, with careful handling of edge cases.
-
-## Usage Examples
-
-### Basic Option Pricing
-Use the sidebar to select a pricing model and input parameters:
-- Current asset price
-- Strike price
-- Time to maturity (in years)
-- Volatility
-- Risk-free interest rate
-
-### Strategy Analysis
-1. Navigate to the "Strategy Analysis" tab
-2. Select a strategy category and specific strategy
-3. View the P&L profile and risk metrics
-4. Enable "Show Detailed Strategy Performance" for comprehensive metrics
-
-### Advanced Quantitative Analysis
-1. Navigate to the "Quant Research" tab
-2. Select from tools like Implied Volatility, Local Volatility Surface, VaR, or Risk Scenario Analysis
-3. Configure tool-specific parameters
-4. View the resulting calculations and visualizations
-
-## Project Structure
-
-The application is organized into several functional components:
-
-1. **Pricing Models**: Implementation of Black-Scholes, Binomial, and Monte Carlo methods
-2. **Greeks Calculation**: Functions for first and higher-order Greeks
-3. **Strategy Analysis**: Tools for evaluating option strategies
-4. **Risk Assessment**: VaR and scenario analysis implementations
-5. **UI Components**: Streamlit interface elements and visualization functions
+Strategy valuation uses Black–Scholes–Merton at each leg's implied volatility (no smile dynamics, European exercise),
+probabilities are log-normal, and transaction costs beyond a flat commission, margin and discrete dividends are not
+modelled. This project is for education and analysis only and is **not investment advice**.
 
 ## Author
 
-Created by Navnoor Bawa
-
-## License
-
-MIT License
+Created by [Navnoor Bawa](https://www.linkedin.com/in/navnoorbawa/). Released under the [MIT License](LICENSE).
