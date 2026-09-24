@@ -1,0 +1,68 @@
+"""Streamlit application entry point (``streamlit run main.py``)."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+
+import streamlit as st
+
+from .. import __version__
+from . import tab_iv, tab_methodology, tab_pricing, tab_risk, tab_strategy, tab_surface
+from .inputs import sidebar
+
+REPO_URL = "https://github.com/NavnoorBawa/Option-Pricing-and-Strategy-Analyzer"
+
+
+def run() -> None:
+    st.set_page_config(
+        page_title="Options Pricing & Strategy Analyzer",
+        page_icon="📈",
+        layout="wide",
+        initial_sidebar_state="expanded",
+        menu_items={
+            "Get help": REPO_URL,
+            "Report a bug": f"{REPO_URL}/issues",
+            "About": f"Options Pricing & Strategy Analyzer v{__version__} by Navnoor Bawa. "
+            "Educational tool, not investment advice.",
+        },
+    )
+    inputs = sidebar()
+
+    st.title("Options Pricing & Strategy Analyzer")
+    st.caption(
+        "Black-Scholes-Merton, binomial and Monte Carlo pricing · Greeks to third order · multi-leg strategies · "
+        "stress tests and VaR/ES · implied and local volatility surfaces"
+    )
+
+    try:
+        prices = tab_pricing.compute_prices(inputs)
+    except ValueError as exc:
+        st.warning(
+            f"{inputs.model.label}: {exc} Showing Black-Scholes-Merton values instead.", icon=":material/warning:"
+        )
+        inputs = replace(inputs, model=replace(inputs.model, kind="bsm"))
+        prices = tab_pricing.compute_prices(inputs)
+    tab_pricing.render_price_cards(inputs, prices)
+
+    pricing, strategy, risk, surface, iv, methodology = st.tabs(
+        [
+            ":material/calculate: Pricing & Greeks",
+            ":material/stacked_line_chart: Strategy Builder",
+            ":material/shield: Risk & Scenarios",
+            ":material/landscape: Volatility Surface",
+            ":material/troubleshoot: Implied Volatility",
+            ":material/menu_book: Methodology",
+        ]
+    )
+    with pricing:
+        tab_pricing.render(inputs, prices)
+    with strategy:
+        position = tab_strategy.render(inputs)
+    with risk:
+        tab_risk.render(position)
+    with surface:
+        tab_surface.render(inputs)
+    with iv:
+        tab_iv.render(inputs)
+    with methodology:
+        tab_methodology.render()

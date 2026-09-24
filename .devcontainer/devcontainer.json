@@ -1,23 +1,17 @@
 {
-  "name": "Python 3",
-  // Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
-  "image": "mcr.microsoft.com/devcontainers/python:1-3.11-bullseye",
+  "name": "Options Pricing & Strategy Analyzer",
+  "image": "mcr.microsoft.com/devcontainers/python:1-3.12-bookworm",
   "customizations": {
     "codespaces": {
-      "openFiles": [
-        "README.md",
-        "main.py"
-      ]
+      "openFiles": ["README.md", "main.py"]
     },
     "vscode": {
-      "settings": {},
-      "extensions": [
-        "ms-python.python",
-        "ms-python.vscode-pylance"
-      ]
+      "extensions": ["ms-python.python", "ms-python.vscode-pylance", "charliermarsh.ruff"]
     }
   },
-  "updateContentCommand": "[ -f packages.txt ] && sudo apt update && sudo apt upgrade -y && sudo xargs apt install -y <packages.txt; [ -f requirements.txt ] && pip3 install --user -r requirements.txt; pip3 install --user streamlit; echo '✅ Packages installed and Requirements met'",
+  "updateContentCommand": "pip3 install --user -r requirements.txt pytest mpmath ruff && echo '✅ Packages installed'",
+  // Codespaces' port-forwarding proxy breaks Streamlit's CORS/XSRF checks (e.g. for file uploads), so they are
+  // disabled here on the command line only - never in .streamlit/config.toml, which also applies to deployments.
   "postAttachCommand": {
     "server": "streamlit run main.py --server.enableCORS false --server.enableXsrfProtection false"
   },
@@ -27,7 +21,5 @@
       "onAutoForward": "openPreview"
     }
   },
-  "forwardPorts": [
-    8501
-  ]
+  "forwardPorts": [8501]
 }

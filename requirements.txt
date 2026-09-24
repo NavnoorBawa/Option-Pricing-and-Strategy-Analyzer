@@ -1,7 +1,8 @@
-streamlit>=1.30.0
-numpy>=1.24.3
-pandas>=2.0.3
-scipy>=1.10.1
-plotly>=5.18.0
-matplotlib>=3.7.1
-seaborn>=0.12.2
+# Runtime dependencies (Streamlit Community Cloud installs from this file).
+# Development tools are listed in pyproject.toml under [dependency-groups].
+streamlit>=1.64,<2
+numpy>=1.26
+pandas>=2.1
+plotly>=5.24
+scipy>=1.11
+xlsxwriter>=3.1

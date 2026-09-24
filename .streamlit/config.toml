@@ -1,21 +1,15 @@
 [theme]
-base="dark"
-primaryColor="#FF4B4B"
-backgroundColor="#0E1117"
-secondaryBackgroundColor="#262730"
-textColor="#FAFAFA"
-font="sans serif"
+base = "dark"
+primaryColor = "#FF4B4B"
 
 [server]
-runOnSave = true
-enableXsrfProtection = false
-enableCORS = false
+# Uploaded option-quote CSVs are small; cap uploads at 10 MB.
+maxUploadSize = 10
 
 [browser]
-serverAddress = "localhost"
-serverPort = 8501
 gatherUsageStats = false
 
 [client]
-toolbarMode = "auto"
-showErrorDetails = false
+# Hide developer menu items from viewers and show only the error type (no stack traces) to users.
+toolbarMode = "viewer"
+showErrorDetails = "type"
