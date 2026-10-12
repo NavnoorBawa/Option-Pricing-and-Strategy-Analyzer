@@ -18,8 +18,11 @@ def render() -> None:
   multiplier converts to dollar P&L.
 
 ### Black–Scholes–Merton
+
 $$C = S e^{-qT} N(d_1) - K e^{-rT} N(d_2), \qquad P = K e^{-rT} N(-d_2) - S e^{-qT} N(-d_1)$$
-$$d_{1,2} = \frac{\ln(S/K) + (r - q \pm \tfrac12\sigma^2)\,T}{\sigma\sqrt{T}}$$
+
+$$d_{1,2} = \dfrac{\ln(S/K) + (r - q \pm \tfrac12\sigma^2)\,T}{\sigma\sqrt{T}}$$
+
 With zero volatility the value is the discounted forward intrinsic value
 $\max(\pm(S e^{-qT} - K e^{-rT}), 0)$. All fourteen Greeks (to third order) are analytical and are
 verified against high-precision finite differences in the test-suite.
@@ -43,7 +46,10 @@ a fixed seed makes results reproducible.
 Quotes outside the no-arbitrage bounds
 $\max(S e^{-qT} - K e^{-rT}, 0) \le C < S e^{-qT}$ (and the put analogue) are rejected, because no
 volatility can produce them. Otherwise the quote is converted to its out-of-the-money equivalent through
-put–call parity and solved with Brent's method, which always converges on a bracketed root.
+put–call parity and solved with Brent's method, which always converges on a bracketed root. American quotes
+are inverted on a 501-step Leisen–Reimer tree against American bounds; a quote equal to the option's
+zero-volatility value (for example the value of exercising now) does not identify a volatility and is
+reported as such.
 
 ### Strategies
 Each position is a list of legs. Options are valued with Black–Scholes–Merton at each leg's implied
@@ -53,7 +59,7 @@ The entry cost is the model value unless you enter your own fill price, so the "
 for legs entered at model value. Breakevens are exact roots of the P&L function, maximum profit or loss is
 reported as unlimited when the P&L keeps rising or falling with the spot, and the probability of profit
 integrates the log-normal density of the price at the front expiry over the profitable intervals (drift = the
-risk-free rate by default). Premium financing and early exercise are ignored.
+risk-free rate by default). Premium financing is ignored unless you switch it on; early exercise is ignored.
 
 ### Scenarios and stress tests
 Every scenario re-prices all legs at the shocked spot, implied volatility, rate and remaining time. Historical
@@ -81,7 +87,9 @@ $|\Delta| S \sigma \sqrt{h}\, z_\alpha$ is shown for comparison.
 ### Local volatility
 Surfaces are handled as total implied variance $w(y,T) = \sigma_{\text{BS}}^2 T$ in forward log-moneyness
 $y = \ln(K/F_T)$, and local variance follows Gatheral's form of Dupire's equation
+
 $$\sigma_{\text{loc}}^2 = \frac{\partial_T w}{1 - \frac{y}{w}\partial_y w + \frac14\left(-\frac14 - \frac1w + \frac{y^2}{w^2}\right)(\partial_y w)^2 + \frac12 \partial_{yy} w}.$$
+
 The numerator and denominator are exactly the calendar and butterfly no-arbitrage conditions; where either
 fails local volatility is undefined and is reported rather than patched. The parametric surface is SSVI
 (Gatheral & Jacquier, 2014), arbitrage-free when $\eta(1+|\rho|) \le 2$; uploaded quotes are smoothed per
