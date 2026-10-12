@@ -3,7 +3,12 @@ import itertools
 import pytest
 
 from options_analyzer import black_scholes as bs
-from options_analyzer.implied_vol import ImpliedVolError, implied_volatility, no_arbitrage_bounds
+from options_analyzer.implied_vol import (
+    ImpliedVolError,
+    implied_volatility,
+    implied_volatility_american,
+    no_arbitrage_bounds,
+)
 
 GRID = list(
     itertools.product(
@@ -53,3 +58,24 @@ def test_tiny_but_positive_price_is_solved():
     price = bs.price(100, 250, 0.1, 0.05, 0.4, option_type="call")
     assert 0 < price < 1e-10
     assert implied_volatility(price, 100, 250, 0.1, 0.05) == pytest.approx(0.4, abs=1e-6)
+
+
+AMERICAN = list(itertools.product([80, 100, 125], [0.1, 1.0], [0.1, 0.3, 0.8], ["call", "put"], [0.0, 0.04]))
+
+
+@pytest.mark.parametrize(("K", "T", "sigma", "kind", "q"), AMERICAN)
+def test_american_round_trip(K, T, sigma, kind, q):
+    from options_analyzer import binomial
+
+    price = binomial.price(100, K, T, 0.05, sigma, q, kind, 501, american=True, method="lr")
+    iv = implied_volatility_american(price, 100, K, T, 0.05, q, kind)
+    reproduced = binomial.price(100, K, T, 0.05, max(iv, 1e-6), q, kind, 501, american=True, method="lr")
+    # Quotes equal to the zero-volatility value (e.g. immediate exercise) are not identifiable: IV = 0.
+    assert abs(iv - sigma) < 1e-5 or (iv == 0.0 and reproduced == pytest.approx(price, abs=1e-9))
+
+
+def test_american_bounds_reject_impossible_quotes():
+    with pytest.raises(ImpliedVolError, match="immediate exercise"):
+        implied_volatility_american(5.0, 100, 90, 1, 0.05, 0, "call")
+    with pytest.raises(ImpliedVolError, match="upper bound"):
+        implied_volatility_american(150.0, 100, 90, 1, 0.05, 0, "call")

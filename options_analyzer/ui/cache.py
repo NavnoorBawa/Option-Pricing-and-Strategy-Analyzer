@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import streamlit as st
 
-from .. import binomial, monte_carlo, risk, vol_surface
+from .. import binomial, implied_vol, monte_carlo, risk, vol_surface
 from ..strategies import Market, Strategy
 
 
@@ -67,3 +67,19 @@ def ssvi_surface(params: vol_surface.SSVIParams, rate, dividend_yield, m_range, 
 @st.cache_data(show_spinner=False, max_entries=8)
 def market_surface(quotes, spot, rate, dividend_yield, smooth) -> vol_surface.VolSurface:
     return vol_surface.fit_market_surface(quotes, spot, rate, dividend_yield, smooth=smooth)
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def american_value(S, K, T, r, sigma, q, option_type) -> float:
+    return binomial.price(S, K, T, r, sigma, q, option_type, 501, american=True, method="lr")
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def american_iv(price, S, K, T, r, q, option_type) -> float:
+    return implied_vol.implied_volatility_american(price, S, K, T, r, q, option_type)
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def american_curve(S, K, T, r, q, option_type, max_vol) -> tuple[np.ndarray, np.ndarray]:
+    vols = np.linspace(0.005, max_vol, 41)
+    return vols, np.array([american_value(S, K, T, r, v, q, option_type) for v in vols])

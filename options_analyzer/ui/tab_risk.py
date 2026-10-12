@@ -113,6 +113,7 @@ def _stress_tests(position: Position) -> None:
     right.dataframe(
         table[columns],
         hide_index=True,
+        height=35 * (len(table) + 1) + 3,  # show every scenario without an inner scrollbar
         column_config={
             "Spot change": st.column_config.NumberColumn(format="percent"),
             "IV multiplier": st.column_config.NumberColumn(format="%.2fx", help="Multiplier on implied vol."),

@@ -42,7 +42,8 @@ interface on top of it.
 **Volatility Surface & Implied Volatility**
 - Arbitrage-free SSVI surfaces or your own quotes (CSV), smoothed and turned into local volatility with Gatheral's
   formula; calendar and butterfly arbitrage are detected and reported, never silently patched.
-- Implied-volatility solver that checks no-arbitrage bounds and always converges.
+- Implied-volatility solver for European (Black–Scholes–Merton) and American (binomial) quotes that checks
+  the no-arbitrage bounds and always converges.
 - Settings are stored in the URL, so any setup can be bookmarked or shared.
 
 | Pricing & Greeks | Risk & Scenarios | Volatility Surface |
@@ -114,7 +115,7 @@ tests/                      pytest suite (math, invariants, reference values, UI
 
 ```bash
 pip install -r requirements.txt pytest mpmath ruff
-pytest              # ~1,100 tests: Greeks vs 40-digit derivatives, QuantLib references, UI smoke tests
+pytest              # 1,250+ tests: Greeks vs 40-digit derivatives, QuantLib references, invariants, UI
 ruff check . && ruff format --check .
 ```
 
