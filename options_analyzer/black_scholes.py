@@ -170,6 +170,7 @@ def greeks(
     det = {name: np.zeros_like(S) for name in GREEK_ORDER}
     det["delta"] = phi * df_q * itm
     det["theta"] = phi * (q * S * df_q - r * K * df_r) * itm * (tau > 0)
+    det["charm"] = phi * q * df_q * itm * (tau > 0)  # d(delta)/dt of phi e^{-q tau} itm
     det["rho"] = phi * K * tau * df_r * itm
     det["epsilon"] = -phi * S * tau * df_q * itm
 

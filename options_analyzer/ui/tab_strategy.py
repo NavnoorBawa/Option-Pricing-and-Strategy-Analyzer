@@ -311,7 +311,8 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
             0,
             1,
             key="pnl_iv_shift",
-            help="Adds this many volatility points to every leg's IV in the 'Today' and dated curves.",
+            help="Adds this many volatility points to every leg's IV in the 'Today' and dated curves. The "
+            "at-expiry curve, breakevens and the metrics above use the legs' own IVs.",
         )
         / 100
     )
@@ -323,7 +324,7 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
     shift_label = f", IV {iv_shift * 100:+.0f} pts" if iv_shift else ""
     curves = [
         (
-            strat.pnl(strategy, market, spots, metrics.horizon, carry, vol_shift=iv_shift) * units,
+            strat.pnl(strategy, market, spots, metrics.horizon, carry) * units,
             f"At expiry ({front_days:.0f}d)",
             charts.CALL,
             "solid",
@@ -400,8 +401,7 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
         st.caption(
             md(f"Commissions of {money(strategy.fees * units)} are included in the net premium and every P&L figure.")
         )
-    expiries = {leg.expiry for leg in strategy.legs if leg.is_option}
-    if market.dividend_yield > 0 and len(expiries) > 1 and np.isinf(metrics.max_loss):
+    if strat.unbounded_loss_from_dividends(strategy, market):
         st.info(
             md(
                 "With a dividend yield, a European long-dated call gains less than $1 for each $1 rise in the "

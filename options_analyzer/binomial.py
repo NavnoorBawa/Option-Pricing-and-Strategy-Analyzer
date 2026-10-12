@@ -6,12 +6,13 @@ Two lattices are provided:
   ``d = 1/u``. Converges to Black-Scholes at rate O(1/n) with the familiar
   odd/even oscillation.
 * ``"lr"`` - Leisen & Reimer (1996) with the Peizer-Pratt (method 2)
-  inversion. The tree is centred on the strike, so convergence is smooth and
-  roughly O(1/n^2); an odd number of steps is used (an even request is rounded
-  up by one).
+  inversion. The tree is centred on the strike, so convergence is smooth:
+  roughly O(1/n^2) for European exercise and first order with early exercise.
+  An odd number of steps is used (an even request is rounded up by one, or
+  down at the 20,000-step limit).
 
-Backward induction is vectorised over the nodes of each time step, so a
-2,000-step American tree prices in a few milliseconds.
+Backward induction is vectorised over the nodes of each time step: a
+2,000-step American tree prices in tens of milliseconds.
 """
 
 from __future__ import annotations
@@ -27,6 +28,10 @@ __all__ = ["METHODS", "TreeResult", "price", "price_with_greeks"]
 METHODS = {"crr": "Cox-Ross-Rubinstein", "lr": "Leisen-Reimer"}
 
 _MAX_STEPS = 20_000
+#: Node spots are capped at e^700 (about 1e304) so that very wide lattices (high volatility, long expiry,
+#: many steps) stay finite. Nodes that far out carry negligible risk-neutral probability.
+_MAX_LOG_SPOT = 700.0
+_MAX_SPOT = float(np.exp(_MAX_LOG_SPOT))
 
 
 @dataclass(frozen=True)
@@ -41,8 +46,9 @@ class TreeResult:
     method: str
     american: bool
     #: ``(times, spot)`` of the early-exercise boundary for American options
-    #: (the highest exercised node for puts, the lowest for calls). Empty when
-    #: early exercise is never optimal.
+    #: (the highest exercised node for puts, the lowest for calls). Only time
+    #: steps where the boundary lies inside the lattice are recorded, so it is
+    #: empty when early exercise is never optimal.
     exercise_boundary: tuple[np.ndarray, np.ndarray] | None = None
 
 
@@ -90,11 +96,66 @@ def _lattice(S, K, T, r, sigma, q, steps, method):
     return dt, u, d, p
 
 
-def _deterministic_american(S, K, T, r, q, phi):
-    """American value with zero volatility: best discounted exercise on a fine grid."""
+def _deterministic_american(S, K, T, r, q, phi) -> tuple[float, float]:
+    """American value with zero volatility and the optimal exercise time (best discounted exercise on a grid)."""
     t = np.linspace(0.0, T, 4001)
     values = np.exp(-r * t) * np.maximum(phi * (S * np.exp((r - q) * t) - K), 0.0)
-    return float(values.max())
+    best = int(np.argmax(values))
+    return float(values[best]), float(t[best])
+
+
+def _validate(S, K, sigma, option_type, steps, method) -> tuple[int, str, int]:
+    phi = bs.option_sign(option_type)
+    method = str(method).lower()
+    if method not in METHODS:
+        raise ValueError(f"method must be one of {sorted(METHODS)}, got {method!r}")
+    steps = int(steps)
+    if not 1 <= steps <= _MAX_STEPS:
+        raise ValueError(f"steps must be between 1 and {_MAX_STEPS}")
+    if S <= 0 or K <= 0:
+        raise ValueError("spot and strike must be positive")
+    if sigma < 0:
+        raise ValueError("volatility must be non-negative")
+    if method == "lr" and steps % 2 == 0:
+        steps = steps + 1 if steps < _MAX_STEPS else steps - 1
+    return phi, method, steps
+
+
+def _spots(S: float, log_u: float, log_d: float, i: int) -> np.ndarray:
+    """Spot at every node of level ``i`` (capped so that extreme lattices stay finite)."""
+    j = np.arange(i + 1)  # number of up-moves
+    return np.exp(np.minimum(np.log(S) + j * log_u + (i - j) * log_d, _MAX_LOG_SPOT))
+
+
+def _induct(S, K, T, r, sigma, q, phi, steps, american, method, keep_levels=False):
+    """Backward induction. Returns ``(value, (level1, level2), (boundary_t, boundary_s), lattice)``."""
+    dt, u, d, p = _lattice(S, K, T, r, sigma, q, steps, method)
+    disc = np.exp(-r * dt)
+    log_u, log_d = np.log(u), np.log(d)
+    spot = _spots(S, log_u, log_d, steps)
+    values = np.maximum(phi * (spot - K), 0.0)
+    inv_d = 1.0 / d
+    levels = {}
+    boundary_t: list[float] = []
+    boundary_s: list[float] = []
+    for i in range(steps - 1, -1, -1):
+        values = disc * (p * values[1:] + (1.0 - p) * values[:-1])
+        if american:
+            # Level-i spots from level i+1 (one multiply instead of an exp per node), capped like _spots.
+            # The root is set exactly so that immediate exercise is worth exactly the intrinsic value.
+            spot = np.minimum(spot[:-1] * inv_d, _MAX_SPOT) if i else np.array([float(S)])
+            exercise = phi * (spot - K)
+            if keep_levels:
+                exercised = exercise > values
+                # Record the boundary only where it is interior to the level: if the edge node is exercised
+                # the boundary lies beyond the lattice (the spot started inside the exercise region).
+                if exercised.any() and not exercised[-1 if phi < 0 else 0]:
+                    boundary_t.append(i * dt)
+                    boundary_s.append(spot[exercised].max() if phi < 0 else spot[exercised].min())
+            values = np.maximum(values, exercise)
+        if keep_levels and i <= 2:
+            levels[i] = values.copy()
+    return float(values[0]), levels, (boundary_t, boundary_s), (log_u, log_d)
 
 
 def price_with_greeks(
@@ -112,76 +173,50 @@ def price_with_greeks(
     """Price an option on a binomial tree and read Delta/Gamma/Theta off the tree.
 
     Delta and gamma use the node values at steps 1 and 2 (Hull, ch. 21). Theta
-    uses the middle node at step 2 for CRR (where ``u d = 1``) and a one-day
-    re-pricing for Leisen-Reimer, whose middle node is not at the current spot.
+    uses the middle node at step 2 for CRR (where ``u d = 1``). The
+    Leisen-Reimer middle node is not at the current spot, so its theta is a
+    central difference in time to expiry on the same tree, whose value is
+    smooth in ``T``.
     """
-    phi = bs.option_sign(option_type)
-    method = str(method).lower()
-    if method not in METHODS:
-        raise ValueError(f"method must be one of {sorted(METHODS)}, got {method!r}")
-    steps = int(steps)
-    if not 1 <= steps <= _MAX_STEPS:
-        raise ValueError(f"steps must be between 1 and {_MAX_STEPS}")
-    if S <= 0 or K <= 0:
-        raise ValueError("spot and strike must be positive")
-    if sigma < 0:
-        raise ValueError("volatility must be non-negative")
+    phi, method, steps = _validate(S, K, sigma, option_type, steps, method)
 
     if T <= 0 or sigma == 0:
         g = bs.greeks(S, K, T, r, sigma, q, option_type)
         value = bs.price(S, K, T, r, sigma, q, option_type)
-        if american and T > 0:
-            value = max(value, _deterministic_american(S, K, T, r, q, phi))
-        elif american:
-            value = max(value, max(phi * (S - K), 0.0))
-        return TreeResult(value, g["delta"], g["gamma"], g["theta"], steps, method, american, None)
+        delta, gamma, theta = g["delta"], g["gamma"], g["theta"]
+        if american:
+            if T > 0:
+                early, when = _deterministic_american(S, K, T, r, q, phi)
+            else:
+                early, when = max(phi * (S - K), 0.0), 0.0
+            if early > value:
+                # Exercise at a fixed date before expiry: the value no longer depends on the time to
+                # expiry (theta 0) and is linear in the spot.
+                value, delta, gamma, theta = early, float(phi * np.exp(-q * when)), 0.0, 0.0
+        return TreeResult(value, delta, gamma, theta, steps, method, american, None)
 
     # Greeks need the node values at steps 1 and 2 before the terminal layer.
-    steps = max(steps, 3)
-    if method == "lr" and steps % 2 == 0:
-        steps += 1
+    if steps < 3:
+        steps = 3
 
-    dt, u, d, p = _lattice(S, K, T, r, sigma, q, steps, method)
-    disc = np.exp(-r * dt)
-    log_u, log_d = np.log(u), np.log(d)
-
-    def spots(i: int) -> np.ndarray:
-        j = np.arange(i + 1)  # number of up-moves
-        return S * np.exp(j * log_u + (i - j) * log_d)
-
-    values = np.maximum(phi * (spots(steps) - K), 0.0)
-    level2 = level1 = None
-    boundary_t: list[float] = []
-    boundary_s: list[float] = []
-    for i in range(steps - 1, -1, -1):
-        values = disc * (p * values[1:] + (1.0 - p) * values[:-1])
-        if american:
-            s_i = spots(i)
-            exercise = np.maximum(phi * (s_i - K), 0.0)
-            exercised = (exercise > values) & (exercise > 0)
-            values = np.where(exercised, exercise, values)
-            if exercised.any():
-                boundary_t.append(i * dt)
-                boundary_s.append(s_i[exercised].max() if phi < 0 else s_i[exercised].min())
-        if i == 2:
-            level2 = values.copy()
-        elif i == 1:
-            level1 = values.copy()
-
-    value = float(values[0])
-    s1 = spots(1)
-    s2 = spots(2)
+    value, levels, (boundary_t, boundary_s), (log_u, log_d) = _induct(
+        S, K, T, r, sigma, q, phi, steps, american, method, keep_levels=True
+    )
+    level1, level2 = levels[1], levels[2]
+    s1 = _spots(S, log_u, log_d, 1)
+    s2 = _spots(S, log_u, log_d, 2)
     delta = float((level1[1] - level1[0]) / (s1[1] - s1[0]))
     gamma = float(
         ((level2[2] - level2[1]) / (s2[2] - s2[1]) - (level2[1] - level2[0]) / (s2[1] - s2[0]))
         / (0.5 * (s2[2] - s2[0]))
     )
     if method == "crr":
-        theta = float((level2[1] - value) / (2.0 * dt))
+        theta = float((level2[1] - value) / (2.0 * T / steps))
     else:
-        bump = min(1.0 / 365.0, 0.5 * T)
-        later = price(S, K, T - bump, r, sigma, q, option_type, steps, american, method)
-        theta = (later - value) / bump
+        h = 0.01 * min(1.0 / 365.0, T)
+        shorter = price(S, K, T - h, r, sigma, q, option_type, steps, american, method)
+        longer = price(S, K, T + h, r, sigma, q, option_type, steps, american, method)
+        theta = (shorter - longer) / (2.0 * h)
 
     boundary = None
     if american:
@@ -203,35 +238,11 @@ def price(
     method: str = "crr",
 ) -> float:
     """Binomial-tree option value (see :func:`price_with_greeks`)."""
-    phi = bs.option_sign(option_type)
-    method = str(method).lower()
-    if method not in METHODS:
-        raise ValueError(f"method must be one of {sorted(METHODS)}, got {method!r}")
-    steps = int(steps)
-    if not 1 <= steps <= _MAX_STEPS:
-        raise ValueError(f"steps must be between 1 and {_MAX_STEPS}")
-    if S <= 0 or K <= 0:
-        raise ValueError("spot and strike must be positive")
-    if sigma < 0:
-        raise ValueError("volatility must be non-negative")
+    phi, method, steps = _validate(S, K, sigma, option_type, steps, method)
     if T <= 0 or sigma == 0:
         value = bs.price(S, K, T, r, sigma, q, option_type)
         if american:
-            extra = _deterministic_american(S, K, T, r, q, phi) if T > 0 else max(phi * (S - K), 0.0)
+            extra = _deterministic_american(S, K, T, r, q, phi)[0] if T > 0 else max(phi * (S - K), 0.0)
             value = max(value, extra)
         return float(value)
-    if method == "lr" and steps % 2 == 0:
-        steps += 1
-
-    dt, u, d, p = _lattice(S, K, T, r, sigma, q, steps, method)
-    disc = np.exp(-r * dt)
-    log_u, log_d = np.log(u), np.log(d)
-    j = np.arange(steps + 1)
-    values = np.maximum(phi * (S * np.exp(j * log_u + (steps - j) * log_d) - K), 0.0)
-    for i in range(steps - 1, -1, -1):
-        values = disc * (p * values[1:] + (1.0 - p) * values[:-1])
-        if american:
-            j = np.arange(i + 1)
-            exercise = np.maximum(phi * (S * np.exp(j * log_u + (i - j) * log_d) - K), 0.0)
-            values = np.maximum(values, exercise)
-    return float(values[0])
+    return _induct(S, K, T, r, sigma, q, phi, steps, american, method)[0]

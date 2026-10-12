@@ -30,17 +30,20 @@ verified against high-precision finite differences in the test-suite.
 ### Binomial trees
 * **Cox–Ross–Rubinstein:** $u = e^{\sigma\sqrt{\Delta t}}$, $d = 1/u$,
   $p = (e^{(r-q)\Delta t} - d)/(u - d)$. The tree refuses inputs with $p \notin (0,1)$ (arbitrage).
-* **Leisen–Reimer:** Peizer–Pratt inversion centres the tree on the strike; convergence is smooth and
-  roughly second order (an odd number of steps is used).
-* American exercise compares continuation and exercise value at every node; delta, gamma and theta are read
-  off the tree, and the early-exercise boundary is traced from the exercised nodes.
+* **Leisen–Reimer:** Peizer–Pratt inversion centres the tree on the strike; convergence is smooth, roughly
+  second order for European exercise and first order with early exercise (an odd number of steps is used).
+* American exercise compares continuation and exercise value at every node; delta and gamma are read off
+  the tree, theta from the step-2 middle node (CRR) or a central difference in time (Leisen–Reimer), and the
+  early-exercise boundary is traced from the exercised nodes. The early-exercise premium is measured on the
+  same tree with European exercise, so the discretisation error cancels.
 
 ### Monte Carlo
 European payoffs depend only on $S_T$, which is sampled exactly:
 $S_T = S\exp\big((r - q - \tfrac12\sigma^2)T + \sigma\sqrt{T}Z\big)$. Antithetic pairs $(Z, -Z)$ and a
 control variate (the discounted terminal price, with known mean $S e^{-qT}$) reduce the variance; the
-standard error uses the unbiased sample deviation of the independent samples. Calls and puts share draws and
-a fixed seed makes results reproducible.
+standard error uses the unbiased sample deviation of the independent samples, and is left blank when no
+simulated price crosses the strike (the sample then cannot estimate its own error). Calls and puts share
+draws and a fixed seed makes results reproducible.
 
 ### Implied volatility
 Quotes outside the no-arbitrage bounds
@@ -98,7 +101,8 @@ with a monotone (PCHIP) interpolant of total variance.
 
 ### Limitations
 Constant volatility per leg (no smile dynamics in strategy valuation), European exercise for strategies,
-no transaction costs, margin or discrete dividends, and log-normal probabilities. This tool is for education
+no bid-ask spreads or transaction costs beyond a flat per-contract commission, no margin or discrete
+dividends, and log-normal probabilities. This tool is for education
 and analysis only and is not investment advice.
 
 ### References

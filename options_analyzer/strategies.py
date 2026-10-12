@@ -27,7 +27,7 @@ Conventions
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import pairwise
 
 import numpy as np
@@ -52,6 +52,7 @@ __all__ = [
     "pnl",
     "position_greeks",
     "position_value",
+    "unbounded_loss_from_dividends",
 ]
 
 LEG_KINDS = ("call", "put", "stock")
@@ -302,9 +303,15 @@ def _live_vol_horizon(strategy: Strategy, market: Market, horizon: float) -> flo
     return spread
 
 
+#: The analysis grid ends at most this many log-units above max(spot, strikes) (a factor of a million). Further
+#: out the P&L is the difference of terms so large that rounding hides it, and its behaviour is known
+#: analytically (upside slope and S -> infinity limit, see :func:`_tail_root`).
+_MAX_GRID_WIDTH = float(np.log(1e6))
+
+
 def _analysis_grid(strategy: Strategy, market: Market, horizon: float) -> np.ndarray:
     """Spot grid containing every kink and spanning ~8 standard deviations of every relevant distribution."""
-    width = min(8.0 * _live_vol_horizon(strategy, market, horizon), 50.0)
+    width = min(8.0 * _live_vol_horizon(strategy, market, horizon), _MAX_GRID_WIDTH)
     hi = max([market.spot, *strategy.strikes]) * max(np.exp(width), 3.0)
     grid = np.concatenate(
         [
@@ -351,17 +358,42 @@ def _upside_slope(strategy: Strategy, market: Market, horizon: float) -> float:
     return slope
 
 
-def _pnl_at_infinity(strategy: Strategy, market: Market, horizon: float, carry: bool) -> float:
-    """Limit of the P&L as S -> infinity when the upside slope is zero."""
-    total = 0.0
+def unbounded_loss_from_dividends(strategy: Strategy, market: Market, horizon: float | None = None) -> bool:
+    """True when the loss is unbounded only because of the dividend yield.
+
+    A European call expiring after ``horizon`` gains ``e^{-q tau} < 1`` per
+    unit rise of the stock, so a long-dated call that "covers" a short
+    front-month call (calendar, diagonal) leaves a small negative upside slope.
+    """
+    horizon = front_expiry(strategy, market) if horizon is None else horizon
+    tol = _slope_tolerance(strategy)
+    without = replace(market, dividend_yield=0.0)
+    return _upside_slope(strategy, market, horizon) < -tol <= _upside_slope(strategy, without, horizon)
+
+
+def _pnl_at_infinity(strategy: Strategy, market: Market, horizon: float, carry: bool) -> tuple[float, float]:
+    """Limit of the P&L as S -> infinity when the upside slope is zero, and the size of the terms summed."""
+    total = magnitude = 0.0
     for leg in strategy.legs:
+        term = 0.0
         if leg.kind == "call":
             tau = _leg_expiry(leg, market) - horizon
-            total -= leg.quantity * leg.strike * (np.exp(-market.rate * tau) if tau > 0 else 1.0)
+            term = -leg.quantity * leg.strike * (np.exp(-market.rate * tau) if tau > 0 else 1.0)
         elif leg.kind == "stock":
-            total += leg.quantity * float(_dividends(market, horizon))
+            term = leg.quantity * float(_dividends(market, horizon))
+        total += term
+        magnitude += abs(term)
     cost = entry_cost(strategy, market) * (float(np.exp(market.rate * horizon)) if carry else 1.0)
-    return float(total - cost)
+    return float(total - cost), float(magnitude + abs(cost))
+
+
+def _asymptotic_sign(strategy: Strategy, market: Market, horizon: float, carry: bool) -> int:
+    """Sign of the P&L as S -> infinity (0 when it tends to zero within rounding)."""
+    slope = _upside_slope(strategy, market, horizon)
+    if abs(slope) > _slope_tolerance(strategy):
+        return int(np.sign(slope))
+    limit, magnitude = _pnl_at_infinity(strategy, market, horizon, carry)
+    return int(np.sign(limit)) if abs(limit) > 1e-13 * magnitude else 0
 
 
 def _transitions(strategy, market, grid, classes, horizon, carry) -> dict[int, float]:
@@ -385,6 +417,71 @@ def _transitions(strategy, market, grid, classes, horizon, carry) -> dict[int, f
     return out
 
 
+def _slope_tolerance(strategy: Strategy) -> float:
+    return 1e-9 * max(1.0, sum(abs(leg.quantity) for leg in strategy.legs))
+
+
+def _tail_root(strategy, market, horizon, carry, end_spot: float, end_class: int) -> float | None:
+    """Breakeven beyond the end of the analysis grid, if the P&L must still change sign out there.
+
+    That happens when the sign of the P&L at the end of the grid differs from
+    its asymptotic sign (the sign of the upside slope, or of the S -> infinity
+    limit when the slope is zero), e.g. a diagonal spread whose dividend-paying
+    long call gains a little less than the short call loses.
+    """
+    target = _asymptotic_sign(strategy, market, horizon, carry)
+    if target == 0 or end_class == 0 or end_class == target:
+        return None
+    lo = hi = end_spot
+    for _ in range(200):  # up to 2^200 times the end of the grid
+        lo, hi = hi, 2.0 * hi
+        value, scale = _pnl_and_scale(strategy, market, np.array([hi]), horizon, carry)
+        cls = int(_sign_classes(value, scale)[0])
+        if cls == target:
+            return float(brentq(lambda s: float(pnl(strategy, market, s, horizon, carry)), lo, hi, xtol=1e-12 * hi))
+        if cls == 0:  # rounding hides the sign before it flips: no resolvable root
+            return None
+    return None
+
+
+@dataclass(frozen=True)
+class _SignProfile:
+    grid: np.ndarray
+    values: np.ndarray
+    classes: np.ndarray
+    transitions: dict[int, float]
+    tail: float | None  # breakeven beyond the grid, see _tail_root
+
+    @property
+    def breakevens(self) -> list[float]:
+        return sorted([*self.transitions.values(), *([self.tail] if self.tail is not None else [])])
+
+
+def _sign_profile(strategy: Strategy, market: Market, horizon: float, carry: bool) -> _SignProfile:
+    grid = _analysis_grid(strategy, market, horizon)
+    values, scale = _pnl_and_scale(strategy, market, grid, horizon, carry)
+    classes = _sign_classes(values, scale)
+    if classes[-1] == 0:
+        # Far out, the P&L is a small difference of huge terms and can drop below the rounding tolerance
+        # (e.g. a butterfly's tiny debit at extreme volatility). A zero run reaching the end of the grid
+        # takes the exact asymptotic sign; it is a genuine zero plateau only if the asymptote is zero.
+        target = _asymptotic_sign(strategy, market, horizon, carry)
+        if target != 0:
+            nonzero = np.flatnonzero(classes != 0)
+            classes[(nonzero[-1] + 1) if nonzero.size else 0 :] = target
+    transitions = _transitions(strategy, market, grid, classes, horizon, carry)
+    tail = _tail_root(strategy, market, horizon, carry, float(grid[-1]), int(classes[-1]))
+    return _SignProfile(grid, values, classes, transitions, tail)
+
+
+def _merge(points: list[float], market: Market) -> list[float]:
+    merged: list[float] = []
+    for point in sorted(points):
+        if not merged or point - merged[-1] > 1e-9 * max(market.spot, 1.0):
+            merged.append(point)
+    return merged
+
+
 def breakevens(strategy: Strategy, market: Market, horizon: float | None = None, carry: bool = False) -> list[float]:
     """Spot prices at which the P&L at ``horizon`` (default: front expiry) changes between loss, zero and profit.
 
@@ -392,14 +489,7 @@ def breakevens(strategy: Strategy, market: Market, horizon: float | None = None,
     contributes both of its endpoints.
     """
     horizon = front_expiry(strategy, market) if horizon is None else horizon
-    grid = _analysis_grid(strategy, market, horizon)
-    values, scale = _pnl_and_scale(strategy, market, grid, horizon, carry)
-    points = sorted(_transitions(strategy, market, grid, _sign_classes(values, scale), horizon, carry).values())
-    merged: list[float] = []
-    for point in points:
-        if not merged or point - merged[-1] > 1e-9 * max(market.spot, 1.0):
-            merged.append(point)
-    return merged
+    return _merge(_sign_profile(strategy, market, horizon, carry).breakevens, market)
 
 
 @dataclass(frozen=True)
@@ -466,11 +556,10 @@ def analyze(strategy: Strategy, market: Market, drift: float | None = None, carr
     """
     horizon = front_expiry(strategy, market)
     drift = market.rate if drift is None else drift
-    grid = _analysis_grid(strategy, market, horizon)
-    values, scale = _pnl_and_scale(strategy, market, grid, horizon, carry)
-    classes = _sign_classes(values, scale)
+    profile = _sign_profile(strategy, market, horizon, carry)
+    grid, values, classes, transitions = profile.grid, profile.values, profile.classes, profile.transitions
     slope = _upside_slope(strategy, market, horizon)
-    slope_tol = 1e-9 * max(1.0, sum(abs(leg.quantity) for leg in strategy.legs))
+    slope_tol = _slope_tolerance(strategy)
 
     i_max, i_min = int(np.argmax(values)), int(np.argmin(values))
     max_profit, max_loss = float(values[i_max]), float(-values[i_min])
@@ -481,14 +570,13 @@ def analyze(strategy: Strategy, market: Market, drift: float | None = None, carr
         max_loss, max_loss_spot = np.inf, None
     else:
         # Bounded upside: the extreme may only be reached as S -> infinity.
-        limit = _pnl_at_infinity(strategy, market, horizon, carry)
+        limit, _ = _pnl_at_infinity(strategy, market, horizon, carry)
         if limit > max_profit:
             max_profit, max_profit_spot = limit, None
         if -limit > max_loss:
             max_loss, max_loss_spot = -limit, None
 
-    transitions = _transitions(strategy, market, grid, classes, horizon, carry)
-    be = breakevens(strategy, market, horizon, carry)
+    be = _merge(profile.breakevens, market)
 
     # Probability of profit: log-normal mass of every run of grid points with P&L > 0.
     vol_t = market.volatility * np.sqrt(horizon)
@@ -506,18 +594,20 @@ def analyze(strategy: Strategy, market: Market, drift: float | None = None, carr
         starts = np.concatenate([[positive[0]], positive[breaks + 1]])
         ends = np.concatenate([positive[breaks], [positive[-1]]])
         last = len(grid) - 1
+        upper_end = np.inf if profile.tail is None else profile.tail  # a profitable run reaching the grid's end
         for i0, i1 in zip(starts, ends, strict=True):
             a = 0.0 if i0 == 0 else transitions[int(i0) - 1]
-            b = np.inf if i1 == last else transitions[int(i1)]
+            b = upper_end if i1 == last else transitions[int(i1)]
             pop += cdf(b) - cdf(a)
 
     spots, weights, _, _ = _terminal_quadrature(market, horizon, drift, [*strategy.strikes, *be])
     outcomes = pnl(strategy, market, spots, horizon, carry)
     expected = float(np.dot(weights, outcomes))
     with np.errstate(over="ignore", invalid="ignore"):
-        second = float(np.dot(weights, outcomes**2))
+        # Two-pass variance: E[X^2] - E[X]^2 cancels catastrophically for (nearly) riskless positions.
+        variance = float(np.dot(weights, (outcomes - expected) ** 2))
     # At extreme sigma * sqrt(h) the second moment exceeds float range: report it as infinite.
-    std = float(np.sqrt(max(second - expected**2, 0.0))) if np.isfinite(second) else np.inf
+    std = float(np.sqrt(variance)) if np.isfinite(variance) else np.inf
 
     return StrategyMetrics(
         entry_cost=entry_cost(strategy, market),

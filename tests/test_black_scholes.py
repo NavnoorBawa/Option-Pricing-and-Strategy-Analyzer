@@ -137,3 +137,10 @@ def test_delta_at_the_money_at_expiry_keeps_parity():
     call = bs.greeks(100, 100, 0.0, 0.05, 0.2, option_type="call")["delta"]
     put = bs.greeks(100, 100, 0.0, 0.05, 0.2, option_type="put")["delta"]
     assert (call, put) == (0.5, -0.5)
+
+
+@pytest.mark.parametrize("sigma", [0.0, 1e-9])
+def test_charm_parity_holds_in_the_zero_volatility_limit(sigma):
+    c = bs.greeks(100, 90, 0.5, 0.05, sigma, 0.04, "call")["charm"]
+    p = bs.greeks(100, 90, 0.5, 0.05, sigma, 0.04, "put")["charm"]
+    assert c == pytest.approx(0.04 * np.exp(-0.02)) and p == pytest.approx(0.0)

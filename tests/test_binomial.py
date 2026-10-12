@@ -24,27 +24,25 @@ def test_leisen_reimer_rounds_to_odd_steps():
     )
 
 
-# American reference values from QuantLib's FdBlackScholesVanillaEngine (800 x 800 grid). QuantLib derives
-# the year fraction from calendar dates with ACT/365, so "6 months" is 182/365 and "3 months" 91/365.
-QUANTLIB_AMERICAN = [
+# Converged American reference values: Richardson extrapolation of Leisen-Reimer trees with 9,999 and 19,999
+# steps (first-order convergence with early exercise), cross-checked against a 20,000-step CRR tree and the
+# published 6.0904 for the first case. Year fractions follow ACT/365 dates: "6 months" is 182/365.
+AMERICAN_REFERENCE = [
     # S, K, T, r, sigma, q, type, value
-    (100, 100, 365 / 365, 0.05, 0.20, 0.00, "put", 6.08962),
-    (100, 110, 182 / 365, 0.05, 0.30, 0.00, "put", 13.38007),
-    (100, 90, 730 / 365, 0.08, 0.25, 0.00, "put", 4.90432),
-    (100, 100, 365 / 365, 0.05, 0.20, 0.04, "call", 8.11824),
-    (100, 100, 365 / 365, -0.01, 0.20, 0.00, "call", 7.56837),
-    (40, 45, 91 / 365, 0.03, 0.40, 0.02, "put", 6.35827),
+    (100, 100, 365 / 365, 0.05, 0.20, 0.00, "put", 6.090371),
+    (100, 110, 182 / 365, 0.05, 0.30, 0.00, "put", 13.380688),
+    (100, 90, 730 / 365, 0.08, 0.25, 0.00, "put", 4.905740),
+    (100, 100, 365 / 365, 0.05, 0.20, 0.04, "call", 8.118240),
+    (100, 100, 365 / 365, -0.01, 0.20, 0.00, "call", 7.568545),
+    (40, 45, 91 / 365, 0.03, 0.40, 0.02, "put", 6.358318),
+    (50, 50, 5 / 12, 0.10, 0.40, 0.00, "put", 4.284216),  # Hull, Example 21.1 (4.28)
 ]
 
 
-@pytest.mark.parametrize(("S", "K", "T", "r", "sigma", "q", "kind", "value"), QUANTLIB_AMERICAN)
-def test_american_prices_match_quantlib(S, K, T, r, sigma, q, kind, value):
-    assert bn.price(S, K, T, r, sigma, q, kind, 1001, american=True, method="lr") == pytest.approx(value, abs=2e-3)
-
-
-def test_american_put_matches_hull_example():
-    # Hull Example 21.1 (S=50, K=50, r=10%, sigma=40%, 5 months): 4.28 with many steps.
-    assert bn.price(50, 50, 5 / 12, 0.10, 0.40, 0, "put", 2000, american=True) == pytest.approx(4.284, abs=2e-3)
+@pytest.mark.parametrize(("S", "K", "T", "r", "sigma", "q", "kind", "value"), AMERICAN_REFERENCE)
+def test_american_prices_match_converged_references(S, K, T, r, sigma, q, kind, value):
+    assert bn.price(S, K, T, r, sigma, q, kind, 2001, american=True, method="lr") == pytest.approx(value, abs=3e-4)
+    assert bn.price(S, K, T, r, sigma, q, kind, 2000, american=True, method="crr") == pytest.approx(value, abs=1e-3)
 
 
 def test_american_call_without_dividends_equals_european():
@@ -97,3 +95,47 @@ def test_degenerate_inputs():
         bn.price(100, 100, 1, 0.05, 0.2, steps=0)
     with pytest.raises(ValueError):
         bn.price(100, 100, 1, 0.05, 0.2, method="trinomial")
+
+
+# --- Regression tests for findings of the independent review of the rebuilt engine ---------------
+
+
+@pytest.mark.parametrize("method", ["crr", "lr"])
+@pytest.mark.parametrize("american", [False, True])
+def test_extremely_wide_lattice_stays_finite(method, american):
+    # sigma sqrt(T n) = 5 * sqrt(10 * 2000) puts the top node beyond e^709: it used to overflow to inf/NaN.
+    res = bn.price_with_greeks(100, 100, 10, 0.05, 5.0, 0, "call", 2000, american, method)
+    assert res.price == pytest.approx(bs.price(100, 100, 10, 0.05, 5.0), abs=1e-6)
+    assert all(np.isfinite([res.delta, res.gamma, res.theta]))
+
+
+@pytest.mark.parametrize("days", [1, 3, 7, 30])
+def test_leisen_reimer_theta_matches_analytic_for_short_expiries(days):
+    T = days / 365
+    res = bn.price_with_greeks(100, 100, T, 0.05, 0.2, 0, "call", 501, method="lr")
+    assert res.theta == pytest.approx(bs.greeks(100, 100, T, 0.05, 0.2)["theta"], rel=1e-3)
+
+
+def test_american_leisen_reimer_theta_matches_crr():
+    lr = bn.price_with_greeks(100, 100, 7 / 365, 0.05, 0.3, 0, "put", 1001, True, "lr").theta
+    crr = bn.price_with_greeks(100, 100, 7 / 365, 0.05, 0.3, 0, "put", 4000, True, "crr").theta
+    assert lr == pytest.approx(crr, rel=2e-3)
+
+
+def test_exercise_boundary_ignores_levels_entirely_inside_the_exercise_region():
+    # Deep in-the-money put: the early levels are all exercised, and their top node is not the boundary.
+    res = bn.price_with_greeks(60, 100, 1, 0.05, 0.2, 0, "put", 501, True, "crr")
+    assert res.price == pytest.approx(40.0)
+    _, spots = res.exercise_boundary
+    assert spots.min() > 78  # the critical price a year from expiry is about 81; the old output started at 60
+
+
+def test_leisen_reimer_accepts_the_maximum_step_count():
+    res = bn.price_with_greeks(100, 100, 1, 0.05, 0.2, steps=20_000, method="lr")
+    assert res.steps == 19_999
+    assert res.price == pytest.approx(bs.price(100, 100, 1, 0.05, 0.2), abs=1e-7)
+
+
+def test_zero_volatility_american_greeks_reflect_immediate_exercise():
+    res = bn.price_with_greeks(80, 100, 1, 0.05, 0.0, 0, "put", 500, True, "crr")
+    assert (res.price, res.delta, res.gamma, res.theta) == (20.0, -1.0, 0.0, 0.0)

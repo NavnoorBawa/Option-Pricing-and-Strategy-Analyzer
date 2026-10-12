@@ -83,3 +83,11 @@ def test_legs_expiring_during_an_episode_are_flagged():
     episode = [sc.StressScenario("long", -0.1, 1.0, 0.0, days=60)]
     rows = sc.run_stress_tests(strategy, MARKET, episode, include_elapsed_time=True)
     assert rows[0]["Legs expired"] == 1
+
+
+def test_pnl_grid_accepts_a_single_day_and_rejects_ambiguous_shapes():
+    market = S.Market(100, 0.05, 0.2, 30 / 365)
+    calendar = S.build_template("Long Call Calendar", 100, 10, market.expiry)
+    assert sc.pnl_grid(calendar, market, np.array([0.0, 0.1]), days=5).shape == (1, 2)
+    with pytest.raises(ValueError, match="single number"):
+        sc.pnl_grid(calendar, market, np.array([0.0]), np.array([0.0]), days=np.array([5]))

@@ -1,5 +1,6 @@
 """End-to-end smoke tests of the Streamlit app with streamlit.testing (headless)."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -92,3 +93,23 @@ def test_volatility_surface_upload(app):
 def test_implied_vol_round_trip(app):
     iv = next(m.value for m in app.metric if m.label == "Implied volatility")
     assert iv == "20.000%"
+
+
+def _trace(at: AppTest, prefix: str) -> dict:
+    for chart in at.get("plotly_chart"):
+        for trace in json.loads(chart.proto.spec)["data"]:
+            if (trace.get("name") or "").startswith(prefix):
+                return trace
+    raise AssertionError(f"no trace named {prefix!r}")
+
+
+def test_iv_shift_leaves_the_expiry_curve_and_metrics_alone(app):
+    # A calendar's back leg is alive at the front expiry; the slider must not move the at-expiry curve away
+    # from the breakevens and maxima computed without the shift.
+    app.sidebar.number_input(key="days").set_value(30).run()
+    app.selectbox(key="strategy_category").set_value("Time spread").run()
+    before = _trace(app, "At expiry")["y"]
+    app.slider(key="pnl_iv_shift").set_value(10).run()
+    _ok(app)
+    assert _trace(app, "At expiry")["y"] == before
+    assert _trace(app, "Today")["name"] == "Today, IV +10 pts"

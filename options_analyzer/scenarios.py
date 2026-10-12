@@ -214,16 +214,18 @@ def pnl_grid(
 
     * with ``vol_changes`` (relative IV changes, e.g. 0.25 = +25 %) the result
       has shape ``(len(vol_changes), len(spot_changes))`` at a fixed ``days``;
-    * otherwise ``days`` must be an array and the result has shape
-      ``(len(days), len(spot_changes))`` at unchanged implied volatility.
+    * otherwise the result has shape ``(len(days), len(spot_changes))`` at
+      unchanged implied volatility (a single day count gives one row).
     """
-    spots = market.spot * (1.0 + np.asarray(spot_changes, dtype=float))[None, :]
+    spots = market.spot * (1.0 + np.atleast_1d(np.asarray(spot_changes, dtype=float)))[None, :]
     base = float(position_value(strategy, market))
     if vol_changes is not None:
-        vol_mult = (1.0 + np.asarray(vol_changes, dtype=float))[:, None]
+        if np.ndim(days) != 0:
+            raise ValueError("with vol_changes, days must be a single number (the grid is volatility x spot)")
+        vol_mult = (1.0 + np.atleast_1d(np.asarray(vol_changes, dtype=float)))[:, None]
         t = float(days) / DAYS_PER_YEAR
         values = position_value(strategy, market, spots, t, vol_multiplier=vol_mult)
     else:
-        t = np.asarray(days, dtype=float)[:, None] / DAYS_PER_YEAR
+        t = np.atleast_1d(np.asarray(days, dtype=float))[:, None] / DAYS_PER_YEAR
         values = position_value(strategy, market, spots, t)
     return multiplier * (np.asarray(values, dtype=float) - base)

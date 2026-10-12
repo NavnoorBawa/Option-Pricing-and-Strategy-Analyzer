@@ -33,8 +33,9 @@ __all__ = [
     "no_arbitrage_bounds",
 ]
 
-MIN_VOL = 1e-6
+MIN_VOL = 1e-6  # lower bracket of the American solver (the tree needs a positive volatility)
 MAX_VOL = 20.0
+_VOL_FLOOR = 1e-12  # lower bracket of the European solver
 
 
 class ImpliedVolError(ValueError):
@@ -101,15 +102,20 @@ def implied_volatility(
     def objective(vol: float) -> float:
         return bs.price(S, K, T, r, vol, q, otm_type) - otm_price
 
+    hi = _upper_bracket(objective)
+    if objective(_VOL_FLOOR) > 0.0:
+        return 0.0  # the time value is below what a volatility of 1e-12 produces: zero to machine precision
+    return float(brentq(objective, _VOL_FLOOR, hi, xtol=tol, rtol=4 * np.finfo(float).eps, maxiter=500))
+
+
+def _upper_bracket(objective) -> float:
+    """Smallest of 1, 2, 4, ..., ``MAX_VOL`` where the (increasing) objective is non-negative."""
     hi = 1.0
     while objective(hi) < 0.0:
-        hi *= 2.0
-        if hi > MAX_VOL:
+        if hi >= MAX_VOL:
             raise ImpliedVolError(f"implied volatility exceeds {MAX_VOL:.0%}; check the quote and inputs")
-    lo = MIN_VOL
-    if objective(lo) > 0.0:
-        return MIN_VOL
-    return float(brentq(objective, lo, hi, xtol=tol, rtol=4 * np.finfo(float).eps, maxiter=500))
+        hi = min(2.0 * hi, MAX_VOL)
+    return hi
 
 
 def american_bounds(S: float, K: float, T: float, r: float, q: float = 0.0, option_type: str = "call"):
@@ -168,9 +174,5 @@ def implied_volatility_american(
             f"price {price:.6g} is below the zero-volatility American value {price + floor:.6g}; "
             "no volatility can produce it"
         )
-    hi = 1.0
-    while objective(hi) < 0.0:
-        hi *= 2.0
-        if hi > MAX_VOL:
-            raise ImpliedVolError(f"implied volatility exceeds {MAX_VOL:.0%}; check the quote and inputs")
+    hi = _upper_bracket(objective)
     return float(brentq(objective, MIN_VOL, hi, xtol=tol, maxiter=200))

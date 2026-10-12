@@ -57,3 +57,17 @@ def test_input_validation():
         mc.price_european(100, 100, 1, 0.05, 0.2, n_paths=10)
     with pytest.raises(ValueError):
         mc.price_european(-1, 100, 1, 0.05, 0.2)
+
+
+def test_standard_error_is_not_reported_when_no_path_crosses_the_strike():
+    # Far out of the money: every path finishes below the strike, so the control-variate residuals are
+    # constant and the sample cannot estimate its error (it used to report round-off, Error/SE ~ -1e8).
+    res = mc.price_european(100, 140, 30 / 365, 0.05, 0.2, n_paths=100_000, seed=42)
+    assert res["call"].itm_fraction == 0.0 and res["put"].itm_fraction == 1.0
+    assert np.isnan(res["call"].std_error) and np.isnan(res["put"].std_error)
+    ordinary = mc.price_european(*ARGS, n_paths=10_000)["call"]
+    assert 0 < ordinary.itm_fraction < 1 and ordinary.std_error > 0
+
+
+def test_odd_antithetic_sample_count_is_rounded_up_to_pairs():
+    assert mc.terminal_prices(100, 1, 0.05, 0.2, n_paths=101).shape == (102,)

@@ -79,3 +79,22 @@ def test_american_bounds_reject_impossible_quotes():
         implied_volatility_american(5.0, 100, 90, 1, 0.05, 0, "call")
     with pytest.raises(ImpliedVolError, match="upper bound"):
         implied_volatility_american(150.0, 100, 90, 1, 0.05, 0, "call")
+
+
+@pytest.mark.parametrize("sigma", [16.5, 18.0, 19.9])
+def test_volatilities_up_to_the_cap_are_solved(sigma):
+    price = bs.price(100, 100, 0.01, 0, sigma, 0, "call")
+    assert implied_volatility(price, 100, 100, 0.01, 0, 0, "call") == pytest.approx(sigma, rel=1e-9)
+
+
+@pytest.mark.parametrize("quote", [1e-6, 1e-5, 3e-5])
+def test_tiny_time_value_is_reproduced(quote):
+    iv = implied_volatility(quote, 100, 100, 1.0, 0, 0, "call")
+    assert bs.price(100, 100, 1.0, 0, iv, 0, "call") == pytest.approx(quote, rel=1e-6)
+
+
+def test_american_volatility_up_to_the_cap_is_solved():
+    from options_analyzer import binomial
+
+    price = binomial.price(100, 100, 0.1, 0.05, 17.0, 0, "call", 501, american=True, method="lr")
+    assert implied_volatility_american(price, 100, 100, 0.1, 0.05, 0, "call") == pytest.approx(17.0, rel=1e-6)

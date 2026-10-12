@@ -39,19 +39,26 @@ def compute_prices(inputs: Inputs) -> Prices:
     bs_put = bs.price(S, K, T, r, sigma, q, "put")
     if model.kind == "binomial":
         tree = cache.tree_results(S, K, T, r, sigma, q, model.steps, model.american, model.tree_method)
+        # The early-exercise premium is measured on the same lattice, so the tree's discretisation error cancels.
+        european = (
+            cache.tree_results(S, K, T, r, sigma, q, model.steps, False, model.tree_method) if model.american else None
+        )
         notes = {}
         for kind, ref in (("call", bs_call), ("put", bs_put)):
-            diff = tree[kind].price - ref
-            notes[kind] = (
-                f"Early-exercise premium {money(diff, 4, signed=True)} vs European BSM"
-                if model.american
-                else f"Tree error vs BSM {money(diff, 4, signed=True)}"
-            )
+            if model.american:
+                premium = tree[kind].price - european[kind].price
+                notes[kind] = f"Early-exercise premium {money(premium, 4, signed=True)} (same tree, European exercise)"
+            else:
+                notes[kind] = f"Tree error vs BSM {money(tree[kind].price - ref, 4, signed=True)}"
         return Prices(tree["call"].price, tree["put"].price, notes["call"], notes["put"], tree=tree)
     if model.kind == "monte_carlo":
         mc = cache.mc_results(S, K, T, r, sigma, q, model.n_paths, model.seed, model.antithetic, model.control_variate)
         notes = {
-            kind: f"95% CI {money(res.ci95[0], 3)} – {money(res.ci95[1], 3)} · SE {money(res.std_error, 4)}"
+            kind: (
+                f"95% CI {money(res.ci95[0], 3)} – {money(res.ci95[1], 3)} · SE {money(res.std_error, 4)}"
+                if np.isfinite(res.std_error)
+                else "No simulated price crossed the strike, so the error cannot be estimated"
+            )
             for kind, res in mc.items()
         }
         return Prices(mc["call"].price, mc["put"].price, notes["call"], notes["put"], mc=mc)
@@ -241,7 +248,10 @@ def _model_diagnostics(inputs: Inputs, prices: Prices) -> None:
         st.plotly_chart(
             charts.convergence_chart(steps, series, reference, "Black-Scholes-Merton"), key="tree_convergence"
         )
-        st.caption("CRR oscillates between odd and even step counts; Leisen-Reimer converges smoothly at ~O(1/n²).")
+        st.caption(
+            "CRR oscillates between odd and even step counts; Leisen-Reimer converges smoothly, "
+            + ("at first order with early exercise." if model.american else "at roughly O(1/n²).")
+        )
         if model.american:
             boundaries = {}
             for kind, res in tree.items():
@@ -255,10 +265,14 @@ def _model_diagnostics(inputs: Inputs, prices: Prices) -> None:
                 st.plotly_chart(charts.exercise_boundary_chart(boundaries, K), key="exercise_boundary")
                 st.caption(
                     "Exercising immediately is optimal when the spot is beyond the boundary: below it for a put, "
-                    "above it for a call. Without dividends an American call is never exercised early."
+                    "above it for a call. With a non-negative rate and no dividends an American call is never "
+                    "exercised early."
                 )
             else:
-                st.info("Early exercise is never optimal for these inputs (e.g. an American call without dividends).")
+                st.info(
+                    "Early exercise is never optimal for these inputs, or the spot is already in the exercise region "
+                    "at every step the tree resolves (e.g. a deep in-the-money put worth its intrinsic value)."
+                )
     elif model.kind == "monte_carlo":
         times, paths = cache.mc_paths(S, T, r, sigma, q, model.seed)
         c1, c2 = st.columns(2)
@@ -288,8 +302,9 @@ def _model_diagnostics(inputs: Inputs, prices: Prices) -> None:
                 "95% CI high": res.ci95[1],
                 "BSM": bs.price(S, K, T, r, sigma, q, kind),
                 "Error / SE": (res.price - bs.price(S, K, T, r, sigma, q, kind)) / res.std_error
-                if res.std_error
-                else 0.0,
+                if res.std_error > 0
+                else np.nan,
+                "In the money": res.itm_fraction,
             }
             for kind, res in mc.items()
         ]
@@ -300,11 +315,15 @@ def _model_diagnostics(inputs: Inputs, prices: Prices) -> None:
                 c: st.column_config.NumberColumn(format="%.4f")
                 for c in ("Monte Carlo", "Std. error", "95% CI low", "95% CI high", "BSM")
             }
-            | {"Error / SE": st.column_config.NumberColumn(format="%.2f")},
+            | {
+                "Error / SE": st.column_config.NumberColumn(format="%.2f"),
+                "In the money": st.column_config.NumberColumn(format="percent"),
+            },
         )
         st.caption(
             "Terminal prices are sampled exactly from the log-normal distribution (no time-stepping bias). "
-            "|Error / SE| below about 2 is consistent with an unbiased estimator."
+            "|Error / SE| below about 2 is consistent with an unbiased estimator. When no simulated price crosses "
+            "the strike the sample cannot estimate its own error, and the standard error is left blank."
         )
     else:
         st.info(

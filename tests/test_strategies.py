@@ -229,3 +229,49 @@ def test_random_positions_match_monte_carlo():
 def test_time_spreads_require_an_expiry():
     with pytest.raises(ValueError, match="expiry"):
         S.build_template("Long Call Calendar", 100, 10)
+
+
+# --- Second review round ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "vol", "days", "expected"),
+    [("Bull Call Spread", 1.2, 3650, 1), ("Long Call Butterfly", 1.0, 3650, 2), ("Iron Condor", 3.0, 365, 2)],
+)
+def test_no_spurious_far_breakevens_at_extreme_volatility(name, vol, days, expected):
+    # The grid used to reach 1e15 x spot, where rounding turned a constant P&L into fake sign changes.
+    market = S.Market(100, 0.05, vol, days / 365)
+    metrics = S.analyze(S.build_template(name, 100, 10), market)
+    assert len(metrics.breakevens) == expected
+    assert max(metrics.breakevens) < 200
+
+
+def test_tiny_debit_far_out_is_not_a_breakeven():
+    # A butterfly at 500% vol for 5 years costs ~1e-10: its far P&L is below the rounding tolerance.
+    market = S.Market(100, 0.05, 5.0, 5.0)
+    assert len(S.analyze(S.build_template("Long Call Butterfly", 100, 10), market).breakevens) == 2
+
+
+@pytest.mark.parametrize(("q", "root"), [(0.01, 958.501), (0.005, 1798.998)])
+def test_breakeven_beyond_the_grid_is_found(q, root):
+    # A dividend-paying diagonal loses slowly far above the strikes; the upper breakeven used to be dropped.
+    market = S.Market(100, 0.05, 0.2, 1.0, q)
+    diagonal = S.build_template("Diagonal (Poor Man's Covered Call)", 100, 10, market.expiry)
+    metrics = S.analyze(diagonal, market)
+    assert len(metrics.breakevens) == 2 and np.isinf(metrics.max_loss)
+    assert metrics.breakevens[1] == pytest.approx(root, abs=1e-3)
+    assert float(S.pnl(diagonal, market, metrics.breakevens[1], metrics.horizon)) == pytest.approx(0, abs=1e-9)
+    assert S.unbounded_loss_from_dividends(diagonal, market)
+
+
+def test_unbounded_loss_note_only_for_dividend_drag():
+    market = S.Market(100, 0.05, 0.2, 30 / 365, 0.01)
+    naked = S.Strategy("naked", (S.Leg("call", -1, 105), S.Leg("put", 1, 95, 60 / 365)))
+    assert np.isinf(S.analyze(naked, market).max_loss)
+    assert not S.unbounded_loss_from_dividends(naked, market)
+
+
+def test_riskless_conversion_has_no_dispersion():
+    market = S.Market(5000, 0.05, 0.2, 0.5, 0.02)
+    conversion = S.Strategy("conv", (S.Leg("stock", 1), S.Leg("put", 1, 5000), S.Leg("call", -1, 5000)))
+    assert S.analyze(conversion, market).pnl_std < 1e-9

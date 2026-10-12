@@ -35,10 +35,15 @@ _Z_95 = 1.959963984540054
 @dataclass(frozen=True)
 class MonteCarloResult:
     price: float
+    #: Standard error of ``price``. NaN when every simulated price finished on the same side of the strike:
+    #: the sample then carries no information about the payoff's kink and cannot estimate its own error
+    #: (with the control variate the residuals are exactly constant).
     std_error: float
     n_paths: int
     antithetic: bool
     control_variate: bool
+    #: Fraction of simulated terminal prices that finished in the money.
+    itm_fraction: float = float("nan")
 
     @property
     def ci95(self) -> tuple[float, float]:
@@ -66,7 +71,8 @@ def terminal_prices(
     """Exact samples of ``S_T`` under the risk-neutral measure.
 
     With ``antithetic=True`` the first half of the array holds the draws for
-    ``Z`` and the second half those for ``-Z``.
+    ``Z`` and the second half those for ``-Z``; an odd ``n_paths`` is then
+    rounded up to the next even number.
     """
     rng = np.random.default_rng(seed)
     z = _normals(int(n_paths), antithetic, rng)
@@ -91,7 +97,8 @@ def price_european(
 
     Returns a dict ``{option_type: MonteCarloResult}``. The standard error uses
     the unbiased (``ddof=1``) sample deviation of the independent samples
-    (pair averages when antithetic sampling is on).
+    (pair averages when antithetic sampling is on). It is NaN when no simulated
+    price crossed the strike (see :class:`MonteCarloResult`).
     """
     n_paths = int(n_paths)
     if n_paths < 100:
@@ -104,8 +111,16 @@ def price_european(
         n_paths += 1
 
     if T <= 0 or sigma == 0:
+        forward = S * np.exp((r - q) * max(T, 0.0))
         return {
-            kind: MonteCarloResult(bs.price(S, K, T, r, sigma, q, kind), 0.0, n_paths, antithetic, control_variate)
+            kind: MonteCarloResult(
+                bs.price(S, K, T, r, sigma, q, kind),
+                0.0,
+                n_paths,
+                antithetic,
+                control_variate,
+                float(bs.option_sign(kind) * (forward - K) > 0),
+            )
             for kind in option_types
         }
 
@@ -118,6 +133,7 @@ def price_european(
     for kind in option_types:
         phi = bs.option_sign(kind)
         y = discount * np.maximum(phi * (s_t - K), 0.0)
+        n_itm = int(np.count_nonzero(y > 0.0))
         x = control
         if antithetic:
             half = n_paths // 2
@@ -129,8 +145,8 @@ def price_european(
             beta = float(np.dot(x_centred, y - y.mean()) / var_x) if var_x > 0 else 0.0
             y = y - beta * (x - control_mean)
         estimate = float(y.mean())
-        std_error = float(y.std(ddof=1) / np.sqrt(y.size))
-        results[kind] = MonteCarloResult(estimate, std_error, n_paths, antithetic, control_variate)
+        std_error = float(y.std(ddof=1) / np.sqrt(y.size)) if 0 < n_itm < n_paths else float("nan")
+        results[kind] = MonteCarloResult(estimate, std_error, n_paths, antithetic, control_variate, n_itm / n_paths)
     return results
 
 

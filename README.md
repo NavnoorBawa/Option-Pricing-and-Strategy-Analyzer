@@ -17,8 +17,9 @@ interface on top of it.
 
 **Pricing & Greeks**
 - Black–Scholes–Merton with continuous dividend yield, exact at every edge case (expiry, zero volatility).
-- Binomial trees: Cox–Ross–Rubinstein and Leisen–Reimer (≈O(1/n²) convergence), European or American exercise,
-  tree Greeks and the early-exercise boundary. Up to 2,000 steps in milliseconds.
+- Binomial trees: Cox–Ross–Rubinstein and Leisen–Reimer (≈O(1/n²) convergence for European exercise), European
+  or American exercise, tree Greeks and the early-exercise boundary. A 2,000-step American tree prices in about
+  25 ms.
 - Monte Carlo with exact terminal sampling, antithetic and control variates, reproducible seeds and 95 % confidence
   intervals.
 - All 14 Greeks (delta … ultima, plus rho and dividend rho) for calls and puts, with explicit units, a sensitivity
