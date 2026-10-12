@@ -24,7 +24,7 @@ def test_crash_hurts_long_stock_and_helps_long_put():
 def test_vol_shock_damping_reduces_long_dated_vega_impact():
     market = S.Market(100, 0.05, 0.2, 2.0)
     straddle = S.build_template("Long Straddle", 100, 10)
-    spike = [sc.StressScenario("spike", 0.0, 3.0, 0.0)]
+    spike = [sc.StressScenario("spike", 0.0, 3.0, 0.0, one_month_vol_shock=True)]
     full = sc.run_stress_tests(straddle, market, spike, vol_tenor_decay=0.0)[0]["P&L"]
     damped = sc.run_stress_tests(straddle, market, spike, vol_tenor_decay=0.25)[0]["P&L"]
     assert 0 < damped < full
@@ -57,3 +57,29 @@ def test_pnl_grids():
     assert decay.shape == (4, 5)
     assert decay[-1] == pytest.approx(S.pnl(strategy, MARKET, 100 * (1 + spot_moves), 91 / 365))
     assert decay[1, 2] < 0  # theta
+
+
+def test_hypothetical_iv_shocks_are_literal_and_match_the_heatmap():
+    # Review finding: the heatmap and the stress table disagreed for the same IV shock.
+    market = S.Market(100, 0.05, 0.2, 1.0)
+    straddle = S.build_template("Long Straddle", 100, 10)
+    spike = next(x for x in sc.HYPOTHETICAL_SCENARIOS if x.name == "Vol spike (IV +50%)")
+    row = sc.run_stress_tests(straddle, market, [spike], multiplier=100)[0]
+    cell = sc.pnl_grid(straddle, market, np.array([0.0]), np.array([0.5]), 0, multiplier=100)[0, 0]
+    assert row["P&L"] == pytest.approx(cell)
+    assert not row["IV shock damped"]
+
+
+def test_scenario_data_matches_sources():
+    by_name = {x.name: x for x in (*sc.HISTORICAL_SCENARIOS, *sc.HYPOTHETICAL_SCENARIOS)}
+    assert by_name["Dot-com bust (2000-02)"].rate_change == pytest.approx(-0.0425)  # Fed funds 6.00% -> 1.75%
+    fed = by_name["Fed severely adverse (2026)"]
+    assert (fed.spot_change, fed.rate_change) == (pytest.approx(-0.58), pytest.approx(-0.036))
+    assert all(x.one_month_vol_shock for x in sc.HISTORICAL_SCENARIOS)
+
+
+def test_legs_expiring_during_an_episode_are_flagged():
+    strategy = S.build_template("Long Call Calendar", 100, 10, 0.1)
+    episode = [sc.StressScenario("long", -0.1, 1.0, 0.0, days=60)]
+    rows = sc.run_stress_tests(strategy, MARKET, episode, include_elapsed_time=True)
+    assert rows[0]["Legs expired"] == 1

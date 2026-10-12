@@ -77,8 +77,9 @@ def _stress_tests(position: Position) -> None:
         "Damp IV shock for longer tenors",
         value=True,
         key="stress_damp",
-        help="IV multipliers are one-month (VIX-like) shocks; longer-dated IV moves less, scaled by "
-        f"(T / 1 month)^-{scenarios.DEFAULT_VOL_TENOR_DECAY}.",
+        help="Historical and Fed scenarios shock one-month (VIX-like) implied vol; longer-dated IV moves less, "
+        f"so the shock is scaled by (T / 1 month)^-{scenarios.DEFAULT_VOL_TENOR_DECAY}. Hypothetical IV shocks "
+        "always apply literally to every leg, like the heatmap above.",
     )
     with c3.popover("Custom scenario", icon=":material/tune:"):
         custom_on = st.toggle("Include custom scenario", value=False, key="stress_custom")
@@ -106,14 +107,23 @@ def _stress_tests(position: Position) -> None:
     table = pd.DataFrame(rows)
     left, right = st.columns([1.1, 1])
     left.plotly_chart(charts.bar_chart(table["Scenario"], table["P&L"], "P&L ($)"), key="stress_chart")
+    columns = ["Scenario", "P&L", "Spot change", "IV multiplier", "IV shock damped", "Rate change (bp)"]
+    if elapsed or custom_on:
+        columns += ["Days elapsed", "Legs expired"]
     right.dataframe(
-        table[["Scenario", "P&L", "Spot change", "IV multiplier", "Rate change (bp)", "Days elapsed"]],
+        table[columns],
         hide_index=True,
         column_config={
             "Spot change": st.column_config.NumberColumn(format="percent"),
-            "IV multiplier": st.column_config.NumberColumn(format="%.2fx"),
+            "IV multiplier": st.column_config.NumberColumn(format="%.2fx", help="Multiplier on implied vol."),
+            "IV shock damped": st.column_config.CheckboxColumn(
+                help="One-month shock, damped for longer-dated legs (see the toggle above)."
+            ),
             "Rate change (bp)": st.column_config.NumberColumn(format="%+.0f"),
             "P&L": st.column_config.NumberColumn(format="dollar"),
+            "Legs expired": st.column_config.NumberColumn(
+                help="Option legs that expire during the episode; they are settled on the end-of-episode price."
+            ),
         },
     )
     with st.expander("Scenario sources and definitions"):
@@ -196,7 +206,8 @@ def _var(position: Position) -> None:
                 100.0,
                 10.0,
                 key="var_vov",
-                help="About 100% matches one-month index implied vol (VIX) dynamics.",
+                help="Volatility of one-month implied vol; about 100% matches index (VIX) dynamics. Longer-dated "
+                "legs move less, damped by tenor like the stress tests.",
             )
             / 100
         )
@@ -269,8 +280,14 @@ def _var(position: Position) -> None:
         [
             {"Statistic": "Mean P&L", "Value": money(result.mean, signed=True)},
             {"Statistic": "Standard deviation", "Value": money(result.std)},
-            {"Statistic": "Skewness", "Value": f"{result.skewness:.3f}"},
-            {"Statistic": "Excess kurtosis", "Value": f"{result.excess_kurtosis:.3f}"},
+            {
+                "Statistic": "Skewness",
+                "Value": "n/a (riskless)" if np.isnan(result.skewness) else f"{result.skewness:.3f}",
+            },
+            {
+                "Statistic": "Excess kurtosis",
+                "Value": "n/a (riskless)" if np.isnan(result.excess_kurtosis) else f"{result.excess_kurtosis:.3f}",
+            },
             {"Statistic": "Worst simulated P&L", "Value": money(result.worst, signed=True)},
             {"Statistic": "Best simulated P&L", "Value": money(result.best, signed=True)},
         ]
@@ -281,6 +298,12 @@ def _var(position: Position) -> None:
         f"Full revaluation of every leg on {n_paths:,} simulated {risk.DISTRIBUTIONS[distribution]} paths "
         f"(zero drift, volatility {position.market.volatility:.1%}), with {horizon} trading day(s) of time decay. "
         "VaR and ES use the Acerbi–Tasche estimators on the sorted P&L. Excess kurtosis is unstable for ν ≤ 4."
+        + (
+            f" {result.settled_legs} option leg(s) expire before the horizon and are settled on the simulated price "
+            "at the close of their expiry day."
+            if result.settled_legs
+            else ""
+        )
     )
     c2.number_input("Random seed", 0, 2**32 - 1, 7, 1, key="var_seed")
 

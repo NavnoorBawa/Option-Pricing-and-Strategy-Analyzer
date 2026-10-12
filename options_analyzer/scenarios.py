@@ -38,14 +38,18 @@ class StressScenario:
     rate_change: float  # absolute, e.g. -0.015 = -150 bp
     days: int = 0  # calendar days the episode lasted
     description: str = ""
+    #: True when ``vol_multiplier`` is a one-month (VIX-like) shock, which is
+    #: damped for longer tenors; False applies it literally to every leg.
+    one_month_vol_shock: bool = False
 
 
 #: Historical analogues, built from S&P 500 closes (Yardeni bull/bear tables,
-#: closing basis), the VIX / VXO and the Fed funds target (FRED) over each
-#: episode. The implied-vol multiplier is the ratio of the VIX at the end of
-#: the window to its level at the start, i.e. a shock to one-month implied
-#: vol; see :func:`run_stress_tests` for how it is damped for longer tenors.
-#: Rate changes are policy-rate moves over the window.
+#: closing basis), the VIX / VXO (FRED VIXCLS, VXOCLS) and the Fed funds target
+#: (federalreserve.gov open-market archive) over each episode. The implied-vol
+#: multiplier is the ratio of the VIX at the end of the window to its level at
+#: the start, i.e. a shock to one-month implied vol; see :func:`run_stress_tests`
+#: for how it is damped for longer tenors. Rate changes are policy-rate moves
+#: over the window.
 HISTORICAL_SCENARIOS: tuple[StressScenario, ...] = (
     StressScenario(
         "Black Monday (1987)",
@@ -54,14 +58,16 @@ HISTORICAL_SCENARIOS: tuple[StressScenario, ...] = (
         -0.005,
         1,
         "19 Oct 1987: S&P 500 -20.5% in one session; VXO 36 -> 150.",
+        one_month_vol_shock=True,
     ),
     StressScenario(
         "Dot-com bust (2000-02)",
         -0.491,
         1.8,
-        -0.0525,
+        -0.0425,
         929,
-        "24 Mar 2000 - 9 Oct 2002: S&P 500 -49.1%; VIX ~23 -> ~42; Fed funds 6.50% -> 1.25%.",
+        "24 Mar 2000 - 9 Oct 2002: S&P 500 -49.1%; VIX ~23 -> ~42; Fed funds 6.00% -> 1.75%.",
+        one_month_vol_shock=True,
     ),
     StressScenario(
         "Global Financial Crisis (2007-09)",
@@ -71,6 +77,7 @@ HISTORICAL_SCENARIOS: tuple[StressScenario, ...] = (
         517,
         "9 Oct 2007 - 9 Mar 2009: S&P 500 -56.8%; VIX 16 -> 50 (peak close 80.9 in Nov 2008); "
         "Fed funds 4.75% -> 0-0.25%.",
+        one_month_vol_shock=True,
     ),
     StressScenario(
         "Volmageddon (2018)",
@@ -79,6 +86,7 @@ HISTORICAL_SCENARIOS: tuple[StressScenario, ...] = (
         0.0,
         1,
         "5 Feb 2018: S&P 500 -4.1%; VIX 17.3 -> 37.3, its largest one-day jump at the time.",
+        one_month_vol_shock=True,
     ),
     StressScenario(
         "COVID crash (2020)",
@@ -88,6 +96,7 @@ HISTORICAL_SCENARIOS: tuple[StressScenario, ...] = (
         33,
         "19 Feb - 23 Mar 2020: S&P 500 -33.9% in 23 sessions; VIX 14 -> 62 (record close 82.7 on 16 Mar); "
         "Fed cut 150 bp.",
+        one_month_vol_shock=True,
     ),
     StressScenario(
         "2022 rate shock",
@@ -96,6 +105,7 @@ HISTORICAL_SCENARIOS: tuple[StressScenario, ...] = (
         0.03,
         282,
         "3 Jan - 12 Oct 2022: S&P 500 -25.4%; VIX 17 -> 34; Fed funds +300 bp.",
+        one_month_vol_shock=True,
     ),
     StressScenario(
         "Tariff shock (Apr 2025)",
@@ -104,6 +114,7 @@ HISTORICAL_SCENARIOS: tuple[StressScenario, ...] = (
         0.0,
         6,
         "2 - 8 Apr 2025: S&P 500 -12.1% in four sessions; VIX 22 -> 52.",
+        one_month_vol_shock=True,
     ),
 )
 
@@ -121,12 +132,13 @@ HYPOTHETICAL_SCENARIOS: tuple[StressScenario, ...] = (
     StressScenario("Rates +200 bp", 0.0, 1.0, 0.02, 0, "Parallel 2-point rise in the risk-free rate."),
     StressScenario(
         "Fed severely adverse (2026)",
-        -0.54,
+        -0.58,
         4.0,
-        -0.039,
+        -0.036,
         274,
-        "Federal Reserve 2026 supervisory stress test: equities about -54% over three quarters, "
-        "VIX peaking near 72, short rates falling to about 0.1%.",
+        "Federal Reserve 2026 supervisory scenario (federalreserve.gov, Feb 2026): equities fall about 58% from "
+        "Q4 2025 to Q3 2026, the VIX peaks at 72 (about 4x), the 3-month Treasury rate falls from 3.7% to 0.1%.",
+        one_month_vol_shock=True,
     ),
     StressScenario("Gap down -10%", -0.10, 1.4, 0.0, 0, "Overnight gap lower with a volatility pickup."),
     StressScenario("Gap up +10%", 0.10, 0.9, 0.0, 0, "Overnight gap higher with a mild volatility drop."),
@@ -148,16 +160,19 @@ def run_stress_tests(
 ) -> list[dict]:
     """P&L of the position under each scenario (in $ after ``multiplier``).
 
-    The implied-vol multiplier is the shock to one-month vol; with
-    ``vol_tenor_decay > 0`` it is damped for longer-dated legs (a 1-year
-    option's IV moves roughly half as much as one-month IV in a crisis).
-    With ``include_elapsed_time`` the scenario's duration also passes, so
-    options decay (and expire, if the episode outlasts them).
+    For scenarios whose IV multiplier is a one-month (VIX) shock,
+    ``vol_tenor_decay > 0`` damps it for longer-dated legs (a 1-year option's
+    IV moves roughly half as much as one-month IV in a crisis); hypothetical
+    IV shocks apply literally to every leg. With ``include_elapsed_time`` the
+    scenario's duration also passes, so options decay; a leg that expires
+    during the episode is settled on the end-of-episode price (a stylised
+    simplification, flagged in the ``Legs expired`` column).
     """
     base = float(position_value(strategy, market))
     rows = []
     for sc in scenarios:
         t = sc.days / DAYS_PER_YEAR if include_elapsed_time else 0.0
+        decay = vol_tenor_decay if sc.one_month_vol_shock else 0.0
         value = position_value(
             strategy,
             market,
@@ -165,7 +180,10 @@ def run_stress_tests(
             t=t,
             vol_multiplier=sc.vol_multiplier,
             rate_shift=sc.rate_change,
-            vol_tenor_decay=vol_tenor_decay,
+            vol_tenor_decay=decay,
+        )
+        expired = sum(
+            1 for leg in strategy.legs if leg.is_option and (market.expiry if leg.expiry is None else leg.expiry) < t
         )
         change = multiplier * (float(value) - base)
         rows.append(
@@ -173,8 +191,10 @@ def run_stress_tests(
                 "Scenario": sc.name,
                 "Spot change": sc.spot_change,
                 "IV multiplier": sc.vol_multiplier,
+                "IV shock damped": bool(decay),
                 "Rate change (bp)": sc.rate_change * 1e4,
                 "Days elapsed": sc.days if include_elapsed_time else 0,
+                "Legs expired": expired,
                 "P&L": change,
                 "Description": sc.description,
             }

@@ -13,12 +13,15 @@ Conventions
   (typically 100) for the dollar P&L of listed contracts.
 * Options are European and valued with Black-Scholes-Merton at each leg's
   own implied volatility (defaulting to the market volatility).
-* Stock legs are valued on a total-return basis (dividends at yield ``q``
-  are reinvested), which keeps the stock and option legs consistent with
-  put-call parity. Financing of the premium paid or received is ignored,
-  as is conventional for payoff diagrams.
-* The entry cost of every option is its model value at inception, so the
-  P&L "today" at the current spot is exactly zero.
+* A stock leg is worth its price plus the cash dividends it has paid,
+  reinvested at the risk-free rate: ``S_t + S_0 (e^{rt} - e^{(r-q)t})``
+  (the expected dividends at yield ``q``). Its delta is therefore exactly 1,
+  a covered call's profit stays capped, and the whole position is a
+  martingale after discounting, consistently with the option legs.
+* Financing of the premium paid or received is ignored by default, as is
+  conventional for payoff diagrams (see the ``carry`` option of :func:`pnl`).
+* When legs are entered at their model value (no premium override) and
+  without fees, the P&L "today" at the current spot is zero.
 """
 
 from __future__ import annotations
@@ -148,10 +151,16 @@ def front_expiry(strategy: Strategy, market: Market) -> float:
 VOL_SHOCK_REFERENCE_TENOR = 30.0 / 365.0
 
 
+def _dividends(market: Market, t):
+    """Value at ``t`` of the expected cash dividends of one share, reinvested at ``r``."""
+    r, q = market.rate, market.dividend_yield
+    return market.spot * (np.exp(r * np.asarray(t, dtype=float)) - np.exp((r - q) * np.asarray(t, dtype=float)))
+
+
 def _leg_value(leg, market, spot, t, vol_multiplier, vol_shift, rate_shift, vol_tenor_decay):
     q = market.dividend_yield
     if leg.kind == "stock":
-        return spot * np.exp(q * t)
+        return spot + _dividends(market, t)
     tau = np.maximum(_leg_expiry(leg, market) - t, 0.0)
     multiplier = vol_multiplier
     if vol_tenor_decay:
@@ -211,8 +220,10 @@ def pnl(strategy: Strategy, market: Market, spot=None, t=0.0, carry: bool = Fals
     """Mark-to-market P&L per unit relative to the entry cost.
 
     With ``carry=True`` the entry cost is financed at the risk-free rate until
-    ``t`` (a debit is borrowed, a credit earns interest), so that under the
-    risk-neutral measure the expected P&L is exactly zero.
+    ``t`` (a debit is borrowed, a credit earns interest). The risk-neutral
+    expected P&L is then zero whenever every leg is entered at its model value
+    at the market volatility and there are no fees; any premium override, leg
+    IV different from the market volatility or fee shows up as the edge.
     """
     cost = entry_cost(strategy, market)
     if carry:
@@ -224,9 +235,15 @@ def position_greeks(strategy: Strategy, market: Market, spot=None, t: float = 0.
     """First-order Greeks of the whole position (per unit, raw model units)."""
     spot = market.spot if spot is None else spot
     totals = dict.fromkeys(("delta", "gamma", "theta", "vega", "rho"), 0.0)
+    r, q = market.rate, market.dividend_yield
     for leg in strategy.legs:
         if leg.kind == "stock":
-            totals["delta"] = totals["delta"] + leg.quantity * np.exp(market.dividend_yield * t)
+            totals["delta"] = totals["delta"] + leg.quantity
+            # Dividend accrual: d/dt of S0 (e^{rt} - e^{(r-q)t}), and its sensitivity to r.
+            totals["theta"] = totals["theta"] + leg.quantity * market.spot * (
+                r * np.exp(r * t) - (r - q) * np.exp((r - q) * t)
+            )
+            totals["rho"] = totals["rho"] + leg.quantity * market.spot * t * (np.exp(r * t) - np.exp((r - q) * t))
             continue
         tau = max(_leg_expiry(leg, market) - t, 0.0)
         g = bs.greeks(spot, leg.strike, tau, market.rate, _leg_vol(leg, market), market.dividend_yield, leg.kind)
@@ -241,7 +258,8 @@ def leg_table(strategy: Strategy, market: Market) -> list[dict]:
     for leg in strategy.legs:
         if leg.kind == "stock":
             unit_price = market.spot
-            g = {"delta": 1.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+            # Theta of a share is its dividend accrual, q * S per year.
+            g = {"delta": 1.0, "gamma": 0.0, "theta": market.dividend_yield * market.spot, "vega": 0.0}
         else:
             tau = _leg_expiry(leg, market)
             vol = _leg_vol(leg, market)
@@ -273,19 +291,51 @@ def leg_table(strategy: Strategy, market: Market) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
+def _live_vol_horizon(strategy: Strategy, market: Market, horizon: float) -> float:
+    """Largest volatility x sqrt(time) relevant at ``horizon``: the price distribution and any live leg."""
+    spread = market.volatility * np.sqrt(max(horizon, 1e-4))
+    for leg in strategy.legs:
+        if leg.is_option:
+            remaining = _leg_expiry(leg, market) - horizon
+            if remaining > 0:
+                spread = max(spread, _leg_vol(leg, market) * np.sqrt(remaining))
+    return spread
+
+
 def _analysis_grid(strategy: Strategy, market: Market, horizon: float) -> np.ndarray:
-    """Spot grid covering every kink and ~8 standard deviations either side."""
-    width = 8.0 * market.volatility * np.sqrt(max(horizon, 1e-4))
+    """Spot grid containing every kink and spanning ~8 standard deviations of every relevant distribution."""
+    width = min(8.0 * _live_vol_horizon(strategy, market, horizon), 50.0)
     hi = max([market.spot, *strategy.strikes]) * max(np.exp(width), 3.0)
     grid = np.concatenate(
         [
             np.linspace(0.0, hi, 4001),
-            np.geomspace(1e-6 * market.spot, hi, 2001),
+            np.geomspace(1e-6 * market.spot, hi, 4001),
             np.asarray(strategy.strikes, dtype=float),
             [market.spot],
         ]
     )
     return np.unique(grid)
+
+
+def _pnl_and_scale(strategy: Strategy, market: Market, spots, horizon: float, carry: bool):
+    """P&L at ``horizon`` and the magnitude of the terms summed into it (for rounding tolerances)."""
+    cost = entry_cost(strategy, market)
+    if carry:
+        cost *= float(np.exp(market.rate * horizon))
+    spots = np.asarray(spots, dtype=float)
+    total = np.zeros_like(spots)
+    scale = np.full_like(spots, abs(cost))
+    for leg in strategy.legs:
+        value = leg.quantity * _leg_value(leg, market, spots, horizon, 1.0, 0.0, 0.0, 0.0)
+        total = total + value
+        scale = scale + np.abs(value)
+    return total - cost, scale
+
+
+def _sign_classes(values: np.ndarray, scale: np.ndarray) -> np.ndarray:
+    """+1 / -1 / 0 per point, treating only rounding-level P&L (relative to its terms) as zero."""
+    tol = 1e-13 * scale
+    return np.where(values > tol, 1, np.where(values < -tol, -1, 0))
 
 
 def _upside_slope(strategy: Strategy, market: Market, horizon: float) -> float:
@@ -294,51 +344,77 @@ def _upside_slope(strategy: Strategy, market: Market, horizon: float) -> float:
     q = market.dividend_yield
     for leg in strategy.legs:
         if leg.kind == "stock":
-            slope += leg.quantity * np.exp(q * horizon)
+            slope += leg.quantity
         elif leg.kind == "call":
             tau = _leg_expiry(leg, market) - horizon
             slope += leg.quantity * (np.exp(-q * tau) if tau > 0 else 1.0)
     return slope
 
 
-def breakevens(strategy: Strategy, market: Market, horizon: float | None = None, carry: bool = False) -> list[float]:
-    """Spot prices at which the P&L at ``horizon`` (default: front expiry) is zero."""
-    horizon = front_expiry(strategy, market) if horizon is None else horizon
-    grid = _analysis_grid(strategy, market, horizon)
-    values = pnl(strategy, market, grid, horizon, carry)
-    tol = 1e-9 * max(market.spot, 1.0)
-    sign = np.sign(np.where(np.abs(values) <= tol, 0.0, values))
+def _pnl_at_infinity(strategy: Strategy, market: Market, horizon: float, carry: bool) -> float:
+    """Limit of the P&L as S -> infinity when the upside slope is zero."""
+    total = 0.0
+    for leg in strategy.legs:
+        if leg.kind == "call":
+            tau = _leg_expiry(leg, market) - horizon
+            total -= leg.quantity * leg.strike * (np.exp(-market.rate * tau) if tau > 0 else 1.0)
+        elif leg.kind == "stock":
+            total += leg.quantity * float(_dividends(market, horizon))
+    cost = entry_cost(strategy, market) * (float(np.exp(market.rate * horizon)) if carry else 1.0)
+    return float(total - cost)
+
+
+def _transitions(strategy, market, grid, classes, horizon, carry) -> dict[int, float]:
+    """Location of every change of sign class between grid points ``i`` and ``i + 1``.
+
+    A strict sign change is refined with Brent's method; at the edge of a
+    zero-P&L region the transition sits on the region's last zero point.
+    """
 
     def f(s):
         return float(pnl(strategy, market, s, horizon, carry))
 
-    # Walk the non-zero grid points; a sign flip between neighbours brackets a
-    # root, a flip across a run of (numerically) zero points is a root there.
-    roots: list[float] = []
-    nonzero = np.flatnonzero(sign)
-    for i, j in pairwise(nonzero):
-        if sign[i] == sign[j]:
-            continue
-        if j == i + 1:
-            roots.append(float(brentq(f, grid[i], grid[j], xtol=1e-10 * max(market.spot, 1.0))))
+    xtol = 1e-12 * max(market.spot, 1.0)
+    out = {}
+    for i in np.flatnonzero(classes[:-1] != classes[1:]):
+        a, b = classes[i], classes[i + 1]
+        if a != 0 and b != 0:
+            out[int(i)] = float(brentq(f, grid[i], grid[i + 1], xtol=xtol))
         else:
-            roots.append(float(0.5 * (grid[i + 1] + grid[j - 1])))
-    # Merge numerically identical roots.
+            out[int(i)] = float(grid[i] if a == 0 else grid[i + 1])
+    return out
+
+
+def breakevens(strategy: Strategy, market: Market, horizon: float | None = None, carry: bool = False) -> list[float]:
+    """Spot prices at which the P&L at ``horizon`` (default: front expiry) changes between loss, zero and profit.
+
+    A zero-P&L plateau (e.g. a zero-cost risk reversal between its strikes)
+    contributes both of its endpoints.
+    """
+    horizon = front_expiry(strategy, market) if horizon is None else horizon
+    grid = _analysis_grid(strategy, market, horizon)
+    values, scale = _pnl_and_scale(strategy, market, grid, horizon, carry)
+    points = sorted(_transitions(strategy, market, grid, _sign_classes(values, scale), horizon, carry).values())
     merged: list[float] = []
-    for root in sorted(roots):
-        if not merged or root - merged[-1] > 1e-7 * max(market.spot, 1.0):
-            merged.append(root)
+    for point in points:
+        if not merged or point - merged[-1] > 1e-9 * max(market.spot, 1.0):
+            merged.append(point)
     return merged
 
 
 @dataclass(frozen=True)
 class StrategyMetrics:
-    """Payoff analytics per unit at the front expiry (multiply by the multiplier for $)."""
+    """Payoff analytics per unit at the front expiry (multiply by the multiplier for $).
+
+    ``max_profit`` is the largest P&L and ``max_loss`` minus the smallest, so
+    ``max_loss < 0`` means the position cannot lose (a guaranteed minimum
+    profit) and ``max_profit < 0`` that it cannot make money.
+    """
 
     entry_cost: float
     max_profit: float  # np.inf when unlimited
-    max_loss: float  # positive number; np.inf when unlimited
-    max_profit_spot: float | None
+    max_loss: float  # np.inf when unlimited; negative = guaranteed profit
+    max_profit_spot: float | None  # None when unlimited or reached as S -> infinity
     max_loss_spot: float | None
     breakevens: list[float]
     probability_of_profit: float
@@ -350,20 +426,24 @@ class StrategyMetrics:
 
     @property
     def reward_to_risk(self) -> float | None:
-        if not np.isfinite(self.max_loss) or self.max_loss <= 0:
+        if not np.isfinite(self.max_loss) or self.max_loss <= 0 or self.max_profit <= 0:
             return None
         return self.max_profit / self.max_loss
 
 
 def _terminal_quadrature(market: Market, horizon: float, drift: float, kinks: Sequence[float]):
-    """Nodes/weights for E[f(S_h)] with log-normal S_h, split at kinks (Gauss-Legendre)."""
+    """Nodes/weights for E[f(S_h)] with log-normal S_h, split at kinks (Gauss-Legendre).
+
+    The z-window extends to ``12 + 2 sigma sqrt(h)`` on the upside so that the
+    mass driving E[S] and E[S^2] (centred near z = sigma sqrt(h) and
+    2 sigma sqrt(h)) is always inside it, even for extreme volatilities.
+    """
     vol_t = market.volatility * np.sqrt(horizon)
     mean = np.log(market.spot) + (drift - market.dividend_yield - 0.5 * market.volatility**2) * horizon
-    z_kinks = sorted(
-        {float((np.log(k) - mean) / vol_t) for k in kinks if k > 0 and abs((np.log(k) - mean) / vol_t) < 12}
-    )
-    edges = [-12.0, *z_kinks, 12.0]
-    x, w = np.polynomial.legendre.leggauss(64)
+    lo, hi = -12.0, 12.0 + 2.0 * vol_t
+    z_kinks = sorted({float((np.log(k) - mean) / vol_t) for k in kinks if k > 0})
+    edges = [lo, *(z for z in z_kinks if lo < z < hi), hi]
+    x, w = np.polynomial.legendre.leggauss(96)
     nodes, weights = [], []
     for a, b in pairwise(edges):
         if b - a <= 0:
@@ -387,44 +467,64 @@ def analyze(strategy: Strategy, market: Market, drift: float | None = None, carr
     horizon = front_expiry(strategy, market)
     drift = market.rate if drift is None else drift
     grid = _analysis_grid(strategy, market, horizon)
-    values = pnl(strategy, market, grid, horizon, carry)
+    values, scale = _pnl_and_scale(strategy, market, grid, horizon, carry)
+    classes = _sign_classes(values, scale)
     slope = _upside_slope(strategy, market, horizon)
-    slope_tol = 1e-9
+    slope_tol = 1e-9 * max(1.0, sum(abs(leg.quantity) for leg in strategy.legs))
 
     i_max, i_min = int(np.argmax(values)), int(np.argmin(values))
-    max_profit = np.inf if slope > slope_tol else float(values[i_max])
-    max_loss = np.inf if slope < -slope_tol else float(-values[i_min])
+    max_profit, max_loss = float(values[i_max]), float(-values[i_min])
+    max_profit_spot, max_loss_spot = float(grid[i_max]), float(grid[i_min])
+    if slope > slope_tol:
+        max_profit, max_profit_spot = np.inf, None
+    elif slope < -slope_tol:
+        max_loss, max_loss_spot = np.inf, None
+    else:
+        # Bounded upside: the extreme may only be reached as S -> infinity.
+        limit = _pnl_at_infinity(strategy, market, horizon, carry)
+        if limit > max_profit:
+            max_profit, max_profit_spot = limit, None
+        if -limit > max_loss:
+            max_loss, max_loss_spot = -limit, None
+
+    transitions = _transitions(strategy, market, grid, classes, horizon, carry)
     be = breakevens(strategy, market, horizon, carry)
 
-    # Probability of profit: sum the log-normal mass of the intervals where P&L > 0.
+    # Probability of profit: log-normal mass of every run of grid points with P&L > 0.
     vol_t = market.volatility * np.sqrt(horizon)
     mean = np.log(market.spot) + (drift - market.dividend_yield - 0.5 * market.volatility**2) * horizon
-    edges = [0.0, *be, np.inf]
+
+    def cdf(x: float) -> float:
+        if x <= 0:
+            return 0.0
+        return 1.0 if np.isinf(x) else float(ndtr((np.log(x) - mean) / vol_t))
+
     pop = 0.0
-    for a, b in pairwise(edges):
-        if np.isinf(b):
-            probe = (a if a > 0 else market.spot) * 2.0 + 1.0
-        elif a == 0:
-            probe = 0.5 * b
-        else:
-            probe = 0.5 * (a + b)
-        if float(pnl(strategy, market, probe, horizon, carry)) > 0:
-            cdf_b = 1.0 if np.isinf(b) else float(ndtr((np.log(b) - mean) / vol_t))
-            cdf_a = 0.0 if a == 0 else float(ndtr((np.log(a) - mean) / vol_t))
-            pop += cdf_b - cdf_a
+    positive = np.flatnonzero(classes == 1)
+    if positive.size:
+        breaks = np.flatnonzero(np.diff(positive) > 1)
+        starts = np.concatenate([[positive[0]], positive[breaks + 1]])
+        ends = np.concatenate([positive[breaks], [positive[-1]]])
+        last = len(grid) - 1
+        for i0, i1 in zip(starts, ends, strict=True):
+            a = 0.0 if i0 == 0 else transitions[int(i0) - 1]
+            b = np.inf if i1 == last else transitions[int(i1)]
+            pop += cdf(b) - cdf(a)
 
     spots, weights, _, _ = _terminal_quadrature(market, horizon, drift, [*strategy.strikes, *be])
     outcomes = pnl(strategy, market, spots, horizon, carry)
     expected = float(np.dot(weights, outcomes))
-    second = float(np.dot(weights, outcomes**2))
-    std = float(np.sqrt(max(second - expected**2, 0.0)))
+    with np.errstate(over="ignore", invalid="ignore"):
+        second = float(np.dot(weights, outcomes**2))
+    # At extreme sigma * sqrt(h) the second moment exceeds float range: report it as infinite.
+    std = float(np.sqrt(max(second - expected**2, 0.0))) if np.isfinite(second) else np.inf
 
     return StrategyMetrics(
         entry_cost=entry_cost(strategy, market),
         max_profit=max_profit,
         max_loss=max_loss,
-        max_profit_spot=None if np.isinf(max_profit) else float(grid[i_max]),
-        max_loss_spot=None if np.isinf(max_loss) else float(grid[i_min]),
+        max_profit_spot=max_profit_spot,
+        max_loss_spot=max_loss_spot,
         breakevens=be,
         probability_of_profit=float(min(max(pop, 0.0), 1.0)),
         expected_pnl=expected,
@@ -721,8 +821,9 @@ TEMPLATE_CATEGORIES = tuple(dict.fromkeys(t.category for t in TEMPLATES.values()
 def build_template(name: str, strike: float, width: float, expiry: float | None = None) -> Strategy:
     """Instantiate a template around ``strike`` with strike spacing ``width``.
 
-    ``expiry`` (years) is only needed by time spreads, whose legs carry their
-    own expiries; other templates leave leg expiries to the market default.
+    ``expiry`` (years) is required by time spreads, whose legs carry their own
+    expiries (``expiry`` and ``2 * expiry``); other templates leave leg
+    expiries to the market default.
     """
     template = TEMPLATES[name]
     if template.uses_width:
@@ -733,6 +834,9 @@ def build_template(name: str, strike: float, width: float, expiry: float | None 
             raise ValueError(
                 f"strike width {width:g} is too wide for strike {strike:g}: the lowest strike would be {lowest:g}"
             )
-    if expiry is None:
-        expiry = 1.0
+    if template.category == "Time spread":
+        if expiry is None or not expiry > 0:
+            raise ValueError(f"{name} needs the front-month expiry (years)")
+    elif expiry is None:
+        expiry = 1.0  # unused: these legs take the market expiry
     return Strategy(name, template.build(strike, width, expiry), template.description)

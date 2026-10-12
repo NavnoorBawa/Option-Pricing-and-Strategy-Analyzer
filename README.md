@@ -68,17 +68,17 @@ app automatically.
 ```python
 from options_analyzer import black_scholes as bs, binomial, implied_vol, strategies as st
 
-bs.price(100, 105, 0.5, 0.04, 0.22, q=0.01, option_type="put")                    # 8.1319
-bs.greeks(100, 105, 0.5, 0.04, 0.22, q=0.01, option_type="put")["vega"]           # 27.797 (per 1.00 of vol)
+bs.price(100, 105, 0.5, 0.04, 0.22, q=0.01, option_type="put")  # 8.1319
+bs.greeks(100, 105, 0.5, 0.04, 0.22, q=0.01, option_type="put")["vega"]  # 27.797 (per 1.00 of vol)
 binomial.price(100, 105, 0.5, 0.04, 0.22, 0.01, "put", 1001, american=True, method="lr")  # 8.3695
-implied_vol.implied_volatility(8.50, 100, 105, 0.5, 0.04, 0.01, "put")             # 0.2332
+implied_vol.implied_volatility(8.50, 100, 105, 0.5, 0.04, 0.01, "put")  # 0.2332
 
 market = st.Market(spot=100, rate=0.04, volatility=0.22, expiry=0.5, dividend_yield=0.01)
 condor = st.build_template("Iron Condor", strike=100, width=5)
 metrics = st.analyze(condor, market)
-metrics.breakevens              # [91.909, 108.091]
-metrics.max_loss                # 1.909 per share
-metrics.probability_of_profit   # 0.398
+metrics.breakevens  # [91.909, 108.091]
+metrics.max_loss  # 1.909 per share
+metrics.probability_of_profit  # 0.398
 ```
 
 ## Conventions

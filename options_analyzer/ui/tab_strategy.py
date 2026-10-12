@@ -150,8 +150,9 @@ def render(inputs: Inputs) -> Position | None:
             "Finance the premium",
             value=False,
             key="carry",
-            help="Charge interest on a net debit (or earn it on a credit) at the risk-free rate. With this on the "
-            "risk-neutral expected P&L is exactly zero. Payoff diagrams conventionally leave it off.",
+            help="Charge interest on a net debit (or earn it on a credit) at the risk-free rate. With this on, "
+            "the risk-neutral expected P&L is zero for legs entered at model value with the sidebar IV and no "
+            "fees. Payoff diagrams conventionally leave it off.",
         )
 
     try:
@@ -237,8 +238,19 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
         delta_color="off",
         border=True,
     )
-    c[1].metric("Max profit", money(metrics.max_profit * units), border=True)
-    c[2].metric("Max loss", money(metrics.max_loss * units), border=True)
+    if metrics.max_profit < 0:
+        c[1].metric("Max profit", "None", border=True, help=md(f"Loses at least {money(-metrics.max_profit * units)}."))
+    else:
+        c[1].metric("Max profit", money(metrics.max_profit * units), border=True)
+    if metrics.max_loss < 0:
+        c[2].metric(
+            "Max loss",
+            "None",
+            border=True,
+            help=md(f"Guaranteed profit of at least {money(-metrics.max_loss * units)}."),
+        )
+    else:
+        c[2].metric("Max loss", money(metrics.max_loss * units), border=True)
     be = metrics.breakevens
     c[3].metric(
         "Breakeven" + ("s" if len(be) > 1 else ""), " · ".join(f"{b:,.2f}" for b in be) if be else "none", border=True
@@ -353,10 +365,15 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
     c[0].metric(
         "Expected P&L at expiry",
         money(metrics.expected_pnl * units, signed=True),
-        help="Mean P&L under the chosen drift. With the risk-neutral drift it equals the interest the premium "
-        "would have earned, and is exactly zero when the premium is financed.",
+        help="Mean P&L under the chosen drift. With the risk-neutral drift and legs at model value it equals "
+        "the interest the premium would have earned (zero when the premium is financed); fills better or "
+        "worse than model value, leg IVs and fees show up as the difference.",
     )
-    c[1].metric("P&L standard deviation", money(metrics.pnl_std * units))
+    c[1].metric(
+        "P&L standard deviation",
+        money(metrics.pnl_std * units) if np.isfinite(metrics.pnl_std) else "Too large",
+        help="Dispersion of the P&L at the front expiry under the chosen drift.",
+    )
     c[2].metric("Drift used", pct(metrics.drift, 2), help="Annual expected return of the underlying.")
 
     st.markdown("**Legs at inception**")
@@ -383,9 +400,19 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
         st.caption(
             md(f"Commissions of {money(strategy.fees * units)} are included in the net premium and every P&L figure.")
         )
+    expiries = {leg.expiry for leg in strategy.legs if leg.is_option}
+    if market.dividend_yield > 0 and len(expiries) > 1 and np.isinf(metrics.max_loss):
+        st.info(
+            md(
+                "With a dividend yield, a European long-dated call gains less than $1 for each $1 rise in the "
+                "stock, so far above the strikes the short front-month call dominates and the loss is unbounded. "
+                "An American call would be exercised early to avoid this."
+            ),
+            icon=":material/info:",
+        )
     st.caption(
         "Options are valued with Black-Scholes-Merton (European exercise) at each leg's implied volatility; "
-        "stock is valued on a total-return basis. "
+        "stock is valued at its price plus the dividends it pays. "
         + ("The premium is financed at the risk-free rate. " if carry else "Premium financing is ignored. ")
         + "Probabilities assume a log-normal price with the sidebar volatility; the shaded band is the ±1σ range "
         "of the price at the front expiry."

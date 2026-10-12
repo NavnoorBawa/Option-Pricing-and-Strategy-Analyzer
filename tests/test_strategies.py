@@ -140,3 +140,92 @@ def test_financed_risk_neutral_expected_pnl_is_zero(name):
     market = S.Market(100, 0.05, 0.25, 0.5, dividend_yield=0.02)
     metrics = S.analyze(S.build_template(name, 100, 10, market.expiry), market, carry=True)
     assert metrics.expected_pnl == pytest.approx(0.0, abs=1e-8)
+
+
+# --- Regression tests for findings of the independent review of the rebuilt engine ---------------
+
+
+@pytest.mark.parametrize("quantity", [1, -1])
+def test_far_out_of_the_money_option_with_tiny_premium(quantity):
+    market = S.Market(100, 0.05, 0.10, 7 / 365)
+    strategy = S.Strategy("lottery", (S.Leg("call", quantity, 110),))
+    m = S.analyze(strategy, market)
+    assert m.breakevens == pytest.approx([110.0])
+    expected = 4.55e-12 if quantity > 0 else 1.0 - 4.55e-12
+    assert m.probability_of_profit == pytest.approx(expected, rel=0.05, abs=1e-12)
+
+
+def test_covered_call_profit_stays_capped_with_dividends():
+    market = S.Market(100, 0.05, 0.2, 1.0, dividend_yield=0.02)
+    m = S.analyze(S.build_template("Covered Call", 100, 10), market)
+    call = bs.price(100, 100, 1, 0.05, 0.2, 0.02)
+    dividends = 100 * (np.exp(0.05) - np.exp(0.03))
+    assert m.max_profit == pytest.approx(call + dividends)  # K - S0 + C + D with K = S0
+    assert np.isinf(S.analyze(S.build_template("Protective Put", 100, 10), market).max_profit)
+
+
+@pytest.mark.parametrize("name", ["Covered Call", "Protective Put", "Collar", "Long Call", "Iron Condor"])
+def test_position_theta_matches_finite_difference_with_dividends(name):
+    market = S.Market(100, 0.05, 0.2, 1.0, dividend_yield=0.03)
+    strategy = S.build_template(name, 100, 10)
+    h = 1e-6
+    numeric = float(S.position_value(strategy, market, None, h) - S.position_value(strategy, market)) / h
+    assert S.position_greeks(strategy, market)["theta"] == pytest.approx(numeric, rel=1e-4, abs=1e-6)
+
+
+def test_zero_pnl_plateau_reports_both_ends_and_exact_probability():
+    rr = S.Strategy("zero-cost risk reversal", (S.Leg("put", -1, 90, premium=3.5), S.Leg("call", 1, 110, premium=3.5)))
+    m = S.analyze(rr, MARKET)
+    assert m.breakevens == pytest.approx([90.0, 110.0])
+    d2 = (np.log(100 / 110) + (0.05 - 0.02) * 1) / 0.2
+    assert m.probability_of_profit == pytest.approx(norm.cdf(d2), abs=1e-10)
+    zero_debit = S.Strategy("free spread", (S.Leg("call", 1, 100, premium=5.0), S.Leg("call", -1, 110, premium=5.0)))
+    assert S.analyze(zero_debit, MARKET).probability_of_profit == pytest.approx(norm.cdf(0.15), abs=1e-10)
+
+
+def test_extreme_reached_only_as_spot_goes_to_infinity():
+    market = S.Market(100, 0.05, 0.10, 30 / 365)
+    strategy = S.Strategy("diagonal puts", (S.Leg("put", 2, 119, 400 / 365, 0.6), S.Leg("put", -2, 112)))
+    m = S.analyze(strategy, market)
+    assert m.max_loss == pytest.approx(42.905857, rel=1e-6)
+    assert m.max_loss_spot is None
+
+
+@pytest.mark.parametrize(("vol", "years"), [(0.2, 1.0), (1.5, 10.0), (5.0, 10.0)])
+def test_expected_pnl_quadrature_at_extreme_volatility(vol, years):
+    market = S.Market(100, 0.05, vol, years)
+    call = bs.price(100, 100, years, 0.05, vol)
+    m = S.analyze(S.build_template("Long Call", 100, 10), market)
+    assert m.expected_pnl == pytest.approx(np.exp(0.05 * years) * call - call, rel=1e-9)
+
+
+def test_riskless_box_has_no_loss():
+    box = S.Strategy("box", (S.Leg("call", 1, 90), S.Leg("call", -1, 110), S.Leg("put", 1, 110), S.Leg("put", -1, 90)))
+    m = S.analyze(box, MARKET)
+    assert m.max_loss < 0 and m.reward_to_risk is None
+    assert m.probability_of_profit == 1.0
+
+
+def test_random_positions_match_monte_carlo():
+    rng = np.random.default_rng(1)
+    for _ in range(15):
+        legs = []
+        for _ in range(rng.integers(1, 4)):
+            kind = str(rng.choice(["call", "put", "stock"]))
+            legs.append(
+                S.Leg(kind, float(rng.choice([-2, -1, 1, 2])), float(rng.uniform(70, 130)) if kind != "stock" else 0.0)
+            )
+        market = S.Market(100, 0.03, float(rng.uniform(0.1, 0.6)), float(rng.uniform(0.05, 1.5)), 0.02)
+        strategy = S.Strategy("random", tuple(legs))
+        m = S.analyze(strategy, market)
+        z = rng.standard_normal(200_000)
+        t = market.expiry
+        spots = 100 * np.exp((0.03 - 0.02 - 0.5 * market.volatility**2) * t + market.volatility * np.sqrt(t) * z)
+        outcomes = S.pnl(strategy, market, spots, t)
+        assert m.probability_of_profit == pytest.approx((outcomes > 0).mean(), abs=0.005)
+        assert m.expected_pnl == pytest.approx(outcomes.mean(), abs=5 * outcomes.std() / np.sqrt(z.size))
+
+
+def test_time_spreads_require_an_expiry():
+    with pytest.raises(ValueError, match="expiry"):
+        S.build_template("Long Call Calendar", 100, 10)
