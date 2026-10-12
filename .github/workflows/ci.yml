@@ -16,29 +16,68 @@ concurrency:
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
-      - run: pip install "ruff>=0.16"
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: pip install -r requirements-dev.txt
       - run: ruff check .
       - run: ruff format --check .
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: requirements*.txt
       - name: Install dependencies
-        run: pip install -r requirements.txt "pytest>=8" "mpmath>=1.3"
+        run: pip install -r requirements-dev.txt
       - name: Run tests
         run: pytest -q
+
+  # The oldest dependency versions the project declares, so that the lower bounds stay true.
+  oldest-dependencies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install the declared minimum versions
+        run: >
+          pip install "numpy==1.26.*" "pandas==2.1.*" "scipy==1.11.*" "plotly==5.24.*" "streamlit==1.64.*"
+          "xlsxwriter==3.1.*" mpmath==1.4.1 pytest==9.1.1
+      - name: Run tests
+        run: pytest -q
+
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Build and install the wheel with the app extra
+        run: |
+          pip install build
+          python -m build --wheel
+          pip install "$(ls dist/*.whl)[app]"
+      - name: Import the core and the app outside the checkout
+        working-directory: /tmp
+        run: |
+          python -c "import options_analyzer, options_analyzer.ui.app; print(options_analyzer.__version__)"
+          command -v options-analyzer

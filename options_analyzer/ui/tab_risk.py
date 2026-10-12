@@ -266,7 +266,7 @@ def _var(position: Position) -> None:
         "Delta-normal VaR",
         money(result.delta_normal_var),
         border=True,
-        help="Linear approximation |Δ|·S·σ·√h·z. Differences from full revaluation show the "
+        help="Linear approximation |Δ|·S·σ·√(h/252)·z. Differences from full revaluation show the "
         "position's non-linearity (gamma, vega).",
     )
     st.plotly_chart(

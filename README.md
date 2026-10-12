@@ -8,8 +8,8 @@ An interactive options analytics workbench built with Streamlit: price European 
 models, inspect Greeks to third order, build and analyse any multi-leg strategy, stress-test it against historical
 crises, measure its Value-at-Risk, and turn implied-volatility surfaces into arbitrage-checked local volatility.
 
-The numerical core is a standalone, fully tested Python package (`options_analyzer`); the Streamlit app is a thin
-interface on top of it.
+The numerical core is a standalone, fully tested Python package (`options_analyzer`, needing only NumPy, SciPy and
+pandas); the Streamlit app is a thin interface on top of it.
 
 ![Strategy Builder](docs/images/strategy.png)
 
@@ -47,9 +47,11 @@ interface on top of it.
   the no-arbitrage bounds and always converges.
 - Settings are stored in the URL, so any setup can be bookmarked or shared.
 
-| Pricing & Greeks | Risk & Scenarios | Volatility Surface |
-| --- | --- | --- |
-| ![Pricing](docs/images/pricing.png) | ![Risk](docs/images/risk.png) | ![Surface](docs/images/surface.png) |
+| Pricing & Greeks | Risk & Scenarios |
+| --- | --- |
+| ![Pricing](docs/images/pricing.png) | ![Risk](docs/images/risk.png) |
+| **Volatility Surface** | **Implied Volatility** |
+| ![Surface](docs/images/surface.png) | ![Implied volatility](docs/images/iv.png) |
 
 ## Quick start
 
@@ -64,6 +66,9 @@ streamlit run main.py
 
 The app opens at <http://localhost:8501>. A dev container (VS Code / GitHub Codespaces) is included and starts the
 app automatically.
+
+To use it as an installed package instead: `pip install ".[app]"` installs the app and its `options-analyzer`
+command; `pip install .` installs only the numerical core.
 
 ## Using the library
 
@@ -87,8 +92,8 @@ metrics.probability_of_profit  # 0.398
 
 - Time to expiry is calendar days / 365; rates and dividend yield are continuously compounded.
 - Greeks are displayed per calendar day (theta, charm, veta, color), per volatility point (vega, vanna, zomma …),
-  per 1 % rate move (rho) and per $1 spot move (delta, gamma, speed). Time Greeks measure the passage of time, so a
-  long option has negative theta.
+  per 1 % rate move (rho) and per $1 spot move (delta, gamma, speed). Time Greeks measure the passage of time, so
+  theta is usually negative for a long option.
 - VaR horizons are in trading days (252 per year).
 - Strategy quantities are signed (+ long, − short); one unit is an option on one share. P&L is shown for the whole
   position (contracts × multiplier).
@@ -115,12 +120,14 @@ tests/                      pytest suite (math, invariants, reference values, UI
 ## Development
 
 ```bash
-pip install -r requirements.txt pytest mpmath ruff
-pytest              # 1,250+ tests: Greeks vs 40-digit derivatives, QuantLib references, invariants, UI
+pip install -r requirements-dev.txt   # app dependencies plus pinned pytest, mpmath and ruff
+pytest              # 1,290+ tests: Greeks vs 40-digit derivatives, converged reference values, invariants, UI
 ruff check . && ruff format --check .
+streamlit run main.py --client.showErrorDetails full   # full tracebacks while debugging
 ```
 
-Continuous integration runs the linters and the test-suite on Python 3.10–3.13 for every pull request.
+Continuous integration runs the linters, the test-suite on Python 3.10–3.14, the test-suite against the oldest
+supported dependency versions, and a wheel build for every pull request. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Version 2.0 is a ground-up rebuild following a full audit of the original single-file app; [AUDIT.md](AUDIT.md) lists
 every issue that was found and how it was resolved.

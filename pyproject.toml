@@ -4,20 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "options-analyzer"
-version = "2.0.0"
+dynamic = ["version"]
 description = "Option pricing, Greeks, multi-leg strategy analytics, VaR/stress testing and volatility surfaces, with a Streamlit UI."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Navnoor Bawa" }]
 requires-python = ">=3.10"
+# The numerical core needs only NumPy, SciPy and pandas; the Streamlit app is the "app" extra.
 dependencies = [
     "numpy>=1.26",
     "pandas>=2.1",
-    "plotly>=5.24",
     "scipy>=1.11",
-    "streamlit>=1.64,<2",
-    "xlsxwriter>=3.1",
 ]
 keywords = ["options", "black-scholes", "greeks", "binomial", "monte-carlo", "value-at-risk", "local-volatility", "streamlit"]
 classifiers = [
@@ -27,12 +25,22 @@ classifiers = [
     "Topic :: Office/Business :: Financial :: Investment",
 ]
 
+[project.optional-dependencies]
+app = [
+    "plotly>=5.24",
+    "streamlit>=1.64,<2",
+    "xlsxwriter>=3.1",
+]
+
+[project.scripts]
+options-analyzer = "options_analyzer.ui.launch:main"
+
 [project.urls]
 Repository = "https://github.com/NavnoorBawa/Option-Pricing-and-Strategy-Analyzer"
 Issues = "https://github.com/NavnoorBawa/Option-Pricing-and-Strategy-Analyzer/issues"
 
-[dependency-groups]
-dev = ["mpmath>=1.3", "pytest>=8", "ruff>=0.16"]
+[tool.setuptools.dynamic]
+version = { attr = "options_analyzer.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["options_analyzer*"]
@@ -52,5 +60,7 @@ ignore = ["RUF001", "RUF002", "RUF003", "C408"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Import the package from the checkout (also for the plain `pytest` console script).
+pythonpath = ["."]
 addopts = "-ra"
 filterwarnings = ["error::RuntimeWarning"]

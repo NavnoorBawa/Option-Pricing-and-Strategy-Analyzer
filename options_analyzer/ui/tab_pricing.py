@@ -57,7 +57,7 @@ def compute_prices(inputs: Inputs) -> Prices:
             kind: (
                 f"95% CI {money(res.ci95[0], 3)} – {money(res.ci95[1], 3)} · SE {money(res.std_error, 4)}"
                 if np.isfinite(res.std_error)
-                else "No simulated price crossed the strike, so the error cannot be estimated"
+                else "Every simulated price finished on one side of the strike: the error cannot be estimated"
             )
             for kind, res in mc.items()
         }
@@ -322,8 +322,9 @@ def _model_diagnostics(inputs: Inputs, prices: Prices) -> None:
         )
         st.caption(
             "Terminal prices are sampled exactly from the log-normal distribution (no time-stepping bias). "
-            "|Error / SE| below about 2 is consistent with an unbiased estimator. When no simulated price crosses "
-            "the strike the sample cannot estimate its own error, and the standard error is left blank."
+            "|Error / SE| below about 2 is consistent with an unbiased estimator. The standard error is left blank "
+            "when the sample cannot estimate it: every price finished out of the money, or every one in the money "
+            "with the control variate on."
         )
     else:
         st.info(

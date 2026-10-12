@@ -12,7 +12,8 @@ def render() -> None:
 * Time to expiry $T$ = calendar days / 365. Rates $r$ and dividend yield $q$ are continuously compounded.
 * Greeks are shown per calendar day (theta, charm, veta, color), per volatility point (vega, vanna, zomma),
   per 1 % rate move (rho) and per \$1 move in the underlying (delta, gamma, speed). Every time Greek is the
-  change as calendar time *passes*, so a long option has negative theta.
+  change as calendar time *passes*: theta is usually negative for a long option (deep in-the-money puts and
+  calls on high-dividend stocks can gain value as time passes).
 * Value-at-Risk horizons are in trading days (252 per year), because volatility accrues with trading time.
 * Strategy quantities are signed (+ long, − short); one unit is an option on one share. The contract
   multiplier converts to dollar P&L.
@@ -41,8 +42,9 @@ verified against high-precision finite differences in the test-suite.
 European payoffs depend only on $S_T$, which is sampled exactly:
 $S_T = S\exp\big((r - q - \tfrac12\sigma^2)T + \sigma\sqrt{T}Z\big)$. Antithetic pairs $(Z, -Z)$ and a
 control variate (the discounted terminal price, with known mean $S e^{-qT}$) reduce the variance; the
-standard error uses the unbiased sample deviation of the independent samples, and is left blank when no
-simulated price crosses the strike (the sample then cannot estimate its own error). Calls and puts share
+standard error uses the unbiased sample deviation of the independent samples. It is left blank when the
+sample cannot estimate it: every simulated price finished out of the money, or every one in the money with
+the control variate on (the residuals are then constant). Calls and puts share
 draws and a fixed seed makes results reproducible.
 
 ### Implied volatility
@@ -85,7 +87,7 @@ and the cash earns the risk-free rate until the horizon.
 
 VaR and ES use the Acerbi–Tasche estimators: with $w = \lfloor n(1-\alpha)\rfloor$ worst outcomes, VaR is the
 $w$-th worst loss and ES the average of the $w$ worst losses. The delta-normal VaR
-$|\Delta| S \sigma \sqrt{h}\, z_\alpha$ is shown for comparison.
+$|\Delta| S \sigma \sqrt{h/252}\, z_\alpha$ is shown for comparison.
 
 ### Local volatility
 Surfaces are handled as total implied variance $w(y,T) = \sigma_{\text{BS}}^2 T$ in forward log-moneyness

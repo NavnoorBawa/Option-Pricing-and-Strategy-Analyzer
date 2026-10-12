@@ -71,3 +71,10 @@ def test_standard_error_is_not_reported_when_no_path_crosses_the_strike():
 
 def test_odd_antithetic_sample_count_is_rounded_up_to_pairs():
     assert mc.terminal_prices(100, 1, 0.05, 0.2, n_paths=101).shape == (102,)
+
+
+def test_standard_error_is_kept_without_control_variate_when_every_path_is_in_the_money():
+    res = mc.price_european(100, 50, 0.25, 0.05, 0.2, n_paths=100_000, seed=42, control_variate=False)["call"]
+    assert res.itm_fraction == 1.0 and 0 < res.std_error < 0.01
+    lo, hi = res.ci95
+    assert lo <= bs.price(100, 50, 0.25, 0.05, 0.2) <= hi

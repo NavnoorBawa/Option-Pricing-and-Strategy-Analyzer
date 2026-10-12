@@ -9,7 +9,7 @@
       "extensions": ["ms-python.python", "ms-python.vscode-pylance", "charliermarsh.ruff"]
     }
   },
-  "updateContentCommand": "pip3 install --user -r requirements.txt pytest mpmath ruff && echo '✅ Packages installed'",
+  "updateContentCommand": "pip3 install --user -r requirements-dev.txt && echo '✅ Packages installed'",
   // Codespaces' port-forwarding proxy breaks Streamlit's CORS/XSRF checks (e.g. for file uploads), so they are
   // disabled here on the command line only - never in .streamlit/config.toml, which also applies to deployments.
   "postAttachCommand": {

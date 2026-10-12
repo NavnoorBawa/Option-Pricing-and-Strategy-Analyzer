@@ -35,9 +35,9 @@ _Z_95 = 1.959963984540054
 @dataclass(frozen=True)
 class MonteCarloResult:
     price: float
-    #: Standard error of ``price``. NaN when every simulated price finished on the same side of the strike:
-    #: the sample then carries no information about the payoff's kink and cannot estimate its own error
-    #: (with the control variate the residuals are exactly constant).
+    #: Standard error of ``price``. NaN when the sample cannot estimate its own error: every simulated price
+    #: finished out of the money (all payoffs zero), or every one finished in the money with the control
+    #: variate on (the payoff is then linear in the control and the residuals are exactly constant).
     std_error: float
     n_paths: int
     antithetic: bool
@@ -97,8 +97,8 @@ def price_european(
 
     Returns a dict ``{option_type: MonteCarloResult}``. The standard error uses
     the unbiased (``ddof=1``) sample deviation of the independent samples
-    (pair averages when antithetic sampling is on). It is NaN when no simulated
-    price crossed the strike (see :class:`MonteCarloResult`).
+    (pair averages when antithetic sampling is on). It is NaN when the sample
+    cannot estimate it (see :class:`MonteCarloResult`).
     """
     n_paths = int(n_paths)
     if n_paths < 100:
@@ -145,7 +145,8 @@ def price_european(
             beta = float(np.dot(x_centred, y - y.mean()) / var_x) if var_x > 0 else 0.0
             y = y - beta * (x - control_mean)
         estimate = float(y.mean())
-        std_error = float(y.std(ddof=1) / np.sqrt(y.size)) if 0 < n_itm < n_paths else float("nan")
+        degenerate = n_itm == 0 or (control_variate and n_itm == n_paths)
+        std_error = float("nan") if degenerate else float(y.std(ddof=1) / np.sqrt(y.size))
         results[kind] = MonteCarloResult(estimate, std_error, n_paths, antithetic, control_variate, n_itm / n_paths)
     return results
 

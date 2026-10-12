@@ -1,0 +1,15 @@
+name: Feature request
+description: A model, analysis or interface improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What would you like to do?
+    validations:
+      required: true
+  - type: textarea
+    id: reference
+    attributes:
+      label: References
+      description: Papers, books or tools that describe the method, if any.

@@ -11,7 +11,7 @@ Conventions
   calendar day, vega per volatility point, rho per 1 % rate move, ...).
 * Time-decay Greeks (theta, charm, veta, color) are derivatives with respect to
   the *passage of calendar time*, i.e. ``-d/dT``, which is the market
-  convention (a long option has negative theta).
+  convention (theta is usually negative for a long option).
 * Every function broadcasts over NumPy arrays and returns a Python ``float``
   when all inputs are scalars.
 

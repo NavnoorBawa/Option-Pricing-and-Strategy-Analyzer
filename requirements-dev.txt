@@ -1,0 +1,5 @@
+# Development tools, pinned so that new releases cannot break CI without a code change (Dependabot bumps them).
+-r requirements.txt
+mpmath==1.4.1
+pytest==9.1.1
+ruff==0.16.8

@@ -10,6 +10,7 @@ maxUploadSize = 10
 gatherUsageStats = false
 
 [client]
-# Hide developer menu items from viewers and show only the error type (no stack traces) to users.
-toolbarMode = "viewer"
+# "auto" shows developer menu items only on localhost (or to the app's developer on Community Cloud).
+toolbarMode = "auto"
+# Show users only the error type, not stack traces; run with --client.showErrorDetails full while debugging.
 showErrorDetails = "type"

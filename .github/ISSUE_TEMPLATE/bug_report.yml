@@ -1,0 +1,24 @@
+name: Bug report
+description: A wrong number, an error or a broken chart
+labels: [bug]
+body:
+  - type: textarea
+    id: inputs
+    attributes:
+      label: Inputs
+      description: Page URL (it holds the sidebar settings), tab, and any strategy legs or uploaded quotes.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What you saw
+      description: Include a screenshot or the error message.
+    validations:
+      required: true
