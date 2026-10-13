@@ -19,6 +19,11 @@ from . import cache, charts
 from .format import md, money, pct
 from .inputs import Inputs
 
+_TREE_LIMIT = (
+    "The sidebar's binomial tree has too few steps to price this option at the volatilities needed; "
+    "increase the number of steps"
+)
+
 
 def _reset_quote() -> None:
     st.session_state["iv_quote_generation"] = st.session_state.get("iv_quote_generation", 0) + 1
@@ -69,7 +74,11 @@ def render(inputs: Inputs) -> None:
             return cache.american_value(S, K, T, r, max(vol, lowest), q, option_type, steps, method)
         return bs.price(S, K, T, r, vol, q, option_type)
 
-    model_value = model_price(sigma)
+    try:
+        model_value = model_price(sigma)
+    except ValueError as exc:  # a short tree cannot represent the sidebar volatility
+        st.error(f"{_TREE_LIMIT} ({exc}).")
+        return
     # The quote belongs to the contract: its widget key holds the contract (not the volatility or the exercise
     # style), so the typed quote survives those changes and the reset button starts a fresh widget.
     generation = st.session_state.get("iv_quote_generation", 0)
@@ -104,11 +113,20 @@ def render(inputs: Inputs) -> None:
         else:
             st.error(f"No implied volatility exists: {exc}.")
         return
+    except ValueError as exc:  # the bracket search reached a volatility the tree cannot represent
+        st.error(f"{_TREE_LIMIT} ({exc}).")
+        return
+
+    def safe_price(vol: float) -> float:
+        try:
+            return model_price(vol)
+        except ValueError:
+            return np.nan
 
     if american:
         bump = 0.005
         low_vol = max(iv - bump, lowest)
-        vega = (model_price(iv + bump) - model_price(low_vol)) / (iv + bump - low_vol) / 100
+        vega = (safe_price(iv + bump) - safe_price(low_vol)) / (iv + bump - low_vol) / 100
     else:
         vega = bs.greeks(S, K, T, r, max(iv, 1e-6), q, option_type)["vega"] / 100
     intrinsic = max(bs.option_sign(option_type) * (S - K), 0.0)
@@ -124,7 +142,7 @@ def render(inputs: Inputs) -> None:
     )
     c[1].metric(
         "Model check",
-        money(model_price(iv), 6),
+        money(safe_price(iv), 6),
         border=True,
         help="Model value at the implied volatility (should equal the quote).",
     )

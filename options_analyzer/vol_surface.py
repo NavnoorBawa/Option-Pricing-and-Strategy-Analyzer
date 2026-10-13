@@ -626,6 +626,7 @@ def _time_column(frame: pd.DataFrame, column) -> pd.Series:
     return values
 
 
+MAX_USUAL_YEARS = 3.0  # listed options rarely run longer: unlabelled maturities beyond this may well be days
 _NAME_THE_UNIT = "name the column 'Days' if they are days to expiry, or 'Maturity (years)' if they are years"
 
 
@@ -647,8 +648,8 @@ def _maturities(
     listed option runs that many years). Up to 30, whole numbers from 5 up are as likely to be years (a 1, 2, 3,
     5, 7, 10-year tenor grid) as days (a weekly chain at 7, 14, 21, 28), so the file is refused with a request
     to name the unit; anything smaller is read as years. Returns ``(years, guess)``: ``guess`` is a
-    :class:`_GuessedYears` when years was only assumed (suspect for small whole numbers and fractions above 10),
-    else None; :func:`parse_quotes` turns it into a warning once the quotes can be checked against it.
+    :class:`_GuessedYears` when years was only assumed (suspect for small whole numbers and values above
+    :data:`MAX_USUAL_YEARS`), else None; :func:`parse_quotes` warns about the suspect ones.
     """
     if "days" in found:
         column = found["days"][0]
@@ -678,7 +679,7 @@ def _maturities(
         )
     if whole:
         return values, _GuessedYears(column, f"are whole numbers up to {largest:g}", True)
-    return values, _GuessedYears(column, f"go up to {largest:g}", largest > 10)
+    return values, _GuessedYears(column, f"go up to {largest:g}", largest > MAX_USUAL_YEARS)
 
 
 SPREAD_CHECK_VOL = 0.01  # vol error allowed on each quote before prices that run the wrong way with strike count
@@ -695,81 +696,14 @@ def _spread_arbitrage(strike, iv, T: float, forward: float) -> bool:
     strike, iv = np.asarray(strike, dtype=float)[order], np.asarray(iv, dtype=float)[order]
     sd = iv * np.sqrt(T)
     d1 = np.log(forward / strike) / sd + 0.5 * sd
+    # Both prices directly: a call from put-call parity is rounding noise far out of the money.
     put = strike * ndtr(sd - d1) - forward * ndtr(-d1)
-    call = put + forward - strike
-    slack = SPREAD_CHECK_VOL * forward * np.sqrt(T) * np.exp(-0.5 * d1 * d1) / np.sqrt(2.0 * np.pi)  # vega x error
+    call = forward * ndtr(d1) - strike * ndtr(d1 - sd)
+    vega_error = SPREAD_CHECK_VOL * forward * np.sqrt(T) * np.exp(-0.5 * d1 * d1) / np.sqrt(2.0 * np.pi)
+    slack = vega_error + 1e-12 * forward  # each quote's vol may be off by 1 point; prices round at 1e-12
     put_floor = np.maximum.accumulate(put - slack)[:-1]  # a put at a higher strike is worth at least this
     call_cap = np.minimum.accumulate(call + slack)[:-1]  # a call at a higher strike is worth at most this
     return bool(np.any(put[1:] + slack[1:] < put_floor) or np.any(call[1:] - slack[1:] > call_cap))
-
-
-def _too_steep_for_years(quotes: pd.DataFrame, spot: float | None, carry: float) -> str | None:
-    """Evidence from the smiles that maturities read as years are days to expiry, as a sentence (else None).
-
-    A smile a few days long is far steeper than an arbitrage-free smile years long can be: read as years, its
-    vols price a put below a put at a lower strike (:func:`_spread_arbitrage`). Every maturity is priced both
-    ways, at the forward from ``spot`` and ``carry`` (the median strike without a spot). There is evidence when
-    at least half of the maturities have such prices as years, and fewer as days.
-    """
-
-    def arbitrage(strike, iv, t) -> bool:
-        forward = spot * np.exp(carry * t) if spot is not None else float(np.median(strike))
-        return _spread_arbitrage(strike, iv, t, forward)
-
-    checked = as_years = as_days = 0
-    for T, quoted in quotes.groupby("maturity"):
-        if len(quoted) < 2:
-            continue
-        strike, iv = quoted["strike"].to_numpy(float), quoted["iv"].to_numpy(float)
-        checked += 1
-        as_years += arbitrage(strike, iv, float(T))
-        as_days += arbitrage(strike, iv, float(T) / 365.0)
-    if not as_years or 2 * as_years < checked or as_days >= as_years:
-        return None
-    return (
-        f"Read as years, the implied vols at {as_years} of {checked} maturities are too steep for options that "
-        "long: a put would cost less than one at a lower strike, or a call more than one at a lower strike. "
-        f"Read as days, {f'only {as_days} would' if as_days else 'none would'}."
-    )
-
-
-LOW_VOL_FOR_YEARS = 0.05  # below this median vol, prices read as years may well be days read as years
-BELOW_INTRINSIC_SHARE = 0.1  # share of prices below their intrinsic value as years (none as days) that is evidence
-
-
-def _below_intrinsic(priced: pd.DataFrame, spot: float, rate: float, dividend_yield: float, T: np.ndarray) -> int:
-    """How many option prices are below their discounted intrinsic value at maturities ``T`` (years)."""
-    strike = priced["strike"].to_numpy(float)
-    gap = spot * np.exp(-dividend_yield * T) - strike * np.exp(-rate * T)
-    intrinsic = np.maximum(np.where(priced["type"] == "call", gap, -gap), 0.0)
-    return int((priced["price"].to_numpy(float) < intrinsic - 1e-12 * np.maximum(spot, strike)).sum())
-
-
-def _prices_suggest_days(priced: pd.DataFrame, vols: pd.Series, spot: float, rate: float, dividend_yield: float):
-    """Evidence from option prices that maturities read as years are days to expiry, as a sentence (else None).
-
-    A price fixes the total variance, not the time it builds up over, so it says less than a quoted vol
-    (:func:`_too_steep_for_years`). With rates, a price below its discounted intrinsic value is impossible: when
-    at least :data:`BELOW_INTRINSIC_SHARE` of the prices are as years and none as days, that is reported.
-    Otherwise the only sign is the vol level: days read as years make vols about sqrt(365) = 19 times too low,
-    so a median below :data:`LOW_VOL_FOR_YEARS` is reported.
-    """
-    T = priced["maturity"].to_numpy(float)
-    as_years = _below_intrinsic(priced, spot, rate, dividend_yield, T)
-    if as_years >= BELOW_INTRINSIC_SHARE * len(priced) and not _below_intrinsic(
-        priced, spot, rate, dividend_yield, T / 365.0
-    ):
-        return (
-            f"Read as years, {as_years} of {len(priced)} option prices are below the least an option that long "
-            "can be worth (its discounted intrinsic value); read as days, none are."
-        )
-    median = float(vols.median())
-    if median < LOW_VOL_FOR_YEARS:
-        return (
-            f"Read as years, the option prices imply a median vol of only {median:.2%}; read as days, they would "
-            "imply about 19 times more."
-        )
-    return None
 
 
 def _option_kind(frame: pd.DataFrame, column) -> pd.Series:
@@ -830,10 +764,9 @@ def parse_quotes(
     at ``spot``, ``rate`` and ``dividend_yield``. Units in brackets are read
     (``IV (%)``, ``Maturity (days)``), values may carry ``%`` signs and thousands
     separators, a maturity column that can only hold days (see :func:`_maturities`)
-    is converted, and one that could hold years or days is refused. One read as years
-    without a stated unit is checked against the quotes, which can show that the
-    values are days (:func:`_too_steep_for_years`, :func:`_prices_suggest_days`).
-    Dates and values above 100 years' worth of days are refused.
+    is converted, and one that could hold years or days is refused; values read as
+    years without a stated unit get a warning when they could well be days. Dates
+    and values above 100 years' worth of days are refused.
 
     Returns ``(clean, messages)`` where ``clean`` has columns ``strike``,
     ``maturity`` (years), ``iv`` (decimal) and ``messages`` describes every
@@ -915,7 +848,6 @@ def parse_quotes(
     if data.empty:
         raise QuoteParseError("no valid rows remain after cleaning")
 
-    priced = data
     if value == "price":
         data = _prices_to_vols(data, spot, rate, dividend_yield, messages)
         if data.empty:
@@ -953,14 +885,9 @@ def parse_quotes(
         messages.append(f"Averaged {int(duplicated.sum())} duplicate (maturity, strike) quotes.")
         data = data.groupby(["maturity", "strike"], as_index=False)["iv"].mean()
     data = data.sort_values(["maturity", "strike"]).reset_index(drop=True)[["strike", "maturity", "iv"]]
-    if guess is not None:  # years was assumed: check the quotes against it
-        if value == "iv":
-            evidence = _too_steep_for_years(data, spot, rate - dividend_yield)
-        else:
-            evidence = _prices_suggest_days(priced, data["iv"], spot, rate, dividend_yield)
-        if guess.suspect or evidence:
-            warning = f"Maturities in '{guess.column}' {guess.described}, read as years; {_NAME_THE_UNIT}."
-            messages.append(QuoteWarning(f"{warning} {evidence}" if evidence else warning))
+    if guess is not None and guess.suspect:  # years was assumed for values that could well be days
+        warning = f"Maturities in '{guess.column}' {guess.described}, read as years; {_NAME_THE_UNIT}."
+        messages.append(QuoteWarning(warning))
     return data, messages
 
 

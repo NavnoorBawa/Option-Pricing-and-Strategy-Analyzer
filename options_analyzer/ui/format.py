@@ -37,12 +37,14 @@ SHORT_SCALES = ((1e6, "M"), (1e9, "B"), (1e12, "T"))
 
 
 def _scaled(value: float, prefix: str, signed: bool) -> str:
-    """``1.23M``, ``1.23B`` or ``1.23T`` (with ``prefix`` after the sign), and ``1.2e+15`` beyond."""
+    """``1.23M``, ``12.35B`` or ``123.5T`` (with ``prefix`` after the sign), and ``1.2e+15`` beyond."""
     size = abs(value)
     sign = "-" if value < 0 else ("+" if signed else "")
     for scale, suffix in SHORT_SCALES:
-        if round(size / scale, 2) < 1000:
-            return f"{sign}{prefix}{size / scale:.2f}{suffix}"
+        mantissa = size / scale
+        decimals = 2 if round(mantissa, 2) < 100 else 1  # three or four significant figures: '+$337.7M' fits
+        if round(mantissa, decimals) < 1000:
+            return f"{sign}{prefix}{mantissa:.{decimals}f}{suffix}"
     return f"{sign}{prefix}{size:.1e}"
 
 

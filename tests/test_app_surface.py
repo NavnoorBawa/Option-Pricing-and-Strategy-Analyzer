@@ -241,7 +241,7 @@ def test_fractional_days_up_to_ten_get_a_units_warning_and_a_fit_note_that_names
     _upload(app, _maturity_column("Maturity", (2.65, 4.65, 9.65), as_years=False))
     _ok(app)
     warnings = [w.value for w in app.warning]
-    assert any("go up to 9.65, read as years; name the column 'Days'" in w and "too steep" in w for w in warnings)
+    assert any("go up to 9.65, read as years; name the column 'Days'" in w for w in warnings)
     fit_notes = [w for w in warnings if w.startswith("The SVI smile")]
     assert fit_notes and all("the maturity unit" in w and "noisy" not in w for w in fit_notes)
     _upload(app, _maturity_column("Days", (2.65, 4.65, 9.65), as_years=False))

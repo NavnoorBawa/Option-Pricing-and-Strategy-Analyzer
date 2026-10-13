@@ -150,9 +150,11 @@ every issue that was found and how it was resolved.
 
 ## Limitations
 
-Strategy valuation uses Black–Scholes–Merton at each leg's implied volatility (no smile dynamics, European exercise),
-probabilities are log-normal, and transaction costs beyond a flat commission, margin and discrete dividends are not
-modelled. This project is for education and analysis only and is **not investment advice**.
+Strategy valuation uses Black–Scholes–Merton at each leg's implied volatility (no smile dynamics, European exercise;
+leg volatilities are typed in, not read from a fitted surface), probabilities are log-normal, and transaction costs
+beyond a flat commission, margin and discrete dividends are not modelled. Expiries and horizons are whole calendar
+days (at least one), so same-day (0DTE) options cannot be analysed. This project is for education and analysis only
+and is **not investment advice**.
 
 ## Author
 

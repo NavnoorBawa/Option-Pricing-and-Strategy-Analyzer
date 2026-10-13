@@ -425,3 +425,16 @@ def test_sensitivity_chart_labels_cannot_overlap_the_axis_or_each_other():
     # Both at the top of the plot (not below it, over the tick labels), pointing away from each other.
     assert all(a.y == 1 and a.yanchor == "top" for a in labels.values())
     assert (labels["current"].xanchor, labels["strike"].xanchor) == ("right", "left")
+
+
+def test_iv_tab_explains_a_tree_too_short_for_extreme_volatility(app):
+    # Round-3 verifier: a 15-step tree at 500% volatility over 10 years with a negative rate raised a raw
+    # ValueError from the American value curve ("no arbitrage-free lattice exists"), shown as a crash.
+    app.sidebar.number_input(key="days").set_value(3650).run()
+    app.sidebar.number_input(key="rate").set_value(-5.0).run()
+    app.sidebar.number_input(key="vol").set_value(500.0).run()
+    _binomial(app, american=True, tree="lr", steps=15)
+    for kind in ("call", "put"):
+        app.segmented_control(key="iv_type").set_value(kind).run()
+        assert not app.exception, [e.value for e in app.exception]
+        assert all("too few steps" in e.value for e in app.error), [e.value for e in app.error]

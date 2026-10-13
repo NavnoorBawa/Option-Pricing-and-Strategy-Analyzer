@@ -418,8 +418,9 @@ CARD_GLYPHS = {
     "s": 15.084,
     "t": 12.168,
 }
-#: Width (px) of a card's value in a row of four at 1,280 px with the sidebar open; a wider value ends in "…".
-CARD_WIDTH = 161.0
+#: Width (px) of a card's value in a row of four at 1,280 px with the sidebar open, leaving room for the main
+#: area's 10 px scrollbar where the browser shows one (161 px without it); a wider value ends in "…".
+CARD_WIDTH = 158.5
 
 
 def _card_width(text: str) -> float:
@@ -447,10 +448,13 @@ def test_card_width_model_counts_the_sign():
         (999_999.4, True, "+$999,999"),
         (999_999.6, False, "$1.00M"),
         (-2_345_678.9, True, "-$2.35M"),
-        (999_994_000.0, True, "+$999.99M"),
+        (999_940_000.0, True, "+$999.9M"),
+        (999_994_000.0, True, "+$1.00B"),
+        (337_720_000.0, True, "+$337.7M"),  # SPX x 100,000 long straddle vega: cut at 158.5 px as '+$337.72M'
+        (99_996_000.0, True, "+$100.0M"),
         (999_996_000.0, False, "$1.00B"),
         (2_157_150_000.0, True, "+$2.16B"),
-        (441_049_535_530_000.0, False, "$441.05T"),
+        (441_049_535_530_000.0, False, "$441.0T"),
         (-999_996_000_000_000.0, False, "-$1.0e+15"),
         (1.03e15, True, "+$1.0e+15"),
         (1.5e16, False, "$1.5e+16"),
@@ -496,7 +500,7 @@ def test_worded_card_values_fit_at_laptop_width():
         (1234.56789, 4, "1,234.57"),
         (-9_999.99, 2, "-9,999.99"),
         (20_000.0, 4, "20,000"),
-        (187_182_738.53, 2, "187.18M"),
+        (187_182_738.53, 2, "187.2M"),
         (-3.2e15, 2, "-3.2e+15"),
     ],
 )
@@ -550,10 +554,10 @@ def test_cards_stay_readable_at_the_input_limits(category, name):
 
 def test_shortened_amounts_at_the_input_limits_keep_the_exact_value_in_the_help():
     at = _app(spot=9999999, strike=9999999, contracts=100000, multiplier=10000)
-    assert _metric(at, "Net premium").value == "$441.05T"
+    assert _metric(at, "Net premium").value == "$441.0T"
     assert "Exact: \\$441,049,535," in _metric(at, "Net premium").proto.help
     delta = _metric(at, "Delta (shares)")
-    assert delta.value == "187.18M"
+    assert delta.value == "187.2M"
     assert "Exact: 187,182,738.53" in delta.proto.help
 
 
@@ -664,7 +668,7 @@ def test_american_note_measures_early_exercise_on_one_tree(method, steps, days):
     assert "early exercise adds \\$0.0000 per share on this tree" in note
     american, european = _dollars(note, " American"), _dollars(note, " European")
     assert american == european == float(_metric(at, "Call value").value.lstrip("$"))
-    assert any("Early-exercise premium \\$0.0000 (same tree" in c.value for c in at.caption)
+    assert any("early-exercise premium: call \\$0.0000," in c.value for c in at.caption)  # the Pricing caption
     bsm = bs.price(100, 100, days / 365, 0.05, 0.2, 0.0, "call")
     assert f"The strategy values it at \\${bsm:.4f}" in note  # the leg's Black-Scholes-Merton value
 
@@ -679,7 +683,7 @@ def test_american_note_reports_the_same_premium_as_the_pricing_tab():
     american, european = _dollars(note, " American"), _dollars(note, " European")
     assert american == float(_metric(at, "Put value").value.lstrip("$"))
     assert premium > 0 and premium == pytest.approx(american - european, abs=1.5e-4)
-    assert any(f"Early-exercise premium +\\${premium:.4f} (same tree" in c.value for c in at.caption)
+    assert any(f"put +\\${premium:.4f} (against the same tree" in c.value for c in at.caption)
     assert "The strategy values it at \\$6.7309" in note
     assert _metric(at, "Net premium").value == "$673.09"
     assert any("whatever the sidebar pricing model" in c.value for c in at.caption)

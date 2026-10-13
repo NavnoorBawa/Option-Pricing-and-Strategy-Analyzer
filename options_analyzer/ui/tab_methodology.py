@@ -130,10 +130,10 @@ by least squares on implied vols, with $b \ge 0$, $|\rho| < 1$, $s > 0$, a non-n
 Lee's wing bound $b(1+|\rho|) \le 2$. The search starts from Zeliade's quasi-explicit fits: for fixed $m$ and
 $s$ the smile is linear in $a$, $bs$ and $\rho bs$, solved on a grid of $(m, s)$ with $|\rho| < 1$ imposed, so
 steep, nearly linear equity skews are followed too. SSVI slices are exactly SVI, so noise-free SSVI quotes are
-recovered. A maturity column whose header gives no unit is read as years and checked against the quotes. Read
-as years, a skewed smile a few days long is steeper than any arbitrage-free smile that long can be (its vols
-price a put below a put at a lower strike), and option prices fall below their intrinsic value or imply vols
-about 19 times too low; quotes like that get a warning to name the unit.
+recovered. A maturity column whose header gives no unit is converted from days when its values go above 30,
+refused when they are whole numbers from 5 to 30 (they could be years or days), and otherwise read as years,
+with a warning to name the unit when they are small whole numbers or go above 3 (listed options rarely run
+longer), as they could then be days.
 $\partial_y w$ and $\partial_{yy} w$ are analytic; $\partial_T w$ at fixed $y$ comes from secants between
 neighbouring maturities evaluated at the same $y$ — their Fritsch–Butland weighted harmonic mean inside, the
 one-sided three-point formula at the first maturity (the one-sided secant where that is not positive), and the
@@ -146,8 +146,8 @@ maturities are quoted near the same forward moneyness.
 ### Limitations
 Constant volatility per leg (no smile dynamics in strategy valuation), European exercise for strategies,
 no bid-ask spreads or transaction costs beyond a flat per-contract commission, no margin or discrete
-dividends, and log-normal probabilities. This tool is for education
-and analysis only and is not investment advice.
+dividends, log-normal probabilities, and whole-day expiries of at least one day (no same-day options). This tool
+is for education and analysis only and is not investment advice.
 
 ### References
 Hull, *Options, Futures and Other Derivatives* · Haug, *The Complete Guide to Option Pricing Formulas* ·

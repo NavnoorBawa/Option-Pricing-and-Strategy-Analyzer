@@ -116,4 +116,11 @@ def american_curve(
 ) -> tuple[np.ndarray, np.ndarray]:
     lowest = implied_vol.lowest_tree_volatility(T, r, q, steps, method)
     vols = np.linspace(max(0.005, lowest), max(max_vol, 2 * lowest), 41)
-    return vols, np.array([american_value(S, K, T, r, v, q, option_type, steps, method) for v in vols])
+
+    def value(vol: float) -> float:
+        try:
+            return american_value(S, K, T, r, vol, q, option_type, steps, method)
+        except ValueError:  # a short tree cannot represent this volatility: leave a gap in the curve
+            return np.nan
+
+    return vols, np.array([value(v) for v in vols])
