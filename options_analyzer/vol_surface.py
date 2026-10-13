@@ -37,9 +37,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
+from dateutil import parser as dateutil_parser
 from scipy.optimize import least_squares
 from scipy.special import ndtr
 
@@ -664,13 +666,24 @@ _TIME_OF_DAY = r"\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?\s*(?:[ap]\.?m\.?)?"  # "16:0
 def _looks_like_dates(sample: pd.Series) -> bool:
     """Whether most of a column's text values are calendar dates, with or without a year.
 
-    pandas gives a date without a year ("Nov 20", "11/20") the year 1, and a time alone the year 1 and 1 January
-    ("5h", "5pm") or today's date ("16:00"), so those times are not counted.
+    A date without a year ("Nov 20", "11/20") gets the year 1, and a time alone the year 1 and 1 January ("5h",
+    "5pm"), so those times are not counted; nor are times of day ("16:00").
     """
-    dates = pd.to_datetime(sample, errors="coerce", format="mixed", utc=True)
-    yearless = (dates.dt.year == 1) & ((dates.dt.month != 1) | (dates.dt.day != 1))
-    dated = ((dates.dt.year >= 1900) | yearless) & ~sample.str.lower().str.fullmatch(_TIME_OF_DAY)
+    dates = [_parse_date(text) for text in sample]
+    dated = np.array(
+        [d is not None and (d.year >= 1900 or (d.year == 1 and (d.month, d.day) != (1, 1))) for d in dates], dtype=bool
+    )
+    dated &= ~sample.str.lower().str.fullmatch(_TIME_OF_DAY).to_numpy(dtype=bool)
     return bool(len(sample)) and bool(dated.mean() > 0.5)
+
+
+def _parse_date(text: str) -> datetime | None:
+    """``text`` as a date with the year 1 when it has none, or None. Parsed with dateutil (a pandas dependency)
+    rather than pandas, which returns NaT for the year 1 before pandas 3."""
+    try:
+        return dateutil_parser.parse(text, default=datetime(1, 1, 1))
+    except (ValueError, OverflowError):
+        return None
 
 
 def _time_column(
@@ -1109,7 +1122,7 @@ def parse_quotes(
     unexplained = int((~valid & ~reported).sum())
     if unexplained:
         messages.append(f"Dropped {unexplained} row(s) with missing, non-numeric or non-positive values.")
-    data = data[valid]
+    data = data[valid].copy()
     if data.empty:
         raise QuoteParseError("no valid rows remain after cleaning")
 
@@ -1130,7 +1143,7 @@ def parse_quotes(
                 f"Dropped {int(placeholder.sum())} quote(s) with an implied vol below {MIN_QUOTED_VOL:.2%}, a "
                 "placeholder some data feeds write where there is no vol."
             )
-            data = data[~placeholder]
+            data = data[~placeholder].copy()
             if data.empty:
                 raise QuoteParseError("no valid rows remain after cleaning")
         median = float(data["iv"].median())
