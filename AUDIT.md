@@ -9,7 +9,7 @@ implementation is carried over except its purpose, its author credit and its lic
 - **Line-by-line read** of the whole code base, README and configuration.
 - **Seven domain audits** (pricing models, Greeks, strategies, implied volatility, VaR/GARCH/stress tests,
   scenario analysis, volatility surfaces). Each finding is backed by evidence from running the original code:
-  finite differences against 40-digit arithmetic, reference values (Hull, QuantLib), put-call parity, round-trips,
+  finite differences against 40-digit arithmetic, reference values (Hull, Richardson-extrapolated trees), put-call parity, round-trips,
   memory and timing measurements, and the Streamlit app driven headlessly. The most consequential findings were
   then re-checked independently; a planned second, adversarial pass over every original-code finding did not run,
   which is moot for the fixes because none of the original implementation remains.
@@ -37,8 +37,8 @@ separately below. Every issue is resolved in version 2.
   gone.*
 - The implied-volatility solver returned a hard-coded 30% for any option within 3.65 days of expiry, clamped every
   answer to 5%-100%, returned numbers for impossible quotes and failed 58.9% of a well-posed round-trip test;
-  with its own default inputs it showed 5.00% instead of 3.54%. *Now 0 failures on 2,520 cases, with explicit
-  errors for impossible quotes.*
+  with its own default inputs it showed 5.00% instead of 3.54%. *Now 0 failures on the 2,520-case round-trip
+  grid in the test-suite, with explicit errors for impossible quotes.*
 - The binomial tree did not check its risk-neutral probability: at σ = 1%, r = 10% and 10 steps it priced a \$9.52
   call at **\$2,109** and produced negative put prices. *Arbitrage-checked lattices with a Leisen-Reimer option.*
 - Black-Scholes at zero volatility returned undiscounted intrinsic value (a call worth \$4.88 showed \$0.00), so the
@@ -79,7 +79,7 @@ separately below. Every issue is resolved in version 2.
 | VaR, 100,000 simulations | 15-42 s | 42 ms (Normal), 59 ms (10-day GARCH) |
 | Monte Carlo standard error at equal cost | baseline | about 6x smaller (antithetic + control variate) |
 | Rerun time after a widget change | ~1-2 s | ~0.4 s |
-| Automated tests | 0 | 1,250+ (math, invariants, QuantLib references, UI) |
+| Automated tests | 0 | 3,300+ (math, invariants, reference values, UI) |
 
 ## Findings by area
 
@@ -213,7 +213,7 @@ followed by how version 2 resolves the area as a whole.
 | Low | No automated tests for implied volatility | 476-614 |
 | Low | Scalar scipy.stats.norm makes each IV call take milliseconds, which rules out smiles and surfaces | 15-53, 567-612 |
 
-**Resolution.** `implied_vol.py` checks the no-arbitrage bounds, converts in-the-money quotes to their out-of-the-money equivalent and solves with Brent's method on a bracket: 0 failures on a 2,520-case grid (vol 1%-300%, expiries down to 17 hours), versus 58.9% before. American quotes can be inverted on the binomial tree. Impossible quotes produce an explanation, not a number.
+**Resolution.** `implied_vol.py` checks the no-arbitrage bounds, converts in-the-money quotes to their out-of-the-money equivalent and solves with Brent's method on a bracket: 0 failures on the 2,520-case round-trip grid in tests/test_implied_vol.py (vol 1%-300%, expiries down to 17 hours, rates -1% to 5%), versus 58.9% before. American quotes can be inverted on the binomial tree. Impossible quotes produce an explanation, not a number.
 
 ### Value-at-Risk, GARCH and stress testing (29 issues: 3 critical, 5 high, 12 medium, 9 low)
 
@@ -319,7 +319,7 @@ followed by how version 2 resolves the area as a whole.
 | Low | Deprecated and legacy APIs | 1380, 1421-1422, 2647, 2788, 3230, 32... |
 | Low | Dead code and unused imports in the vol-surface path | 1379-1380, 1417, 1569, 2647, 2741, 27... |
 
-**Resolution.** `vol_surface.py` works in total implied variance and computes local volatility with Gatheral's formula (matches a price-based Dupire calculation to 1e-9). Surfaces come from arbitrage-free SSVI or from uploaded quotes, which are validated and smoothed per maturity (penalty chosen by cross-validation). Calendar and butterfly arbitrage are counted and left undefined instead of being patched, and the real local-vol grid is exported.
+**Resolution.** `vol_surface.py` works in total implied variance and computes local volatility with Gatheral's formula (matches a price-based Dupire calculation to 1e-9). Surfaces come from arbitrage-free SSVI or from uploaded quotes (implied vols, or option prices inverted at the sidebar market), which are validated and fitted per maturity with Gatheral's raw SVI smile: least squares on implied vols from Zeliade quasi-explicit starting points, with a negative minimum variance and breaches of Lee's wing bound penalised, so the smile's slope and curvature are analytic; dw/dT at fixed forward moneyness comes from secants between neighbouring maturities. Calendar and butterfly arbitrage are counted and left undefined instead of being patched, and the real local-vol grid is exported.
 
 ### Interface, reliability and project hygiene
 
@@ -334,18 +334,22 @@ followed by how version 2 resolves the area as a whole.
 | Medium | Catch-all exception handler, debug expanders and printed tracebacks shown to users; `warnings.filterwarnings('ignore')` hid numerical problems | Errors are prevented by validation or shown as plain-language messages; `showErrorDetails = "type"`; warnings are not suppressed |
 | Medium | Greeks shown only for calls under a misleading "Position Greeks" label, rounded to 3 decimals | Call and put Greeks with units and definitions, higher orders on demand, position Greeks in dollars on the strategy tab |
 | Medium | Three different strategy lists in three tabs, with hidden hard-coded strikes | One position, built once in the Strategy Builder, is analysed by every risk tool |
-| Medium | Hard-coded HTML cards and colours that break in the light theme; HTML injected with `unsafe_allow_html` | Native `st.metric`, `st.dataframe` and theme-aware Plotly; no raw HTML |
+| Medium | Hard-coded HTML cards and colours that break in the light theme; HTML injected with `unsafe_allow_html` | Native `st.metric`, `st.dataframe` and theme-aware Plotly; no `unsafe_allow_html` and no hard-coded colours. The only raw HTML is one generated `<style>` block (inserted with `st.html`) that sizes and wraps the price cards |
 | Medium | Markdown rendered amounts such as "\$4.88 ... \$100" as LaTeX | Dollar signs escaped wherever amounts appear in Markdown |
 | Low | Duplicate function definitions, dead code (commented-out solver, unreachable branches), unused imports (seaborn, matplotlib colormaps, `minimize`), 554 whitespace warnings | Code base rewritten; `ruff check` and `ruff format` pass and run in CI |
 | Low | README told users to run a file that does not exist (`options_pricing_app.py`), claimed Python 3.7+ support and advertised the Kelly/Sharpe metrics | README rewritten and verified: the run command, Python 3.10+ (tested with the minimum dependency versions) and every documented feature |
 | Low | `requirements.txt` listed unused packages, missed `xlsxwriter` (the Excel export silently disappeared) and used floors too old for the APIs used | Accurate runtime requirements with tested floors; `pyproject.toml` for tooling |
-| Low | No tests, no CI, a monolithic 4,331-line file, no type hints | A package with separate math and UI layers, type hints, 1,250+ tests and a CI workflow on Python 3.10-3.13 |
+| Low | No tests, no CI, a monolithic 4,331-line file, no type hints | A package with separate math and UI layers, type hints, 3,300+ tests and a CI workflow on Python 3.10-3.14 (plus oldest dependencies and a wheel build) |
 | Low | Dev container on an older Debian image | Python 3.12 on Debian bookworm, with ruff and the test tools installed |
 
 ## Independent review of version 2
 
-Before release, version 2 itself was reviewed by independent agents instructed to break it. Each finding below was
-reproduced, fixed and covered by a regression test.
+Before release, version 2 itself was reviewed by independent agents instructed to break it: two rounds on the
+rebuild, then a final review of the merged result. Every finding was reproduced before it was fixed (by an
+independent verifier, or by hand where none ran), the fixes of the second and final rounds were checked again by an
+adversarial verifier, and each one that is testable is covered by a regression test.
+
+### First round
 
 | Severity | Issue found in the rebuild | Fix |
 | --- | --- | --- |
@@ -363,3 +367,67 @@ reproduced, fixed and covered by a regression test.
 | Low | Riskless positions (box spreads) showed a negative maximum loss and noise-driven skewness | Labelled as guaranteed profit; higher moments reported as not applicable |
 | Low | VaR configuration accepted NaN/infinite parameters and fractional horizons | Validated, including a minimum number of tail observations |
 | Low | Documentation promised a zero expected P&L also when fills, fees or leg IVs differ from the model | Wording corrected; time-spread templates require an explicit expiry |
+
+### Second round
+
+| Severity | Issue found in the rebuild | Fix |
+| --- | --- | --- |
+| Critical | The CI test job (and the README's `pytest` command) could not import the package: every test module failed at collection | `pythonpath` set in the pytest configuration; CI also builds the wheel and imports the installed package outside the checkout |
+| High | Local volatility from uploaded quotes was badly wrong on the app's own sample file (142% where the true value is 27%): the smoothing spline's second derivative was noise | Each maturity is fitted with Gatheral's SVI smile (analytic derivatives, constrained quasi-explicit starts), so noise-free SSVI quotes are recovered exactly and noisy ones to about 1-4 vol points of local vol |
+| High | Calendar arbitrage between interior maturities was hidden: the monotone interpolant set dw/dT to 0, so local vol showed 0% instead of being undefined | dw/dT comes from secants between neighbouring maturities; a secant that falls beyond quote precision is reported as calendar arbitrage and local vol is left blank |
+| High | dw/dT at the last maturity was biased low, down to 0 on arbitrage-free inverted term structures | One-sided secants at the ends (three-point formula at the first maturity where it is reliable) |
+| High | The common strike range lost the carry shift twice: identical strikes at every expiry were shrunk or rejected | The strike grid spans the union of the quoted ranges, each maturity masked to its own quotes and refined so every maturity keeps about 16 points |
+| High | Strategy Builder leg edits were silently discarded whenever sidebar volatility, days or strike changed | The editor's identity no longer depends on sidebar values and edited legs are kept per template; custom positions survive strike changes |
+| High | Headline strategy and VaR numbers were cut off with an ellipsis at normal desktop widths | Values are sized for the card (exact amounts in the tooltip); breakevens are listed in full |
+| Medium | At 500% volatility, 10 years and 2,000 steps the top tree node overflowed: the call came out infinite with NaN Greeks | Node spots are capped at e^700; their risk-neutral weight is negligible. The price matches Black-Scholes-Merton to 1e-6 |
+| Medium | Leisen-Reimer theta was a one-sided one-day difference: 10-17% too large for 1-3 day options | Central difference in time on the same tree; matches the analytical theta to 0.1% |
+| Medium | When the spot started inside the exercise region (deep in-the-money American put), the plotted exercise boundary followed the edge of the lattice | A time step contributes to the boundary only when the boundary lies inside the lattice |
+| Medium | Monte Carlo with a control variate reported a round-off standard error (Error/SE of about -1e8) when no path crossed the strike | The standard error is reported as not estimable, with the reason; the in-the-money fraction is shown |
+| Medium | Spurious breakevens at about 1e10-1e13 x spot when volatility x sqrt(time) was large: rounding hid a constant P&L | The grid stops at a million times the spot and the far tail takes its exact asymptotic sign; 2,043 breakevens checked against 50-digit arithmetic |
+| Medium | The implied-vol shift slider also moved the at-expiry curve of time spreads, away from the breakevens and maxima | The at-expiry curve uses the legs' own IVs, like the metrics |
+| Medium | Implied volatilities between 1,600% and the 2,000% cap were rejected | The bracket expands up to the cap itself |
+| Medium | A "Vol" (volume) column beat "Implied Volatility"; "Maturity (years)" and spaced aliases were rejected; days in a maturity column were read as years; "25.1%" or "4,500.00" values failed | Headers and aliases are normalised the same way and bracketed units are read; maturities above 30 are days, ambiguous whole numbers are refused with a request to name the unit, guessed units are warned about; % signs and thousands separators are accepted |
+| Medium | The surface tab accepted only implied vols and its output fed nothing | Option prices (Price or Bid/Ask plus call/put) are inverted at the sidebar market; the surface's implied vol for the sidebar contract is shown; the smile chart overlays the quotes with the fit error |
+| Medium | On extreme lattices (volatility squared x time about 1,400) calls came out plausibly wrong, American calls even above the spot | Calls are priced by put-call symmetry (McDonald-Schroder) on the put lattice, whose payoffs are bounded; capped levels are computed from logarithms |
+| Medium | No vega, rho or dividend rho for American options; the Greeks shown were European and several times too large for in-the-money puts | Tree vega, rho and epsilon by bump-and-reprice on the same lattice |
+| Medium | The sidebar pricing model only changed the headline cards; sensitivity, heatmaps, chain, Strategy and Risk stayed European without saying so | Every European-only view says so; under an American tree the Strategy tab shows the sidebar contract's early-exercise value on the same tree |
+| Medium | The Implied Volatility tab threw away a typed quote when the sidebar volatility or exercise style changed, and ignored the sidebar's American tree | The quote belongs to the contract and survives those changes (with a reset button); the American model follows the sidebar tree |
+| Medium | The binomial model defaulted to the less accurate CRR lattice; the convergence chart showed only the call and stopped at 1,000 steps; the parity card was zero by construction | Leisen-Reimer by default; call and put convergence with an extrapolated reference up to the chosen step count; the fourth card shows what the model adds (tree error, early-exercise premium or Monte Carlo error) |
+| Medium | Payoff chart range exploded for high-volatility underlyings; VaR histogram piled tail outcomes into the edge bins; stress-test columns were hidden behind a scroll | Range from probability quantiles with a margin around the strikes; tail outcomes beyond the axis are counted in a note; compact full-width tables |
+| Medium | "Reward / risk" showed 15-50 digit numbers for cheap spreads; the default strike width ignored volatility and expiry (a 7-day iron condor defaulted to a \$0.03 credit for \$999.97 of risk with PoP 100.0%) | Ratio shown only when meaningful; width follows the expected move as a percentage of the strike; PoP never rounds to a certainty |
+| Medium | 3D surfaces were cropped; the smile picker lost its selection and repeated labels for nearby expiries; price-heatmap labels collapsed for low-priced underlyings | Re-laid-out scenes; picker keyed to the maturity grid with unique day labels; precision follows the grid |
+| Medium | The lint job installed the newest ruff on every run, so a ruff release could fail CI with no code change; dev tools were listed in four places | Exact pins in one Dependabot-tracked `requirements-dev.txt`, used by CI, the dev container, the README and CONTRIBUTING |
+| Medium | Monte Carlo errors were blanked whenever every path finished in the money, even without the control variate | Blank only when the sample genuinely cannot estimate its error |
+| Low | A breakeven beyond the analysis grid was dropped (dividend-paying diagonal, root near 958) | The root is bracketed beyond the grid when the asymptotic sign requires one |
+| Low | The early-exercise premium included the tree's discretisation error (non-zero for a no-dividend call) | Measured against the same tree with European exercise |
+| Low | Captions claimed second-order convergence for American Leisen-Reimer trees and that calls are never exercised early (false for negative rates) | Captions and methodology corrected |
+| Low | Leisen-Reimer rejected the documented 20,000-step maximum | Even counts round down at the limit |
+| Low | Zero-volatility American Greeks were European; charm's zero-volatility limit was 0 | Exact limits |
+| Low | A tiny time value returned the solver floor instead of a volatility that reprices it | The floor is 1e-12 and the quote is reproduced |
+| Low | The P&L standard deviation of riskless positions was noise from a one-pass variance | Two-pass variance |
+| Low | The dividend "unbounded loss" note also appeared for naked short calls | Shown only when the dividend drag causes the unbounded loss |
+| Low | American test references were off by up to 1.4e-3 against a 2e-3 tolerance | Converged references (Richardson-extrapolated trees), tolerance 3e-4 |
+| Low | Tree speed was overstated; terminal_prices' odd sample count, pnl_grid shapes and the "no transaction costs" limitation were inconsistent | Induction is twice as fast and documented honestly; behaviour documented or validated; wording fixed |
+| Low | Calendar and diagonal legs were described without expiries; no spot x date P&L view or position-Greeks profile; time-decay moves ignored volatility | Leg labels carry expiries; spot x days-from-today P&L heatmap and Greeks-vs-spot chart with steps scaled by sigma sqrt(T) |
+| Low | The early-exercise boundary was a sawtooth of raw lattice nodes; the Monte Carlo sample-path chart claimed to show the pricing scenarios | Critical price interpolated per level (monotone); honest chart labels |
+| Low | Only seven sidebar inputs were stored in the URL | Every sidebar setting and the Strategy Builder's template, width, contracts, multiplier and commission are bound to the URL (edited legs are not) |
+| Low | CI skipped Python 3.14 and never tested the declared minimum dependency versions | Matrix 3.10-3.14 plus an oldest-dependencies job and job timeouts |
+| Low | The installed package could not start the app and forced Streamlit on users of the numerical core | Core needs NumPy/SciPy/pandas only; the app is the `app` extra with an `options-analyzer` command; one version source |
+| Low | "A long option has negative theta" was stated as a rule, and the delta-normal VaR formula omitted the /252 | Wording and formula corrected |
+| Low | Missing contributor scaffolding; the IV screenshot was unused; the toolbar setting hid developer tools locally | CONTRIBUTING.md, issue templates, screenshot added, `toolbarMode = "auto"` |
+
+### Final review of the merged result
+
+| Severity | Issue found | Fix |
+| --- | --- | --- |
+| Medium | American trees drew an early-exercise boundary where early exercise is never optimal (zero rate, or a no-dividend call at high volatility x expiry), from rounding noise | The exercise gain is computed from small terms (no difference of two nearly equal values), so rounding cannot fake an exercise; the boundary sits where the gain changes sign and matches an 80-bit induction of the same lattice |
+| Medium | Monte Carlo prices at very large sigma sqrt(T) were confidently wrong (standard error near zero) or negative | Heavy-tailed samples (detected from the terminal-price mean against its known value, and always from sigma sqrt(T) = 2 without the control variate) price the put directly and the call by put-call parity, with a note on the cards; prices stay within the no-arbitrage bounds |
+| Medium | Maturity units in headers other than days/years/% (months, weeks, hours) were ignored; one tiny implied vol aborted the whole fit; call and put vols at one strike were averaged; slightly different times to one expiry became separate maturities | Units read (an ambiguous "m" refused); a scaled ridge in the SVI starting solve; the out-of-the-money side is kept when a Type column exists; times within half a day are one expiry |
+| Medium | Butterfly arbitrage in uploaded quotes was neither detected nor reported | Neighbouring-strike butterflies are checked with each quote's price uncertainty (half the bid/ask spread, or the price grid's step) and reported |
+| Medium | The payoff chart's "+-1 sigma range" was centred on the forward, which is not the 1-sigma range at higher volatility | Centred on the median of the log-normal price used for the probabilities |
+| Medium | The installed `options-analyzer` command ran without the app's Streamlit settings (full tracebacks, telemetry, 200 MB uploads) | The settings ship as package data next to the app script, checked identical to the repository's by a test and in CI |
+| Medium | The 3-D surfaces lost their z-axis title on phones and narrow columns | Fixed-width charts that wrap and centre |
+| Low | Decimal commas were read as thousands separators (values x10); "1M" tenors were reported as dates; a blank Mid column blocked Bid/Ask prices | Commas interpreted only when unambiguous; tenor strings named; prices chosen row by row |
+| Low | Probability of profit was reversed when a breakeven was below 1e-12 x spot; zero net premium read "credit"; VaR omitted legs settling on the horizon day; breakevens of \$1-\$10 underlyings were rounded to the cent; "Reward / risk 0.00 : 1" | Relative root tolerance and a deeper grid; "no net premium"; settled legs counted; four significant digits; "< 0.01 : 1" |
+| Low | Values cut off in the implied-vol and surface cards; heatmap cell values unreadable; the smile chart's ATM label over a tick label; "None" in cells captions call blank; Greek names truncated | Card rows sized like the price cards; full-width heatmaps without colour bars; label moved; blank cells; wider name column; "Local vol defined" never rounds to 100% when points are missing |
+| Low | A core-only install still installed a command that crashed; README screenshots showed an older interface; documentation cited a quote-smoothing method and a test grid that no longer existed | The command explains that it needs the `app` extra; screenshots regenerated by `scripts/screenshots.py`; this report and the README describe the SVI fit and the 2,520-case grid that the test-suite runs |

@@ -138,7 +138,7 @@ tests/                      pytest suite (math, invariants, reference values, UI
 
 ```bash
 pip install -r requirements-dev.txt   # app dependencies plus pinned pytest, mpmath and ruff
-pytest              # 1,290+ tests: Greeks vs 40-digit derivatives, converged reference values, invariants, UI
+pytest              # 3,300+ tests: Greeks vs 40-digit derivatives, converged reference values, invariants, UI
 ruff check . && ruff format --check .
 streamlit run main.py --client.showErrorDetails full   # full tracebacks while debugging
 ```
