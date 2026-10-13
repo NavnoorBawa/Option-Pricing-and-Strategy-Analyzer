@@ -48,10 +48,12 @@ __all__ = [
     "build_template",
     "entry_cost",
     "front_expiry",
+    "leg_labels",
     "leg_table",
     "pnl",
     "position_greeks",
     "position_value",
+    "strike_text",
     "unbounded_loss_from_dividends",
 ]
 
@@ -109,10 +111,23 @@ class Leg:
 
     def label(self) -> str:
         side = "Long" if self.quantity > 0 else "Short"
-        qty = f"{abs(self.quantity):g}"
+        qty = strike_text(abs(self.quantity))
         if self.kind == "stock":
             return f"{side} {qty} share{'s' if abs(self.quantity) != 1 else ''}"
-        return f"{side} {qty} × {self.strike:g} {self.kind.capitalize()}"
+        return f"{side} {qty} × {strike_text(self.strike)} {self.kind.capitalize()}"
+
+
+def strike_text(value: float, most: int = 8) -> str:
+    """A strike (or quantity) with every decimal it has, up to ``most``, and thousands separators.
+
+    ``100``, ``102.5``, ``0.975``, ``12,345.67``: never rounded to a few significant digits or written in
+    scientific notation, so a label shows the same strike as the legs table.
+    """
+    decimals = next(
+        (d for d in range(most) if abs(round(value, d) - value) <= 1e-12 * max(1.0, abs(value))),
+        most,
+    )
+    return f"{value:,.{decimals}f}"
 
 
 @dataclass(frozen=True)
@@ -146,6 +161,42 @@ def front_expiry(strategy: Strategy, market: Market) -> float:
     """Earliest option expiry in the strategy (``market.expiry`` for stock only)."""
     expiries = [_leg_expiry(leg, market) for leg in strategy.legs if leg.is_option]
     return min(expiries) if expiries else market.expiry
+
+
+def _days_text(years: float) -> str:
+    days = years * 365.0
+    return f"{round(days)}d" if abs(days - round(days)) < 1e-6 else f"{days:.1f}d"
+
+
+def _price_text(price: float) -> str:
+    text = f"{price:,.4f}".rstrip("0")
+    return text + "0" * (2 - len(text.split(".")[1]))
+
+
+def leg_labels(strategy: Strategy, market: Market) -> list[str]:
+    """Display label of every leg, with the details that tell otherwise identical legs apart.
+
+    Each option's expiry is added when the option legs expire on different
+    dates (calendars, diagonals) or a leg's expiry differs from the market
+    default, e.g. ``Short 1 × 100 Call (30d)``; an implied volatility other
+    than the market's and a fill price entered by hand are added too.
+    """
+    options = [leg for leg in strategy.legs if leg.is_option]
+    expiries = {round(_leg_expiry(leg, market) * 365.0, 6) for leg in options}
+    show_expiry = len(expiries) > 1 or any(
+        leg.expiry is not None and not np.isclose(leg.expiry, market.expiry, rtol=0, atol=1e-9) for leg in options
+    )
+    labels = []
+    for leg in strategy.legs:
+        details = []
+        if leg.is_option and show_expiry:
+            details.append(_days_text(_leg_expiry(leg, market)))
+        if leg.is_option and leg.volatility is not None and not np.isclose(leg.volatility, market.volatility):
+            details.append(f"IV {leg.volatility * 100:g}%")
+        if leg.premium is not None:
+            details.append(f"filled at ${_price_text(leg.premium)}")
+        labels.append(leg.label() + (f" ({', '.join(details)})" if details else ""))
+    return labels
 
 
 #: Reference tenor for implied-volatility shocks (one month, like the VIX).
