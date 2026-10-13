@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from options_analyzer import vol_surface
+from options_analyzer import black_scholes, vol_surface
 from options_analyzer.ui import charts, tab_surface
 
 APP = str(Path(__file__).resolve().parents[1] / "main.py")
@@ -328,6 +328,25 @@ def test_butterfly_arbitrage_in_uploaded_quotes_is_a_visible_note(app):
     assert any("butterfly of neighbouring strikes costs less than nothing" in w.value for w in app.warning)
 
 
+def test_tick_rounded_bids_and_asks_raise_no_arbitrage_warning(app):
+    # An arbitrage-free chain quoted in 0.05 ticks: the midpoints' rounding was reported as static arbitrage.
+    rows = []
+    for days in (7, 14, 30, 60, 91):
+        t = days / 365
+        for strike in range(70, 131):
+            iv = np.sqrt(vol_surface.SSVIParams().total_variance(np.log(strike / 100) - 0.05 * t, t)[0] / t)
+            kind = "call" if strike >= 100 * np.exp(0.05 * t) else "put"
+            price = black_scholes.price(100.0, strike, t, 0.05, iv, 0.0, kind)
+            half = max(0.05, 0.03 * price)
+            bid, ask = np.floor((price - half) / 0.05) * 0.05, np.ceil((price + half) / 0.05) * 0.05
+            if bid > 0:
+                rows.append({"Strike": strike, "Days": days, "Type": kind, "Bid": round(bid, 2), "Ask": round(ask, 2)})
+    _upload(app, pd.DataFrame(rows))
+    _ok(app)
+    assert _metric(app, "Butterfly arbitrage") == "0"
+    assert not [w.value for w in app.warning if "static arbitrage" in w.value]
+
+
 def test_parse_messages_stay_visible_when_the_fit_fails_numerically(app, monkeypatch):
     # numpy's LinAlgError escaped the cache wrapper, which caught only QuoteParseError: the tab printed the raw
     # 'Singular matrix' and every parse message was lost.
@@ -374,4 +393,6 @@ def test_the_3d_surfaces_wrap_instead_of_squeezing_into_narrow_columns(app):
     ((block, count),) = blocks
     assert count == 2 and block.flex_container.direction == block.flex_container.HORIZONTAL
     assert block.flex_container.wrap
+    # Centred: left-aligned, the pair filled only the left half of the row at 1,920 px.
+    assert block.flex_container.justify == block.flex_container.JUSTIFY_CENTER
     assert 2 * tab_surface.SURFACE_CHART_WIDTH + 16 <= 804  # side by side in the main column at 1,280 px

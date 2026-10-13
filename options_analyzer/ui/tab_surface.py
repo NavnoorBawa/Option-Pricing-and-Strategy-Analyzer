@@ -338,7 +338,8 @@ def render(inputs: Inputs) -> None:
     # Side by side when both fit (1,280 px with the sidebar open), otherwise one per row; a phone shrinks them to
     # its column. Two half-width columns were 212-274 px wide at 900-1,024 px with the sidebar open, which cut off
     # the 3-D scene's axes (Plotly sizes the scene by the chart's height, so a wider chart only adds margin).
-    row = st.container(horizontal=True, key="surfaces")
+    # Centred, so a wide screen does not leave the right half of the row empty.
+    row = st.container(horizontal=True, horizontal_alignment="center", key="surfaces")
     row.plotly_chart(
         charts.surface_3d(surface.moneyness, surface.maturities, surface.implied_vol, "Implied volatility", colorscale),
         key="surf_iv",

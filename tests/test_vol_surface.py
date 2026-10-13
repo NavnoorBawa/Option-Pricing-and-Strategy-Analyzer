@@ -170,8 +170,21 @@ def test_placeholder_implied_vols_are_dropped_with_a_message():
     raw.loc[raw.index % 13 == 2, "ImpliedVol"] = 1e-05
     clean, messages = vs.parse_quotes(raw, 100, 0.05)
     assert len(clean) == 104 - 8 and clean["iv"].min() > 0.1
-    assert any("Dropped 8 quote(s) with an implied vol below 0.0001" in m and "placeholder" in m for m in messages)
+    assert any("Dropped 8 quote(s) with an implied vol below 0.01%" in m and "placeholder" in m for m in messages)
     vs.fit_market_surface(clean, 100, 0.05, 0.0)
+
+
+@pytest.mark.parametrize("header", ["IV (%)", "IV"])
+def test_the_placeholder_threshold_is_0_01_percent_in_a_file_of_percentages(header):
+    # The threshold was compared with the file's own numbers, so in percentages it was 0.0001% and the message
+    # gave it as a bare "0.0001"; 0.005 (0.005%) was kept as a vol of 0.00005.
+    raw = vs.sample_quotes(100, 0.05, 0.0).rename(columns={"ImpliedVol": header})
+    raw[header] = (raw[header] * 100).round(2)  # percentages, named in the header or recognised by their size
+    raw.loc[raw.index % 13 == 2, header] = 0.005
+    raw.loc[raw.index % 13 == 5, header] = 1e-05
+    clean, messages = vs.parse_quotes(raw, 100, 0.05)
+    assert len(clean) == 104 - 16 and clean["iv"].min() > 0.1
+    assert any("Dropped 16 quote(s) with an implied vol below 0.01%" in m for m in messages)
 
 
 def test_svi_fit_reaches_the_generating_accuracy_on_steep_noisy_skews():
@@ -568,7 +581,8 @@ def test_parse_quotes_normalises_formats():
     raw["IV"] = raw["IV"] * 100
     raw = pd.concat([raw, raw.head(2), pd.DataFrame([{"strike": "abc", "DTE": 30, "IV": 20}])])
     clean, messages = vs.parse_quotes(raw)
-    assert list(clean.columns) == ["strike", "maturity", "iv"]
+    assert list(clean.columns) == ["strike", "maturity", "iv", "price_error"]
+    assert clean["price_error"].isna().all()  # implied vols: the prices behind them are unknown
     assert clean["iv"].max() < 1.0
     text = " ".join(messages)
     assert "days" in text and "percent" in text and "duplicate" in text and "Dropped" in text
@@ -680,8 +694,10 @@ def test_tenor_strings_are_called_tenors_not_dates(tenors):
     assert "dates" not in str(error.value) and "add a Days column" in str(error.value)
 
 
-def test_times_of_day_are_not_called_dates():
-    frame = pd.DataFrame({"Strike": [90, 100, 110] * 2, "Expiry": ["5h"] * 3 + ["10h"] * 3, "IV": [0.2] * 6})
+@pytest.mark.parametrize("times", [("5h", "10h"), ("16:00", "09:30"), ("4pm", "9:30 am")])
+def test_times_of_day_are_not_called_dates(times):
+    # pandas dates a time alone on 1 January of the year 1 ("5h") or today ("16:00").
+    frame = pd.DataFrame({"Strike": [90, 100, 110] * 2, "Expiry": [times[0]] * 3 + [times[1]] * 3, "IV": [0.2] * 6})
     with pytest.raises(vs.QuoteParseError, match="has no numeric values"):
         vs.parse_quotes(frame)
 
@@ -735,7 +751,7 @@ def test_decimal_commas_are_read_as_decimal_points():
     frame = pd.read_csv(io.StringIO(text.to_csv(index=False)))  # quoted, comma-separated
     clean, messages = vs.parse_quotes(frame)
     expected, _ = vs.parse_quotes(raw.assign(Strike=raw["Strike"] + 0.5))
-    assert np.allclose(clean.to_numpy(), expected.to_numpy(), rtol=0, atol=1e-12)
+    assert np.allclose(clean.to_numpy(), expected.to_numpy(), rtol=0, atol=1e-12, equal_nan=True)
     assert clean["strike"].min() == pytest.approx(70.5) and clean["iv"].max() < 0.6
     for column in ("Strike", "Maturity", "ImpliedVol"):
         example = text[column].iloc[0].rstrip("%")  # '70,5', '0,0822', '54,..'
@@ -761,9 +777,21 @@ def test_a_column_without_numbers_is_named():
         vs.parse_quotes(raw)
 
 
-def test_expiry_dates_without_a_days_column_are_explained():
+@pytest.mark.parametrize(
+    "dates",
+    [
+        ("2026-11-20", "2026-12-18"),
+        ("Nov 20", "Dec 18"),
+        ("11/20", "12/18"),
+        ("20 Nov", "18 Dec"),
+        ("Nov-26", "Dec-26"),
+        ("20NOV26", "18DEC26"),
+    ],
+)
+def test_expiry_dates_without_a_days_column_are_explained(dates):
+    # pandas gives a date without a year ('Nov 20') the year 1, so such dates got only "has no numeric values".
     raw = vs.sample_quotes().rename(columns={"Maturity": "Expiry"})
-    raw["Expiry"] = "2026-12-18"
+    raw["Expiry"] = np.where(raw.index % 2, *dates)
     with pytest.raises(vs.QuoteParseError, match=r"column 'Expiry' holds dates .* add a Days column"):
         vs.parse_quotes(raw)
 
@@ -1161,6 +1189,72 @@ def test_butterfly_check_is_model_free_and_tolerates_repeated_strikes():
     spiked[10] += 0.02  # 2 vol points rich at 100
     assert vs._butterfly_arbitrage(strikes, spiked, 30 / 365, 100.0) == (1, (99.0, 100.0, 101.0))
     assert vs._butterfly_arbitrage(np.r_[strikes, 100.0], np.r_[flat, 0.2], 30 / 365, 100.0) == (0, None)
+
+
+def _tick_quoted_chain(tick: float = 0.05, half_spread=lambda price, tick: max(tick, 0.03 * price), spike=0.0):
+    """Out-of-the-money bids and asks around Black-Scholes prices of SSVI vols, rounded outwards to ``tick``.
+
+    Spot 100, rate 5%, strikes 70-130 in steps of 1, 7-91 days; arbitrage-free unless ``spike`` (vol points)
+    is added to the 30-day at-the-money vol.
+    """
+    params, r = vs.SSVIParams(), 0.05
+    rows = []
+    for days in (7, 14, 30, 60, 91):
+        t = days / 365
+        for strike in range(70, 131):
+            iv = np.sqrt(params.total_variance(np.log(strike / 100) - r * t, t)[0] / t)
+            iv += spike if (days, strike) == (30, 100) else 0.0
+            kind = "call" if strike >= 100 * np.exp(r * t) else "put"
+            price = bs.price(100.0, strike, t, r, iv, 0.0, kind)
+            half = half_spread(price, tick)
+            bid, ask = np.floor((price - half) / tick) * tick, np.ceil((price + half) / tick) * tick
+            if bid > 0:
+                rows.append({"Strike": strike, "Days": days, "Type": kind, "Bid": round(bid, 2), "Ask": round(ask, 2)})
+    return pd.DataFrame(rows)
+
+
+def _quote_arbitrage(frame: pd.DataFrame) -> list[str]:
+    quotes, _ = vs.parse_quotes(frame, 100.0, 0.05)
+    return [note for note in vs.fit_market_surface(quotes, 100.0, 0.05, 0.0).notes if "static arbitrage" in note]
+
+
+def test_tick_rounded_quotes_of_an_arbitrage_free_chain_are_not_static_arbitrage():
+    # Midpoints of bids and asks in 0.05 ticks move in steps of 0.025, more than half a vol point of a cheap
+    # option's price: the 14-day 87/88/89 put butterfly cost -0.05 at the midpoints, and the arbitrage-free chain
+    # was reported as static arbitrage although that butterfly costs +0.25 bought at the ask and sold at the bid.
+    chain = _tick_quoted_chain()
+    puts = chain[(chain["Days"] == 14) & chain["Strike"].between(87, 89)]
+    mid = ((puts["Bid"] + puts["Ask"]) / 2).to_numpy()
+    assert mid[0] - 2 * mid[1] + mid[2] == pytest.approx(-0.05)
+    assert puts["Ask"].iloc[0] - 2 * puts["Bid"].iloc[1] + puts["Ask"].iloc[2] == pytest.approx(0.25)
+    assert _quote_arbitrage(chain) == []
+    mids = chain.assign(Mid=(chain["Bid"] + chain["Ask"]) / 2).drop(columns=["Bid", "Ask"])
+    assert _quote_arbitrage(mids) == []
+    quotes, _ = vs.parse_quotes(chain, 100.0, 0.05)
+    assert np.allclose(np.sort(quotes["price_error"]), np.sort((chain["Ask"] - chain["Bid"]) / 2))
+    assert np.allclose(vs.parse_quotes(mids, 100.0, 0.05)[0]["price_error"], 0.025)  # the step of the midpoints
+    coarse = chain.assign(Last=(chain["Bid"] + chain["Ask"]) / 2).round({"Last": 1}).drop(columns=["Bid", "Ask"])
+    assert _quote_arbitrage(coarse) == []  # last trades to the nearest 0.1 may each be 0.1 off
+
+
+def test_a_butterfly_that_costs_less_than_nothing_at_the_bid_and_ask_is_still_reported():
+    def one_tick(price, tick):  # spreads of one or two ticks
+        return tick / 2
+
+    assert _quote_arbitrage(_tick_quoted_chain(0.01, one_tick)) == []
+    chain = _tick_quoted_chain(0.01, one_tick, spike=0.03)
+    calls = chain[(chain["Days"] == 30) & chain["Strike"].between(99, 101)].set_index("Strike")
+    assert calls.loc[99, "Ask"] - 2 * calls.loc[100, "Bid"] + calls.loc[101, "Ask"] < -0.2  # a real arbitrage
+    (note,) = _quote_arbitrage(chain)
+    assert "a butterfly of neighbouring strikes costs less than nothing" in note and "half its bid/ask spread" in note
+
+
+def test_the_price_step_is_the_coarsest_usual_increment_of_every_price():
+    assert vs._price_step(pd.Series([0.175, 0.225, 1.05, 12.3])) == 0.025
+    assert vs._price_step(pd.Series([0.12, 0.13, np.nan, 0.0, -1.0])) == 0.01
+    assert vs._price_step(pd.Series([1.2345, 2.0001])) == 0.0001
+    assert vs._price_step(pd.Series([1.234567])) == 0.0
+    assert vs._price_step(pd.Series([np.nan])) == 0.0
 
 
 def test_vertical_spread_arbitrage_in_the_quotes_is_reported_even_when_the_fit_is_close():

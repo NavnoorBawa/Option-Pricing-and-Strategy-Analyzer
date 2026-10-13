@@ -133,7 +133,10 @@ steep, nearly linear equity skews are followed too. SSVI slices are exactly SVI,
 recovered. The fit can smooth over quotes that are not free of arbitrage, so the quotes themselves are also
 checked without a model: a butterfly of three neighbouring strikes that costs less than nothing even if each
 quote's vol is half a point off, or a put priced below one at a lower strike (a call above one) even if each
-is a vol point off, is reported as static arbitrage in the quotes. A maturity header may state days,
+is a vol point off, is reported as static arbitrage in the quotes. Both checks also let each price be off by
+half its bid/ask spread (so a reported butterfly costs less than nothing bought at the ask and sold at the
+bid), or by one step of the file's price grid (a midpoint of bids and asks in 0.05 ticks lies on a 0.025
+grid), or for a quoted implied vol by 0.01% of the forward. A maturity header may state days,
 years, months, weeks, hours or minutes ('Maturity (months)'); a bare 'm' could be months or minutes and is
 refused, and times to expiry within half a day of each other are taken as one expiry (keeping each quote's
 total variance). A maturity column whose header gives no unit is converted from days when its values go above
