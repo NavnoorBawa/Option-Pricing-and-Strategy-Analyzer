@@ -10,8 +10,8 @@ import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from options_analyzer import vol_surface
-from options_analyzer.ui import tab_surface
+from options_analyzer import black_scholes, implied_vol, vol_surface
+from options_analyzer.ui import charts, tab_surface
 
 APP = str(Path(__file__).resolve().parents[1] / "main.py")
 
@@ -100,7 +100,7 @@ def test_option_prices_build_a_surface_with_quote_markers_and_fit_quality(app):
     captions = " ".join(c.value for c in app.caption)
     assert "Inverted 104 option price(s)" in captions
     assert "spot (100.00), rate (5.00%) and dividend yield (0.00%)" in captions
-    assert _metric(app, "Calendar-arbitrage points") == "0" and _metric(app, "Local vol defined") == "100%"
+    assert _metric(app, "Calendar arbitrage") == "0" and _metric(app, "Local vol defined") == "100%"
     names = _trace_names(app)
     assert {"Quotes · 30d", "Quotes · 273d", "Quotes · 2.00y"} <= set(names)
     summary = next(d.value for d in app.dataframe if "Fit RMSE (vol pts)" in d.value.columns)
@@ -116,9 +116,9 @@ def test_local_vol_defined_is_a_share_of_the_quoted_points(app):
     _ok(app)
     clean, _ = vol_surface.parse_quotes(frame)
     surface = vol_surface.fit_market_surface(clean, 100, 0.05, 0.0)
-    expected = np.isfinite(surface.local_vol).sum() / surface.quoted_points
-    assert _metric(app, "Local vol defined") == f"{expected:.0%}"
-    assert expected > 0.6  # the old denominator (the whole grid) gave a misleadingly low share
+    valid = int(np.isfinite(surface.local_vol).sum())
+    assert _metric(app, "Local vol defined") == tab_surface._local_vol_share(valid, surface.quoted_points)
+    assert valid / surface.quoted_points > 0.6  # the old denominator (the whole grid) gave a misleadingly low share
     assert any("outside each maturity's quoted strikes" in c.value for c in app.caption)
 
 
@@ -128,8 +128,8 @@ def test_interior_calendar_arbitrage_is_reported(app):
     quotes.loc[quotes["Maturity"] == maturities[4], "ImpliedVol"] *= 0.8
     _upload(app, quotes)
     _ok(app)
-    assert int(_metric(app, "Calendar-arbitrage points")) > 0  # was 0, with a local vol of exactly 0%
-    assert _metric(app, "Local vol defined") == "75%"  # two of the eight maturities are left undefined
+    assert int(_metric(app, "Calendar arbitrage")) > 0  # was 0, with a local vol of exactly 0%
+    assert _metric(app, "Local vol defined") == "75.0%"  # two of the eight maturities are left undefined
 
 
 def test_parse_messages_stay_visible_when_the_fit_fails(app):
@@ -260,5 +260,184 @@ def test_flat_total_variance_at_the_last_expiry_is_not_reported_as_calendar_arbi
             rows.append({"Strike": 100 * np.exp(y + 0.05 * days / 365), "Days": days, "IV": iv})
     _upload(app, pd.DataFrame(rows).round(4))
     _ok(app)
-    assert _metric(app, "Calendar-arbitrage points") == "0"  # was 31
+    assert _metric(app, "Calendar arbitrage") == "0"  # was 31
     assert any("changes by less than the quotes' precision" in w.value for w in app.warning)
+
+
+@pytest.mark.parametrize(
+    "valid, quoted, shown",
+    [
+        (649, 652, "99.5%"),  # was "100%" next to a note that local vol is blank at three points
+        (1229, 1230, "99.9%"),
+        (1224, 1230, "99.5%"),
+        (1, 1000, "0.1%"),
+        (246, 328, "75.0%"),
+        (652, 652, "100%"),
+        (0, 652, "0%"),
+        (0, 0, "–"),
+    ],
+)
+def test_local_vol_share_reads_100_or_0_only_when_exact(valid, quoted, shown):
+    assert tab_surface._local_vol_share(valid, quoted) == shown
+
+
+def test_local_vol_defined_is_not_rounded_up_to_100_next_to_blank_points(app):
+    # 1,224 of 1,230 points showed "100%" next to 6 butterfly-arbitrage points and a caption saying local vol
+    # is left blank where the surface has static arbitrage.
+    app.slider(key="ssvi_rho").set_value(-0.8).run()
+    app.slider(key="ssvi_eta").set_value(2.55).run()
+    app.slider(key="ssvi_m").set_value((0.3, 2.5)).run()
+    _ok(app)
+    assert _metric(app, "Butterfly arbitrage") == "6"
+    assert _metric(app, "Local vol defined") == "99.5%"
+    assert "1,224 of 1,230" in next(m.help for m in app.metric if m.label == "Local vol defined")
+
+
+def test_surface_card_labels_fit_a_row_of_four_at_1280_px(app):
+    # 'Calendar-arbitrage points' (25 characters, 150 px) was cut to 'Calendar-arbitrage p…' in the 139 px label of
+    # a card in a row of four at 1,280 px with the sidebar open; 'Calendar arbitrage' measures 109 px there.
+    labels = [m.label for m in app.metric if m.label in ("Grid", "Calendar arbitrage", "Butterfly arbitrage")]
+    assert labels == ["Grid", "Calendar arbitrage", "Butterfly arbitrage"]
+    assert all(len(m.label) <= 20 for m in app.metric if "arbitrage" in m.label or m.label == "Local vol defined")
+    help_text = next(m.help for m in app.metric if m.label == "Butterfly arbitrage")
+    assert help_text.startswith("Number of grid points") and "g(y) < 0" in help_text  # g < 0 is the violation
+
+
+def test_quote_surface_cards_say_they_count_the_fitted_surface(app):
+    quotes = vol_surface.sample_quotes(100, 0.05, 0.0, seed=3)
+    _upload(app, quotes)
+    _ok(app)
+    for label in ("Calendar arbitrage", "Butterfly arbitrage"):
+        help_text = next(m.help for m in app.metric if m.label == label)
+        assert "of the fitted surface" in help_text and "quotes themselves is listed in the notes" in help_text
+
+
+def test_butterfly_arbitrage_in_uploaded_quotes_is_a_visible_note(app):
+    # The surface showed 0 butterfly-arbitrage points and no note for quotes with a negative-cost butterfly.
+    rows = []
+    for days in (14, 30, 60, 91):
+        for strike in range(90, 111):
+            t = days / 365
+            iv = np.sqrt(vol_surface.SSVIParams().total_variance(np.log(strike / 100) - 0.05 * t, t)[0] / t)
+            rows.append(
+                {"Strike": strike, "Days": days, "IV": round(float(iv), 4) + 0.02 * ((days, strike) == (30, 100))}
+            )
+    _upload(app, pd.DataFrame(rows))
+    _ok(app)
+    assert _metric(app, "Butterfly arbitrage") == "0"
+    assert any("butterfly of neighbouring strikes costs less than nothing" in w.value for w in app.warning)
+
+
+def test_tick_rounded_bids_and_asks_raise_no_arbitrage_warning(app):
+    # An arbitrage-free chain quoted in 0.05 ticks: the midpoints' rounding was reported as static arbitrage.
+    rows = []
+    for days in (7, 14, 30, 60, 91):
+        t = days / 365
+        for strike in range(70, 131):
+            iv = np.sqrt(vol_surface.SSVIParams().total_variance(np.log(strike / 100) - 0.05 * t, t)[0] / t)
+            kind = "call" if strike >= 100 * np.exp(0.05 * t) else "put"
+            price = black_scholes.price(100.0, strike, t, 0.05, iv, 0.0, kind)
+            half = max(0.05, 0.03 * price)
+            bid, ask = np.floor((price - half) / 0.05) * 0.05, np.ceil((price + half) / 0.05) * 0.05
+            if bid > 0:
+                rows.append({"Strike": strike, "Days": days, "Type": kind, "Bid": round(bid, 2), "Ask": round(ask, 2)})
+    _upload(app, pd.DataFrame(rows))
+    _ok(app)
+    assert _metric(app, "Butterfly arbitrage") == "0"
+    assert not [w.value for w in app.warning if "static arbitrage" in w.value]
+
+
+def test_a_mark_column_next_to_wide_bids_and_asks_raises_no_arbitrage_warning(app):
+    # Mark = (Bid + Ask) / 2 next to the bid and ask was allowed only its 0.025 grid step, not half the spread, so
+    # this arbitrage-free chain (wide spreads around prices off their midpoints) showed a static-arbitrage warning.
+    rng = np.random.default_rng(0)
+    rows = []
+    for days in (7, 14, 30, 60, 91):
+        t = days / 365
+        for strike in range(70, 131):
+            iv = np.sqrt(vol_surface.SSVIParams().total_variance(np.log(strike / 100) - 0.05 * t, t)[0] / t)
+            kind = "call" if strike >= 100 * np.exp(0.05 * t) else "put"
+            price = black_scholes.price(100.0, strike, t, 0.05, iv, 0.0, kind)
+            half = max(0.05, 0.1 * price)
+            centre = price + rng.uniform(-0.9, 0.9) * half  # each spread still brackets the price
+            bid = min(np.floor((centre - half) / 0.05), np.floor(price / 0.05)) * 0.05
+            ask = max(np.ceil((centre + half) / 0.05), np.ceil(price / 0.05)) * 0.05
+            if bid > 0:
+                row = {"Strike": strike, "Days": days, "Type": kind, "Bid": round(bid, 2), "Ask": round(ask, 2)}
+                rows.append(row | {"Mark": round((bid + ask) / 2, 3)})
+    _upload(app, pd.DataFrame(rows))
+    _ok(app)
+    assert any("option price from 'Mark'" in c.value for c in app.caption)
+    assert not [w.value for w in app.warning if "static arbitrage" in w.value]
+
+
+def test_vols_of_tick_rounded_midpoints_raise_no_arbitrage_warning(app):
+    # The unknown price behind a quoted vol was allowed only 0.01% of the forward (0.0037 at spot 37.4): vols of
+    # midpoints of an arbitrage-free chain in 0.05 ticks with $0.50 strikes showed a static-arbitrage warning.
+    rows = []
+    for days in (7, 14, 30, 60, 91):
+        t = days / 365
+        for strike in np.arange(26.5, 48.6, 0.5):
+            iv = np.sqrt(vol_surface.SSVIParams().total_variance(np.log(strike / 37.4) - 0.05 * t, t)[0] / t)
+            kind = "call" if strike >= 37.4 * np.exp(0.05 * t) else "put"
+            price = black_scholes.price(37.4, strike, t, 0.05, iv, 0.0, kind)
+            half = max(0.05, 0.03 * price)
+            bid, ask = np.floor((price - half) / 0.05) * 0.05, np.ceil((price + half) / 0.05) * 0.05
+            if bid > 0:
+                vol = implied_vol.implied_volatility((bid + ask) / 2, 37.4, strike, t, 0.05, 0.0, kind)
+                rows.append({"Strike": strike, "Days": days, "IV": round(vol, 4)})
+    app.sidebar.number_input(key="spot").set_value(37.4).run()
+    _upload(app, pd.DataFrame(rows))
+    _ok(app)
+    assert not [w.value for w in app.warning if "static arbitrage" in w.value]
+
+
+def test_parse_messages_stay_visible_when_the_fit_fails_numerically(app, monkeypatch):
+    # numpy's LinAlgError escaped the cache wrapper, which caught only QuoteParseError: the tab printed the raw
+    # 'Singular matrix' and every parse message was lost.
+    def singular(*args, **kwargs):
+        raise np.linalg.LinAlgError("Singular matrix")
+
+    monkeypatch.setattr(vol_surface, "fit_market_surface", singular)
+    _upload(app, vol_surface.sample_quotes(100, 0.05, 0.0, seed=17))  # a file no other test has cached
+    assert not app.exception
+    assert any("Singular matrix" in e.value for e in app.error)
+    assert any("Read strike from 'Strike'" in c.value for c in app.caption)
+
+
+def test_the_smile_charts_atm_label_sits_inside_the_top_of_the_plot():
+    # At the bottom the label was drawn over the x-axis tick label '1' at every width.
+    fig = charts.smile_chart(np.linspace(0.7, 1.3, 41), [("30d", np.full(41, 0.2), np.full(41, 0.2))], "K/S")
+    (label,) = [a for a in fig.layout.annotations if a.text == "ATM"]
+    assert label.y == 1 and label.yanchor == "top" and label.xanchor == "left"
+
+
+def test_the_3d_surfaces_wrap_instead_of_squeezing_into_narrow_columns(app):
+    # Plotly sizes a 3-D scene by the chart's height: half-width columns of 212-274 px (900-1,024 px with the
+    # sidebar open) or 328-358 px on phones cut off the z axis and its title. The camera now sits 1.3 times as far
+    # out (a scene about 270 px across) and the two charts wrap onto separate rows before they get narrower.
+    eye = charts.surface_3d(np.linspace(0.8, 1.2, 5), [0.5, 1.0], np.full((2, 5), 0.2), "t", "Viridis").layout.scene
+    assert np.hypot(np.hypot(eye.camera.eye.x, eye.camera.eye.y), eye.camera.eye.z) > 3.7  # was 2.9
+    blocks = []
+
+    def walk(node):
+        children = getattr(node, "children", None)
+        if isinstance(children, dict):
+            surfaces = [
+                c
+                for c in children.values()
+                if getattr(c, "type", None) == "plotly_chart"
+                and json.loads(c.proto.spec)["data"][0]["type"] == "surface"
+            ]
+            if surfaces:
+                blocks.append((node.proto, len(surfaces)))
+            for child in children.values():
+                walk(child)
+
+    walk(app._tree)
+    ((block, count),) = blocks
+    assert count == 2 and block.flex_container.direction == block.flex_container.HORIZONTAL
+    assert block.flex_container.wrap
+    # Centred: left-aligned, the pair filled only the left half of the row at 1,920 px.
+    assert block.flex_container.justify == block.flex_container.JUSTIFY_CENTER
+    assert 2 * tab_surface.SURFACE_CHART_WIDTH + 16 <= 804  # side by side in the main column at 1,280 px

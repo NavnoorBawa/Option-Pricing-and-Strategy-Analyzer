@@ -400,8 +400,11 @@ def bar_chart(names, values, x_title: str):
 
 
 def surface_3d(moneyness, maturities, z, title: str, colorscale: str):
-    # A cube-shaped scene, a camera far enough out and a colour bar under the plot keep every axis
-    # inside a half-width column (Plotly's automatic aspect otherwise stretches some surfaces out of view).
+    # A cube-shaped scene (Plotly's automatic aspect stretches some surfaces out of view) and a colour bar under
+    # the plot. Plotly sizes a 3-D scene by the plot's height, not its width, so the camera distance fixes the
+    # scene at about 270 px across: every axis, tick label and title stays inside a chart at least that wide
+    # (a phone column is 328 px or more; the Volatility Surface tab wraps the two charts before they get
+    # narrower). A margin does not help: the scene is clipped at its own domain, so a margin only moves the cut.
     fig = go.Figure(
         go.Surface(
             x=moneyness,
@@ -432,7 +435,7 @@ def surface_3d(moneyness, maturities, z, title: str, colorscale: str):
             yaxis_title="Maturity (years)",
             zaxis=dict(title="Volatility", tickformat=".0%"),
             aspectmode="cube",
-            camera=dict(eye=dict(x=1.9, y=-1.9, z=1.1), center=dict(x=0.0, y=0.0, z=-0.12)),
+            camera=dict(eye=dict(x=2.47, y=-2.47, z=1.43), center=dict(x=0.0, y=0.0, z=-0.12)),
         ),
     )
     return fig
@@ -469,7 +472,9 @@ def smile_chart(
                 )
             )
     if spot_line is not None:
-        _vline(fig, spot_line, "ATM", position="bottom")
+        # Inside the top of the plot beside the line, above the smile's trough: at the bottom the label was drawn
+        # over the x-axis tick label "1" at every width.
+        _vline(fig, spot_line, "ATM", position="top right")
     fig = apply_layout(fig, None, x_title, "Volatility", height=480)
     fig.update_yaxes(tickformat=".0%")
     fig.update_layout(legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="left", x=0.0))

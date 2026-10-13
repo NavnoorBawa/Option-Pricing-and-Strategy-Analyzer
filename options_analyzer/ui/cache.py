@@ -96,7 +96,7 @@ def market_surface(raw, spot, rate, dividend_yield) -> tuple[vol_surface.VolSurf
     quotes, messages = vol_surface.parse_quotes(raw, spot, rate, dividend_yield)
     try:
         return vol_surface.fit_market_surface(quotes, spot, rate, dividend_yield), messages, None
-    except vol_surface.QuoteParseError as exc:
+    except ValueError as exc:  # QuoteParseError, or a numerical failure of the fit (numpy's LinAlgError)
         return None, messages, str(exc)
 
 

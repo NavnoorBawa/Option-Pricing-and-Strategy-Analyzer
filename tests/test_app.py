@@ -84,7 +84,7 @@ def test_volatility_surface_upload(app):
     csv = vol_surface.sample_quotes().to_csv(index=False).encode()
     app.file_uploader(key="quotes_file").upload("quotes.csv", csv, "text/csv").run()
     _ok(app)
-    assert any(m.label == "Calendar-arbitrage points" for m in app.metric)
+    assert any(m.label == "Calendar arbitrage" for m in app.metric)
     app.file_uploader(key="quotes_file").upload("bad.csv", b"a,b\n1,2\n", "text/csv").run()
     assert not app.exception
     assert any("Strike column" in e.value for e in app.error)
