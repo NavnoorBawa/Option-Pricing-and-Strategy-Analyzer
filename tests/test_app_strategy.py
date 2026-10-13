@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from scipy.stats import lognorm, norm
 from streamlit.proto.WidgetStates_pb2 import WidgetState
 from streamlit.testing.v1 import AppTest
 
@@ -85,8 +86,10 @@ def _metric(at: AppTest, label: str):
     return next(m for m in at.metric if m.label == label)
 
 
-def _summary_line(at: AppTest) -> str:
-    return next(m.value for m in at.markdown if "Reward / risk" in m.value)
+def _summary_line(at: AppTest, raw: bool = False) -> str:
+    """The breakevens and reward / risk line, with its no-break spaces as plain spaces unless ``raw``."""
+    line = next(m.value for m in at.markdown if "Reward / risk" in m.value)
+    return line if raw else line.replace("\N{NO-BREAK SPACE}", " ")
 
 
 def _chart(at: AppTest, key: str) -> dict:
@@ -369,6 +372,76 @@ def test_reward_to_risk_is_never_an_absurd_number():
     at = _app(strike=125, days=30, strategy_width_pct=10)
     assert _metric(at, "Max loss").value == "$0.01"
     assert "**Reward / risk:** > 1,000 : 1" in _summary_line(at)
+
+
+def test_tiny_reward_to_risk_is_not_shown_as_zero():
+    # Final review: a 1-day covered call's $42.45 maximum profit against a $9,958 maximum loss (a ratio of 0.0043)
+    # read "0.00 : 1", as if the position could not profit.
+    at = _app(strategy_category="Stock + option", days=1)
+    assert _metric(at, "Max profit").value == "$42.45"
+    assert _metric(at, "Max loss").value == "$9,958"
+    assert "**Reward / risk:** < 0.01 : 1" in _summary_line(at)
+    # No-break spaces keep the ratio on one line: on a phone it wrapped after the "<".
+    nbsp = "\N{NO-BREAK SPACE}"
+    assert f"**Reward / risk:** <{nbsp}0.01{nbsp}:{nbsp}1" in _summary_line(at, raw=True)
+    assert "**Reward / risk:** 0.03 : 1" in _summary_line(_app(strategy_category="Stock + option", days=30))
+
+
+def test_zero_net_premium_is_neither_a_debit_nor_a_credit():
+    # Final review: an at-the-money synthetic at a zero rate costs exactly nothing (C - P = S - K e^{-rT} = 0) but its
+    # card read "$0.00 credit (received)".
+    at = _app(rate=0, strategy_category="Synthetic")
+    premium = _metric(at, "Net premium")
+    assert premium.value == "$0.00"
+    assert premium.proto.delta == "no net premium"
+    # The label follows the amount as shown: a sub-cent residue is $0.00 either way.
+    assert tab_strategy.premium_label(0.004) == tab_strategy.premium_label(-0.004) == "no net premium"
+    assert tab_strategy.premium_label(0.005) == "debit (paid)"
+    assert tab_strategy.premium_label(-0.005) == "credit (received)"
+
+
+@pytest.mark.parametrize("vol", [20, 100, 200])
+def test_payoff_band_is_the_one_sigma_range_of_the_price_at_expiry(vol):
+    # Final review: the band was centred on the forward, not on the median of the log-normal price the probabilities
+    # use, so at 200% volatility over a year its lower "-1σ" edge was the median itself.
+    spec = _chart(_app(vol=vol), "payoff_chart")
+    sigma = vol / 100  # one year to expiry
+    price = lognorm(s=sigma, scale=100 * np.exp(0.05 - 0.5 * sigma**2))  # risk-neutral price at expiry
+    band = next(shape for shape in spec["layout"]["shapes"] if shape["type"] == "rect")
+    assert band["x0"] == pytest.approx(price.ppf(norm.cdf(-1.0)), rel=1e-9)
+    assert band["x1"] == pytest.approx(price.ppf(norm.cdf(1.0)), rel=1e-9)
+    # The chart's probability range starts 2.5 standard deviations below the median (it ends capped at 3 x 110).
+    spots = _array(next(t for t in spec["data"] if t.get("name", "").startswith("At expiry"))["x"])
+    assert spots[0] == pytest.approx(price.ppf(norm.cdf(-2.5)), rel=1e-9)
+
+
+@pytest.mark.parametrize("spot", [1.0, 1.5, 5.0, 100.0])
+def test_breakeven_dollars_agree_with_their_percentage(spot):
+    # Final review: at a $1 spot the condor's breakevens read "$0.96 (-3.8%)", although $0.96 is 4.0% below the spot.
+    market = strat.Market(spot, 0.05, 0.2, 30 / 365)
+    condor = strat.build_template("Iron Condor", spot, tab_strategy.auto_width(spot, 0.2, 30 / 365))
+    text = tab_strategy.breakeven_text(strat.analyze(condor, market).breakevens, spot)
+    pairs = re.findall(r"\$([\d,.]+) \(([+-][\d.]+%)\)", text)
+    assert len(pairs) == 2, text
+    for dollars, percent in pairs:
+        assert f"{float(dollars.replace(',', '')) / spot - 1:+.1%}" == percent, text
+
+
+@pytest.mark.parametrize("spot", [1e-4, 0.01, 0.5, 0.999, 1.0, 5.0, 9.99, 10.0, 100.0, 4500.0, 1e6])
+def test_breakeven_decimals_resolve_a_tenth_of_a_percent(spot):
+    decimals = tab_strategy.breakeven_decimals(spot)
+    assert decimals >= 2  # at least cents
+    assert 10.0**-decimals <= spot / 1000 * (1 + 1e-12)  # one unit of the last decimal is at most 0.1% of the spot
+    assert decimals == 2 or 10.0 ** -(decimals - 1) > spot / 1000  # and no decimal more than that needs
+
+
+def test_breakevens_of_a_one_dollar_underlying_show_a_tenth_of_a_cent():
+    at = _app(spot=1, strike=1, days=30, strategy_category="Range-bound")
+    at.selectbox(key="strategy_Range-bound").set_value("Iron Condor").run()
+    _ok(at)
+    assert "Breakevens at expiry:** \\$0.962 (-3.8%) and \\$1.038 (+3.8%)" in _summary_line(at)
+    marker = next(t for t in _chart(at, "payoff_chart")["data"] if t.get("name") == "Breakeven")
+    assert marker["hovertemplate"].startswith("Breakeven %{x:$,.3f}")
 
 
 def test_both_breakevens_are_shown_in_full():
@@ -696,9 +769,29 @@ def test_risk_heatmap_labels_show_the_exact_spot_shocks():
     at = _app()
     at.slider(key="grid_span").set_value(25).run()
     spec = _chart(at, "risk_heatmap")["data"][0]
-    assert spec["x"][:4] == ["-25%", "-20.8%", "-16.7%", "-12.5%"]
-    assert spec["x"][6] == "0%"
-    assert spec["y"][2] == "IV 0%"
+    assert spec["y"][:4] == ["-25%", "-20.8%", "-16.7%", "-12.5%"]
+    assert spec["y"][6] == "0%"
+    assert spec["x"][2] == "IV 0%"
+
+
+def test_spot_iv_heatmap_cells_stay_wide_enough_for_a_phone():
+    # Final review: with the 13 spot shocks as columns next to a colour bar, the cell values were 4 px tall on a
+    # 390 px phone. Like the spot x date grid, the 6 implied-vol shocks are now the columns and the spot shocks the
+    # rows (highest at the top), and the colour bar is left out: the cell values already say it.
+    heat = _chart(_app(), "risk_heatmap")["data"][0]
+    assert heat["showscale"] is False
+    assert heat["x"] == ["IV -50%", "IV -25%", "IV 0%", "IV +25%", "IV +50%", "IV +100%"]
+    assert heat["y"][0] == "-30%" and heat["y"][6] == "0%" and heat["y"][-1] == "+30%"
+    z = _array(heat["z"])
+    assert z.shape == (13, 6)
+
+    def bull_call_spread(spot, vol):  # the default position: 100 x (long 100 call, short 110 call), one year
+        return 100 * (bs.price(spot, 100, 1, 0.05, vol) - bs.price(spot, 110, 1, 0.05, vol))
+
+    today = bull_call_spread(100, 0.2)
+    assert z[0, 0] == pytest.approx(bull_call_spread(70, 0.1) - today, abs=1e-6)  # spot -30%, IV -50%
+    assert z[-1, -1] == pytest.approx(bull_call_spread(130, 0.4) - today, abs=1e-6)  # spot +30%, IV +100%
+    assert z[0, -1] == pytest.approx(bull_call_spread(70, 0.4) - today, abs=1e-6)  # spot -30%, IV +100%
 
 
 def test_spot_date_grid_steps_in_standard_deviations():
@@ -792,6 +885,14 @@ def _note(fig):
     return next((a for a in fig.layout.annotations if a.name == "outside"), None)
 
 
+def test_var_caption_counts_legs_that_expire_on_the_horizon_day():
+    # Final review: a 1-day bull call spread expires 0.69 trading days in, before a 1-day horizon, but its legs
+    # settle on day 1, the horizon itself, so the caption left them out.
+    at = _app(days=1)
+    assert any("2 option leg(s) expire before the horizon" in c.value for c in at.caption)
+    assert not any("expire before the horizon" in c.value for c in _app(days=2).caption)  # 1.38 trading days
+
+
 def test_histogram_does_not_pile_the_tails_into_the_end_bins():
     # Review finding: outcomes beyond the 0.05%/99.95% quantiles were clipped into spikes at both ends.
     rng = np.random.default_rng(3)
@@ -854,10 +955,10 @@ def test_pnl_cell_text_stays_short(value, bound, text):
     assert charts.pnl_cell_text(value, bound) == text
 
 
-def test_spot_date_heatmap_gives_the_colour_scale_width_to_its_cells():
+def test_risk_heatmaps_give_the_colour_scale_width_to_their_cells():
     at = _app()
     assert _chart(at, "date_heatmap")["data"][0]["showscale"] is False  # the cell values already say it
-    assert _chart(at, "risk_heatmap")["data"][0].get("showscale", True) is True
+    assert _chart(at, "risk_heatmap")["data"][0]["showscale"] is False
 
 
 @pytest.mark.parametrize(("x", "label"), [(-0.125, "-12.5%"), (0.0, "0%"), (0.3, "+30%"), (-1 / 12, "-8.3%")])

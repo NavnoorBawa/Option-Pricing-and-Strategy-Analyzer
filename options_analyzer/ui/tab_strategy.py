@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -451,15 +452,28 @@ def probability_text(p: float, sure: bool = False, never: bool = False) -> str:
     return f"{p:.1%}"
 
 
+def premium_label(cost: float) -> str:
+    """The Net premium card's label: a debit or a credit, or neither when the amount shows as $0.00 (a synthetic
+    at the forward, a zero-cost collar)."""
+    if abs(cost) < 0.005:
+        return "no net premium"
+    return "debit (paid)" if cost > 0 else "credit (received)"
+
+
 def reward_risk_text(metrics: strat.StrategyMetrics, units: float) -> str:
+    """Max profit ÷ max loss as ``1.27 : 1``, with no-break spaces so that a phone never wraps it (after a ``<``)."""
     rr = metrics.reward_to_risk
     if rr is not None and np.isinf(rr):
         return "Unlimited"
     if rr is None or metrics.max_loss * units < 0.005:
         return "–"  # no loss, no profit, or a maximum loss that shows as $0.00
     if rr > 1000:
-        return "> 1,000 : 1"
-    return f"{rr:,.2f} : 1"
+        text = "> 1,000 : 1"
+    elif rr < 0.005:
+        text = "< 0.01 : 1"  # a positive ratio (a maximum profit) that would round to 0.00
+    else:
+        text = f"{rr:,.2f} : 1"
+    return text.replace(" ", "\N{NO-BREAK SPACE}")
 
 
 #: Decimals the legs table shows per column (its column formats), used to write values that round to zero as 0.
@@ -512,24 +526,30 @@ def _join(parts: list[str]) -> str:
     return parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
 
 
+def breakeven_decimals(spot: float) -> int:
+    """Decimals that resolve a breakeven as finely as its change from spot, shown to 0.1 %: four significant
+    digits of the spot and at least cents ($96.21, $4.739, $0.9621)."""
+    return min(8, max(2, 3 - math.floor(math.log10(spot))))
+
+
 def breakeven_text(breakevens: list[float], spot: float) -> str:
     if not breakevens:
         return "none (the P&L at expiry never changes sign)"
-    decimals = 2 if spot >= 1 else 4
+    decimals = breakeven_decimals(spot)
     return _join([f"${b:,.{decimals}f} ({b / spot - 1:+.1%})" for b in breakevens])
 
 
-def payoff_range(spot: float, strikes, forward: float, sigma_t: float) -> tuple[float, float]:
+def payoff_range(spot: float, strikes, median: float, sigma_t: float) -> tuple[float, float]:
     """x-range of the payoff chart: the likely prices at expiry plus a margin around the strikes.
 
-    The probability range is the forward ± 2.5 standard deviations (in log terms); at very high volatility
-    its upper end is capped at three times the highest strike or spot so the strikes stay readable.
+    The probability range is the median price at expiry ± 2.5 standard deviations of the log price; at very high
+    volatility its upper end is capped at three times the highest strike or spot so the strikes stay readable.
     """
     anchors = [spot, *strikes]
     low, high = min(anchors), max(anchors)
     margin = 0.25 * (high - low)
-    lo = min(forward * np.exp(-2.5 * sigma_t), low - margin)
-    hi = max(forward * np.exp(2.5 * sigma_t), high + margin)
+    lo = min(median * np.exp(-2.5 * sigma_t), low - margin)
+    hi = max(median * np.exp(2.5 * sigma_t), high + margin)
     return max(lo, 0.0), min(hi, 3.0 * high)
 
 
@@ -543,7 +563,7 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
     c[0].metric(
         "Net premium",
         money_short(abs(cost)),
-        "debit (paid)" if cost > 0 else "credit (received)",
+        premium_label(cost),
         delta_color="off",
         delta_arrow="off",
         border=True,
@@ -580,7 +600,8 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
         md(f"**Breakeven{'s' if len(be) > 1 else ''} at expiry:** {breakeven_text(be, market.spot)}")
         + f" · **Reward / risk:** {reward_risk_text(metrics, units)}",
         help="Breakevens are the prices where the P&L at the front expiry changes sign (% change from today's "
-        "spot). Reward / risk is max profit ÷ max loss; it is not shown when the maximum loss rounds to $0.00.",
+        "spot). Reward / risk is max profit ÷ max loss, shown as < 0.01 : 1 or > 1,000 : 1 beyond those values; "
+        "it is not shown when the maximum loss rounds to $0.00.",
     )
 
     greeks = strat.position_greeks(strategy, market)
@@ -635,8 +656,11 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
         / 100
     )
     sigma_t = market.volatility * np.sqrt(metrics.horizon)
+    # The log-normal price at the front expiry that the probabilities use: ln S_T has standard deviation σ√T and
+    # mean ln F - σ²T/2, so its median lies e^{σ²T/2} below the forward F.
     forward = market.spot * np.exp((metrics.drift - market.dividend_yield) * metrics.horizon)
-    lo, hi = payoff_range(market.spot, strategy.strikes, forward, sigma_t)
+    median = forward * np.exp(-0.5 * sigma_t**2)
+    lo, hi = payoff_range(market.spot, strategy.strikes, median, sigma_t)
     spots = np.unique(np.concatenate([np.linspace(lo, hi, 600), strategy.strikes]))
     shift_label = f", IV {iv_shift * 100:+.0f} pts" if iv_shift else ""
     curves = [
@@ -662,10 +686,19 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
                 "dot",
             )
         )
-    band = (forward * np.exp(-sigma_t), forward * np.exp(sigma_t))
+    band = (median * np.exp(-sigma_t), median * np.exp(sigma_t))  # the 15.9th and 84.1st percentiles
     visible_be = [b for b in be if lo <= b <= hi]
     st.plotly_chart(
-        charts.payoff_chart(spots, curves, market.spot, strategy.strikes, visible_be, band), key="payoff_chart"
+        charts.payoff_chart(
+            spots,
+            curves,
+            market.spot,
+            strategy.strikes,
+            visible_be,
+            band,
+            breakeven_decimals=breakeven_decimals(market.spot),
+        ),
+        key="payoff_chart",
     )
     profile = pd.DataFrame({"Underlying price": spots} | {name: values for values, name, _, _ in curves})
     st.download_button(
@@ -743,5 +776,5 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
         "stock is valued at its price plus the dividends it pays. "
         + ("The premium is financed at the risk-free rate. " if carry else "Premium financing is ignored. ")
         + "Probabilities assume a log-normal price with the sidebar volatility; the shaded band is the ±1σ range "
-        "of the price at the front expiry."
+        "of the price at the front expiry (its 16th to 84th percentiles)."
     )

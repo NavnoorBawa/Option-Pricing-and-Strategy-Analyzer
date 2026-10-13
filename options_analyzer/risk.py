@@ -218,7 +218,11 @@ def _var_es(pnl: np.ndarray, confidence: float) -> tuple[float, float, tuple[flo
 
 
 def _settlement_days(strategy: Strategy, market: Market, horizon_days: int) -> dict[int, int]:
-    """Index of every option leg expiring before the horizon -> trading day it settles on."""
+    """Index of every option leg expiring before the horizon -> trading day it settles on.
+
+    A leg settles at the close of the first trading day on or after its expiry, which is the horizon itself for a
+    leg that expires during the horizon's last day (a 30-day option at a 21-day horizon: 20.7 trading days).
+    """
     days = {}
     for i, leg in enumerate(strategy.legs):
         if leg.is_option:
@@ -226,14 +230,14 @@ def _settlement_days(strategy: Strategy, market: Market, horizon_days: int) -> d
             expiry_days = expiry * TRADING_DAYS
             if expiry_days < horizon_days - 1e-9:
                 days[i] = int(min(max(math.ceil(expiry_days - 1e-9), 1), horizon_days))
-    return {i: d for i, d in days.items() if d < horizon_days}
+    return days
 
 
 def value_at_risk(strategy: Strategy, market: Market, config: VaRConfig, multiplier: float = 1.0) -> VaRResult:
     """Full-revaluation Monte Carlo VaR/ES of ``strategy`` (in $ after ``multiplier``)."""
     h = int(config.horizon_days)
     settle = _settlement_days(strategy, market, h)
-    spot_at, spot, log_return, rng = _simulate(market, config, sorted(set(settle.values())))
+    spot_at, spot, log_return, rng = _simulate(market, config, sorted({d for d in settle.values() if d < h}))
     vol_multiplier = _vol_multiplier(log_return, config, rng)
     horizon_years = h / TRADING_DAYS
 
@@ -254,7 +258,7 @@ def value_at_risk(strategy: Strategy, market: Market, config: VaRConfig, multipl
     for i, day in settle.items():
         leg = strategy.legs[i]
         phi = 1.0 if leg.kind == "call" else -1.0
-        payoff = np.maximum(phi * (spot_at[day] - leg.strike), 0.0)
+        payoff = np.maximum(phi * ((spot_at[day] if day < h else spot) - leg.strike), 0.0)
         later = later + leg.quantity * payoff * np.exp(market.rate * (h - day) / TRADING_DAYS)
 
     today = float(position_value(strategy, market))

@@ -68,12 +68,16 @@ def _scenario_grid(position: Position, front_days: float) -> None:
     vol_changes = np.array([-0.5, -0.25, 0.0, 0.25, 0.5, 1.0])
     grid = scenarios.pnl_grid(position.strategy, position.market, spot_changes, vol_changes, horizon, position.units)
     st.plotly_chart(
+        # Implied-vol shocks (6) are the columns and spot shocks the rows, highest at the top, without the colour
+        # scale (the cells say it), as in the spot × date grid: with 13 spot columns and a colour bar the cell values
+        # shrank to 4 px on a phone.
         charts.pnl_heatmap(
-            [shock_label(x) for x in spot_changes],
             [f"IV {shock_label(x)}" for x in vol_changes],
-            grid,
-            "Spot change",
+            [shock_label(x) for x in spot_changes],
+            grid.T,
             "Implied-vol change",
+            "Spot change",
+            colorbar=False,
         ),
         key="risk_heatmap",
     )
