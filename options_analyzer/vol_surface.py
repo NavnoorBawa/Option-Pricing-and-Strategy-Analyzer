@@ -28,8 +28,9 @@ Two sources are supported:
   ``dw/dT`` at fixed ``y`` comes from secants between neighbouring maturities
   evaluated at the same ``y``: their Fritsch-Butland weighted harmonic mean
   inside, the one-sided three-point formula at the first maturity and the
-  one-sided secant at the last. A secant that is negative beyond quote
-  precision is calendar arbitrage.
+  one-sided secant at the last. A secant that falls by more than the quotes'
+  precision is calendar arbitrage; one that changes by less resolves nothing
+  and is not used, and where no secant is left local vol is undefined.
 """
 
 from __future__ import annotations
@@ -46,6 +47,7 @@ from .implied_vol import ImpliedVolError, implied_volatility
 
 __all__ = [
     "QuoteParseError",
+    "QuoteWarning",
     "SSVIParams",
     "SVISlice",
     "VolSurface",
@@ -107,27 +109,51 @@ class SVISlice:
         return self.a + self.b * self.s * np.sqrt(1.0 - self.rho * self.rho)
 
 
+_RHO_FACE = 0.99  # |rho| of the starting points that sit on the edge of the admissible region
+
+
 def _svi_start_points(y, iv, T, n_best: int = 3) -> list[np.ndarray]:
-    """Quasi-explicit starting points: for fixed ``(m, s)`` SVI is linear in ``(a, b s, rho b s)``."""
+    """Quasi-explicit starting points (Zeliade): for fixed ``(m, s)`` SVI is linear in ``(a, c = b s, d = rho c)``.
+
+    On a grid of ``(m, s)`` the weighted linear least-squares problem is solved subject to ``|d| < c``: the
+    unconstrained solution where it satisfies that, otherwise the better of the two edges ``d = +-0.99 c``.
+    Clipping an unconstrained solution instead (``c`` to about 0, or ``rho`` alone to 0.99) kept almost none of
+    a steep, nearly linear skew's slope, and every start was a flat smile the optimiser could not leave.
+    """
     w = iv * iv * T
     weight = 1.0 / (2.0 * iv * T)  # d(iv) = dw / (2 iv T): weighted variance residuals approximate vol residuals
+    target = w * weight
     lo, hi = y.min(), y.max()
     width = max(hi - lo, 1e-4)
     m_grid = np.linspace(lo - 0.5 * width, hi + 0.5 * width, 25)
     s_grid = width * np.geomspace(0.003, 2.0, 24)
     m_all, s_all = (g.ravel() for g in np.meshgrid(m_grid, s_grid, indexing="ij"))
     z = (y[None, :] - m_all[:, None]) / s_all[:, None]
-    design = np.stack([np.ones_like(z), z, np.sqrt(z * z + 1.0)], axis=-1) * weight[None, :, None]
-    normal = np.einsum("gni,gnj->gij", design, design) + 1e-14 * np.eye(3)
-    rhs = np.einsum("gni,n->gi", design, w * weight)
-    a, d, c = np.linalg.solve(normal, rhs[..., None])[..., 0].T
-    c = np.maximum(c, 1e-10)
-    rho = np.clip(d / c, -0.99, 0.99)
-    b = np.minimum(c / s_all, 2.0 / (1.0 + np.abs(rho)))
+    root = np.sqrt(z * z + 1.0)
+    ones = np.ones_like(z)
+
+    def solve(columns):  # weighted least squares at every grid point: coefficients and cost
+        design = np.stack(columns, axis=-1) * weight[None, :, None]
+        normal = np.einsum("gni,gnj->gij", design, design) + 1e-14 * np.eye(len(columns))
+        coef = np.linalg.solve(normal, np.einsum("gni,n->gi", design, target)[..., None])[..., 0]
+        return coef, np.sum((np.einsum("gni,gi->gn", design, coef) - target) ** 2, axis=1)
+
+    coef, cost = solve([ones, z, root])
+    a, d, c = coef.T
+    inside = (c > 0) & (np.abs(d) < _RHO_FACE * c)
+    a, c = np.where(inside, a, np.mean(w)), np.where(inside, c, 0.0)  # flat smile until an edge does better
+    rho = np.where(inside, d / np.where(inside, c, 1.0), 0.0)
+    cost = np.where(inside, cost, np.sum((np.mean(w) * weight - target) ** 2))
+    for sign in (1.0, -1.0):
+        coef, cost_edge = solve([ones, sign * _RHO_FACE * z + root])
+        a_edge, c_edge = coef.T
+        better = (c_edge > 0) & (cost_edge < cost)
+        a, c, cost = np.where(better, a_edge, a), np.where(better, c_edge, c), np.where(better, cost_edge, cost)
+        rho = np.where(better, sign * _RHO_FACE, rho)
+    b = np.minimum(np.maximum(c, 1e-12) / s_all, 2.0 / (1.0 + np.abs(rho)))  # Lee's wing bound
     a = np.maximum(a, -b * s_all * np.sqrt(1.0 - rho * rho))  # keep the minimum variance non-negative
     params = np.column_stack([a, b, rho, m_all, s_all])
-    root = np.sqrt((y[None, :] - m_all[:, None]) ** 2 + s_all[:, None] ** 2)
-    fitted = a[:, None] + b[:, None] * (rho[:, None] * (y[None, :] - m_all[:, None]) + root)
+    fitted = a[:, None] + b[:, None] * s_all[:, None] * (rho[:, None] * z + root)
     cost = np.sum(((fitted - w[None, :]) * weight[None, :]) ** 2, axis=1)
     return [params[i] for i in np.argsort(cost)[:n_best]]
 
@@ -135,30 +161,36 @@ def _svi_start_points(y, iv, T, n_best: int = 3) -> list[np.ndarray]:
 QUOTE_PRECISION = 1e-4  # implied-vol precision of a quote: differences below it are noise
 MATURITY_TOLERANCE = 0.5 / 365  # maturities this close (half a day, in years) are the same expiry
 _RHO_MAX = 0.999
-_LOG_S = (-25.0, 5.0)
+_LOG_S_RANGE = (-12.0, 6.0)  # s from e^-12 to e^6 times the quoted range of y: a kink to a parabola
 
 
 def fit_svi(y, iv, T: float) -> SVISlice:
     """Least-squares raw-SVI fit to implied vols ``iv`` at forward log-moneyness ``y`` and maturity ``T``.
 
-    The residuals are implied-vol errors. ``b >= 0``, ``|rho| < 1``, ``s > 0``
-    and a vertex ``m`` within a few quoted ranges of the quotes hold by
-    construction (``b = beta^2``, ``rho = 0.999 tanh(r)``, ``s = e^sigma``,
-    ``m = centre + span tanh(mu)``); a negative minimum variance and a breach of
-    Lee's wing bound ``b (1 + |rho|) <= 2`` are penalised. Several quasi-explicit
-    starting points are refined and the best fit is kept. Noise-free SVI (hence
-    SSVI) quotes are recovered to solver precision.
+    The residuals are implied-vol errors. ``b >= 0``, ``|rho| < 1``, an ``s`` from
+    a kink to a parabola and a vertex ``m`` within a few quoted ranges of the
+    quotes hold by construction (``b = |beta|``, ``rho = 0.999 tanh(r)``,
+    ``ln s`` and ``m`` mapped through ``tanh`` onto their ranges), with no
+    parameter whose gradient is cut to zero; a negative minimum variance and a
+    breach of Lee's wing bound ``b (1 + |rho|) <= 2`` are penalised. Several
+    quasi-explicit starting points (:func:`_svi_start_points`) are refined and
+    the best fit is kept. Noise-free SVI (hence SSVI) quotes are recovered to
+    solver precision.
     """
     y = np.asarray(y, dtype=float)
     iv = np.asarray(iv, dtype=float)
     lo, hi = y.min(), y.max()
-    centre, span = 0.5 * (lo + hi), 3.5 * max(hi - lo, 1e-4)
+    width = max(hi - lo, 1e-4)
+    centre, span = 0.5 * (lo + hi), 3.5 * width
+    log_s_mid = np.log(width) + 0.5 * (_LOG_S_RANGE[0] + _LOG_S_RANGE[1])
+    log_s_half = 0.5 * (_LOG_S_RANGE[1] - _LOG_S_RANGE[0])
     penalty = 10.0 * np.sqrt(len(y))
     vega = 1.0 / (2.0 * np.sqrt(np.mean(iv * iv * T) * T))  # variance -> vol units for the penalties
 
     def unpack(x):
-        a, beta, r, mu, log_s = x
-        return a, beta * beta, _RHO_MAX * np.tanh(r), centre + span * np.tanh(mu), np.exp(np.clip(log_s, *_LOG_S))
+        a, beta, r, mu, sigma = x
+        m = centre + span * np.tanh(mu)
+        return a, abs(beta), _RHO_MAX * np.tanh(r), m, np.exp(log_s_mid + log_s_half * np.tanh(sigma))
 
     def residuals(x):
         a, b, rho, m, s = unpack(x)
@@ -170,7 +202,7 @@ def fit_svi(y, iv, T: float) -> SVISlice:
         return np.concatenate([np.sqrt(w / T) - iv, [penalty * vega * max(-wmin, 0.0), penalty * max(lee, 0.0)]])
 
     def jacobian(x):
-        _, beta, r, mu, log_s = x
+        _, beta, r, mu, sigma = x
         a, b, rho, m, s = unpack(x)
         z = y - m
         root = np.sqrt(z * z + s * s)
@@ -185,10 +217,10 @@ def fit_svi(y, iv, T: float) -> SVISlice:
             jac[-1] = penalty * np.array([0.0, 1.0 + abs(rho), b * np.sign(rho), 0.0, 0.0])
         chain = [
             1.0,
-            2.0 * beta,
+            1.0 if beta >= 0 else -1.0,
             _RHO_MAX * (1.0 - np.tanh(r) ** 2),
             span * (1.0 - np.tanh(mu) ** 2),
-            s if _LOG_S[0] < log_s < _LOG_S[1] else 0.0,
+            s * log_s_half * (1.0 - np.tanh(sigma) ** 2),
         ]
         return jac * np.array(chain)[None, :]
 
@@ -197,14 +229,17 @@ def fit_svi(y, iv, T: float) -> SVISlice:
             residuals, x0, jac=jacobian, method="lm", x_scale="jac", ftol=1e-10, xtol=1e-12, gtol=1e-12, max_nfev=budget
         )
 
+    def inside(value):
+        return np.arctanh(np.clip(value, -0.999, 0.999))
+
     starts = [
         np.array(
             [
                 a,
-                np.sqrt(b),
-                np.arctanh(np.clip(rho / _RHO_MAX, -0.999, 0.999)),
-                np.arctanh(np.clip((m - centre) / span, -0.999, 0.999)),
-                np.log(s),
+                b,
+                inside(rho / _RHO_MAX),
+                inside((m - centre) / span),
+                inside((np.log(s) - log_s_mid) / log_s_half),
             ]
         )
         for a, b, rho, m, s in _svi_start_points(y, iv, T)
@@ -438,6 +473,10 @@ class QuoteParseError(ValueError):
     """The uploaded quotes cannot be turned into a surface."""
 
 
+class QuoteWarning(str):
+    """A parse message about a unit that had to be guessed: the reading may be wrong, so show it prominently."""
+
+
 _UNITS = {
     "%": "percent",
     "pct": "percent",
@@ -589,8 +628,10 @@ def _time_column(frame: pd.DataFrame, column) -> pd.Series:
 def _maturities(frame: pd.DataFrame, found: dict, used: list[str], messages: list[str]) -> pd.Series:
     """Time to expiry in years, from a days column if there is one, otherwise from a maturity column.
 
-    A maturity column whose header does not say years is taken to be in days when its values go above 30, or
-    when they are all whole numbers from 5 up (a weekly chain at 7, 14, 21, 28 is days, not decades).
+    A maturity column whose header does not say years is converted from days when its values go above 30 (no
+    listed option runs that many years). Up to 30, whole numbers from 5 up are as likely to be years (a 1, 2, 3,
+    5, 7, 10-year tenor grid) as days (a weekly chain at 7, 14, 21, 28), so the file is refused with a request
+    to name the unit; smaller whole numbers, and fractions above 10, are read as years with a warning.
     """
     if "days" in found:
         column = found["days"][0]
@@ -603,23 +644,26 @@ def _maturities(frame: pd.DataFrame, found: dict, used: list[str], messages: lis
     positive = values[values > 0]
     largest = values.max()
     whole = bool(len(positive)) and bool(np.all(positive == positive.round()))
-    explicit = unit == "years"
-    if largest > 30 or (whole and largest >= 5 and not explicit):
-        if largest > 30:
-            reason = f"go up to {largest:g}, which only makes sense in days"
-        else:
-            reason = f"are whole numbers from {positive.min():g} to {largest:g}, which look like days"
+    rename = "name the column 'Days' if they are days to expiry, or 'Maturity (years)' if they are years"
+    if largest > 30:
         messages.append(
-            f"Maturities in '{column}' {reason}; converted days to years (ACT/365). Name the column 'Days' to make "
-            "this explicit, or 'Maturity (years)' if they are years."
+            f"Maturities in '{column}' go up to {largest:g}, which only makes sense in days; converted days to "
+            "years (ACT/365). Name the column 'Days' to make this explicit."
         )
         used.append(f"maturity from '{column}' (days)")
         return values / 365.0
-    if whole and not explicit:
-        messages.append(
-            f"Maturities in '{column}' are whole numbers up to {largest:g}, read as years; name the column 'Days' "
-            "if they are days."
-        )
+    if unit != "years":
+        if whole and largest >= 5:
+            raise QuoteParseError(
+                f"the maturities in '{column}' are whole numbers from {positive.min():g} to {largest:g}, which "
+                f"could be years or days; {rename}"
+            )
+        if whole:
+            messages.append(
+                QuoteWarning(f"Maturities in '{column}' are whole numbers up to {largest:g}, read as years; {rename}.")
+            )
+        elif largest > 10:
+            messages.append(QuoteWarning(f"Maturities in '{column}' go up to {largest:g}, read as years; {rename}."))
     used.append(f"maturity from '{column}' (years)")
     return values
 
@@ -681,12 +725,14 @@ def parse_quotes(
     with a call/put ``Type`` column. Prices are inverted with Black-Scholes-Merton
     at ``spot``, ``rate`` and ``dividend_yield``. Units in brackets are read
     (``IV (%)``, ``Maturity (days)``), values may carry ``%`` signs and thousands
-    separators, and a maturity column that can only hold days (see :func:`_maturities`)
-    is converted. Dates and values above 100 years' worth of days are refused.
+    separators, a maturity column that can only hold days (see :func:`_maturities`)
+    is converted, and one that could hold years or days is refused. Dates and values
+    above 100 years' worth of days are refused.
 
     Returns ``(clean, messages)`` where ``clean`` has columns ``strike``,
     ``maturity`` (years), ``iv`` (decimal) and ``messages`` describes every
-    interpretation and adjustment. Raises :class:`QuoteParseError` if the data is unusable.
+    interpretation and adjustment; a :class:`QuoteWarning` among them flags a unit
+    that was guessed. Raises :class:`QuoteParseError` if the data is unusable.
     """
     messages: list[str] = []
     if len(frame) > MAX_ROWS:
@@ -782,8 +828,10 @@ def parse_quotes(
             messages.append(f"Implied vols read as decimals (median {median:.4g} = {median:.2%}).")
         if iv_percent is None and 1.0 <= median <= 5.0:
             messages.append(
-                f"A median implied vol of {median:.4g} is ambiguous (it could be {median:.4g}% or {median:.0%}); "
-                "name the column 'IV (%)' if the values are percentages."
+                QuoteWarning(
+                    f"A median implied vol of {median:.4g} is ambiguous (it could be {median:.4g}% or {median:.0%}); "
+                    "name the column 'IV (%)' if the values are percentages."
+                )
             )
     if (data["iv"] > 5.0).any():
         n_bad = int((data["iv"] > 5.0).sum())
@@ -853,32 +901,38 @@ def _time_derivative(w, cover, tol, Ts):
     evaluated at row ``i``'s ``y``, whether that is close enough to slice ``i + k``'s quotes, and the
     total-variance precision of its quotes (NaN / False where slice ``i + k`` does not exist).
 
-    Inside: the Fritsch-Butland weighted harmonic mean of the two secants. First maturity: the one-sided
-    three-point formula (second order, capped at three times the secant), or the one-sided secant where that
-    is not positive or the third maturity is not quoted near this ``y``; at short maturities the secant's
-    truncation error dominates. Last maturity: the one-sided secant, because at long maturities quote noise in
-    total variance (which grows with ``T``) dominates and the three-point formula amplifies it.
+    A secant is only used where its change in total variance is larger than the two slices' quote precision:
+    one that falls by more is calendar arbitrage, and one that changes by less (two expiries a day apart a year
+    out, say) does not resolve the slope or even its sign. Inside: the Fritsch-Butland weighted harmonic mean of
+    the two secants, or the one that is resolved. First maturity: the one-sided three-point formula (second
+    order, capped at three times the secant), or the one-sided secant where that is not positive or the third
+    maturity is not quoted near this ``y``; at short maturities the secant's truncation error dominates. Last
+    maturity: the one-sided secant, because at long maturities quote noise in total variance (which grows with
+    ``T``) dominates and the three-point formula amplifies it. ``w_t`` is 0 where no secant is resolved.
     Returns ``(w_t, calendar_bad, available)``, each ``(n_T, n_y)``.
     """
     h = np.diff(Ts)
     h_l = np.r_[np.nan, h][:, None]
     h_r = np.r_[h, np.nan][:, None]
     diff_l, diff_r = w[0] - w[-1], w[1] - w[0]
-    negative = (cover[-1] & (diff_l < -(tol[-1] + tol[0]))) | (cover[1] & (diff_r < -(tol[0] + tol[1])))
-    d_l, d_r = np.maximum(diff_l, 0.0) / h_l, np.maximum(diff_r, 0.0) / h_r
+    precision_l, precision_r = tol[-1] + tol[0], tol[0] + tol[1]
+    negative = (cover[-1] & (diff_l < -precision_l)) | (cover[1] & (diff_r < -precision_r))
     with np.errstate(divide="ignore", invalid="ignore"):
+        d_l = np.where(diff_l > precision_l, diff_l, 0.0) / h_l  # 0 unless the secant rises measurably
+        d_r = np.where(diff_r > precision_r, diff_r, 0.0) / h_r
         harmonic = 3 * (h_l + h_r) / ((2 * h_r + h_l) / d_l + (h_r + 2 * h_l) / d_r)
-    w_t = np.where((d_l > 0) & (d_r > 0), harmonic, (h_r * d_l + h_l * d_r) / (h_l + h_r))
+    w_t = np.where((d_l > 0) & (d_r > 0), harmonic, np.maximum(d_l, d_r))
     available = cover[-1] & cover[1]
     w_t[0], available[0] = d_r[0], cover[1][0]
     w_t[-1], available[-1] = d_l[-1], cover[-1][-1]
     if len(Ts) >= 3:
-        near, far = d_r[0], (w[2][0] - w[1][0]) / h[1]  # secants T0-T1 and T1-T2, both at row 0's y
+        near = d_r[0]
+        rise = w[2][0] - w[1][0]  # secant T1-T2 at row 0's y
+        far = np.where(rise > tol[1][0] + tol[2][0], rise, 0.0) / h[1]
         three_point = ((2 * h[0] + h[1]) * near - h[0] * far) / (h[0] + h[1])
         use = cover[2][0] & (near > 0) & (far > 0) & (three_point > 0)
         w_t[0] = np.where(use, np.minimum(three_point, 3 * near), near)
-    bad = negative | (available & ~(w_t > 0))
-    return w_t, bad, available
+    return w_t, negative, available
 
 
 @dataclass(frozen=True)
@@ -889,6 +943,7 @@ class _MarketValues:
     butterfly_bad: np.ndarray
     defined: np.ndarray  # inside the quotes with positive total variance
     available: np.ndarray  # dw/dT has its neighbours close to their quotes
+    unresolved: np.ndarray  # no secant rises by more than the quote precision, and none falls by more
     zero_variance: bool
 
 
@@ -920,11 +975,19 @@ def _market_values(fits, Ts, quoted_y, carry, moneyness) -> _MarketValues:
     g = durrleman_g(y, np.where(defined, own, 1.0), w_y, w_yy)
     calendar_bad &= defined
     butterfly_bad = defined & (g <= 0)
-    ok = defined & available & ~calendar_bad & ~butterfly_bad
+    unresolved = defined & available & ~calendar_bad & ~(w_t > 0)
+    ok = defined & available & ~calendar_bad & ~butterfly_bad & ~unresolved
     with np.errstate(divide="ignore", invalid="ignore"):
         local = np.where(ok, np.sqrt(np.where(ok, w_t / g, 0.0)), np.nan)
     return _MarketValues(
-        implied, local, calendar_bad, butterfly_bad, defined, available, bool((inside & (own <= 0)).any())
+        implied,
+        local,
+        calendar_bad,
+        butterfly_bad,
+        defined,
+        available,
+        unresolved,
+        bool((inside & (own <= 0)).any()),
     )
 
 
@@ -991,8 +1054,10 @@ def fit_market_surface(
     poor = Ts[rmse > POOR_FIT_RMSE]
     if poor.size:
         notes.append(
-            f"The SVI fit misses the quotes by more than {POOR_FIT_RMSE * 100:.0f} vol point (RMSE) at maturities "
-            f"{', '.join(f'{t:.3g}y' for t in poor)}; check those quotes."
+            f"The SVI smile is more than {POOR_FIT_RMSE * 100:.0f} vol point (RMSE) from the quotes at maturities "
+            f"{', '.join(f'{t:.3g}y' for t in poor)}: the quotes there are noisy, or their smile has a shape a "
+            "single SVI curve cannot follow (an SVI smile has one trough and no humps). The Smiles chart shows "
+            "how far the fit is from each quote."
         )
 
     moneyness = _moneyness_grid(np.exp(quoted_y + carry * Ts[:, None]), n_moneyness)
@@ -1002,6 +1067,13 @@ def fit_market_surface(
         notes.append(
             f"Local vol is left blank at {uncovered} grid point(s) where dw/dT would need a neighbouring maturity "
             "far outside its quoted strikes."
+        )
+    unresolved = int(values.unresolved.sum())
+    if unresolved:
+        notes.append(
+            f"Local vol is left blank at {unresolved} grid point(s) where total variance changes by less than the "
+            "quotes' precision between neighbouring maturities, so dw/dT cannot be measured there (this is not "
+            "calendar arbitrage)."
         )
     if values.zero_variance:
         notes.append("The fitted surface has zero total variance at some quoted points; check the quotes.")

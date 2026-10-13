@@ -100,6 +100,73 @@ def test_svi_fit_keeps_variance_positive_and_wings_within_lees_bound():
     assert fitted.b * (1 + abs(fitted.rho)) <= 2.0 + 1e-6
 
 
+def ssvi_slice(params, t) -> vs.SVISlice:
+    """The raw-SVI parameters of an SSVI slice."""
+    theta = params.theta(t)
+    phi = params.phi(theta)
+    rho = params.rho
+    return vs.SVISlice(theta * (1 - rho * rho) / 2, theta * phi / 2, rho, -rho / phi, np.sqrt(1 - rho * rho) / phi)
+
+
+def vol_rmse(svi, y, iv, t) -> float:
+    return float(np.sqrt(np.mean((np.sqrt(np.maximum(svi.total_variance(y)[0], 0.0) / t) - iv) ** 2)))
+
+
+STEEP = vs.SSVIParams(0.159804, 0.469738, 3.961008, -0.866546, 0.482821, 0.438353)  # an equity index skew
+
+
+def test_svi_fit_follows_a_steep_nearly_linear_skew():
+    # Every starting point used to be a flat smile (b of 1e-10 to 1e-7): the slope was lost when the start's
+    # rho was clipped to 0.99, and the optimiser could not leave it. The fit ended at rho = -0.999, s = 148 with
+    # an RMSE of 3.45 vol points, while the generating smile is 0.30 points from these quotes.
+    t = 30 / 365
+    y = np.linspace(-0.110539, 0.103477, 17)
+    iv = np.array(
+        [
+            0.284765,
+            0.281186,
+            0.277529,
+            0.260996,
+            0.261928,
+            0.251624,
+            0.252496,
+            0.242422,
+            0.2396,
+            0.22634,
+            0.219801,
+            0.214376,
+            0.205934,
+            0.198332,
+            0.192781,
+            0.17986,
+            0.171056,
+        ]
+    )  # SSVI quotes plus 0.3 vol-point noise
+    assert all(b > 1e-4 for _, b, _, _, _ in vs._svi_start_points(y, iv, t))
+    assert vol_rmse(vs.fit_svi(y, iv, t), y, iv, t) <= 1.5 * vol_rmse(ssvi_slice(STEEP, t), y, iv, t)
+
+
+def test_svi_fit_reaches_the_generating_accuracy_on_steep_noisy_skews():
+    # Steep equity skews (rho -0.9 to -0.7) quoted within one standard deviation with 0.2 vol-point noise: 8% of
+    # them used to end in a flat local minimum, up to 4.2 vol points from the quotes.
+    rng = np.random.default_rng(99)
+    for _ in range(40):
+        rho = rng.uniform(-0.9, -0.7)
+        params = vs.SSVIParams(
+            rng.uniform(0.12, 0.4),
+            rng.uniform(0.15, 0.35),
+            rng.uniform(0.5, 4),
+            rho,
+            rng.uniform(0.2, 0.8) * 2 / (1 + abs(rho)),
+            rng.uniform(0.3, 0.5),
+        )
+        t = rng.choice((7, 14, 30, 60, 91, 182, 365)) / 365
+        sd = np.sqrt(params.theta(t))
+        y = np.linspace(-1.3 * sd, 0.8 * sd, rng.integers(9, 25))
+        iv = np.sqrt(params.total_variance(y, t)[0] / t) + rng.normal(0, 0.002, len(y))
+        assert vol_rmse(vs.fit_svi(y, iv, t), y, iv, t) <= 1.5 * vol_rmse(ssvi_slice(params, t), y, iv, t)
+
+
 # ---------------------------------------------------------------------------
 # Market surface accuracy against the exact SSVI surface
 # ---------------------------------------------------------------------------
@@ -175,6 +242,62 @@ def test_calendar_arbitrage_at_the_last_maturity_flags_both_ends():
     fitted = vs.fit_market_surface(quotes, 100, 0.04, 0.0)
     assert fitted.calendar_violations > 0
     assert np.isnan(fitted.local_vol[-1]).all() and np.isnan(fitted.local_vol[-2]).all()
+
+
+def test_a_steep_noisy_equity_surface_is_fitted_without_a_poor_fit_note():
+    # The 30-day smile of this surface ended in a flat local minimum: fit RMSE 2.3 vol points, implied vol 3.5
+    # and local vol 8.4 points off, and a note telling the user to check quotes that were fine.
+    rng = np.random.default_rng(1071)
+    rows = []
+    for days in (14, 30, 60, 91, 182):
+        t = days / 365
+        for y in np.linspace(-1.2, 1.0, 17) * np.sqrt(STEEP.theta(t)):
+            iv = np.sqrt(STEEP.total_variance(y, t)[0] / t) + rng.normal(0, 0.002)
+            rows.append({"strike": 100 * np.exp(y + 0.05 * t), "maturity": t, "iv": float(iv)})
+    fitted = vs.fit_market_surface(pd.DataFrame(rows), 100, 0.05, 0.0)
+    true = vs.ssvi_surface(STEEP, 0.05, 0.0, fitted.moneyness, fitted.maturities)
+    assert fitted.fit_rmse.max() < 0.003  # measured 0.14-0.21 vol points against 0.2 points of noise
+    assert not any("SVI smile" in note for note in fitted.notes)
+    assert np.nanmax(np.abs(fitted.implied_vol - true.implied_vol)) < 0.005  # measured 0.29 vol points
+    assert np.nanmax(np.abs(fitted.local_vol - true.local_vol)[:-1]) < 0.015  # measured 0.77 vol points
+
+
+def test_a_poor_fit_note_does_not_blame_quotes_that_svi_cannot_shape():
+    # A humped (concave) smile is exact data that no SVI curve follows; the note used to say "check those quotes".
+    params = vs.SSVIParams()
+    quotes = ssvi_quotes(params, 0.0, 0.0, (91, 182, 365), np.linspace(0.8, 1.2, 9))
+    humped = quotes["maturity"] == quotes["maturity"].min()
+    quotes.loc[humped, "iv"] = 0.25 - 1.5 * np.log(quotes.loc[humped, "strike"] / 100) ** 2
+    fitted = vs.fit_market_surface(quotes, 100, 0.0, 0.0)
+    notes = [note for note in fitted.notes if "SVI smile" in note]
+    assert fitted.fit_rmse[0] > vs.POOR_FIT_RMSE and len(notes) == 1
+    assert "0.249y" in notes[0] and "a shape a single SVI curve cannot follow" in notes[0]
+    assert "check those quotes" not in notes[0]
+
+
+def _flat_last_day(days) -> pd.DataFrame:
+    """Rounded SSVI quotes where the 366-day expiry has the same total variance as the 365-day one."""
+    quotes = ssvi_quotes(vs.SSVIParams(), 0.0, 0.0, days, np.linspace(0.8, 1.2, 9), decimals=4)
+    year, next_day = (quotes["maturity"] == round(d / 365, 10) for d in (365, 366))
+    quotes.loc[next_day, "iv"] = np.round(quotes.loc[year, "iv"].to_numpy() * np.sqrt(365 / 366), 4)
+    return quotes
+
+
+def test_total_variance_flat_within_quote_precision_is_not_calendar_arbitrage():
+    # From 365 to 366 days total variance changes by at most 2.4e-5, within the quotes' precision. As the last
+    # maturity this counted 31 calendar-arbitrage points; on both rows local vol was up to 30 vol points too low
+    # (3.7% at the money against a true 20.6%), because the unresolved one-day secant, about 0, set dw/dT.
+    params = vs.SSVIParams()
+    last = vs.fit_market_surface(_flat_last_day((30, 60, 91, 182, 365, 366)), 100, 0.0, 0.0)
+    assert last.calendar_violations == 0 and last.butterfly_violations == 0
+    assert np.isnan(last.local_vol[-1]).all() and np.isfinite(last.local_vol[:-1]).all()
+    assert any("changes by less than the quotes' precision" in n and "not calendar arbitrage" in n for n in last.notes)
+    inside = vs.fit_market_surface(_flat_last_day((30, 60, 91, 182, 365, 366, 730)), 100, 0.0, 0.0)
+    assert inside.calendar_violations == 0 and np.isfinite(inside.local_vol).all()
+    for fitted in (last, inside):
+        true = vs.ssvi_surface(params, 0.0, 0.0, fitted.moneyness, fitted.maturities)
+        error = np.abs(fitted.local_vol - true.local_vol)[4:6]  # the 365 and 366-day rows
+        assert np.nanmax(error) < 0.02  # measured 1.6 vol points: the 182-365 day secant alone
 
 
 def test_rounded_dense_chains_do_not_raise_spurious_calendar_flags():
@@ -458,7 +581,8 @@ def test_ambiguous_vol_units_are_called_out():
     raw["ImpliedVol"] = raw["ImpliedVol"] * 10
     clean, messages = vs.parse_quotes(raw)
     assert clean["iv"].median() > 1  # read as decimals, as before ...
-    assert any("ambiguous" in m and "IV (%)" in m for m in messages)  # ... but the user is told
+    warnings = [m for m in messages if isinstance(m, vs.QuoteWarning)]
+    assert len(warnings) == 1 and "ambiguous" in warnings[0] and "IV (%)" in warnings[0]  # ... but the user is warned
 
 
 def test_percent_signs_and_thousands_separators_are_stripped():
@@ -521,14 +645,41 @@ def test_yyyymmdd_expiries_alone_are_refused_not_read_as_days():
         vs.parse_quotes(raw)
 
 
-@pytest.mark.parametrize("header", ["Maturity", "Expiry", "T", "Tenor"])
-def test_whole_number_maturities_that_look_like_days_are_converted(header):
-    # A weekly chain at 7, 14, 21 and 28 days in a maturity column was read as 7-28 years without a word.
-    quotes = ssvi_quotes(vs.SSVIParams(), 0.04, 0.0, (7, 14, 21, 28), np.linspace(0.9, 1.1, 9))
-    raw = pd.DataFrame({"Strike": quotes["strike"], header: (quotes["maturity"] * 365).round(), "IV": quotes["iv"]})
-    clean, messages = vs.parse_quotes(raw)
-    assert clean["maturity"].max() == pytest.approx(28 / 365)
-    assert any("whole numbers from 7 to 28, which look like days" in m for m in messages)
+def _maturity_frame(header: str, values: tuple) -> pd.DataFrame:
+    """SSVI implied vols with maturities ``values`` in a column ``header`` (generated as years up to 10, else days)."""
+    years = np.array(values, dtype=float) if max(values) <= 10 else np.array(values, dtype=float) / 365
+    quotes = []
+    for value, t in zip(values, years, strict=True):
+        for m in np.linspace(0.8, 1.2, 9):
+            iv = np.sqrt(vs.SSVIParams().total_variance(np.log(m) - 0.04 * t, t)[0] / t)
+            quotes.append({"Strike": 100 * m, header: value, "IV": float(iv)})
+    return pd.DataFrame(quotes)
+
+
+@pytest.mark.parametrize("header", ["Maturity", "Expiry", "T", "Tenor", "TTM", "Time to maturity"])
+@pytest.mark.parametrize("values", [(1, 2, 3, 5, 7, 10), (7, 14, 21, 28), (1, 2, 5)])
+def test_whole_number_maturities_that_could_be_years_or_days_are_refused(header, values):
+    # A 1-10 year tenor grid was read as 1-10 days (and a surface built on it); a weekly chain at 7-28 days used
+    # to be read as 7-28 years. Neither header says which, so the user is asked to.
+    with pytest.raises(
+        vs.QuoteParseError, match=r"could be years or days; name the column 'Days'.*'Maturity \(years\)'"
+    ):
+        vs.parse_quotes(_maturity_frame(header, values))
+    years, _ = vs.parse_quotes(_maturity_frame("Maturity (years)", values))
+    days, _ = vs.parse_quotes(_maturity_frame("Days", values))
+    assert years["maturity"].max() == pytest.approx(max(values))
+    assert days["maturity"].max() == pytest.approx(max(values) / 365)
+
+
+def test_fractional_days_in_a_maturity_column_get_a_units_warning():
+    # 6.65 to 27.65 days were read as 6.65 to 27.65 years with no word about units.
+    clean, messages = vs.parse_quotes(_maturity_frame("Maturity", (6.65, 13.65, 20.65, 27.65)))
+    warnings = [m for m in messages if isinstance(m, vs.QuoteWarning)]
+    assert clean["maturity"].max() == pytest.approx(27.65)
+    assert len(warnings) == 1 and "go up to 27.65, read as years; name the column 'Days'" in warnings[0]
+    _, labelled = vs.parse_quotes(_maturity_frame("Maturity (years)", (6.65, 13.65, 20.65, 27.65)))
+    _, short = vs.parse_quotes(vs.sample_quotes())  # fractions up to 2 years: nothing to warn about
+    assert not any(isinstance(m, vs.QuoteWarning) for m in labelled + short)
 
 
 def test_whole_years_stay_years_when_the_header_says_so_and_are_flagged_otherwise():
@@ -545,7 +696,7 @@ def test_whole_years_stay_years_when_the_header_says_so_and_are_flagged_otherwis
         pd.DataFrame({"Strike": short["strike"], "Maturity": short_years, "IV": short["iv"]})
     )
     assert clean["maturity"].max() == pytest.approx(2.0)  # 1 and 2: read as years, but the user is told
-    assert any("whole numbers up to 2, read as years" in m for m in messages)
+    assert any(isinstance(m, vs.QuoteWarning) and "whole numbers up to 2, read as years" in m for m in messages)
 
 
 def test_headers_wrapped_in_brackets_are_read():

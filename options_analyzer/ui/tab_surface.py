@@ -145,7 +145,10 @@ def _quote_controls(inputs: Inputs) -> vs.VolSurface | None:
         st.error(f"Could not build a surface from this file: {exc}")
         return None
     for message in messages:
-        st.caption(f"ℹ️ {message}")
+        if isinstance(message, vs.QuoteWarning):  # a unit was guessed: the surface may be read wrongly
+            st.warning(message)
+        else:
+            st.caption(f"ℹ️ {message}")
     if error:
         st.error(f"Could not build a surface from this file: {error}")
     return surface
@@ -281,8 +284,8 @@ def render(inputs: Inputs) -> None:
         "Calendar-arbitrage points",
         surface.calendar_violations,
         border=True,
-        help="Grid points where total implied variance does not increase with maturity at fixed forward "
-        "moneyness (∂w/∂T ≤ 0, beyond quote precision for market quotes).",
+        help="Grid points where total implied variance falls as maturity increases at fixed forward moneyness "
+        "(∂w/∂T < 0; for market quotes, by more than the quotes' precision).",
     )
     c[2].metric(
         "Butterfly-arbitrage points",
@@ -302,7 +305,8 @@ def render(inputs: Inputs) -> None:
     if valid < quoted:
         st.caption(
             "Local volatility is left blank where it is undefined: where the surface has static arbitrage, and for "
-            "quotes where ∂w/∂T would need a neighbouring maturity far outside its quoted strikes."
+            "quotes where ∂w/∂T would need a neighbouring maturity far outside its quoted strikes or where total "
+            "variance changes too little between maturities to measure it."
         )
     if quoted < surface.implied_vol.size:
         st.caption("Implied volatility is left blank outside each maturity's quoted strikes (no extrapolation).")

@@ -198,3 +198,53 @@ def test_the_excel_workbook_is_only_built_when_downloaded(app, monkeypatch):
     with zipfile.ZipFile(io.BytesIO(workbook)) as archive:
         sheets = archive.read("xl/workbook.xml").decode()
     assert all(f'name="{name}"' in sheets for name in ("ImpliedVol", "LocalVol", "Summary", "Quotes"))
+
+
+def _maturity_column(header: str, values, as_years: bool) -> pd.DataFrame:
+    params = vol_surface.SSVIParams()
+    rows = []
+    for value in values:
+        t = value if as_years else value / 365
+        for m in np.linspace(0.8, 1.2, 9):
+            iv = np.sqrt(params.total_variance(np.log(m) - 0.05 * t, t)[0] / t)
+            rows.append({"Strike": round(100 * m, 4), header: value, "ImpliedVol": round(float(iv), 6)})
+    return pd.DataFrame(rows)
+
+
+def test_whole_year_tenors_without_a_unit_ask_for_one_instead_of_becoming_days(app):
+    # 1-10 years under 'Maturity' were read as 1-10 days and a ten-day surface was drawn.
+    _upload(app, _maturity_column("Maturity", (1, 2, 3, 5, 7, 10), as_years=True))
+    assert not app.exception
+    assert any("could be years or days" in e.value and "'Maturity (years)'" in e.value for e in app.error)
+    assert not any(m.label == "Grid" for m in app.metric)  # no surface
+    _upload(app, _maturity_column("Maturity (years)", (1, 2, 3, 5, 7, 10), as_years=True))
+    _ok(app)
+    assert _metric(app, "Grid").startswith("6 × ")
+    readout = [i.value for i in app.info if "the surface's implied vol is" in i.value]
+    assert readout  # the sidebar's one-year contract lies inside a 1-10 year surface
+
+
+def test_a_guessed_maturity_unit_is_a_visible_warning(app):
+    # Fractional days (6.65 to 27.65) were read as years with nothing but a caption saying "(years)".
+    _upload(app, _maturity_column("Maturity", (6.65, 13.65, 20.65, 27.65), as_years=False))
+    for _ in range(2):  # the second run reads the parse messages back from the cache
+        _ok(app)
+        warnings = [w.value for w in app.warning]
+        assert any("go up to 27.65, read as years; name the column 'Days'" in w for w in warnings)
+        assert not any("27.65, read as years" in c.value for c in app.caption)
+        app.selectbox(key="surface_colors").set_value("Plasma").run()
+
+
+def test_flat_total_variance_at_the_last_expiry_is_not_reported_as_calendar_arbitrage(app):
+    params = vol_surface.SSVIParams()
+    rows = []
+    for days in (30, 60, 91, 182, 365, 366):
+        t = min(days, 365) / 365  # the 366-day quotes repeat the 365-day total variance at each forward moneyness
+        for m in np.linspace(0.8, 1.2, 9):
+            y = np.log(m) - 0.05 * t
+            iv = np.sqrt(params.total_variance(y, t)[0] / (days / 365))
+            rows.append({"Strike": 100 * np.exp(y + 0.05 * days / 365), "Days": days, "IV": iv})
+    _upload(app, pd.DataFrame(rows).round(4))
+    _ok(app)
+    assert _metric(app, "Calendar-arbitrage points") == "0"  # was 31
+    assert any("changes by less than the quotes' precision" in w.value for w in app.warning)

@@ -104,13 +104,18 @@ with Gatheral's raw SVI smile
 $$w(y) = a + b\left(\rho\,(y-m) + \sqrt{(y-m)^2 + s^2}\right)$$
 
 by least squares on implied vols, with $b \ge 0$, $|\rho| < 1$, $s > 0$, a non-negative minimum variance and
-Lee's wing bound $b(1+|\rho|) \le 2$. SSVI slices are exactly SVI, so noise-free SSVI quotes are recovered.
+Lee's wing bound $b(1+|\rho|) \le 2$. The search starts from Zeliade's quasi-explicit fits: for fixed $m$ and
+$s$ the smile is linear in $a$, $bs$ and $\rho bs$, solved on a grid of $(m, s)$ with $|\rho| < 1$ imposed, so
+steep, nearly linear equity skews are followed too. SSVI slices are exactly SVI, so noise-free SSVI quotes are
+recovered.
 $\partial_y w$ and $\partial_{yy} w$ are analytic; $\partial_T w$ at fixed $y$ comes from secants between
 neighbouring maturities evaluated at the same $y$ — their Fritsch–Butland weighted harmonic mean inside, the
 one-sided three-point formula at the first maturity (the one-sided secant where that is not positive), and the
-one-sided secant at the last, where quote noise outweighs the secant's truncation error. A secant that is
-negative beyond quote precision is calendar arbitrage. Implied vol is shown only inside each maturity's quoted
-strikes, and local vol only where the neighbouring maturities are quoted near the same forward moneyness.
+one-sided secant at the last, where quote noise outweighs the secant's truncation error. A secant that falls
+by more than the quotes' precision is calendar arbitrage; one that changes by less (two expiries a day apart,
+say) cannot resolve $\partial_T w$ and is not used, and where no secant is left local vol is left blank.
+Implied vol is shown only inside each maturity's quoted strikes, and local vol only where the neighbouring
+maturities are quoted near the same forward moneyness.
 
 ### Limitations
 Constant volatility per leg (no smile dynamics in strategy valuation), European exercise for strategies,
