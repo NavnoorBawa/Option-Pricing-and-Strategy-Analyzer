@@ -18,7 +18,8 @@ def run() -> None:
         page_title="Options Pricing & Strategy Analyzer",
         page_icon="📈",
         layout="wide",
-        initial_sidebar_state="expanded",
+        # Open on desktops; on phones the sidebar would cover the whole page, so it starts collapsed there.
+        initial_sidebar_state="auto",
         menu_items={
             "Get help": REPO_URL,
             "Report a bug": f"{REPO_URL}/issues",

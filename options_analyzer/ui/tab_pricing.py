@@ -7,11 +7,15 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 import streamlit as st
+from scipy.special import ndtr
 
 from .. import black_scholes as bs
 from . import cache, charts
-from .format import md, money
+from .format import md, money, pct
 from .inputs import Inputs
+
+#: Monte Carlo scenarios drawn on the sample-paths chart.
+SAMPLE_PATHS = 60
 
 
 @dataclass(frozen=True)
@@ -22,6 +26,8 @@ class Prices:
     put_note: str = ""
     tree: dict | None = None
     mc: dict | None = None
+    #: Values on the same tree with European exercise (American tree only).
+    european_tree: dict | None = None
 
 
 def compute_prices(inputs: Inputs) -> Prices:
@@ -41,16 +47,18 @@ def compute_prices(inputs: Inputs) -> Prices:
         tree = cache.tree_results(S, K, T, r, sigma, q, model.steps, model.american, model.tree_method)
         # The early-exercise premium is measured on the same lattice, so the tree's discretisation error cancels.
         european = (
-            cache.tree_results(S, K, T, r, sigma, q, model.steps, False, model.tree_method) if model.american else None
+            cache.tree_prices(S, K, T, r, sigma, q, model.steps, False, model.tree_method) if model.american else None
         )
         notes = {}
         for kind, ref in (("call", bs_call), ("put", bs_put)):
             if model.american:
-                premium = tree[kind].price - european[kind].price
+                premium = tree[kind].price - european[kind]
                 notes[kind] = f"Early-exercise premium {money(premium, 4, signed=True)} (same tree, European exercise)"
             else:
-                notes[kind] = f"Tree error vs BSM {money(tree[kind].price - ref, 4, signed=True)}"
-        return Prices(tree["call"].price, tree["put"].price, notes["call"], notes["put"], tree=tree)
+                notes[kind] = f"Tree error vs BSM {money(tree[kind].price - ref, 6, signed=True)}"
+        return Prices(
+            tree["call"].price, tree["put"].price, notes["call"], notes["put"], tree=tree, european_tree=european
+        )
     if model.kind == "monte_carlo":
         mc = cache.mc_results(S, K, T, r, sigma, q, model.n_paths, model.seed, model.antithetic, model.control_variate)
         notes = {
@@ -65,25 +73,160 @@ def compute_prices(inputs: Inputs) -> Prices:
     return Prices(bs_call, bs_put, "Closed-form European value", "Closed-form European value")
 
 
-def render_price_cards(inputs: Inputs, prices: Prices) -> None:
-    S, K, T, r, q = inputs.spot, inputs.strike, inputs.expiry, inputs.rate, inputs.dividend_yield
-    forward = S * np.exp((r - q) * T)
-    parity = prices.call - prices.put - (S * np.exp(-q * T) - K * np.exp(-r * T))
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Call value", money(prices.call, 4), border=True, help=md(prices.call_note))
-    c1.caption(md(prices.call_note))
-    c2.metric("Put value", money(prices.put, 4), border=True, help=md(prices.put_note))
-    c2.caption(md(prices.put_note))
-    c3.metric("Forward price", money(forward, 4), border=True, help="F = S·e^{(r−q)T}")
-    c3.caption(f"Discount factor e^(−rT) = {np.exp(-r * T):.6f}")
-    american = inputs.model.kind == "binomial" and inputs.model.american
-    c4.metric(
-        "Put-call parity gap",
-        "n/a" if american else money(parity, 6),
-        border=True,
-        help="C − P − (S·e^{−qT} − K·e^{−rT}). Zero for European prices; American options only satisfy an inequality.",
+def _model_card(inputs: Inputs, prices: Prices) -> tuple[str, str, str, str]:
+    """``(label, value, caption, help)`` of the fourth headline card: what the sidebar model adds or how far it
+    is from the exact answer. (Put-call parity would read zero for every European model by construction.)"""
+    S, K, T, r, sigma, q = (
+        inputs.spot,
+        inputs.strike,
+        inputs.expiry,
+        inputs.rate,
+        inputs.volatility,
+        inputs.dividend_yield,
     )
-    c4.caption("American options: parity is an inequality" if american else "Should be ≈ 0 for European models")
+    model = inputs.model
+    if model.kind == "binomial" and model.american:
+        premium = {kind: prices.tree[kind].price - prices.european_tree[kind] for kind in ("call", "put")}
+        larger = max(premium, key=lambda kind: abs(premium[kind]))
+        return (
+            "Exercise premium",
+            money(premium[larger], 4),
+            f"early-exercise premium: call {money(premium['call'], 4, signed=True)}, "
+            f"put {money(premium['put'], 4, signed=True)} (against the same tree with European exercise)",
+            "American value minus the value on the same tree with European exercise (the larger of the call's and "
+            "the put's is shown). Measured on one lattice, so the tree's discretisation error cancels.",
+        )
+    if model.kind == "binomial":
+        error = {kind: prices.tree[kind].price - bs.price(S, K, T, r, sigma, q, kind) for kind in ("call", "put")}
+        return (
+            "Tree error vs BSM",
+            money(max(abs(e) for e in error.values()), 6),
+            f"error against the closed-form value: call {money(error['call'], 6, signed=True)}, "
+            f"put {money(error['put'], 6, signed=True)}",
+            "Tree value minus the closed-form Black-Scholes-Merton value, the exact answer for European exercise "
+            "(the larger of the call's and the put's is shown). It shrinks as the number of steps grows.",
+        )
+    if model.kind == "monte_carlo":
+        se = {kind: prices.mc[kind].std_error for kind in ("call", "put")}
+        finite = [v for v in se.values() if np.isfinite(v)]
+        return (
+            "Std. error",
+            money(max(finite), 4) if finite else "–",
+            f"standard error: call {money(se['call'], 4)}, put {money(se['put'], 4)}; 95% CI = price ± 1.96 SE",
+            "Standard error of the simulated prices (the larger of the call's and the put's is shown); it falls "
+            "as one over the square root of the number of paths.",
+        )
+    vst = sigma * np.sqrt(T)
+    if vst > 0:
+        itm = float(ndtr((np.log(S / K) + (r - q - 0.5 * sigma**2) * T) / vst))
+    else:
+        itm = float(np.sign(S * np.exp((r - q) * T) - K) + 1.0) / 2.0  # certain, or 1/2 exactly at the strike
+    return (
+        "Call ITM probability",
+        pct(itm, 2),
+        f"risk-neutral probability of finishing in the money: call N(d₂) = {pct(itm, 2)}, put {pct(1.0 - itm, 2)}",
+        "Probability that the call finishes in the money under the pricing (risk-neutral) measure, N(d₂); the "
+        "put's is 1 − N(d₂). It uses the risk-free drift, so it is not a real-world forecast.",
+    )
+
+
+#: Headline-card text in Streamlit's Source Sans: values at 36 px, labels at 14 px. Digits (tabular) and "$" are
+#: half an em wide; the narrower and wider characters are listed. Labels average under 0.47 em per character.
+_VALUE_PX, _LABEL_PX, _LABEL_EM = 36.0, 14.0, 0.47
+_CHAR_EM = {",": 0.25, ".": 0.25, " ": 0.2, "-": 0.31, "%": 0.83}
+#: Card padding and border, the label's help icon, and the gap between cards (gap="small").
+_CARD_CHROME_PX, _HELP_ICON_PX, _CARD_GAP_PX = 32.0, 22.0, 16.0
+#: Smallest value size on a narrow screen, where the values shrink so that the cards stay two by two.
+_MIN_VALUE_PX = 20.0
+
+_PAIRS = ".st-key-price_cards > :has(> .st-key-price_cards_prices, > .st-key-price_cards_model)"
+_CARDS = ".st-key-price_cards_prices > *, .st-key-price_cards_model > *"
+
+
+def _value_em(value: str) -> float:
+    """Width of a card value in ems of its font size."""
+    return sum(_CHAR_EM.get(c, 0.5) for c in value)
+
+
+def _card_width(label: str, value: str, value_px: float = _VALUE_PX, wrap_label: bool = False) -> float:
+    """Width in px a headline card needs to show its value on one line and its label on one line (or, with
+    ``wrap_label``, one word per line)."""
+    longest = max(len(word) for word in label.split()) if wrap_label else len(label)
+    label_px = _LABEL_PX * _LABEL_EM * longest + _HELP_ICON_PX
+    return max(value_px * _value_em(value), label_px) + _CARD_CHROME_PX
+
+
+def _cards_style(cards: list[tuple[str, str]]) -> str:
+    """Flex sizes that wrap the four cards in pairs: 4 across, then 2 + 2, then 1 per row (never 3 + 1).
+
+    Every card is based on the widest card's width, and each pair on two of them side by side, so the row moves
+    the second pair to its own line before either pair has to stack its cards, and both pairs stack at the same
+    width. (Streamlit bases each card on its own content and each container on a fixed 8rem, so on its own the
+    row wraps 3 + 1, or stacks one pair's cards but not the other's.)
+
+    Where the row is narrower than one pair at full size (a phone), the labels wrap and the values shrink with
+    the row so that the widest still fits half of it, down to 20 px: the cards stay two by two on any phone
+    instead of stacking into four full-width cards that push the tabs below the first screen. The sizes follow
+    the row's own width (a container query), so an open sidebar on a narrow window is covered too.
+    """
+    card = int(np.ceil(max(_card_width(label, value) for label, value in cards)))
+    pair = 2 * card + int(_CARD_GAP_PX)
+    compact = int(np.ceil(max(_card_width(label, value, _MIN_VALUE_PX, True) for label, value in cards)))
+    em = max(_value_em(value) for _, value in cards)
+    # Each card of a full-width pair is half the row less half the gap; its value gets that less the padding.
+    value_space = f"50cqw - {_CARD_GAP_PX / 2 + _CARD_CHROME_PX:g}px"
+    return (
+        "<style>"
+        ".st-key-price_cards { container: price-cards / inline-size; } "
+        f"{_PAIRS} {{ flex: 1 1 {pair}px !important; }} "
+        f"{_CARDS} {{ flex: 1 1 {card}px !important; }} "
+        f"@container price-cards (width < {pair}px) {{ "
+        f"{_PAIRS} {{ flex-basis: {2 * compact + int(_CARD_GAP_PX)}px !important; }} "
+        f"{_CARDS} {{ flex-basis: {compact}px !important; }} "
+        ".st-key-price_cards_prices, .st-key-price_cards_model { align-items: stretch; } "
+        ".st-key-price_cards [data-testid='stMetric'] { height: 100%; } "
+        ".st-key-price_cards [data-testid='stMetricLabel'] :is([data-testid='stMarkdownContainer'], p) "
+        "{ white-space: normal; } "
+        ".st-key-price_cards [data-testid='stMetricValue'] "
+        f"{{ font-size: clamp({_MIN_VALUE_PX:g}px, calc(({value_space}) / {em:g}), {_VALUE_PX:g}px); }} "
+        "}"
+        "</style>"
+    )
+
+
+def render_price_cards(inputs: Inputs, prices: Prices) -> None:
+    S, T, r, q = inputs.spot, inputs.expiry, inputs.rate, inputs.dividend_yield
+    forward = S * np.exp((r - q) * T)
+    label, value, caption, help_text = _model_card(inputs, prices)
+    # Two pairs of cards in a wrapping row (sizes in _cards_style). The per-option notes are in the tooltips so
+    # the cards stay short on narrow screens.
+    cards = [
+        ("Call value", money(prices.call, 4), md(prices.call_note)),
+        ("Put value", money(prices.put, 4), md(prices.put_note)),
+        ("Forward price", money(forward, 4), f"F = S·e^((r−q)T). Discount factor e^(−rT) = {np.exp(-r * T):.6f}."),
+        (label, value, md(help_text)),
+    ]
+    st.html(_cards_style([(name, text) for name, text, _ in cards]))
+    row = st.container(horizontal=True, gap="small", key="price_cards")
+    pairs = (
+        row.container(horizontal=True, gap="small", key="price_cards_prices"),
+        row.container(horizontal=True, gap="small", key="price_cards_model"),
+    )
+    for i, (name, text, help_text) in enumerate(cards):
+        pairs[i // 2].metric(name, text, border=True, help=help_text)
+    st.caption(md(f"{inputs.model.label} · {caption}"))
+
+
+def _european_note(inputs: Inputs) -> str:
+    """Caption for views that always use Black-Scholes-Merton, whatever the sidebar model."""
+    model = inputs.model
+    if model.kind == "bsm":
+        return ""
+    early = " Early exercise is ignored here." if model.kind == "binomial" and model.american else ""
+    return (
+        f"Closed-form Black-Scholes-Merton values for European exercise, not the sidebar's {model.label} "
+        f"(used for the price cards and the model diagnostics).{early}"
+    )
 
 
 def _greeks_table(inputs: Inputs, higher_order: bool) -> pd.DataFrame:
@@ -150,6 +293,8 @@ def _sensitivity(inputs: Inputs) -> None:
     x_plot = x * 100 if kind == "vol" else x
     fig = charts.sensitivity_chart(x_plot, curve("call"), curve("put"), x_title, y_title, current, strike_x)
     st.plotly_chart(fig, key="sensitivity_chart")
+    if note := _european_note(inputs):
+        st.caption(note)
 
 
 def _heatmaps(inputs: Inputs) -> None:
@@ -165,10 +310,12 @@ def _heatmaps(inputs: Inputs) -> None:
         values = bs.price(grid_s, args[0], args[1], args[2], grid_v, inputs.dividend_yield, kind)
         col.plotly_chart(
             charts.price_heatmap(
-                spots, vols, values, f"{kind.capitalize()} value", "Blues" if kind == "call" else "Oranges"
+                spots, vols, values, f"{kind.capitalize()} value ($)", "Blues" if kind == "call" else "Oranges"
             ),
             key=f"heatmap_{kind}",
         )
+    if note := _european_note(inputs):
+        st.caption(note)
 
 
 def _chain(inputs: Inputs) -> None:
@@ -205,10 +352,13 @@ def _chain(inputs: Inputs) -> None:
             "Vega / vol pt": st.column_config.NumberColumn(format="%.4f"),
         },
     )
-    st.caption("Strikes from 80% to 120% of the sidebar strike, flat volatility (no smile), same expiry.")
+    st.caption(
+        "Strikes from 80% to 120% of the sidebar strike, flat volatility (no smile), same expiry. "
+        + _european_note(inputs)
+    )
 
 
-def _model_diagnostics(inputs: Inputs, prices: Prices) -> None:
+def _tree_diagnostics(inputs: Inputs, prices: Prices) -> None:
     S, K, T, r, sigma, q = (
         inputs.spot,
         inputs.strike,
@@ -218,114 +368,157 @@ def _model_diagnostics(inputs: Inputs, prices: Prices) -> None:
         inputs.dividend_yield,
     )
     model = inputs.model
-    if model.kind == "binomial":
-        tree = prices.tree
-        st.markdown("**Tree Greeks** (read off the lattice, so they include the early-exercise feature)")
-        rows = [
-            {
-                "Option": kind.capitalize(),
-                "Value": res.price,
-                "Delta": res.delta,
-                "Gamma": res.gamma,
-                "Theta / day": res.theta / 365,
-                "Steps used": res.steps,
-            }
-            for kind, res in tree.items()
-        ]
-        st.dataframe(
-            pd.DataFrame(rows),
-            hide_index=True,
-            column_config={
-                "Value": st.column_config.NumberColumn(format="%.4f"),
-                "Delta": st.column_config.NumberColumn(format="%.4f"),
-                "Gamma": st.column_config.NumberColumn(format="%.5f"),
-                "Theta / day": st.column_config.NumberColumn(format="%.4f"),
-            },
+    st.markdown("**Tree Greeks** (on the lattice, so they include the early-exercise feature)")
+    rows = [
+        {
+            "Option": kind.capitalize(),
+            "Value": res.price,
+            "Delta": res.delta,
+            "Gamma": res.gamma,
+            "Theta / day": res.theta / 365,
+            "Vega / vol pt": res.vega / 100,
+            "Rho / 1%": res.rho / 100,
+            "Div. rho / 1%": res.epsilon / 100,
+        }
+        for kind, res in prices.tree.items()
+    ]
+    steps_used = prices.tree["call"].steps
+    st.dataframe(
+        pd.DataFrame(rows),
+        hide_index=True,
+        column_config={
+            "Value": st.column_config.NumberColumn(format="%.4f"),
+            "Delta": st.column_config.NumberColumn(format="%.4f"),
+            "Gamma": st.column_config.NumberColumn(format="%.5f"),
+            "Theta / day": st.column_config.NumberColumn(format="%.4f"),
+            "Vega / vol pt": st.column_config.NumberColumn(format="%.4f"),
+            "Rho / 1%": st.column_config.NumberColumn(format="%.4f"),
+            "Div. rho / 1%": st.column_config.NumberColumn(format="%.4f"),
+        },
+    )
+    st.caption(
+        f"Dollars per share on a {steps_used:,}-step tree. Delta and gamma come from its first two time steps, "
+        "theta from the second step (CRR) or from repricing with the expiry moved (Leisen-Reimer). Vega, rho and "
+        "dividend rho (per 1% move in the dividend yield) reprice on a tree with the same steps, with the "
+        "volatility moved ±0.5 vol pt and the rates ±25 bp."
+    )
+
+    st.markdown("**Convergence with the number of steps**")
+    series, references = cache.tree_convergence(S, K, T, r, sigma, q, model.steps, model.american)
+    reference_label = "Converged" if model.american else "Black-Scholes-Merton"
+    for col, kind in zip(st.columns(2), ("call", "put"), strict=True):
+        col.plotly_chart(
+            charts.convergence_chart(series[kind], references[kind], reference_label, kind.capitalize()),
+            key=f"tree_convergence_{kind}",
         )
-        st.markdown("**Convergence of the call value with the number of steps**")
-        steps, series = cache.tree_convergence(S, K, T, r, sigma, q, model.steps, model.american)
-        reference = None if model.american else bs.price(S, K, T, r, sigma, q, "call")
-        st.plotly_chart(
-            charts.convergence_chart(steps, series, reference, "Black-Scholes-Merton"), key="tree_convergence"
+    st.caption(
+        f"Step counts from 10 to the sidebar's {model.steps:,}. CRR oscillates between odd and even step counts; "
+        "Leisen-Reimer converges smoothly, "
+        + (
+            "at first order with early exercise. The converged value extrapolates Leisen-Reimer trees with 2,001 "
+            "and 4,003 steps (Richardson), kept within the no-arbitrage bounds of an American option."
+            if model.american
+            else "at roughly O(1/n²), to the closed-form value."
         )
-        st.caption(
-            "CRR oscillates between odd and even step counts; Leisen-Reimer converges smoothly, "
-            + ("at first order with early exercise." if model.american else "at roughly O(1/n²).")
-        )
-        if model.american:
-            boundaries = {}
-            for kind, res in tree.items():
-                if res.exercise_boundary is not None and len(res.exercise_boundary[0]):
-                    boundaries[f"{kind.capitalize()} boundary"] = (
-                        res.exercise_boundary[0] * 365,
-                        res.exercise_boundary[1],
-                    )
-            st.markdown("**Early-exercise boundary**")
-            if boundaries:
-                st.plotly_chart(charts.exercise_boundary_chart(boundaries, K), key="exercise_boundary")
-                st.caption(
-                    "Exercising immediately is optimal when the spot is beyond the boundary: below it for a put, "
-                    "above it for a call. With a non-negative rate and no dividends an American call is never "
-                    "exercised early."
+    )
+    if model.american:
+        boundaries = {}
+        for kind, res in prices.tree.items():
+            if res.exercise_boundary is not None and len(res.exercise_boundary[0]):
+                boundaries[f"{kind.capitalize()} boundary"] = (
+                    res.exercise_boundary[0] * 365,
+                    res.exercise_boundary[1],
                 )
-            else:
-                st.info(
-                    "Early exercise is never optimal for these inputs, or the spot is already in the exercise region "
-                    "at every step the tree resolves (e.g. a deep in-the-money put worth its intrinsic value)."
-                )
-    elif model.kind == "monte_carlo":
-        times, paths = cache.mc_paths(S, T, r, sigma, q, model.seed)
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown("**Sample paths** (200 of the simulated scenarios)")
-            st.plotly_chart(charts.paths_chart(times * 365, paths[:60], K, paths.mean(axis=0)), key="mc_paths")
-        with c2:
-            st.markdown("**Terminal price distribution**")
-            s_t = cache.mc_terminal(S, T, r, sigma, q, model.n_paths, model.seed, model.antithetic)
-            grid = np.linspace(np.percentile(s_t, 0.05), np.percentile(s_t, 99.95), 400)
-            mu = np.log(S) + (r - q - 0.5 * sigma**2) * T
-            sd = sigma * np.sqrt(T)
-            pdf = np.exp(-0.5 * ((np.log(grid) - mu) / sd) ** 2) / (grid * sd * np.sqrt(2 * np.pi))
-            st.plotly_chart(
-                charts.histogram_chart(
-                    s_t, "Underlying price at expiry", [(K, "strike", charts.NEUTRAL)], pdf=(grid, pdf)
-                ),
-                key="mc_terminal",
+        st.markdown("**Early-exercise boundary**")
+        if boundaries:
+            st.plotly_chart(charts.exercise_boundary_chart(boundaries, K), key="exercise_boundary")
+            st.caption(
+                "Exercising immediately is optimal when the spot is beyond the boundary: below it for a put, "
+                "above it for a call. With a non-negative rate and no dividends an American call is never "
+                "exercised early. The critical price at each step is interpolated between the last exercised "
+                "node and the next one, and consecutive steps are averaged (their nodes interleave)."
             )
-        mc = prices.mc
-        rows = [
-            {
-                "Option": kind.capitalize(),
-                "Monte Carlo": res.price,
-                "Std. error": res.std_error,
-                "95% CI low": res.ci95[0],
-                "95% CI high": res.ci95[1],
-                "BSM": bs.price(S, K, T, r, sigma, q, kind),
-                "Error / SE": (res.price - bs.price(S, K, T, r, sigma, q, kind)) / res.std_error
-                if res.std_error > 0
-                else np.nan,
-                "In the money": res.itm_fraction,
-            }
-            for kind, res in mc.items()
-        ]
-        st.dataframe(
-            pd.DataFrame(rows),
-            hide_index=True,
-            column_config={
-                c: st.column_config.NumberColumn(format="%.4f")
-                for c in ("Monte Carlo", "Std. error", "95% CI low", "95% CI high", "BSM")
-            }
-            | {
-                "Error / SE": st.column_config.NumberColumn(format="%.2f"),
-                "In the money": st.column_config.NumberColumn(format="percent"),
-            },
+        else:
+            st.info(
+                "Early exercise is never optimal for these inputs, or the spot is already in the exercise region "
+                "at every step the tree resolves (e.g. a deep in-the-money put worth its intrinsic value)."
+            )
+
+
+def _monte_carlo_diagnostics(inputs: Inputs, prices: Prices) -> None:
+    S, K, T, r, sigma, q = (
+        inputs.spot,
+        inputs.strike,
+        inputs.expiry,
+        inputs.rate,
+        inputs.volatility,
+        inputs.dividend_yield,
+    )
+    model = inputs.model
+    times, paths = cache.mc_paths(S, T, r, sigma, q, model.n_paths, model.seed, model.antithetic, SAMPLE_PATHS)
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(f"**Sample paths** ({len(paths)} of the {model.n_paths:,} scenarios behind the price)")
+        st.plotly_chart(
+            charts.paths_chart(times * 365, paths, K, S * np.exp((r - q) * times), "Risk-neutral mean (forward)"),
+            key="mc_paths",
         )
         st.caption(
-            "Terminal prices are sampled exactly from the log-normal distribution (no time-stepping bias). "
-            "|Error / SE| below about 2 is consistent with an unbiased estimator. The standard error is left blank "
-            "when the sample cannot estimate it: every price finished out of the money, or every one in the money "
-            "with the control variate on."
+            "The price samples each scenario's price at expiry exactly; its path from today is filled in with a "
+            "Brownian bridge. The purple line is the forward S·e^((r−q)t), the expected price of a scenario at each "
+            "date under the pricing measure; the average of the simulated scenarios differs from it by sampling noise."
         )
+    with c2:
+        st.markdown("**Terminal price distribution**")
+        s_t = cache.mc_terminal(S, T, r, sigma, q, model.n_paths, model.seed, model.antithetic)
+        grid = np.linspace(np.percentile(s_t, 0.05), np.percentile(s_t, 99.95), 400)
+        mu = np.log(S) + (r - q - 0.5 * sigma**2) * T
+        sd = sigma * np.sqrt(T)
+        pdf = np.exp(-0.5 * ((np.log(grid) - mu) / sd) ** 2) / (grid * sd * np.sqrt(2 * np.pi))
+        st.plotly_chart(
+            charts.histogram_chart(s_t, "Underlying price at expiry", [(K, "strike", charts.NEUTRAL)], pdf=(grid, pdf)),
+            key="mc_terminal",
+        )
+    rows = [
+        {
+            "Option": kind.capitalize(),
+            "Monte Carlo": res.price,
+            "Std. error": res.std_error,
+            "95% CI low": res.ci95[0],
+            "95% CI high": res.ci95[1],
+            "BSM": bs.price(S, K, T, r, sigma, q, kind),
+            "Error / SE": (res.price - bs.price(S, K, T, r, sigma, q, kind)) / res.std_error
+            if res.std_error > 0
+            else np.nan,
+            "In the money": res.itm_fraction,
+        }
+        for kind, res in prices.mc.items()
+    ]
+    st.dataframe(
+        pd.DataFrame(rows),
+        hide_index=True,
+        column_config={
+            c: st.column_config.NumberColumn(format="%.4f")
+            for c in ("Monte Carlo", "Std. error", "95% CI low", "95% CI high", "BSM")
+        }
+        | {
+            "Error / SE": st.column_config.NumberColumn(format="%.2f"),
+            "In the money": st.column_config.NumberColumn(format="percent"),
+        },
+    )
+    st.caption(
+        "Terminal prices are sampled exactly from the log-normal distribution (no time-stepping bias). "
+        "|Error / SE| below about 2 is consistent with an unbiased estimator. The standard error is left blank "
+        "when the sample cannot estimate it: every price finished out of the money, or every one in the money "
+        "with the control variate on."
+    )
+
+
+def _model_diagnostics(inputs: Inputs, prices: Prices) -> None:
+    if inputs.model.kind == "binomial":
+        _tree_diagnostics(inputs, prices)
+    elif inputs.model.kind == "monte_carlo":
+        _monte_carlo_diagnostics(inputs, prices)
     else:
         st.info(
             "Black-Scholes-Merton is exact for European options under its assumptions. Switch the sidebar model to a "
@@ -349,7 +542,7 @@ def render(inputs: Inputs, prices: Prices) -> None:
         "Analytical Black-Scholes-Merton Greeks for European exercise, in the units shown "
         "(theta and the other time Greeks per calendar day of elapsed time). "
         + (
-            "Tree Greeks for the American option are under *Model diagnostics* below."
+            "Tree Greeks for the American option, including vega and rho, are under *Model diagnostics* below."
             if inputs.model.american and inputs.model.kind == "binomial"
             else ""
         )

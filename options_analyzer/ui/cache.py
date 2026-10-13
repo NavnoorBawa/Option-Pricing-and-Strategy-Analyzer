@@ -13,6 +13,9 @@ import streamlit as st
 from .. import binomial, implied_vol, monte_carlo, risk, vol_surface
 from ..strategies import Market, Strategy
 
+#: Tree used for American quotes when the sidebar model is not a binomial tree.
+DEFAULT_TREE = (501, "lr")
+
 
 @st.cache_data(show_spinner=False, max_entries=64)
 def tree_results(S, K, T, r, sigma, q, steps, american, method) -> dict:
@@ -22,18 +25,38 @@ def tree_results(S, K, T, r, sigma, q, steps, american, method) -> dict:
     }
 
 
-@st.cache_data(show_spinner=False, max_entries=32)
-def tree_convergence(S, K, T, r, sigma, q, max_steps, american) -> tuple[np.ndarray, dict]:
-    steps = np.unique(np.geomspace(10, min(max(max_steps, 20), 1000), 40).astype(int))
+@st.cache_data(show_spinner=False, max_entries=64)
+def tree_prices(S, K, T, r, sigma, q, steps, american, method) -> dict:
+    return {kind: binomial.price(S, K, T, r, sigma, q, kind, steps, american, method) for kind in ("call", "put")}
 
-    def safe_price(n, method):
+
+@st.cache_data(show_spinner=False, max_entries=32)
+def tree_convergence(S, K, T, r, sigma, q, max_steps, american) -> tuple[dict, dict]:
+    """Call and put values on both lattices for step counts up to ``max_steps``, and converged references.
+
+    Returns ``(series, references)``: ``series[kind][lattice name] = (steps used, values)`` and
+    ``references[kind]`` (closed form for European exercise, an extrapolated Leisen-Reimer tree for American).
+    """
+    max_steps = max(int(max_steps), 10)
+    grid = np.unique(np.r_[np.geomspace(10, max_steps, 40).astype(int), max_steps])
+
+    def safe_price(kind, n, method):
         try:
-            return binomial.price(S, K, T, r, sigma, q, "call", int(n), american, method)
+            return binomial.price(S, K, T, r, sigma, q, kind, int(n), american, method)
         except ValueError:  # CRR is not arbitrage-free at this step count
             return np.nan
 
-    series = {label: [safe_price(n, method) for n in steps] for method, label in binomial.METHODS.items()}
-    return steps, series
+    series = {}
+    for kind in ("call", "put"):
+        series[kind] = {}
+        for method, name in binomial.METHODS.items():
+            # Leisen-Reimer rounds an even step count up to the next odd one: plot it where it was evaluated.
+            used = grid | 1 if method == "lr" else grid
+            series[kind][name] = (used, np.array([safe_price(kind, n, method) for n in grid]))
+    references = {
+        kind: binomial.extrapolated_price(S, K, T, r, sigma, q, kind, american=american) for kind in ("call", "put")
+    }
+    return series, references
 
 
 @st.cache_data(show_spinner=False, max_entries=32)
@@ -42,9 +65,9 @@ def mc_results(S, K, T, r, sigma, q, n_paths, seed, antithetic, control_variate)
 
 
 @st.cache_data(show_spinner=False, max_entries=16)
-def mc_paths(S, T, r, sigma, q, seed) -> tuple[np.ndarray, np.ndarray]:
+def mc_paths(S, T, r, sigma, q, n_paths, seed, antithetic, n_show) -> tuple[np.ndarray, np.ndarray]:
     steps = int(np.clip(round(T * 252), 20, 500))
-    return monte_carlo.simulate_paths(S, T, r, sigma, q, n_paths=200, n_steps=steps, seed=seed)
+    return monte_carlo.scenario_paths(S, T, r, sigma, q, n_paths, seed, antithetic, n_show, steps)
 
 
 @st.cache_data(show_spinner=False, max_entries=16)
@@ -78,16 +101,19 @@ def market_surface(raw, spot, rate, dividend_yield) -> tuple[vol_surface.VolSurf
 
 
 @st.cache_data(show_spinner=False, max_entries=64)
-def american_value(S, K, T, r, sigma, q, option_type) -> float:
-    return binomial.price(S, K, T, r, sigma, q, option_type, 501, american=True, method="lr")
+def american_value(S, K, T, r, sigma, q, option_type, steps=DEFAULT_TREE[0], method=DEFAULT_TREE[1]) -> float:
+    return binomial.price(S, K, T, r, sigma, q, option_type, steps, american=True, method=method)
 
 
 @st.cache_data(show_spinner=False, max_entries=64)
-def american_iv(price, S, K, T, r, q, option_type) -> float:
-    return implied_vol.implied_volatility_american(price, S, K, T, r, q, option_type)
+def american_iv(price, S, K, T, r, q, option_type, steps=DEFAULT_TREE[0], method=DEFAULT_TREE[1]) -> float:
+    return implied_vol.implied_volatility_american(price, S, K, T, r, q, option_type, steps=steps, method=method)
 
 
 @st.cache_data(show_spinner=False, max_entries=16)
-def american_curve(S, K, T, r, q, option_type, max_vol) -> tuple[np.ndarray, np.ndarray]:
-    vols = np.linspace(0.005, max_vol, 41)
-    return vols, np.array([american_value(S, K, T, r, v, q, option_type) for v in vols])
+def american_curve(
+    S, K, T, r, q, option_type, max_vol, steps=DEFAULT_TREE[0], method=DEFAULT_TREE[1]
+) -> tuple[np.ndarray, np.ndarray]:
+    lowest = implied_vol.lowest_tree_volatility(T, r, q, steps, method)
+    vols = np.linspace(max(0.005, lowest), max(max_vol, 2 * lowest), 41)
+    return vols, np.array([american_value(S, K, T, r, v, q, option_type, steps, method) for v in vols])

@@ -49,24 +49,52 @@ def sensitivity_chart(x, call_y, put_y, x_title: str, y_title: str, current_x: f
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=x, y=call_y, name="Call", line=dict(color=CALL, width=2.5)))
     fig.add_trace(go.Scatter(x=x, y=put_y, name="Put", line=dict(color=PUT, width=2.5)))
-    _vline(fig, current_x, "current")
-    if strike_x is not None:
-        _vline(fig, strike_x, "strike", dash="dash", position="bottom")
+    # Labels sit inside the top of the plot, each on the far side of its line from the other line, so they
+    # cannot overlap each other or the tick labels; a strike equal to the current value gets one shared label.
+    if strike_x is None:
+        _vline(fig, current_x, "current", position="top right")
+    elif abs(strike_x - current_x) <= 1e-9 * max(1.0, abs(current_x)):
+        _vline(fig, current_x, "current = strike", position="top right")
+    else:
+        current_side, strike_side = ("top left", "top right") if current_x < strike_x else ("top right", "top left")
+        _vline(fig, current_x, "current", position=current_side)
+        _vline(fig, strike_x, "strike", dash="dash", position=strike_side)
     return apply_layout(fig, None, x_title, y_title)
 
 
+def _decimals_for_step(values, minimum: int, maximum: int = 8, scale: float = 1.0) -> int:
+    """Decimals (at least ``minimum``) that resolve the grid step of ``values * scale`` to a tenth of a step
+    and keep every label distinct."""
+    scaled = np.asarray(values, dtype=float) * scale
+    step = np.min(np.abs(np.diff(scaled))) if scaled.size > 1 else 0.0
+    decimals = max(minimum, int(np.ceil(1.0 - np.log10(step)))) if step > 0 else minimum
+    while decimals < maximum and len({f"{v:.{decimals}f}" for v in scaled}) < len(set(scaled.tolist())):
+        decimals += 1
+    return min(decimals, maximum)
+
+
 def price_heatmap(spots, vols, values, title: str, colorscale: str = "Viridis"):
-    """Option value on a (volatility x spot) grid with the values written in each cell."""
+    """Option value on a (volatility x spot) grid with the values written in each cell.
+
+    Label and cell precision follow the grid: low-priced underlyings (penny stocks, FX rates) and very low
+    volatilities get more decimals, so neighbouring rows and columns never share a label (Plotly would merge
+    them) and the cell values stay readable.
+    """
+    values = np.asarray(values, dtype=float)
+    spot_dp = _decimals_for_step(spots, 2)
+    vol_dp = _decimals_for_step(vols, 1, scale=100.0)
+    largest = float(np.nanmax(np.abs(values))) if values.size else 0.0
+    value_dp = int(np.clip(2 - np.floor(np.log10(largest)), 2, 8)) if largest > 0 else 2
     fig = go.Figure(
         go.Heatmap(
-            x=[f"{s:,.2f}" for s in spots],
-            y=[f"{v:.1%}" for v in vols],
+            x=[f"{s:,.{spot_dp}f}" for s in spots],
+            y=[f"{v * 100:.{vol_dp}f}%" for v in vols],
             z=values,
-            text=np.vectorize(lambda v: f"{v:,.2f}")(values),
+            text=np.vectorize(lambda v: f"{v:,.{value_dp}f}")(values),
             texttemplate="%{text}",
             colorscale=colorscale,
             colorbar=dict(title="Value"),
-            hovertemplate="Spot %{x}<br>Vol %{y}<br>Value %{z:,.4f}<extra></extra>",
+            hovertemplate=f"Spot %{{x}}<br>Vol %{{y}}<br>Value %{{z:,.{value_dp + 2}f}}<extra></extra>",
         )
     )
     fig = apply_layout(fig, title, "Spot price", "Volatility", height=460)
@@ -77,26 +105,32 @@ def price_heatmap(spots, vols, values, title: str, colorscale: str = "Viridis"):
     return fig
 
 
-def convergence_chart(steps, series: dict, reference: float | None, reference_label: str):
+def convergence_chart(series: dict, reference: float | None, reference_label: str, title: str | None = None):
+    """Tree value against the number of steps; ``series`` maps a name to ``(steps, values)``."""
     fig = go.Figure()
-    for i, (name, values) in enumerate(series.items()):
+    for i, (name, (steps, values)) in enumerate(series.items()):
         fig.add_trace(go.Scatter(x=steps, y=values, name=name, mode="lines", line=dict(color=SERIES[i], width=2)))
     if reference is not None:
-        fig.add_hline(y=reference, line=dict(color=NEUTRAL, dash="dash"), annotation_text=reference_label)
-    return apply_layout(fig, None, "Number of steps", "Option value")
+        fig.add_hline(
+            y=reference,
+            line=dict(color=NEUTRAL, dash="dash"),
+            annotation_text=f"{reference_label} {reference:,.4f}",
+            annotation_position="bottom right",
+        )
+    return apply_layout(fig, title, "Number of steps", "Option value ($)")
 
 
 def exercise_boundary_chart(boundaries: dict, strike: float):
+    """Critical spot price over time; ``boundaries`` maps names starting with "Call" or "Put" to ``(days, spots)``."""
     fig = go.Figure()
-    for i, (name, (days, spots)) in enumerate(boundaries.items()):
-        fig.add_trace(
-            go.Scatter(x=days, y=spots, name=name, mode="lines", line=dict(color=(PUT, CALL)[i % 2], width=2.5))
-        )
+    for name, (days, spots) in boundaries.items():
+        color = CALL if name.lower().startswith("call") else PUT
+        fig.add_trace(go.Scatter(x=days, y=spots, name=name, mode="lines", line=dict(color=color, width=2.5)))
     fig.add_hline(y=strike, line=dict(color=NEUTRAL, dash="dash"), annotation_text="strike")
-    return apply_layout(fig, None, "Days from today", "Critical spot price")
+    return apply_layout(fig, None, "Days from today", "Critical spot price ($)")
 
 
-def paths_chart(times_days, paths, strike: float, mean_path=None):
+def paths_chart(times_days, paths, strike: float, mean_path=None, mean_label: str = "Risk-neutral mean (forward)"):
     fig = go.Figure()
     for i, path in enumerate(paths):
         fig.add_trace(
@@ -111,7 +145,7 @@ def paths_chart(times_days, paths, strike: float, mean_path=None):
             )
         )
     if mean_path is not None:
-        fig.add_trace(go.Scatter(x=times_days, y=mean_path, name="Mean path", line=dict(color=ACCENT, width=3)))
+        fig.add_trace(go.Scatter(x=times_days, y=mean_path, name=mean_label, line=dict(color=ACCENT, width=3)))
     fig.add_hline(y=strike, line=dict(color=NEUTRAL, dash="dash"), annotation_text="strike")
     fig = apply_layout(fig, None, "Days from today", "Underlying price")
     fig.update_layout(hovermode="closest")

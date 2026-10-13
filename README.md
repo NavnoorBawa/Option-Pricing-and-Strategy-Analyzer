@@ -17,11 +17,15 @@ pandas); the Streamlit app is a thin interface on top of it.
 
 **Pricing & Greeks**
 - Black–Scholes–Merton with continuous dividend yield, exact at every edge case (expiry, zero volatility).
-- Binomial trees: Cox–Ross–Rubinstein and Leisen–Reimer (≈O(1/n²) convergence for European exercise), European
-  or American exercise, tree Greeks and the early-exercise boundary. A 2,000-step American tree prices in about
-  25 ms.
+- Binomial trees: Leisen–Reimer (the default, ≈O(1/n²) convergence for European exercise) and Cox–Ross–Rubinstein,
+  European or American exercise. Tree Greeks include bump-and-reprice vega, rho and dividend rho, so American
+  hedge ratios are available; convergence charts for the call and the put and a smooth early-exercise boundary.
+  Calls are priced by put–call symmetry, and a lattice wide enough to need its node prices capped (at e^±700)
+  computes each level's prices from their logarithms, so a capped node never feeds an earlier step: even
+  extreme volatility × expiry stays accurate, with early exercise too. A 2,000-step American tree prices in
+  about 25 ms.
 - Monte Carlo with exact terminal sampling, antithetic and control variates, reproducible seeds and 95 % confidence
-  intervals.
+  intervals; the sample-path chart draws 60 of the scenarios behind the price.
 - All 14 Greeks (delta … ultima, plus rho and dividend rho) for calls and puts, with explicit units, a sensitivity
   explorer and spot × volatility price heatmaps.
 
@@ -52,9 +56,12 @@ pandas); the Streamlit app is a thin interface on top of it.
   Black–Scholes–Merton), fitted with an SVI smile per expiry and turned into local volatility with Gatheral's
   formula; calendar and butterfly arbitrage are detected and reported, never silently patched. The smiles show the
   quotes and the fit error, and the surface's implied vol is read off for the sidebar strike and expiry.
-- Implied-volatility solver for European (Black–Scholes–Merton) and American (binomial) quotes that checks
-  the no-arbitrage bounds and always converges.
-- Settings are stored in the URL, so any setup can be bookmarked or shared.
+- Implied-volatility solver for European (Black–Scholes–Merton) and American (binomial: the sidebar tree when it is
+  selected) quotes that checks the no-arbitrage bounds and always converges.
+- The page URL stores the sidebar (market inputs and every pricing-model setting) and the Strategy Builder's
+  template choice, strike width, contracts, multiplier and commission, so a priced contract or template position can
+  be bookmarked or shared. Edited strategy legs, risk and VaR settings, the volatility surface, the implied-volatility
+  quote and uploaded files are not part of the link.
 
 | Pricing & Greeks | Risk & Scenarios |
 | --- | --- |
