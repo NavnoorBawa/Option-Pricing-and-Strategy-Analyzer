@@ -97,9 +97,19 @@ $$\sigma_{\text{loc}}^2 = \frac{\partial_T w}{1 - \frac{y}{w}\partial_y w + \fra
 
 The numerator and denominator are exactly the calendar and butterfly no-arbitrage conditions; where either
 fails local volatility is undefined and is reported rather than patched. The parametric surface is SSVI
-(Gatheral & Jacquier, 2014), arbitrage-free when $\eta(1+|\rho|) \le 2$; uploaded quotes are smoothed per
-maturity with a cubic smoothing spline (penalty by generalised cross-validation) and interpolated in maturity
-with a monotone (PCHIP) interpolant of total variance.
+(Gatheral & Jacquier, 2014), arbitrage-free when $\eta(1+|\rho|) \le 2$. Uploaded quotes (implied vols, or
+option prices inverted with Black–Scholes–Merton, out-of-the-money side preferred) are fitted per maturity
+with Gatheral's raw SVI smile
+
+$$w(y) = a + b\left(\rho\,(y-m) + \sqrt{(y-m)^2 + s^2}\right)$$
+
+by least squares on implied vols, with $b \ge 0$, $|\rho| < 1$, $s > 0$, a non-negative minimum variance and
+Lee's wing bound $b(1+|\rho|) \le 2$. SSVI slices are exactly SVI, so noise-free SSVI quotes are recovered.
+$\partial_y w$ and $\partial_{yy} w$ are analytic; $\partial_T w$ at fixed $y$ comes from secants between
+neighbouring maturities evaluated at the same $y$ — their Fritsch–Butland weighted harmonic mean inside, the
+one-sided secant (first-order accurate) at the first and last maturity. A secant that is negative beyond quote
+precision is calendar arbitrage. Implied vol is shown only inside each maturity's quoted strikes, and local
+vol only where the neighbouring maturities are quoted near the same forward moneyness.
 
 ### Limitations
 Constant volatility per leg (no smile dynamics in strategy valuation), European exercise for strategies,

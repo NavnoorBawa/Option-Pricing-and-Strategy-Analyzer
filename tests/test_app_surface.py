@@ -1,0 +1,152 @@
+"""Volatility Surface tab, end to end with streamlit.testing (headless)."""
+
+import json
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
+from streamlit.testing.v1 import AppTest
+
+from options_analyzer import vol_surface
+
+APP = str(Path(__file__).resolve().parents[1] / "main.py")
+
+
+@pytest.fixture
+def app() -> AppTest:
+    at = AppTest.from_file(APP, default_timeout=120)
+    at.run()
+    assert not at.exception, at.exception
+    return at
+
+
+def _ok(at: AppTest) -> None:
+    assert not at.exception, [e.value for e in at.exception]
+    assert not at.error, [e.value for e in at.error]
+
+
+def _picker(at: AppTest):
+    return next(w for w in at.multiselect if w.label == "Maturities")
+
+
+def _trace_names(at: AppTest) -> list[str]:
+    return [t.get("name") or "" for c in at.get("plotly_chart") for t in json.loads(c.proto.spec)["data"]]
+
+
+def _metric(at: AppTest, label: str) -> str:
+    return next(m.value for m in at.metric if m.label == label)
+
+
+def _upload(at: AppTest, frame: pd.DataFrame) -> AppTest:
+    at.segmented_control(key="surface_source").set_value("Market quotes (CSV)").run()
+    at.file_uploader(key="quotes_file").upload("quotes.csv", frame.to_csv(index=False).encode(), "text/csv").run()
+    return at
+
+
+def _ssvi_quotes(days, moneyness, rate=0.05) -> pd.DataFrame:
+    params = vol_surface.SSVIParams()
+    rows = []
+    for d in days:
+        t = d / 365
+        for m in moneyness:
+            iv = np.sqrt(params.total_variance(np.log(m) - rate * t, t)[0] / t)
+            rows.append({"Strike": round(100 * m, 4), "Days": d, "ImpliedVol": round(float(iv), 6)})
+    return pd.DataFrame(rows)
+
+
+def test_smile_picker_falls_back_to_default_slices_when_the_maturity_grid_changes(app):
+    assert _picker(app).value == [0, 15, 29]
+    app.slider(key="ssvi_t").set_value((0.5, 3.0)).run()
+    _ok(app)
+    # The keyed picker used to keep labels of the old grid, which no longer existed: empty selection, no chart.
+    assert _picker(app).value == [0, 15, 29]
+    assert sum(name.startswith("Implied · ") for name in _trace_names(app)) == 3
+
+
+def test_smile_picker_labels_tell_close_expiries_apart(app):
+    days = (1, 2, 3, 4, 7, 8, 9, 10, 30, 60)
+    _upload(app, _ssvi_quotes(days, np.linspace(0.9, 1.1, 9)))
+    _ok(app)
+    picker = _picker(app)
+    assert picker.options == [f"{d}d" for d in days]  # were '0.00y', '0.01y', '0.01y', '0.01y', ...
+    picker.set_value([2, 3, 6]).run()
+    _ok(app)
+    names = _trace_names(app)
+    assert {"Implied · 3d", "Implied · 4d", "Implied · 9d"} <= set(names)
+
+
+def test_ssvi_atm_vols_follow_the_sidebar_volatility(app):
+    assert app.number_input(key="ssvi_short").value == 24.0 and app.number_input(key="ssvi_long").value == 20.0
+    app.sidebar.number_input(key="vol").set_value(40.0).run()
+    _ok(app)
+    assert app.number_input(key="ssvi_short").value == 48.0 and app.number_input(key="ssvi_long").value == 40.0
+    app.number_input(key="ssvi_long").set_value(30.0).run()
+    app.slider(key="ssvi_rho").set_value(-0.5).run()
+    assert app.number_input(key="ssvi_long").value == 30.0  # an edit sticks until the sidebar volatility moves
+    app.segmented_control(key="surface_source").set_value("Market quotes (CSV)").run()
+    app.segmented_control(key="surface_source").set_value("Parametric (SSVI)").run()
+    _ok(app)
+    assert app.number_input(key="ssvi_short").value == 48.0  # re-seeded, not reset to the 0.5% minimum
+    assert not app.warning
+
+
+def test_option_prices_build_a_surface_with_quote_markers_and_fit_quality(app):
+    _upload(app, vol_surface.sample_quotes(100, 0.05, 0.0, prices=True))
+    _ok(app)
+    captions = " ".join(c.value for c in app.caption)
+    assert "Inverted 104 option price(s)" in captions
+    assert "spot (100.00), rate (5.00%) and dividend yield (0.00%)" in captions
+    assert _metric(app, "Calendar-arbitrage points") == "0" and _metric(app, "Local vol defined") == "100%"
+    names = _trace_names(app)
+    assert {"Quotes · 30d", "Quotes · 273d", "Quotes · 2.00y"} <= set(names)
+    summary = next(d.value for d in app.dataframe if "Fit RMSE (vol pts)" in d.value.columns)
+    assert summary["Fit RMSE (vol pts)"].between(0.03, 0.4).all()
+    assert any("the surface's implied vol is" in i.value for i in app.info)
+
+
+def test_local_vol_defined_is_a_share_of_the_quoted_points(app):
+    narrow = _ssvi_quotes((30, 60), np.linspace(0.95, 1.05, 7))
+    wide = _ssvi_quotes((91, 182, 365), np.linspace(0.6, 1.5, 19))
+    frame = pd.concat([narrow, wide])
+    _upload(app, frame)
+    _ok(app)
+    clean, _ = vol_surface.parse_quotes(frame)
+    surface = vol_surface.fit_market_surface(clean, 100, 0.05, 0.0)
+    expected = np.isfinite(surface.local_vol).sum() / surface.quoted_points
+    assert _metric(app, "Local vol defined") == f"{expected:.0%}"
+    assert expected > 0.6  # the old denominator (the whole grid) gave a misleadingly low share
+    assert any("outside each maturity's quoted strikes" in c.value for c in app.caption)
+
+
+def test_interior_calendar_arbitrage_is_reported(app):
+    quotes = vol_surface.sample_quotes(100, 0.05, 0.0)
+    maturities = np.sort(quotes["Maturity"].unique())
+    quotes.loc[quotes["Maturity"] == maturities[4], "ImpliedVol"] *= 0.8
+    _upload(app, quotes)
+    _ok(app)
+    assert int(_metric(app, "Calendar-arbitrage points")) > 0  # was 0, with a local vol of exactly 0%
+    assert _metric(app, "Local vol defined") == "75%"  # two of the eight maturities are left undefined
+
+
+def test_parse_messages_stay_visible_when_the_fit_fails(app):
+    frame = pd.DataFrame(
+        {
+            "Strike": [90, 95, 100, 105, 110, 100],
+            "Days": [30, 30, 30, 30, 30, 60],
+            "ImpliedVol": ["25%", "23%", "22%", "22%", "23%", "n/a"],
+        }
+    )
+    _upload(app, frame)
+    assert not app.exception
+    assert any("two maturities" in e.value for e in app.error)
+    captions = " ".join(c.value for c in app.caption)
+    assert "Dropped 1 row(s)" in captions and "% signs" in captions
+
+
+def test_quotes_far_from_the_sidebar_spot_are_flagged(app):
+    # SPX-level strikes read against the default spot of 100; the header is the one the uploader's help names.
+    quotes = vol_surface.sample_quotes(5000, 0.05, 0.0).rename(columns={"Maturity": "Maturity (years)"})
+    _upload(app, quotes)
+    _ok(app)
+    assert any("far from the spot 100.00" in w.value for w in app.warning)

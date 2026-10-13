@@ -264,38 +264,74 @@ def bar_chart(names, values, x_title: str):
 
 
 def surface_3d(moneyness, maturities, z, title: str, colorscale: str):
+    # A cube-shaped scene, a camera far enough out and a colour bar under the plot keep every axis
+    # inside a half-width column (Plotly's automatic aspect otherwise stretches some surfaces out of view).
     fig = go.Figure(
         go.Surface(
             x=moneyness,
             y=maturities,
             z=z,
             colorscale=colorscale,
-            colorbar=dict(title="Vol", tickformat=".0%"),
-            hovertemplate="K/S %{x:.3f}<br>T %{y:.2f}y<br>vol %{z:.2%}<extra></extra>",
+            colorbar=dict(
+                title=dict(text="Volatility", side="top"),
+                tickformat=".0%",
+                orientation="h",
+                thickness=12,
+                len=0.8,
+                x=0.5,
+                xanchor="center",
+                y=-0.02,
+                yanchor="top",
+            ),
+            hovertemplate="K/S %{x:.3f}<br>T %{y:.3f} years<br>vol %{z:.2%}<extra></extra>",
             connectgaps=False,
         )
     )
     fig.update_layout(
         title=dict(text=title, x=0.0),
-        height=520,
-        margin=dict(l=0, r=0, t=40, b=0),
+        height=560,
+        margin=dict(l=0, r=0, t=40, b=70),
         scene=dict(
             xaxis_title="Moneyness K/S",
             yaxis_title="Maturity (years)",
             zaxis=dict(title="Volatility", tickformat=".0%"),
-            camera=dict(eye=dict(x=1.6, y=-1.6, z=0.8)),
+            aspectmode="cube",
+            camera=dict(eye=dict(x=1.9, y=-1.9, z=1.1), center=dict(x=0.0, y=0.0, z=-0.12)),
         ),
     )
     return fig
 
 
-def smile_chart(x, slices: Sequence[tuple[str, np.ndarray, np.ndarray]], x_title: str, spot_line: float | None = 1.0):
-    """Implied (solid) and local (dashed) volatility per slice, sharing a colour."""
+def smile_chart(
+    x,
+    slices: Sequence[tuple[str, np.ndarray, np.ndarray]],
+    x_title: str,
+    spot_line: float | None = 1.0,
+    quotes: Sequence[tuple[np.ndarray, np.ndarray, np.ndarray] | None] | None = None,
+):
+    """Implied (solid) and local (dashed) volatility per slice, sharing a colour.
+
+    ``quotes`` (aligned with ``slices``) adds the market quotes as markers:
+    ``(moneyness, quoted implied vol, fitted implied vol)`` or ``None`` for a slice without quotes.
+    """
     fig = go.Figure()
     for i, (label, implied, local) in enumerate(slices):
         color = SERIES[i % len(SERIES)]
         fig.add_trace(go.Scatter(x=x, y=implied, name=f"Implied · {label}", line=dict(color=color, width=2.5)))
         fig.add_trace(go.Scatter(x=x, y=local, name=f"Local · {label}", line=dict(color=color, width=2, dash="dash")))
+        if quotes is not None and quotes[i] is not None:
+            qx, qiv, fitted = quotes[i]
+            fig.add_trace(
+                go.Scatter(
+                    x=qx,
+                    y=qiv,
+                    mode="markers",
+                    name=f"Quotes · {label}",
+                    marker=dict(color=color, size=8, symbol="circle-open", line=dict(width=2)),
+                    customdata=np.column_stack([(np.asarray(qiv) - np.asarray(fitted)) * 100]),
+                    hovertemplate="quote %{y:.2%} · fit error %{customdata[0]:+.2f} vol pts",
+                )
+            )
     if spot_line is not None:
         _vline(fig, spot_line, "ATM", position="bottom")
     fig = apply_layout(fig, None, x_title, "Volatility", height=480)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import zlib
 
 import numpy as np
 import pandas as pd
@@ -15,29 +16,43 @@ from .inputs import Inputs
 SSVI = "Parametric (SSVI)"
 QUOTES = "Market quotes (CSV)"
 COLORSCALES = ("Viridis", "Plasma", "Inferno", "Magma", "Cividis", "Turbo")
+VOL_LIMITS = (0.5, 500.0)
+
+
+def _follow_sidebar_vol(inputs: Inputs) -> None:
+    """Re-seed the SSVI ATM vols from the sidebar volatility whenever it changes (and on first render)."""
+    base = inputs.volatility * 100
+    lo, hi = VOL_LIMITS
+    seeds = {
+        "ssvi_short": float(np.clip(round(base * 1.2, 2), lo, hi)),
+        "ssvi_long": float(np.clip(round(base, 2), lo, hi)),
+    }
+    changed = st.session_state.get("ssvi_vol_seed") != base
+    st.session_state["ssvi_vol_seed"] = base
+    for key, value in seeds.items():
+        if changed or key not in st.session_state:
+            st.session_state[key] = value
 
 
 def _ssvi_controls(inputs: Inputs) -> vs.VolSurface | None:
-    base = inputs.volatility * 100
-    lo, hi = 0.5, 500.0
+    _follow_sidebar_vol(inputs)
+    lo, hi = VOL_LIMITS
     c = st.columns(3)
     short = c[0].number_input(
         "Short-term ATM vol (%)",
-        lo,
-        hi,
-        float(np.clip(round(base * 1.2, 2), lo, hi)),
-        0.5,
+        min_value=lo,
+        max_value=hi,
+        step=0.5,
         key="ssvi_short",
-        help="ATM implied vol as maturity → 0.",
+        help="ATM implied vol as maturity → 0. Starts at 1.2 × the sidebar volatility and follows it.",
     )
     long = c[1].number_input(
         "Long-term ATM vol (%)",
-        lo,
-        hi,
-        float(np.clip(round(base, 2), lo, hi)),
-        0.5,
+        min_value=lo,
+        max_value=hi,
+        step=0.5,
         key="ssvi_long",
-        help="ATM implied vol as maturity → ∞.",
+        help="ATM implied vol as maturity → ∞. Starts at the sidebar volatility and follows it.",
     )
     kappa = c[2].number_input(
         "Term-structure speed κ",
@@ -46,7 +61,7 @@ def _ssvi_controls(inputs: Inputs) -> vs.VolSurface | None:
         1.5,
         0.1,
         key="ssvi_kappa",
-        help="How fast ATM variance moves from the short- to the long-term level.",
+        help="How fast ATM variance moves from the short- to the long-term level (per year).",
     )
     c = st.columns(3)
     rho = c[0].slider(
@@ -81,57 +96,86 @@ def _ssvi_controls(inputs: Inputs) -> vs.VolSurface | None:
     return cache.ssvi_surface(params, inputs.rate, inputs.dividend_yield, m_range, t_range)
 
 
-def _quote_controls(inputs: Inputs) -> tuple[vs.VolSurface | None, pd.DataFrame | None]:
+def _quote_controls(inputs: Inputs) -> vs.VolSurface | None:
     c1, c2 = st.columns([2, 1])
     upload = c1.file_uploader(
         "Option quotes (CSV)",
         type=["csv"],
         key="quotes_file",
-        help="Columns: Strike, Maturity (years) or Days, ImpliedVol (decimal or %). "
-        "At least two maturities with five or more strikes each.",
+        help="Columns: Strike; Maturity (years) or Days; and either ImpliedVol (decimal or %) or option prices "
+        "(Price, or Bid and Ask) with a Type column saying call or put. At least two maturities with five or "
+        "more strikes each.",
     )
-    sample = vs.sample_quotes(inputs.spot, inputs.rate, inputs.dividend_yield)
-    c2.download_button(
-        "Download a sample file",
-        sample.to_csv(index=False).encode(),
-        "sample_option_quotes.csv",
-        "text/csv",
-        on_click="ignore",
-        icon=":material/download:",
-        key="sample_quotes",
-    )
-    smooth = c2.toggle(
-        "Smooth quotes (GCV spline)",
-        value=True,
-        key="quotes_smooth",
-        help="Cubic smoothing spline per maturity with the penalty chosen by generalised "
-        "cross-validation. Turn off to interpolate the quotes exactly.",
+    for label, prices, key in (
+        ("Sample with implied vols", False, "sample_quotes"),
+        ("Sample with prices", True, "sample_prices"),
+    ):
+        sample = vs.sample_quotes(inputs.spot, inputs.rate, inputs.dividend_yield, prices=prices)
+        c2.download_button(
+            label,
+            sample.to_csv(index=False).encode(),
+            f"sample_option_{'prices' if prices else 'quotes'}.csv",
+            "text/csv",
+            on_click="ignore",
+            icon=":material/download:",
+            key=key,
+            width="stretch",
+        )
+    context = (
+        f"Quotes are read with the sidebar spot ({inputs.spot:,.2f}), rate ({inputs.rate:.2%}) and dividend yield "
+        f"({inputs.dividend_yield:.2%}); prices are inverted with Black-Scholes-Merton (European exercise)."
     )
     if upload is None:
-        st.info(
-            "Upload a quotes file, or download the sample to see the expected format. "
-            f"Quotes are interpreted with the sidebar spot ({inputs.spot:,.2f}), rate and dividend yield."
-        )
-        return None, None
+        st.info("Upload a quotes file, or download a sample to see the expected format. " + context)
+        return None
+    st.caption(context)
     try:
         raw = pd.read_csv(io.BytesIO(upload.getvalue()))
-        quotes, messages = vs.parse_quotes(raw)
-        for message in messages:
-            st.caption(f"ℹ️ {message}")
-        surface = cache.market_surface(quotes, inputs.spot, inputs.rate, inputs.dividend_yield, smooth)
+        with st.spinner("Fitting an SVI smile to every maturity…"):
+            surface, messages, error = cache.market_surface(raw, inputs.spot, inputs.rate, inputs.dividend_yield)
     except pd.errors.EmptyDataError:
         st.error("The uploaded file is empty.")
-        return None, None
+        return None
     except UnicodeDecodeError:
         st.error("The uploaded file is not a UTF-8 text CSV.")
-        return None, None
+        return None
     except (vs.QuoteParseError, ValueError, pd.errors.ParserError) as exc:
         st.error(f"Could not build a surface from this file: {exc}")
-        return None, None
-    return surface, quotes
+        return None
+    for message in messages:
+        st.caption(f"ℹ️ {message}")
+    if error:
+        st.error(f"Could not build a surface from this file: {error}")
+    return surface
 
 
-def _downloads(surface: vs.VolSurface, summary: pd.DataFrame, spot: float, quotes: pd.DataFrame | None) -> None:
+def _maturity_labels(maturities: np.ndarray) -> list[str]:
+    """Unique labels: days below one year, years above, with as many decimals as needed to tell them apart."""
+    for decimals in range(5):
+        labels = [f"{t * 365:.{decimals}f}d" if t < 1.0 else f"{t:.{decimals + 2}f}y" for t in maturities]
+        if len(set(labels)) == len(labels):
+            return labels
+    return [f"{t:.8f}y" for t in maturities]
+
+
+def _contract_readout(surface: vs.VolSurface, inputs: Inputs) -> None:
+    moneyness = inputs.strike / inputs.spot
+    iv = surface.implied_vol_at(moneyness, inputs.expiry)
+    where = f"strike {inputs.strike:,.2f} (K/S = {moneyness:.3f}) and expiry {inputs.days} days"
+    if np.isfinite(iv):
+        st.info(
+            f"At the sidebar {where}, the surface's implied vol is **{iv:.2%}** "
+            f"(sidebar volatility {inputs.volatility:.2%}).",
+            icon=":material/my_location:",
+        )
+    else:
+        region = "quoted region" if surface.quotes is not None else "grid"
+        st.caption(
+            f"The sidebar {where} lies outside the surface's {region}, so the surface gives no implied vol for it."
+        )
+
+
+def _downloads(surface: vs.VolSurface, summary: pd.DataFrame, spot: float) -> None:
     frames = surface.to_frames(spot)
     c = st.columns(3)
     c[0].download_button(
@@ -158,8 +202,16 @@ def _downloads(surface: vs.VolSurface, summary: pd.DataFrame, spot: float, quote
             frames["ImpliedVol"].to_excel(writer, sheet_name="ImpliedVol")
             frames["LocalVol"].to_excel(writer, sheet_name="LocalVol")
             summary.to_excel(writer, sheet_name="Summary", index=False)
-            if quotes is not None:
-                quotes.to_excel(writer, sheet_name="Quotes", index=False)
+            if surface.quotes is not None:
+                surface.quotes.rename(
+                    columns={
+                        "strike": "Strike",
+                        "maturity": "Maturity (years)",
+                        "iv": "Quoted implied vol",
+                        "moneyness": "Moneyness K/S",
+                        "fitted_iv": "SVI implied vol",
+                    }
+                ).to_excel(writer, sheet_name="Quotes", index=False)
     except ImportError:
         c[2].caption("Install `xlsxwriter` or `openpyxl` for Excel export.")
         return
@@ -174,18 +226,43 @@ def _downloads(surface: vs.VolSurface, summary: pd.DataFrame, spot: float, quote
     )
 
 
+def _smiles(surface: vs.VolSurface) -> None:
+    st.subheader("Smiles")
+    maturities = surface.maturities
+    labels = _maturity_labels(maturities)
+    n = len(labels)
+    # The key follows the maturity grid, so the default slices apply again whenever the grid changes.
+    grid_id = zlib.crc32(np.round(maturities, 8).tobytes())
+    picked = st.multiselect(
+        "Maturities",
+        list(range(n)),
+        default=sorted({0, n // 2, n - 1}),
+        format_func=labels.__getitem__,
+        max_selections=6,
+        key=f"smile_pick_{grid_id}",
+    )
+    if not picked:
+        return
+    slices = [(labels[i], surface.implied_vol[i], surface.local_vol[i]) for i in picked]
+    quotes = None
+    if surface.quotes is not None:
+        quotes = []
+        for i in picked:
+            rows = surface.quotes[np.isclose(surface.quotes["maturity"], maturities[i], rtol=0.0, atol=1e-9)]
+            quotes.append((rows["moneyness"].to_numpy(), rows["iv"].to_numpy(), rows["fitted_iv"].to_numpy()))
+    st.plotly_chart(charts.smile_chart(surface.moneyness, slices, "Moneyness K/S", quotes=quotes), key="smiles")
+    if quotes is not None:
+        st.caption("Circles are the quotes; hover one to see how far the SVI fit misses it.")
+
+
 @st.fragment
 def render(inputs: Inputs) -> None:
     source = st.segmented_control("Surface source", [SSVI, QUOTES], default=SSVI, required=True, key="surface_source")
-    quotes = None
-    if source == SSVI:
-        surface = _ssvi_controls(inputs)
-    else:
-        surface, quotes = _quote_controls(inputs)
+    surface = _ssvi_controls(inputs) if source == SSVI else _quote_controls(inputs)
     if surface is None:
         return
 
-    total = surface.local_vol.size
+    quoted = surface.quoted_points
     valid = int(np.isfinite(surface.local_vol).sum())
     c = st.columns(4)
     c[0].metric(
@@ -195,7 +272,8 @@ def render(inputs: Inputs) -> None:
         "Calendar-arbitrage points",
         surface.calendar_violations,
         border=True,
-        help="Total implied variance decreasing in maturity at fixed forward moneyness (∂w/∂T < 0).",
+        help="Grid points where total implied variance does not increase with maturity at fixed forward "
+        "moneyness (∂w/∂T ≤ 0, beyond quote precision for market quotes).",
     )
     c[2].metric(
         "Butterfly-arbitrage points",
@@ -205,14 +283,21 @@ def render(inputs: Inputs) -> None:
     )
     c[3].metric(
         "Local vol defined",
-        f"{valid / total:.0%}",
+        f"{valid / quoted:.0%}" if quoted else "–",
         border=True,
-        help="Share of grid points with a valid local volatility.",
+        help="Share of the grid points that have an implied vol (inside the quoted strikes) where local "
+        "volatility is also defined.",
     )
     for note in surface.notes:
         st.warning(note)
-    if valid < total:
-        st.caption("Local volatility is left blank where the surface has static arbitrage — it is undefined there.")
+    if valid < quoted:
+        st.caption(
+            "Local volatility is left blank where it is undefined: where the surface has static arbitrage, and for "
+            "quotes where ∂w/∂T would need a neighbouring maturity far outside its quoted strikes."
+        )
+    if quoted < surface.implied_vol.size:
+        st.caption("Implied volatility is left blank outside each maturity's quoted strikes (no extrapolation).")
+    _contract_readout(surface, inputs)
 
     colorscale = st.selectbox("Colour scale", COLORSCALES, key="surface_colors")
     left, right = st.columns(2)
@@ -227,14 +312,7 @@ def render(inputs: Inputs) -> None:
         key="surf_lv",
     )
 
-    st.subheader("Smiles")
-    labels = [f"{t:.2f}y" for t in surface.maturities]
-    n = len(labels)
-    default = sorted({labels[0], labels[n // 2], labels[-1]}, key=labels.index)
-    picked = st.multiselect("Maturities", labels, default=default, max_selections=6, key="smile_pick")
-    slices = [(lab, surface.implied_vol[labels.index(lab)], surface.local_vol[labels.index(lab)]) for lab in picked]
-    if slices:
-        st.plotly_chart(charts.smile_chart(surface.moneyness, slices, "Moneyness K/S"), key="smiles")
+    _smiles(surface)
 
     st.subheader("Term structure and skew")
     summary = vs.surface_summary(surface)
@@ -252,12 +330,16 @@ def render(inputs: Inputs) -> None:
             "ATM local vol": st.column_config.NumberColumn(format="%.2f%%"),
             "Skew 90-110 (vol pts)": st.column_config.NumberColumn(format="%.2f"),
             "Butterfly (vol pts)": st.column_config.NumberColumn(format="%.2f"),
+            "Fit RMSE (vol pts)": st.column_config.NumberColumn(
+                format="%.3f", help="Root-mean-square gap between the SVI smile and the quotes at this maturity."
+            ),
         },
     )
     st.caption(
         "ATM means K = S. Skew is the 90% minus 110% moneyness implied vol; butterfly is their average "
-        "minus ATM. Near the money, local vol skew is roughly twice the implied skew (Gatheral's rule of thumb)."
+        "minus ATM. Blank cells need strikes outside the quoted range or a local vol that is undefined. Near the "
+        "money, local vol skew is roughly twice the implied skew (Gatheral's rule of thumb)."
     )
 
     st.subheader("Download")
-    _downloads(surface, summary, inputs.spot, quotes)
+    _downloads(surface, summary, inputs.spot)

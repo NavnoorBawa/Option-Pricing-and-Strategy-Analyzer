@@ -65,8 +65,16 @@ def ssvi_surface(params: vol_surface.SSVIParams, rate, dividend_yield, m_range, 
 
 
 @st.cache_data(show_spinner=False, max_entries=8)
-def market_surface(quotes, spot, rate, dividend_yield, smooth) -> vol_surface.VolSurface:
-    return vol_surface.fit_market_surface(quotes, spot, rate, dividend_yield, smooth=smooth)
+def market_surface(raw, spot, rate, dividend_yield) -> tuple[vol_surface.VolSurface | None, list[str], str | None]:
+    """Clean an uploaded quotes table (inverting any prices) and fit it.
+
+    Returns ``(surface, messages, error)`` so the parse messages survive a fit that fails.
+    """
+    quotes, messages = vol_surface.parse_quotes(raw, spot, rate, dividend_yield)
+    try:
+        return vol_surface.fit_market_surface(quotes, spot, rate, dividend_yield), messages, None
+    except vol_surface.QuoteParseError as exc:
+        return None, messages, str(exc)
 
 
 @st.cache_data(show_spinner=False, max_entries=64)

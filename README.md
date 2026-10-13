@@ -41,8 +41,10 @@ pandas); the Streamlit app is a thin interface on top of it.
   dynamics, compared with delta-normal VaR.
 
 **Volatility Surface & Implied Volatility**
-- Arbitrage-free SSVI surfaces or your own quotes (CSV), smoothed and turned into local volatility with Gatheral's
-  formula; calendar and butterfly arbitrage are detected and reported, never silently patched.
+- Arbitrage-free SSVI surfaces or your own quotes (CSV of implied vols, or of option prices that are inverted with
+  Black–Scholes–Merton), fitted with an SVI smile per expiry and turned into local volatility with Gatheral's
+  formula; calendar and butterfly arbitrage are detected and reported, never silently patched. The smiles show the
+  quotes and the fit error, and the surface's implied vol is read off for the sidebar strike and expiry.
 - Implied-volatility solver for European (Black–Scholes–Merton) and American (binomial) quotes that checks
   the no-arbitrage bounds and always converges.
 - Settings are stored in the URL, so any setup can be bookmarked or shared.
