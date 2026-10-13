@@ -774,8 +774,13 @@ def _maturities(
 
 SPREAD_CHECK_VOL = 0.01  # vol error allowed on each quote before prices that run the wrong way with strike count
 FLY_CHECK_VOL = 0.005  # vol error allowed on each quote before a butterfly with a negative cost counts
-# Price error allowed on a quoted implied vol, whose price and tick are unknown, as a fraction of the forward.
+# Price error allowed on a quoted implied vol, whose price and tick are unknown: this fraction of the forward or
+# MIN_PRICE_ERROR (half a cent, the rounding of a price in cents), whichever is more.
 UNKNOWN_PRICE_ERROR = 1e-4
+MIN_PRICE_ERROR = 0.005
+# Static arbitrage in quoted implied vols that goes away if each price behind them is off by half this tick is
+# reported as possible, not certain: vols inverted from midpoints of bids and asks in 0.05 ticks carry that rounding.
+QUOTED_VOL_TICK = 0.05
 
 
 def _black_prices(strike, iv, T: float, forward: float, vol_error: float, price_error=0.0):
@@ -959,8 +964,10 @@ def _option_prices(
     """Each row's option price and how far it may be off, and the rows dropped for a zero bid or an ask below the bid.
 
     The quoted price (Price, Mid, Mark) where it is positive, else the bid/ask midpoint, else the last trade: an
-    empty or partly blank price column next to valid bids and asks no longer blocks them. A bid/ask midpoint may
-    be off by half the spread, and any other price by the step of its column's grid (:func:`_price_step`).
+    empty or partly blank price column next to valid bids and asks no longer blocks them. A price may be off by
+    the step of its column's grid (:func:`_price_step`), and one with a bid and an ask (``0 <= bid <= ask``) by
+    at least as much as takes it to the farther of them: half the spread for their midpoint, so that a price
+    can stand for buying at the ask or selling at the bid.
     """
     price = pd.Series(np.nan, index=frame.index)
     error = pd.Series(np.nan, index=frame.index)
@@ -971,9 +978,11 @@ def _option_prices(
         if price.notna().any():
             used.append(f"option price from '{column}'")
             error = error.where(price.isna(), _price_step(price))
-    if "bid" in found and "ask" in found and price.isna().any():
+    bid = ask = None
+    if "bid" in found and "ask" in found:  # read even when every row has a price: they bound its error
         bid = _numeric(frame, found["bid"][0], messages, required=False)[0]
         ask = _numeric(frame, found["ask"][0], messages, required=False)[0]
+    if bid is not None and price.isna().any():
         need = price.isna() & bid.notna() & ask.notna()
         unusable = need & ((bid <= 0) | (ask < bid))
         if unusable.any():
@@ -992,6 +1001,11 @@ def _option_prices(
             error = error.where(~filled, _price_step(last))
             where = " where no other price is given" if "price" in found or "bid" in found else ""
             used.append(f"option price from '{found['last'][0]}' (last trade){where}")
+    if bid is not None:
+        # A Mid or Mark next to the bid and ask was allowed only its grid's step (0.025 for midpoints of 0.05
+        # ticks), so adding Mid = (Bid + Ask) / 2 to an arbitrage-free Bid/Ask file reported static arbitrage.
+        quoted = price.notna() & (bid >= 0) & (ask >= bid)
+        error = error.where(~quoted, np.maximum(error, np.maximum(ask - price, price - bid)))
     if price.isna().all() and not unusable.all():
         columns = ", ".join(repr(found[key][0]) for key in ("price", "bid", "ask", "last") if key in found)
         raise QuoteParseError(f"no numeric option price in {columns}")
@@ -1024,8 +1038,9 @@ def parse_quotes(
 
     Returns ``(clean, messages)`` where ``clean`` has columns ``strike``,
     ``maturity`` (years), ``iv`` (decimal) and ``price_error`` (how far the option
-    price behind each quote may be off: half the spread for a Bid/Ask midpoint, else
-    the step of its price grid, NaN for an implied vol), and ``messages`` describes
+    price behind each quote may be off: the step of its price grid, or the distance to
+    the farther of its bid and ask when the file gives them and that is more, which is
+    half the spread for a Bid/Ask midpoint; NaN for an implied vol), and ``messages`` describes
     every interpretation and adjustment; a :class:`QuoteWarning` among them flags a
     unit that was guessed. Raises :class:`QuoteParseError` if the data is unusable.
     """
@@ -1317,12 +1332,14 @@ def fit_market_surface(
     maturity far outside its quotes, where the surface has calendar or butterfly
     arbitrage, or where it is otherwise undefined. The quotes themselves are checked
     for static arbitrage, allowing each price its ``price_error`` (see
-    :func:`parse_quotes`; :data:`UNKNOWN_PRICE_ERROR` of the forward where it is NaN
-    or the column is missing).
+    :func:`parse_quotes`; where it is NaN or the column is missing,
+    :data:`UNKNOWN_PRICE_ERROR` of the forward or :data:`MIN_PRICE_ERROR`, whichever
+    is more); arbitrage in quoted vols that half a :data:`QUOTED_VOL_TICK` of error
+    in each price would remove is reported as possible rather than certain.
     """
     notes: list[str] = []
     carry = rate - dividend_yield
-    Ts, fits, quoted, rmse, used, binned, arbitraged, flies = [], [], [], [], [], [], [], []
+    Ts, fits, quoted, rmse, used, binned, arbitraged, flies, certain = [], [], [], [], [], [], [], [], []
     for T, grp in quotes.groupby("maturity"):
         T = float(T)
         if grp["strike"].nunique() < MIN_STRIKES_PER_SLICE:
@@ -1341,11 +1358,23 @@ def fit_market_surface(
         rmse.append(float(np.sqrt(np.mean((fitted - iv) ** 2))))
         forward = spot * np.exp(carry * T)
         # Each quote's price error, undiscounted like the Black prices it widens: its rounding or half its bid/ask
-        # spread (see parse_quotes), or UNKNOWN_PRICE_ERROR of the forward for an implied vol without a price.
+        # spread (see parse_quotes), or for an implied vol without a price UNKNOWN_PRICE_ERROR of the forward or
+        # MIN_PRICE_ERROR, whichever is more.
         known = grp["price_error"].to_numpy(float) if "price_error" in grp else np.full(len(grp), np.nan)
-        price_error = np.where(np.isfinite(known), known * np.exp(rate * T), UNKNOWN_PRICE_ERROR * forward)
-        arbitraged.append(_spread_arbitrage(grp["strike"].to_numpy(float), iv, T, forward, price_error))
-        flies.append(_butterfly_arbitrage(grp["strike"].to_numpy(float), iv, T, forward, price_error))
+        unknown = ~np.isfinite(known)
+        growth = np.exp(rate * T)
+        price_error = np.where(unknown, max(UNKNOWN_PRICE_ERROR * forward, MIN_PRICE_ERROR * growth), known * growth)
+        strike = grp["strike"].to_numpy(float)
+        arbitraged.append(_spread_arbitrage(strike, iv, T, forward, price_error))
+        flies.append(_butterfly_arbitrage(strike, iv, T, forward, price_error))
+        if unknown.any() and (arbitraged[-1] or flies[-1][0]):  # is it beyond the rounding of QUOTED_VOL_TICK?
+            tick_error = np.where(unknown, np.maximum(price_error, 0.5 * QUOTED_VOL_TICK * growth), price_error)
+            certain.append(
+                _spread_arbitrage(strike, iv, T, forward, tick_error)
+                or _butterfly_arbitrage(strike, iv, T, forward, tick_error)[0] > 0
+            )
+        else:
+            certain.append(True)
         used.append(grp.assign(moneyness=grp["strike"] / spot, fitted_iv=fitted))
     if len(fits) < 2:
         n_maturities = quotes["maturity"].nunique()
@@ -1413,11 +1442,32 @@ def fit_market_surface(
                 "strike, or a call more than one at a lower strike, even if each quote is "
                 f"{SPREAD_CHECK_VOL * 100:g} vol point off"
             )
+        # Arbitrage in quoted vols that the rounding of the prices behind them could cause may not be in the market.
+        within_rounding = (fly | spread) & ~np.array(certain)
+        unsure = bool(within_rounding[fly | spread].all())
+        possible = ""
+        if within_rounding.any():
+            where = "The" if unsure else f"At maturities {', '.join(f'{t:.3g}y' for t in Ts[within_rounding])} the"
+            possible = (
+                f" {where} arbitrage is small enough that rounding the prices behind the quoted vols to "
+                f"{QUOTED_VOL_TICK:g} ticks could cause it, so it may not be in the market."
+            )
+        errors = quotes["price_error"].to_numpy(float) if "price_error" in quotes else np.full(len(quotes), np.nan)
+        allowed = []
+        if np.isfinite(errors).any():
+            allowed.append(
+                "each price to be off by half its bid/ask spread (as far as the farther of its bid and ask, for a "
+                "price away from their midpoint) or by one step of the file's price grid"
+            )
+        if not np.isfinite(errors).all():
+            allowed.append(
+                f"the unknown price behind each quoted implied vol to be off by {UNKNOWN_PRICE_ERROR:.2%} of the "
+                f"forward or {MIN_PRICE_ERROR:g}, whichever is more"
+            )
         notes.append(
-            f"The quotes have static arbitrage that the fitted surface smooths out: {'; '.join(parts)}. The checks "
-            "also allow each price to be off by half its bid/ask spread, or by one step of the file's price grid "
-            f"({UNKNOWN_PRICE_ERROR:.2%} of the forward for a quoted implied vol). The arbitrage counts above "
-            "describe the fitted surface, not the quotes, so check these quotes."
+            f"The quotes {'may have' if unsure else 'have'} static arbitrage that the fitted surface smooths out: "
+            f"{'; '.join(parts)}. The checks also allow {', and '.join(allowed)}.{possible} The arbitrage counts "
+            "above describe the fitted surface, not the quotes, so check these quotes."
         )
 
     moneyness = _moneyness_grid(np.exp(quoted_y + carry * Ts[:, None]), n_moneyness)

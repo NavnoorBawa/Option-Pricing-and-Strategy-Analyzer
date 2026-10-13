@@ -7,6 +7,7 @@ import pytest
 
 from options_analyzer import black_scholes as bs
 from options_analyzer import vol_surface as vs
+from options_analyzer.implied_vol import implied_volatility
 
 M = np.linspace(0.7, 1.3, 25)
 T = np.linspace(0.1, 2.0, 12)
@@ -1191,13 +1192,17 @@ def test_butterfly_check_is_model_free_and_tolerates_repeated_strikes():
     assert vs._butterfly_arbitrage(np.r_[strikes, 100.0], np.r_[flat, 0.2], 30 / 365, 100.0) == (0, None)
 
 
-def _tick_quoted_chain(tick: float = 0.05, half_spread=lambda price, tick: max(tick, 0.03 * price), spike=0.0):
+def _tick_quoted_chain(
+    tick: float = 0.05, half_spread=lambda price, tick: max(tick, 0.03 * price), spike=0.0, off_centre=0.0
+):
     """Out-of-the-money bids and asks around Black-Scholes prices of SSVI vols, rounded outwards to ``tick``.
 
     Spot 100, rate 5%, strikes 70-130 in steps of 1, 7-91 days; arbitrage-free unless ``spike`` (vol points)
-    is added to the 30-day at-the-money vol.
+    is added to the 30-day at-the-money vol. Each spread is centred on the price, or with ``off_centre`` on a
+    random point up to that fraction of the half-spread from it, and always brackets the price.
     """
     params, r = vs.SSVIParams(), 0.05
+    rng = np.random.default_rng(0)
     rows = []
     for days in (7, 14, 30, 60, 91):
         t = days / 365
@@ -1207,7 +1212,9 @@ def _tick_quoted_chain(tick: float = 0.05, half_spread=lambda price, tick: max(t
             kind = "call" if strike >= 100 * np.exp(r * t) else "put"
             price = bs.price(100.0, strike, t, r, iv, 0.0, kind)
             half = half_spread(price, tick)
-            bid, ask = np.floor((price - half) / tick) * tick, np.ceil((price + half) / tick) * tick
+            centre = price + rng.uniform(-off_centre, off_centre) * half
+            bid = min(np.floor((centre - half) / tick), np.floor(price / tick)) * tick
+            ask = max(np.ceil((centre + half) / tick), np.ceil(price / tick)) * tick
             if bid > 0:
                 rows.append({"Strike": strike, "Days": days, "Type": kind, "Bid": round(bid, 2), "Ask": round(ask, 2)})
     return pd.DataFrame(rows)
@@ -1247,6 +1254,92 @@ def test_a_butterfly_that_costs_less_than_nothing_at_the_bid_and_ask_is_still_re
     assert calls.loc[99, "Ask"] - 2 * calls.loc[100, "Bid"] + calls.loc[101, "Ask"] < -0.2  # a real arbitrage
     (note,) = _quote_arbitrage(chain)
     assert "a butterfly of neighbouring strikes costs less than nothing" in note and "half its bid/ask spread" in note
+    assert note.startswith("The quotes have static arbitrage") and "may not be in the market" not in note
+    (with_mid,) = _quote_arbitrage(chain.assign(Mid=(chain["Bid"] + chain["Ask"]) / 2))  # the same with a Mid
+    assert "e.g. 99/100/101 at 0.0822y" in with_mid
+
+
+@pytest.mark.parametrize("column", ["Mid", "Mark"])
+def test_a_price_column_next_to_the_bid_and_ask_may_be_off_by_half_the_spread(column):
+    # A Mid or Mark next to Bid and Ask was allowed only the 0.025 step of its grid, so adding Mid = (Bid + Ask) / 2
+    # to an arbitrage-free Bid/Ask file with wide spreads turned no note into 'static arbitrage': the 30-day 96/97/98
+    # put butterfly costs -0.40 at the midpoints but +0.40 bought at the ask and sold at the bid.
+    chain = _tick_quoted_chain(half_spread=lambda price, tick: max(tick, 0.1 * price), off_centre=0.9)
+    puts = chain[(chain["Days"] == 30) & chain["Strike"].between(96, 98)]
+    mid = ((puts["Bid"] + puts["Ask"]) / 2).to_numpy()
+    assert mid[0] - 2 * mid[1] + mid[2] == pytest.approx(-0.4)
+    assert puts["Ask"].iloc[0] - 2 * puts["Bid"].iloc[1] + puts["Ask"].iloc[2] == pytest.approx(0.4)
+    assert _quote_arbitrage(chain) == []
+    priced = chain.assign(**{column: ((chain["Bid"] + chain["Ask"]) / 2).round(3)})
+    assert _quote_arbitrage(priced) == []
+    quotes, messages = vs.parse_quotes(priced, 100.0, 0.05)
+    assert f"option price from '{column}'" in messages[0]
+    assert np.allclose(np.sort(quotes["price_error"]), np.sort((chain["Ask"] - chain["Bid"]) / 2))
+
+
+def test_a_price_away_from_the_midpoint_may_be_off_by_as_much_as_reaches_its_bid_and_ask():
+    frame = pd.DataFrame(
+        {
+            "Strike": [95.0, 100.0, 105.0, 110.0],
+            "Days": 30,
+            "Type": ["put", "call", "call", "call"],
+            "Bid": [1.10, 2.40, 0.60, np.nan],
+            "Ask": [1.30, 2.70, 0.50, np.nan],  # crossed at 105, missing at 110: the price keeps its step
+            "Mark": [1.15, 2.55, 0.55, 0.15],
+        }
+    )
+    quotes, _ = vs.parse_quotes(frame, 100.0, 0.05)
+    assert np.allclose(quotes["price_error"], [0.15, 0.15, 0.05, 0.05])  # to the ask, half the spread, the step
+
+
+def _vols_of_tick_rounded_midpoints(spot: float, tick: float, spike: float = 0.0) -> pd.DataFrame:
+    """Implied vols (4 dp) of midpoints of bids and asks in ``tick``s around an arbitrage-free SSVI chain.
+
+    Rate 5%, $0.50 strikes from 70% to 130% of ``spot``, 7-91 days; ``spike`` (vol points) is added to the
+    30-day vol at the strike nearest the spot.
+    """
+    params, r = vs.SSVIParams(), 0.05
+    rows = []
+    for days in (7, 14, 30, 60, 91):
+        t = days / 365
+        for strike in np.arange(np.ceil(1.4 * spot), np.floor(2.6 * spot) + 1) / 2:
+            iv = np.sqrt(params.total_variance(np.log(strike / spot) - r * t, t)[0] / t)
+            kind = "call" if strike >= spot * np.exp(r * t) else "put"
+            price = bs.price(spot, strike, t, r, iv, 0.0, kind)
+            half = max(tick, 0.03 * price)
+            bid, ask = np.floor((price - half) / tick) * tick, np.ceil((price + half) / tick) * tick
+            if bid > 0:
+                vol = implied_volatility((bid + ask) / 2, spot, strike, t, r, 0.0, kind)
+                vol += spike if days == 30 and abs(strike - spot) <= 0.25 else 0.0
+                rows.append({"Strike": strike, "Days": days, "IV": round(vol, 4)})
+    return pd.DataFrame(rows)
+
+
+def _vol_arbitrage(frame: pd.DataFrame, spot: float) -> list[str]:
+    quotes, _ = vs.parse_quotes(frame, spot, 0.05)
+    return [note for note in vs.fit_market_surface(quotes, spot, 0.05, 0.0).notes if "static arbitrage" in note]
+
+
+def test_vols_of_tick_rounded_midpoints_on_a_low_priced_underlying_are_not_static_arbitrage():
+    # The unknown price behind a quoted vol was allowed only 0.01% of the forward (0.0037 at spot 37.4), so vols
+    # inverted from midpoints of an arbitrage-free chain in 0.05 ticks were reported as static arbitrage: the 30-day
+    # 31.5/32/32.5 put butterfly costs -0.05 at the midpoints (+0.004 at the true prices).
+    assert _vol_arbitrage(_vols_of_tick_rounded_midpoints(37.4, 0.05), 37.4) == []
+
+
+def test_arbitrage_in_quoted_vols_within_the_rounding_of_their_prices_is_called_possible():
+    # In 0.10 ticks the midpoints' rounding still shows as arbitrage beyond half a cent per price; it was reported
+    # as certain although half a 0.05 tick per price removes it.
+    (note,) = _vol_arbitrage(_vols_of_tick_rounded_midpoints(37.4, 0.10), 37.4)
+    assert note.startswith("The quotes may have static arbitrage that the fitted surface smooths out")
+    possible = "arbitrage is small enough that rounding the prices behind the quoted vols to 0.05 ticks could cause it"
+    assert f"The {possible}, so it may not be in the market." in note
+    assert "the unknown price behind each quoted implied vol to be off by 0.01% of the forward or 0.005" in note
+    assert "bid/ask" not in note  # the allowances for prices do not apply to quoted vols
+    # A 5 vol-point spike is beyond that rounding: the note says so, and names only the other maturities as possible.
+    (note,) = _vol_arbitrage(_vols_of_tick_rounded_midpoints(37.4, 0.10, spike=0.05), 37.4)
+    assert note.startswith("The quotes have static arbitrage") and "e.g. 37/37.5/38 at 0.0822y" in note
+    assert f"At maturities 0.164y, 0.249y the {possible}" in note
 
 
 def test_the_price_step_is_the_coarsest_usual_increment_of_every_price():

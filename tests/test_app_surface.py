@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from options_analyzer import black_scholes, vol_surface
+from options_analyzer import black_scholes, implied_vol, vol_surface
 from options_analyzer.ui import charts, tab_surface
 
 APP = str(Path(__file__).resolve().parents[1] / "main.py")
@@ -344,6 +344,51 @@ def test_tick_rounded_bids_and_asks_raise_no_arbitrage_warning(app):
     _upload(app, pd.DataFrame(rows))
     _ok(app)
     assert _metric(app, "Butterfly arbitrage") == "0"
+    assert not [w.value for w in app.warning if "static arbitrage" in w.value]
+
+
+def test_a_mark_column_next_to_wide_bids_and_asks_raises_no_arbitrage_warning(app):
+    # Mark = (Bid + Ask) / 2 next to the bid and ask was allowed only its 0.025 grid step, not half the spread, so
+    # this arbitrage-free chain (wide spreads around prices off their midpoints) showed a static-arbitrage warning.
+    rng = np.random.default_rng(0)
+    rows = []
+    for days in (7, 14, 30, 60, 91):
+        t = days / 365
+        for strike in range(70, 131):
+            iv = np.sqrt(vol_surface.SSVIParams().total_variance(np.log(strike / 100) - 0.05 * t, t)[0] / t)
+            kind = "call" if strike >= 100 * np.exp(0.05 * t) else "put"
+            price = black_scholes.price(100.0, strike, t, 0.05, iv, 0.0, kind)
+            half = max(0.05, 0.1 * price)
+            centre = price + rng.uniform(-0.9, 0.9) * half  # each spread still brackets the price
+            bid = min(np.floor((centre - half) / 0.05), np.floor(price / 0.05)) * 0.05
+            ask = max(np.ceil((centre + half) / 0.05), np.ceil(price / 0.05)) * 0.05
+            if bid > 0:
+                row = {"Strike": strike, "Days": days, "Type": kind, "Bid": round(bid, 2), "Ask": round(ask, 2)}
+                rows.append(row | {"Mark": round((bid + ask) / 2, 3)})
+    _upload(app, pd.DataFrame(rows))
+    _ok(app)
+    assert any("option price from 'Mark'" in c.value for c in app.caption)
+    assert not [w.value for w in app.warning if "static arbitrage" in w.value]
+
+
+def test_vols_of_tick_rounded_midpoints_raise_no_arbitrage_warning(app):
+    # The unknown price behind a quoted vol was allowed only 0.01% of the forward (0.0037 at spot 37.4): vols of
+    # midpoints of an arbitrage-free chain in 0.05 ticks with $0.50 strikes showed a static-arbitrage warning.
+    rows = []
+    for days in (7, 14, 30, 60, 91):
+        t = days / 365
+        for strike in np.arange(26.5, 48.6, 0.5):
+            iv = np.sqrt(vol_surface.SSVIParams().total_variance(np.log(strike / 37.4) - 0.05 * t, t)[0] / t)
+            kind = "call" if strike >= 37.4 * np.exp(0.05 * t) else "put"
+            price = black_scholes.price(37.4, strike, t, 0.05, iv, 0.0, kind)
+            half = max(0.05, 0.03 * price)
+            bid, ask = np.floor((price - half) / 0.05) * 0.05, np.ceil((price + half) / 0.05) * 0.05
+            if bid > 0:
+                vol = implied_vol.implied_volatility((bid + ask) / 2, 37.4, strike, t, 0.05, 0.0, kind)
+                rows.append({"Strike": strike, "Days": days, "IV": round(vol, 4)})
+    app.sidebar.number_input(key="spot").set_value(37.4).run()
+    _upload(app, pd.DataFrame(rows))
+    _ok(app)
     assert not [w.value for w in app.warning if "static arbitrage" in w.value]
 
 
