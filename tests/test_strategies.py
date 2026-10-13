@@ -1,3 +1,4 @@
+import mpmath as mp
 import numpy as np
 import pytest
 from scipy.stats import norm
@@ -320,3 +321,51 @@ def test_strikes_are_labelled_with_every_decimal(strike, text):
 def test_large_quantities_are_labelled_in_full():
     assert S.Leg("call", -1234567, 100).label() == "Short 1,234,567 × 100 Call"
     assert S.Leg("stock", 2.5).label() == "Long 2.5 shares"
+
+
+# --- Final review -------------------------------------------------------------------------------------------------
+
+
+def _covered_call_reference(rate: float, vol: float, years: float) -> tuple[float, float]:
+    """Breakeven and probability of profit of an at-the-money covered call (spot 100), in 50-digit arithmetic.
+
+    Below the strike the P&L at expiry is S_T - (100 - C), so the breakeven is 100 - C with C the closed-form call
+    value; the probability of profit is the log-normal mass above it under the risk-neutral drift.
+    """
+    with mp.workdps(50):
+        s, k, t, r, sigma = mp.mpf(100), mp.mpf(100), mp.mpf(years), mp.mpf(rate), mp.mpf(vol)
+        d1 = (mp.log(s / k) + (r + sigma**2 / 2) * t) / (sigma * mp.sqrt(t))
+        call = s * mp.ncdf(d1) - k * mp.exp(-r * t) * mp.ncdf(d1 - sigma * mp.sqrt(t))
+        breakeven = s - call
+        mean = mp.log(s) + (r - sigma**2 / 2) * t
+        return float(breakeven), float(1 - mp.ncdf((mp.log(breakeven) - mean) / (sigma * mp.sqrt(t))))
+
+
+@pytest.mark.parametrize("years", [5.0, 10.0])
+def test_tiny_breakeven_keeps_the_probability_of_profit_on_its_side(years):
+    # Final review: at 500% volatility over ten years the covered call's breakeven (about 2e-13) collapsed onto
+    # S = 0, so its probability of profit read 100% instead of about 5e-9. The P&L near S = 0 is S - (100 - C) with
+    # 100 - C a difference of two numbers near 100, so the float breakeven carries a few per cent of rounding.
+    market = S.Market(100, 0.05, 5.0, years)
+    m = S.analyze(S.build_template("Covered Call", 100, 10), market)
+    breakeven, pop = _covered_call_reference(0.05, 5.0, years)
+    assert m.breakevens == pytest.approx([breakeven], rel=0.1)
+    assert m.probability_of_profit == pytest.approx(pop, rel=0.05)
+    # The probability is the log-normal mass above the breakeven the analysis found, not above S = 0.
+    vol_t = 5.0 * np.sqrt(years)
+    mean = np.log(100) + (0.05 - 0.5 * 25.0) * years
+    assert m.probability_of_profit == pytest.approx(norm.sf((np.log(m.breakevens[0]) - mean) / vol_t), rel=1e-9)
+
+
+@pytest.mark.parametrize(
+    ("name", "rate"),
+    [("Long Call Calendar", 0.05), ("Diagonal (Poor Man's Covered Call)", 0.05), ("Short Put", 0.0)],
+)
+def test_tiny_breakeven_or_zero_edge_is_not_placed_at_zero(name, rate):
+    # Final review: these showed a probability of profit of >99.9% at 500% volatility over ten years, where the
+    # position profits only above a price of about 2e-13 (true probability about 5e-9). The short put's P&L
+    # near S = 0 is within rounding of zero; the edge of that zero region used to sit at S = 0 too.
+    market = S.Market(100, rate, 5.0, 10.0)
+    m = S.analyze(S.build_template(name, 100, 10, market.expiry), market)
+    assert m.probability_of_profit < 1e-6
+    assert 0 < m.breakevens[0] < 1e-10

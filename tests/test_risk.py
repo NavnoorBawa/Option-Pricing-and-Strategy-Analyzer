@@ -97,7 +97,7 @@ def test_legs_expiring_before_the_horizon_settle_on_their_expiry_day():
     market = S.Market(100, 0.05, 0.30, 7 / 365)
     calendar = S.build_template("Long Call Calendar", 100, 10, market.expiry)
     res = risk.value_at_risk(calendar, market, risk.VaRConfig(0.99, 10, 200_000, "normal", seed=1), 100)
-    assert res.settled_legs == 1
+    assert res.settled_legs == 2  # the 14-day leg (9.67 trading days) settles on day 10, the horizon
     # Independent path simulation: the front call settles at day 5 (ceil of 4.8 trading days).
     rng = np.random.default_rng(99)
     dv = 0.09 / 252
@@ -155,3 +155,29 @@ def test_riskless_position_has_no_higher_moments():
     box = S.Strategy("box", (S.Leg("call", 1, 90), S.Leg("call", -1, 110), S.Leg("put", 1, 110), S.Leg("put", -1, 90)))
     res = risk.value_at_risk(box, MARKET, risk.VaRConfig(0.99, 1, 10_000, "normal"))
     assert np.isnan(res.skewness) and np.isnan(res.excess_kurtosis) and res.std == 0.0
+
+
+# --- Final review -------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("days", "horizon", "settled"),
+    [(30, 21, 4), (30, 20, 0), (30, 22, 4), (1, 1, 4), (7, 5, 4), (7, 4, 0)],
+)
+def test_legs_expiring_during_the_last_day_count_as_settled(days, horizon, settled):
+    # Final review: a 30-day condor at a 21-day horizon expires at 20.7 trading days, but the caption left out the
+    # settlement sentence because the legs settle on day 21, the horizon itself.
+    market = S.Market(100, 0.05, 0.30, days / 365)
+    condor = S.build_template("Iron Condor", 100, 10)
+    config = risk.VaRConfig(0.99, horizon, 20_000, "normal", seed=3)
+    res = risk.value_at_risk(condor, market, config, 100)
+    assert res.settled_legs == settled == 4 * (days / 365 * 252 < horizon)
+    if settled and np.ceil(days / 365 * 252) == horizon:
+        # Every leg expires during the horizon's last day: the P&L is the payoff on the horizon price (no interest
+        # left to earn) minus today's value.
+        spot, _ = risk.simulate_horizon(market, config)
+        payoff = (
+            np.maximum(80 - spot, 0) - np.maximum(90 - spot, 0) - np.maximum(spot - 110, 0) + np.maximum(spot - 120, 0)
+        )
+        expected = 100 * (payoff - float(S.position_value(condor, market)))
+        assert res.pnl == pytest.approx(expected, abs=1e-9)

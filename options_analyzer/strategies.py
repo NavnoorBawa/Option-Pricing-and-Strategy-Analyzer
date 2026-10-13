@@ -360,14 +360,30 @@ def _live_vol_horizon(strategy: Strategy, market: Market, horizon: float) -> flo
 _MAX_GRID_WIDTH = float(np.log(1e6))
 
 
+#: The analysis grid starts at most this many log-units below the spot (e^-650 is about 5e-283, so the grid stays
+#: within the normal float range).
+_MAX_GRID_DEPTH = 650.0
+
+
 def _analysis_grid(strategy: Strategy, market: Market, horizon: float) -> np.ndarray:
-    """Spot grid containing every kink and spanning ~8 standard deviations of every relevant distribution."""
+    """Spot grid containing every kink and spanning ~8 standard deviations of every relevant distribution.
+
+    Downwards it reaches below the bulk of the price distribution at ``horizon``, whose median lies
+    sigma^2 h / 2 (plus the dividend yield) below the spot in log terms: at extreme sigma sqrt(h) nearly all the
+    probability sits under 1e-6 x spot, and a breakeven or the edge of a zero-P&L region must not hide in a single
+    gap between S = 0 and the first grid point there.
+    """
     width = min(8.0 * _live_vol_horizon(strategy, market, horizon), _MAX_GRID_WIDTH)
     hi = max([market.spot, *strategy.strikes]) * max(np.exp(width), 3.0)
+    lo = 1e-6 * market.spot
+    vol_t = market.volatility * np.sqrt(max(horizon, 1e-4))
+    depth = min(8.0 * vol_t + 0.5 * vol_t**2 + market.dividend_yield * horizon, _MAX_GRID_DEPTH)
+    bottom = market.spot * np.exp(-depth)
     grid = np.concatenate(
         [
             np.linspace(0.0, hi, 4001),
-            np.geomspace(1e-6 * market.spot, hi, 4001),
+            np.geomspace(bottom, lo, 1001) if 0.0 < bottom < lo else [],
+            np.geomspace(lo, hi, 4001),
             np.asarray(strategy.strikes, dtype=float),
             [market.spot],
         ]
@@ -452,17 +468,19 @@ def _transitions(strategy, market, grid, classes, horizon, carry) -> dict[int, f
 
     A strict sign change is refined with Brent's method; at the edge of a
     zero-P&L region the transition sits on the region's last zero point.
+    The root tolerance is relative only: an absolute one (such as 1e-12 x spot)
+    let a tiny positive root in the first bracket [0, grid[1]] collapse onto
+    S = 0, which put the whole probability below the root on the wrong side.
     """
 
     def f(s):
         return float(pnl(strategy, market, s, horizon, carry))
 
-    xtol = 1e-12 * max(market.spot, 1.0)
     out = {}
     for i in np.flatnonzero(classes[:-1] != classes[1:]):
         a, b = classes[i], classes[i + 1]
         if a != 0 and b != 0:
-            out[int(i)] = float(brentq(f, grid[i], grid[i + 1], xtol=xtol))
+            out[int(i)] = float(brentq(f, grid[i], grid[i + 1], xtol=1e-300, rtol=1e-12, maxiter=500))
         else:
             out[int(i)] = float(grid[i] if a == 0 else grid[i + 1])
     return out

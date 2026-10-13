@@ -241,11 +241,18 @@ def histogram_chart(
 
 
 def payoff_chart(
-    spots, curves: Sequence[tuple[np.ndarray, str, str, str]], spot: float, strikes, breakevens, band=None
+    spots,
+    curves: Sequence[tuple[np.ndarray, str, str, str]],
+    spot: float,
+    strikes,
+    breakevens,
+    band=None,
+    breakeven_decimals: int = 2,
 ):
     """P&L profile. ``curves`` holds ``(values, name, colour, dash)``; the first is shaded.
 
     The ±1σ band is named in the legend rather than annotated, so its label cannot collide with the spot label.
+    The breakeven hover shows ``breakeven_decimals`` decimals, like the breakevens written under the cards.
     """
     fig = go.Figure()
     if band is not None:
@@ -301,7 +308,7 @@ def payoff_chart(
                 mode="markers",
                 name="Breakeven",
                 marker=dict(size=10, color=ACCENT, symbol="diamond"),
-                hovertemplate="Breakeven %{x:$,.2f}<extra></extra>",
+                hovertemplate=f"Breakeven %{{x:$,.{breakeven_decimals}f}}<extra></extra>",
             )
         )
     fig = apply_layout(fig, None, "Underlying price", "Profit / loss ($)", height=500)
