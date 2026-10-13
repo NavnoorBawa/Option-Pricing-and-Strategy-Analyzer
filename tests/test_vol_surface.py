@@ -682,6 +682,97 @@ def test_fractional_days_in_a_maturity_column_get_a_units_warning():
     assert not any(isinstance(m, vs.QuoteWarning) for m in labelled + short)
 
 
+NEAR_THE_MONEY = np.arange(0.95, 1.0501, 0.01)
+
+
+def _days_chain(header: str, days=(2.65, 4.65, 9.65), moneyness=NEAR_THE_MONEY):
+    """Rounded SSVI implied vols of options ``days`` calendar days long, with the days in a column ``header``."""
+    quotes = ssvi_quotes(vs.SSVIParams(), 0.0, 0.0, days, moneyness, decimals=4)
+    in_days = (quotes["maturity"] * 365).round(6)
+    return pd.DataFrame({"Strike": quotes["strike"].round(2), header: in_days, "IV": quotes["iv"]})
+
+
+@pytest.mark.parametrize("spot", [100.0, None])
+def test_fractional_days_up_to_ten_get_a_units_warning_from_their_smiles(spot):
+    # 2.65, 4.65 and 9.65 days under 'Maturity' were read as years with no word about units: only fractions
+    # above 10 were flagged. As years their smiles are impossibly steep, which the warning now says.
+    clean, messages = vs.parse_quotes(_days_chain("Maturity"), spot)
+    warnings = [m for m in messages if isinstance(m, vs.QuoteWarning)]
+    assert clean["maturity"].max() == pytest.approx(9.65)
+    assert len(warnings) == 1
+    assert "go up to 9.65, read as years; name the column 'Days' if they are days to expiry" in warnings[0]
+    assert "the implied vols at 3 of 3 maturities are too steep for options that long" in warnings[0]
+    assert warnings[0].endswith("Read as days, none would.")
+    _, labelled = vs.parse_quotes(_days_chain("Maturity (years)"), spot)
+    days, named = vs.parse_quotes(_days_chain("Days"), spot)
+    assert not any(isinstance(m, vs.QuoteWarning) for m in labelled + named)
+    assert days["maturity"].max() == pytest.approx(9.65 / 365)
+
+
+def test_the_smile_check_keeps_quiet_on_maturities_that_are_years():
+    steep = vs.SSVIParams(0.3, 0.25, 1.5, -0.9, 1.05, 0.5)  # a steep equity skew at the arbitrage-free limit
+    for params, days, moneyness in (
+        (steep, (91, 182, 365, 730, 1825), np.linspace(0.5, 1.5, 21)),
+        (vs.SSVIParams(), (7, 30, 91, 182, 365, 730), np.linspace(0.6, 1.4, 33)),
+    ):
+        quotes = ssvi_quotes(params, 0.04, 0.0, days, moneyness, decimals=4)
+        for spot in (100.0, None):
+            _, messages = vs.parse_quotes(quotes.rename(columns={"maturity": "Maturity"}), spot, 0.04)
+            assert not any(isinstance(m, vs.QuoteWarning) for m in messages)
+
+
+def test_small_whole_days_get_the_smile_evidence_in_their_one_warning():
+    _, messages = vs.parse_quotes(_days_chain("T", days=(1, 2, 3, 4), moneyness=np.linspace(0.9, 1.1, 9)), 100.0)
+    warnings = [m for m in messages if isinstance(m, vs.QuoteWarning)]
+    assert len(warnings) == 1 and "'T' are whole numbers up to 4, read as years" in warnings[0]
+    assert "4 of 4 maturities are too steep" in warnings[0]
+
+
+def test_poor_fits_on_quotes_with_strike_arbitrage_point_at_the_maturity_unit():
+    # The poor-fit note blamed noise or a shape SVI cannot follow; as years these quotes price a put below a
+    # put at a lower strike, which no smile can follow, and the likely cause is days read as years.
+    quotes, _ = vs.parse_quotes(_days_chain("Maturity"), 100.0)
+    fitted = vs.fit_market_surface(quotes, 100.0, 0.0, 0.0)
+    notes = [note for note in fitted.notes if "SVI smile" in note]
+    assert len(notes) == 1 and "maturities 2.65y, 4.65y, 9.65y, where no arbitrage-free smile can follow" in notes[0]
+    assert "a put costs less than one at a lower strike" in notes[0] and "the maturity unit" in notes[0]
+    assert "noisy" not in notes[0]
+    as_days = vs.fit_market_surface(vs.parse_quotes(_days_chain("Days"), 100.0)[0], 100.0, 0.0, 0.0)
+    assert not any("SVI smile" in note for note in as_days.notes)
+
+
+def _price_chain(header: str, rate: float, days=(2.65, 4.65, 9.65)) -> pd.DataFrame:
+    """Out-of-the-money SSVI option prices for ``days`` calendar days, with the days in a column ``header``."""
+    rows = []
+    for row in ssvi_quotes(vs.SSVIParams(), rate, 0.0, days, NEAR_THE_MONEY).itertuples():
+        kind = "call" if row.strike >= 100 * np.exp(rate * row.maturity) else "put"
+        price = bs.price(100.0, row.strike, row.maturity, rate, row.iv, 0.0, kind)
+        in_days = round(row.maturity * 365, 6)
+        rows.append({"Strike": round(row.strike, 2), header: in_days, "Type": kind, "Price": round(float(price), 4)})
+    return pd.DataFrame(rows)
+
+
+@pytest.mark.parametrize(
+    ("rate", "evidence"),
+    [
+        (0.0, "imply a median vol of only 1.3"),  # prices fit any maturity at zero rates: vols 19 times too low
+        (0.05, "option prices are below the least an option that long can be worth"),
+    ],
+)
+def test_fractional_days_of_option_prices_get_a_units_warning(rate, evidence):
+    _, messages = vs.parse_quotes(_price_chain("Maturity", rate), 100.0, rate)
+    warnings = [m for m in messages if isinstance(m, vs.QuoteWarning)]
+    assert len(warnings) == 1 and "go up to 9.65, read as years; name the column 'Days'" in warnings[0]
+    assert evidence in warnings[0]
+    days, named = vs.parse_quotes(_price_chain("Days", rate), 100.0, rate)
+    assert not any(isinstance(m, vs.QuoteWarning) for m in named)
+    assert days["iv"].median() == pytest.approx(0.25, abs=0.01)
+    years = vs.sample_quotes(100, rate, 0.0, prices=True)
+    years["Maturity"] = years.pop("Days") / 365
+    _, quiet = vs.parse_quotes(years, 100.0, rate)
+    assert not any(isinstance(m, vs.QuoteWarning) for m in quiet)
+
+
 def test_whole_years_stay_years_when_the_header_says_so_and_are_flagged_otherwise():
     quotes = ssvi_quotes(vs.SSVIParams(), 0.04, 0.0, (365, 730, 1825, 3650), np.linspace(0.8, 1.2, 9))
     years = (quotes["maturity"]).round()

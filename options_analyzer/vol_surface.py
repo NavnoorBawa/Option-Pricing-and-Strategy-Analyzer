@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 from scipy.optimize import least_squares
+from scipy.special import ndtr
 
 from . import black_scholes as bs
 from .implied_vol import ImpliedVolError, implied_volatility
@@ -625,47 +626,150 @@ def _time_column(frame: pd.DataFrame, column) -> pd.Series:
     return values
 
 
-def _maturities(frame: pd.DataFrame, found: dict, used: list[str], messages: list[str]) -> pd.Series:
+_NAME_THE_UNIT = "name the column 'Days' if they are days to expiry, or 'Maturity (years)' if they are years"
+
+
+@dataclass(frozen=True)
+class _GuessedYears:
+    """A maturity column read as years although its header states no unit."""
+
+    column: str
+    described: str  # what its values look like: "go up to 9.65", "are whole numbers up to 4"
+    suspect: bool  # whether the values alone are reason to doubt years
+
+
+def _maturities(
+    frame: pd.DataFrame, found: dict, used: list[str], messages: list[str]
+) -> tuple[pd.Series, _GuessedYears | None]:
     """Time to expiry in years, from a days column if there is one, otherwise from a maturity column.
 
     A maturity column whose header does not say years is converted from days when its values go above 30 (no
     listed option runs that many years). Up to 30, whole numbers from 5 up are as likely to be years (a 1, 2, 3,
     5, 7, 10-year tenor grid) as days (a weekly chain at 7, 14, 21, 28), so the file is refused with a request
-    to name the unit; smaller whole numbers, and fractions above 10, are read as years with a warning.
+    to name the unit; anything smaller is read as years. Returns ``(years, guess)``: ``guess`` is a
+    :class:`_GuessedYears` when years was only assumed (suspect for small whole numbers and fractions above 10),
+    else None; :func:`parse_quotes` turns it into a warning once the quotes can be checked against it.
     """
     if "days" in found:
         column = found["days"][0]
         used.append(f"maturity from '{column}' (days, converted to years with ACT/365)")
         if "maturity" in found:
             messages.append(f"Ignored '{found['maturity'][0]}': the time to expiry comes from '{column}'.")
-        return _time_column(frame, column) / 365.0
+        return _time_column(frame, column) / 365.0, None
     column, unit = found["maturity"]
     values = _time_column(frame, column)
     positive = values[values > 0]
     largest = values.max()
     whole = bool(len(positive)) and bool(np.all(positive == positive.round()))
-    rename = "name the column 'Days' if they are days to expiry, or 'Maturity (years)' if they are years"
     if largest > 30:
         messages.append(
             f"Maturities in '{column}' go up to {largest:g}, which only makes sense in days; converted days to "
             "years (ACT/365). Name the column 'Days' to make this explicit."
         )
         used.append(f"maturity from '{column}' (days)")
-        return values / 365.0
-    if unit != "years":
-        if whole and largest >= 5:
-            raise QuoteParseError(
-                f"the maturities in '{column}' are whole numbers from {positive.min():g} to {largest:g}, which "
-                f"could be years or days; {rename}"
-            )
-        if whole:
-            messages.append(
-                QuoteWarning(f"Maturities in '{column}' are whole numbers up to {largest:g}, read as years; {rename}.")
-            )
-        elif largest > 10:
-            messages.append(QuoteWarning(f"Maturities in '{column}' go up to {largest:g}, read as years; {rename}."))
+        return values / 365.0, None
     used.append(f"maturity from '{column}' (years)")
-    return values
+    if unit == "years":
+        return values, None
+    if whole and largest >= 5:
+        raise QuoteParseError(
+            f"the maturities in '{column}' are whole numbers from {positive.min():g} to {largest:g}, which "
+            f"could be years or days; {_NAME_THE_UNIT}"
+        )
+    if whole:
+        return values, _GuessedYears(column, f"are whole numbers up to {largest:g}", True)
+    return values, _GuessedYears(column, f"go up to {largest:g}", largest > 10)
+
+
+SPREAD_CHECK_VOL = 0.01  # vol error allowed on each quote before prices that run the wrong way with strike count
+
+
+def _spread_arbitrage(strike, iv, T: float, forward: float) -> bool:
+    """Whether quoted vols price some put below a put at a lower strike, or some call above a call at a lower strike.
+
+    Undiscounted Black prices at ``forward``; each quote's vol may be off by :data:`SPREAD_CHECK_VOL` in whichever
+    direction removes the arbitrage. No arbitrage-free market prices a put below a lower-strike put or a call
+    above a lower-strike call, so this is model-free.
+    """
+    order = np.argsort(strike, kind="stable")
+    strike, iv = np.asarray(strike, dtype=float)[order], np.asarray(iv, dtype=float)[order]
+    sd = iv * np.sqrt(T)
+    d1 = np.log(forward / strike) / sd + 0.5 * sd
+    put = strike * ndtr(sd - d1) - forward * ndtr(-d1)
+    call = put + forward - strike
+    slack = SPREAD_CHECK_VOL * forward * np.sqrt(T) * np.exp(-0.5 * d1 * d1) / np.sqrt(2.0 * np.pi)  # vega x error
+    put_floor = np.maximum.accumulate(put - slack)[:-1]  # a put at a higher strike is worth at least this
+    call_cap = np.minimum.accumulate(call + slack)[:-1]  # a call at a higher strike is worth at most this
+    return bool(np.any(put[1:] + slack[1:] < put_floor) or np.any(call[1:] - slack[1:] > call_cap))
+
+
+def _too_steep_for_years(quotes: pd.DataFrame, spot: float | None, carry: float) -> str | None:
+    """Evidence from the smiles that maturities read as years are days to expiry, as a sentence (else None).
+
+    A smile a few days long is far steeper than an arbitrage-free smile years long can be: read as years, its
+    vols price a put below a put at a lower strike (:func:`_spread_arbitrage`). Every maturity is priced both
+    ways, at the forward from ``spot`` and ``carry`` (the median strike without a spot). There is evidence when
+    at least half of the maturities have such prices as years, and fewer as days.
+    """
+
+    def arbitrage(strike, iv, t) -> bool:
+        forward = spot * np.exp(carry * t) if spot is not None else float(np.median(strike))
+        return _spread_arbitrage(strike, iv, t, forward)
+
+    checked = as_years = as_days = 0
+    for T, quoted in quotes.groupby("maturity"):
+        if len(quoted) < 2:
+            continue
+        strike, iv = quoted["strike"].to_numpy(float), quoted["iv"].to_numpy(float)
+        checked += 1
+        as_years += arbitrage(strike, iv, float(T))
+        as_days += arbitrage(strike, iv, float(T) / 365.0)
+    if not as_years or 2 * as_years < checked or as_days >= as_years:
+        return None
+    return (
+        f"Read as years, the implied vols at {as_years} of {checked} maturities are too steep for options that "
+        "long: a put would cost less than one at a lower strike, or a call more than one at a lower strike. "
+        f"Read as days, {f'only {as_days} would' if as_days else 'none would'}."
+    )
+
+
+LOW_VOL_FOR_YEARS = 0.05  # below this median vol, prices read as years may well be days read as years
+BELOW_INTRINSIC_SHARE = 0.1  # share of prices below their intrinsic value as years (none as days) that is evidence
+
+
+def _below_intrinsic(priced: pd.DataFrame, spot: float, rate: float, dividend_yield: float, T: np.ndarray) -> int:
+    """How many option prices are below their discounted intrinsic value at maturities ``T`` (years)."""
+    strike = priced["strike"].to_numpy(float)
+    gap = spot * np.exp(-dividend_yield * T) - strike * np.exp(-rate * T)
+    intrinsic = np.maximum(np.where(priced["type"] == "call", gap, -gap), 0.0)
+    return int((priced["price"].to_numpy(float) < intrinsic - 1e-12 * np.maximum(spot, strike)).sum())
+
+
+def _prices_suggest_days(priced: pd.DataFrame, vols: pd.Series, spot: float, rate: float, dividend_yield: float):
+    """Evidence from option prices that maturities read as years are days to expiry, as a sentence (else None).
+
+    A price fixes the total variance, not the time it builds up over, so it says less than a quoted vol
+    (:func:`_too_steep_for_years`). With rates, a price below its discounted intrinsic value is impossible: when
+    at least :data:`BELOW_INTRINSIC_SHARE` of the prices are as years and none as days, that is reported.
+    Otherwise the only sign is the vol level: days read as years make vols about sqrt(365) = 19 times too low,
+    so a median below :data:`LOW_VOL_FOR_YEARS` is reported.
+    """
+    T = priced["maturity"].to_numpy(float)
+    as_years = _below_intrinsic(priced, spot, rate, dividend_yield, T)
+    if as_years >= BELOW_INTRINSIC_SHARE * len(priced) and not _below_intrinsic(
+        priced, spot, rate, dividend_yield, T / 365.0
+    ):
+        return (
+            f"Read as years, {as_years} of {len(priced)} option prices are below the least an option that long "
+            "can be worth (its discounted intrinsic value); read as days, none are."
+        )
+    median = float(vols.median())
+    if median < LOW_VOL_FOR_YEARS:
+        return (
+            f"Read as years, the option prices imply a median vol of only {median:.2%}; read as days, they would "
+            "imply about 19 times more."
+        )
+    return None
 
 
 def _option_kind(frame: pd.DataFrame, column) -> pd.Series:
@@ -726,8 +830,10 @@ def parse_quotes(
     at ``spot``, ``rate`` and ``dividend_yield``. Units in brackets are read
     (``IV (%)``, ``Maturity (days)``), values may carry ``%`` signs and thousands
     separators, a maturity column that can only hold days (see :func:`_maturities`)
-    is converted, and one that could hold years or days is refused. Dates and values
-    above 100 years' worth of days are refused.
+    is converted, and one that could hold years or days is refused. One read as years
+    without a stated unit is checked against the quotes, which can show that the
+    values are days (:func:`_too_steep_for_years`, :func:`_prices_suggest_days`).
+    Dates and values above 100 years' worth of days are refused.
 
     Returns ``(clean, messages)`` where ``clean`` has columns ``strike``,
     ``maturity`` (years), ``iv`` (decimal) and ``messages`` describes every
@@ -760,7 +866,7 @@ def parse_quotes(
     data = pd.DataFrame({"strike": _numeric(frame, found["strike"][0])[0]})
     used = [f"strike from '{found['strike'][0]}'"]
     reported = pd.Series(False, index=data.index)  # rows already dropped with a specific message
-    data["maturity"] = _maturities(frame, found, used, messages)
+    data["maturity"], guess = _maturities(frame, found, used, messages)
 
     iv_percent = None
     if "iv" in found:
@@ -809,6 +915,7 @@ def parse_quotes(
     if data.empty:
         raise QuoteParseError("no valid rows remain after cleaning")
 
+    priced = data
     if value == "price":
         data = _prices_to_vols(data, spot, rate, dividend_yield, messages)
         if data.empty:
@@ -845,7 +952,16 @@ def parse_quotes(
     if duplicated.any():
         messages.append(f"Averaged {int(duplicated.sum())} duplicate (maturity, strike) quotes.")
         data = data.groupby(["maturity", "strike"], as_index=False)["iv"].mean()
-    return data.sort_values(["maturity", "strike"]).reset_index(drop=True)[["strike", "maturity", "iv"]], messages
+    data = data.sort_values(["maturity", "strike"]).reset_index(drop=True)[["strike", "maturity", "iv"]]
+    if guess is not None:  # years was assumed: check the quotes against it
+        if value == "iv":
+            evidence = _too_steep_for_years(data, spot, rate - dividend_yield)
+        else:
+            evidence = _prices_suggest_days(priced, data["iv"], spot, rate, dividend_yield)
+        if guess.suspect or evidence:
+            warning = f"Maturities in '{guess.column}' {guess.described}, read as years; {_NAME_THE_UNIT}."
+            messages.append(QuoteWarning(f"{warning} {evidence}" if evidence else warning))
+    return data, messages
 
 
 # ---------------------------------------------------------------------------
@@ -1011,7 +1127,7 @@ def fit_market_surface(
     """
     notes: list[str] = []
     carry = rate - dividend_yield
-    Ts, fits, quoted, rmse, used, binned = [], [], [], [], [], []
+    Ts, fits, quoted, rmse, used, binned, arbitraged = [], [], [], [], [], [], []
     for T, grp in quotes.groupby("maturity"):
         T = float(T)
         if grp["strike"].nunique() < MIN_STRIKES_PER_SLICE:
@@ -1028,6 +1144,7 @@ def fit_market_surface(
         fits.append(svi)
         quoted.append((y.min(), y.max()))
         rmse.append(float(np.sqrt(np.mean((fitted - iv) ** 2))))
+        arbitraged.append(_spread_arbitrage(grp["strike"].to_numpy(float), iv, T, spot * np.exp(carry * T)))
         used.append(grp.assign(moneyness=grp["strike"] / spot, fitted_iv=fitted))
     if len(fits) < 2:
         raise QuoteParseError(
@@ -1051,14 +1168,27 @@ def fit_market_surface(
             f"used to read them (the nearest is {abs(gap):.0%} {'below' if gap < 0 else 'above'} it); set the "
             "sidebar spot to the underlying price the quotes were taken at."
         )
-    poor = Ts[rmse > POOR_FIT_RMSE]
-    if poor.size:
-        notes.append(
-            f"The SVI smile is more than {POOR_FIT_RMSE * 100:.0f} vol point (RMSE) from the quotes at maturities "
-            f"{', '.join(f'{t:.3g}y' for t in poor)}: the quotes there are noisy, or their smile has a shape a "
-            "single SVI curve cannot follow (an SVI smile has one trough and no humps). The Smiles chart shows "
-            "how far the fit is from each quote."
-        )
+    poor = rmse > POOR_FIT_RMSE
+    crossed = poor & np.array(arbitraged)
+    for which, cause in (
+        (
+            crossed,
+            ", where no arbitrage-free smile can follow them: at those vols a put costs less than one at a lower "
+            "strike, or a call more than one at a lower strike. Check those quotes and the maturity unit (days to "
+            "expiry read as years give smiles this steep).",
+        ),
+        (
+            poor & ~crossed,
+            ": the quotes there are noisy, or their smile has a shape a single SVI curve cannot follow (an SVI "
+            "smile has one trough and no humps).",
+        ),
+    ):
+        if which.any():
+            notes.append(
+                f"The SVI smile is more than {POOR_FIT_RMSE * 100:.0f} vol point (RMSE) from the quotes at "
+                f"maturities {', '.join(f'{t:.3g}y' for t in Ts[which])}{cause} The Smiles chart shows how far "
+                "the fit is from each quote."
+            )
 
     moneyness = _moneyness_grid(np.exp(quoted_y + carry * Ts[:, None]), n_moneyness)
     values = _market_values(fits, Ts, quoted_y, carry, moneyness)

@@ -235,6 +235,20 @@ def test_a_guessed_maturity_unit_is_a_visible_warning(app):
         app.selectbox(key="surface_colors").set_value("Plasma").run()
 
 
+def test_fractional_days_up_to_ten_get_a_units_warning_and_a_fit_note_that_names_the_unit(app):
+    # 2.65 to 9.65 days under 'Maturity' were read as years with no units hint, and the only message was a
+    # poor-fit note blaming noisy quotes or a shape SVI cannot follow.
+    _upload(app, _maturity_column("Maturity", (2.65, 4.65, 9.65), as_years=False))
+    _ok(app)
+    warnings = [w.value for w in app.warning]
+    assert any("go up to 9.65, read as years; name the column 'Days'" in w and "too steep" in w for w in warnings)
+    fit_notes = [w for w in warnings if w.startswith("The SVI smile")]
+    assert fit_notes and all("the maturity unit" in w and "noisy" not in w for w in fit_notes)
+    _upload(app, _maturity_column("Days", (2.65, 4.65, 9.65), as_years=False))
+    _ok(app)
+    assert not app.warning, [w.value for w in app.warning]
+
+
 def test_flat_total_variance_at_the_last_expiry_is_not_reported_as_calendar_arbitrage(app):
     params = vol_surface.SSVIParams()
     rows = []

@@ -107,7 +107,10 @@ by least squares on implied vols, with $b \ge 0$, $|\rho| < 1$, $s > 0$, a non-n
 Lee's wing bound $b(1+|\rho|) \le 2$. The search starts from Zeliade's quasi-explicit fits: for fixed $m$ and
 $s$ the smile is linear in $a$, $bs$ and $\rho bs$, solved on a grid of $(m, s)$ with $|\rho| < 1$ imposed, so
 steep, nearly linear equity skews are followed too. SSVI slices are exactly SVI, so noise-free SSVI quotes are
-recovered.
+recovered. A maturity column whose header gives no unit is read as years and checked against the quotes. Read
+as years, a skewed smile a few days long is steeper than any arbitrage-free smile that long can be (its vols
+price a put below a put at a lower strike), and option prices fall below their intrinsic value or imply vols
+about 19 times too low; quotes like that get a warning to name the unit.
 $\partial_y w$ and $\partial_{yy} w$ are analytic; $\partial_T w$ at fixed $y$ comes from secants between
 neighbouring maturities evaluated at the same $y$ — their Fritsch–Butland weighted harmonic mean inside, the
 one-sided three-point formula at the first maturity (the one-sided secant where that is not positive), and the
