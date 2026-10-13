@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import importlib.util
 import io
+import math
 import zlib
 
 import numpy as np
@@ -19,6 +20,7 @@ SSVI = "Parametric (SSVI)"
 QUOTES = "Market quotes (CSV)"
 COLORSCALES = ("Viridis", "Plasma", "Inferno", "Magma", "Cividis", "Turbo")
 VOL_LIMITS = (0.5, 500.0)
+SURFACE_CHART_WIDTH = 380  # px: two fit side by side in the 804 px main column at 1,280 px with the sidebar open
 
 
 def _follow_sidebar_vol(inputs: Inputs) -> None:
@@ -104,9 +106,11 @@ def _quote_controls(inputs: Inputs) -> vs.VolSurface | None:
         "Option quotes (CSV)",
         type=["csv"],
         key="quotes_file",
-        help="Columns: Strike; Days (to expiry) or Maturity (years); and either ImpliedVol (decimal or %) or "
-        "option prices (Price, or Bid and Ask) with a Type column saying call or put. At least two maturities "
-        "with five or more strikes each.",
+        help="Columns: Strike; Days (to expiry) or Maturity (years), or another unit in brackets such as "
+        "'Maturity (months)', 'Maturity (weeks)' or 'DTE (hours)'; and either ImpliedVol (decimal or %) or option "
+        "prices (Price or Mid, with Bid and Ask used where it is blank). Prices need a Type column saying call or "
+        "put; with implied vols a Type column is optional and keeps the out-of-the-money side where a strike has "
+        "both. At least two maturities with five or more strikes each.",
     )
     for label, prices, key in (
         ("Sample with implied vols", False, "sample_quotes"),
@@ -152,6 +156,19 @@ def _quote_controls(inputs: Inputs) -> vs.VolSurface | None:
     if error:
         st.error(f"Could not build a surface from this file: {error}")
     return surface
+
+
+def _local_vol_share(valid: int, quoted: int) -> str:
+    """``valid`` of ``quoted`` points as a percentage that reads 100% or 0% only when it is exactly that.
+
+    A partial share is rounded down to one decimal and kept within 0.1-99.9%: 649 of 652 points used to show
+    as "100%" next to a note that local vol is blank at three of them.
+    """
+    if not quoted:
+        return "–"
+    if 0 < valid < quoted:
+        return f"{min(max(math.floor(valid / quoted * 1000) / 10, 0.1), 99.9):.1f}%"
+    return f"{valid / quoted:.0%}"
 
 
 def _maturity_labels(maturities: np.ndarray) -> list[str]:
@@ -276,29 +293,34 @@ def render(inputs: Inputs) -> None:
 
     quoted = surface.quoted_points
     valid = int(np.isfinite(surface.local_vol).sum())
+    from_quotes = surface.quotes is not None
+    fitted = " of the fitted surface" if from_quotes else ""
+    in_quotes = " Arbitrage in the quotes themselves is listed in the notes below." if from_quotes else ""
     c = st.columns(4)
     c[0].metric(
         "Grid", f"{len(surface.maturities)} × {len(surface.moneyness)}", border=True, help="Maturities × strikes."
     )
+    # Short labels: "Calendar-arbitrage points" was cut to "Calendar-arbitrage p…" in a row of four at 1,280 px.
     c[1].metric(
-        "Calendar-arbitrage points",
+        "Calendar arbitrage",
         surface.calendar_violations,
         border=True,
-        help="Grid points where total implied variance falls as maturity increases at fixed forward moneyness "
-        "(∂w/∂T < 0; for market quotes, by more than the quotes' precision).",
+        help=f"Number of grid points{fitted} where total implied variance falls as maturity increases at fixed "
+        f"forward moneyness (∂w/∂T < 0; for market quotes, by more than the quotes' precision).{in_quotes}",
     )
     c[2].metric(
-        "Butterfly-arbitrage points",
+        "Butterfly arbitrage",
         surface.butterfly_violations,
         border=True,
-        help="Durrleman's condition g(y) ≤ 0: negative risk-neutral density.",
+        help=f"Number of grid points{fitted} that fail Durrleman's condition: g(y) < 0, a negative risk-neutral "
+        f"density.{in_quotes}",
     )
     c[3].metric(
         "Local vol defined",
-        f"{valid / quoted:.0%}" if quoted else "–",
+        _local_vol_share(valid, quoted),
         border=True,
-        help="Share of the grid points that have an implied vol (inside the quoted strikes) where local "
-        "volatility is also defined.",
+        help=f"Share of the grid points that have an implied vol (inside the quoted strikes) where local "
+        f"volatility is also defined: {valid:,} of {quoted:,}.",
     )
     for note in surface.notes:
         st.warning(note)
@@ -313,16 +335,21 @@ def render(inputs: Inputs) -> None:
     _contract_readout(surface, inputs)
 
     colorscale = st.selectbox("Colour scale", COLORSCALES, key="surface_colors")
-    left, right = st.columns(2)
-    left.plotly_chart(
+    # Side by side when both fit (1,280 px with the sidebar open), otherwise one per row; a phone shrinks them to
+    # its column. Two half-width columns were 212-274 px wide at 900-1,024 px with the sidebar open, which cut off
+    # the 3-D scene's axes (Plotly sizes the scene by the chart's height, so a wider chart only adds margin).
+    row = st.container(horizontal=True, key="surfaces")
+    row.plotly_chart(
         charts.surface_3d(surface.moneyness, surface.maturities, surface.implied_vol, "Implied volatility", colorscale),
         key="surf_iv",
+        width=SURFACE_CHART_WIDTH,
     )
-    right.plotly_chart(
+    row.plotly_chart(
         charts.surface_3d(
             surface.moneyness, surface.maturities, surface.local_vol, "Local volatility (Dupire / Gatheral)", colorscale
         ),
         key="surf_lv",
+        width=SURFACE_CHART_WIDTH,
     )
 
     _smiles(surface)

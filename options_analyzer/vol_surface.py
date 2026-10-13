@@ -135,7 +135,13 @@ def _svi_start_points(y, iv, T, n_best: int = 3) -> list[np.ndarray]:
 
     def solve(columns):  # weighted least squares at every grid point: coefficients and cost
         design = np.stack(columns, axis=-1) * weight[None, :, None]
-        normal = np.einsum("gni,gnj->gij", design, design) + 1e-14 * np.eye(len(columns))
+        normal = np.einsum("gni,gnj->gij", design, design)
+        # A ridge relative to each grid point's own matrix. Far from the quotes z and sqrt(z^2 + 1) are almost
+        # collinear, and next to one heavily weighted quote (an implied vol of 0.1%) an absolute ridge vanished:
+        # one exactly singular grid point aborted the whole batched solve. Such a point now gets some
+        # coefficients, and its cost keeps it from being picked as a start.
+        scale = np.trace(normal, axis1=1, axis2=2)[:, None, None] / len(columns)
+        normal = normal + 1e-12 * scale * np.eye(len(columns))
         coef = np.linalg.solve(normal, np.einsum("gni,n->gi", design, target)[..., None])[..., 0]
         return coef, np.sum((np.einsum("gni,gi->gn", design, coef) - target) ** 2, axis=1)
 
@@ -490,17 +496,41 @@ _UNITS = {
     "yrs": "years",
     "year": "years",
     "years": "years",
+    **dict.fromkeys(("mo", "mos", "mon", "mth", "mths", "month", "months"), "months"),
+    **dict.fromkeys(("w", "wk", "wks", "week", "weeks"), "weeks"),
+    **dict.fromkeys(("h", "hr", "hrs", "hour", "hours"), "hours"),
+    **dict.fromkeys(("min", "mins", "minute", "minutes"), "minutes"),
+    "m": "m",  # months in tenor notation ("3M"), minutes elsewhere: refused as a unit of time to expiry
 }
-_UNIT_SUFFIXES = (("percent", "percent"), ("pct", "percent"), ("years", "years"), ("yrs", "years"), ("days", "days"))
+_UNIT_SUFFIXES = (
+    ("percent", "percent"),
+    ("pct", "percent"),
+    ("years", "years"),
+    ("yrs", "years"),
+    ("days", "days"),
+    ("months", "months"),
+    ("weeks", "weeks"),
+    ("hours", "hours"),
+    ("minutes", "minutes"),
+)
 _BRACKETS = re.compile(r"[(\[{]([^)\]}]*)[)\]}]")
+# Units of a time to expiry other than days and years: days per unit, and how the conversion is described.
+_TIME_UNITS = {
+    "months": (365.0 / 12.0, "months, divided by 12"),
+    "weeks": (7.0, "weeks of 7 days, converted to years with ACT/365"),
+    "hours": (1.0 / 24.0, "hours, converted to years with ACT/365"),
+    "minutes": (1.0 / 1440.0, "minutes, converted to years with ACT/365"),
+}
 
 
 def _header(name) -> tuple[str, str | None]:
-    """A column name reduced to lowercase letters and digits, plus the unit it states (percent, days or years).
+    """A column name reduced to lowercase letters and digits, plus the unit it states.
 
-    Bracketed text next to a name is removed but read for a unit (``"IV (% p.a.)"`` ->
-    ``("iv", "percent")``), as are a ``%`` sign and a trailing unit word (``"Maturity_years"`` ->
-    ``("maturity", "years")``). A name wrapped entirely in brackets keeps its text (``"[STRIKE]"`` -> ``"strike"``).
+    The unit is percent, days, years, months, weeks, hours or minutes, or ``"m"``, which could be months or
+    minutes. Bracketed text next to a name is removed but read for a unit (``"IV (% p.a.)"`` ->
+    ``("iv", "percent")``, ``"Maturity (months)"`` -> ``("maturity", "months")``), as are a ``%`` sign and a
+    trailing unit word (``"Maturity_years"`` -> ``("maturity", "years")``). A name wrapped entirely in brackets
+    keeps its text (``"[STRIKE]"`` -> ``"strike"``).
     """
     text = str(name).strip().lower()
     unit = "percent" if "%" in text else None
@@ -550,12 +580,14 @@ _WEAK_IV = _header("Vol")[0]
 
 MAX_ROWS = 200_000
 MAX_PRICE_QUOTES = 10_000
+MIN_QUOTED_VOL = 1e-4  # quoted implied vols below this are placeholders (some data feeds write 1e-05 for none)
 
 
-def _holds_times(frame: pd.DataFrame, column) -> bool:
+def _holds_times(frame: pd.DataFrame, column, unit: str | None) -> bool:
     """Whether a column has numbers that can be a time to expiry (not dates, not YYYYMMDD integers)."""
+    days_per_unit = _TIME_UNITS[unit][0] if unit in _TIME_UNITS else 1.0
     try:
-        return bool(_numeric(frame, column)[0].max() <= MAX_DAYS)
+        return bool(_numeric(frame, column)[0].max() * days_per_unit <= MAX_DAYS)
     except QuoteParseError:
         return False
 
@@ -570,7 +602,7 @@ def _match_columns(frame: pd.DataFrame) -> dict[str, tuple[str, str | None]]:
             continue
         column = candidates[0]
         if key == "maturity":  # an expiry-date column often sits next to the time to expiry ("Expiration", "TTM")
-            column = next((c for c in candidates if _holds_times(frame, c)), column)
+            column = next((c for c in candidates if _holds_times(frame, c, headers[c][1])), column)
         found[key] = (column, headers[column][1])
         claimed.add(column)
     if "maturity" in found and found["maturity"][1] == "days":  # e.g. "Maturity (days)"
@@ -579,11 +611,20 @@ def _match_columns(frame: pd.DataFrame) -> dict[str, tuple[str, str | None]]:
     return found
 
 
-def _numeric(frame: pd.DataFrame, column) -> tuple[pd.Series, bool]:
+_THOUSANDS = r"[-+]?(?:[1-9]\d{0,2}(?:,\d{3})+|[1-9]\d?(?:,\d{2})+,\d{3})(?:\.\d*)?"  # 1,250,000.5 or 12,50,000.5
+_DECIMAL_COMMA = r"[-+]?\d*,\d+"  # 25,3 or 0,0822
+
+
+def _numeric(
+    frame: pd.DataFrame, column, messages: list[str] | None = None, required: bool = True
+) -> tuple[pd.Series, bool]:
     """A column as floats, with %, thousands separators, currency signs and spaces stripped.
 
-    Also returns whether any value carried a ``%`` sign. A column with no
-    numeric value at all raises :class:`QuoteParseError` naming it.
+    Commas are thousands separators when every number written with one is grouped that way (``1,250.50``), and
+    decimal commas when every one has a single comma and no number in the column has a decimal point
+    (``25,3``), which is then said in ``messages``; any other use of commas is refused. Also returns whether
+    any value carried a ``%`` sign. A column with no numeric value at all raises :class:`QuoteParseError`
+    naming it, or comes back as all NaN when it is not ``required``.
     """
     raw = frame[column]
     percent = False
@@ -592,8 +633,23 @@ def _numeric(frame: pd.DataFrame, column) -> tuple[pd.Series, bool]:
     else:
         text = raw.astype("string").str.strip()
         percent = bool(text.str.endswith("%").fillna(False).any())
-        values = pd.to_numeric(text.str.replace(r"[,\s$€£%]", "", regex=True), errors="coerce").astype(float)
-    if not values.notna().any():
+        text = text.str.replace(r"[\s$€£%]", "", regex=True)
+        numbers = text.str.contains(r"\d", regex=True).fillna(False)
+        commas = text[numbers & text.str.contains(",", regex=False).fillna(False)]
+        points = bool((numbers & text.str.contains(".", regex=False).fillna(False)).any())
+        if commas.str.fullmatch(_THOUSANDS).all():
+            text = text.str.replace(",", "", regex=False)
+        elif commas.str.fullmatch(_DECIMAL_COMMA).all() and not points:
+            text = text.str.replace(",", ".", regex=False)
+            if messages is not None:
+                messages.append(f"Read the commas in '{column}' as decimal points (e.g. '{commas.iloc[0]}').")
+        else:
+            raise QuoteParseError(
+                f"column '{column}' has commas that are neither thousands separators nor decimal commas "
+                f"(e.g. '{commas.iloc[0]}'); write its numbers with a decimal point and no other separator"
+            )
+        values = pd.to_numeric(text, errors="coerce").astype(float)
+    if required and not values.notna().any():
         sample = raw.dropna()
         example = f" (e.g. '{sample.iloc[0]}')" if len(sample) else ""
         raise QuoteParseError(f"column '{column}' has no numeric values{example}")
@@ -601,26 +657,39 @@ def _numeric(frame: pd.DataFrame, column) -> tuple[pd.Series, bool]:
 
 
 MAX_DAYS = 36_500  # 100 years: larger "maturities" are neither years nor days (e.g. YYYYMMDD dates)
+_TENOR = r"\d+(?:\.\d+)?\s*[dwmy]"  # "1M", "3m", "1W", "2Y", "30D"
 
 
-def _time_column(frame: pd.DataFrame, column) -> pd.Series:
-    """A maturity or days column as floats; dates and impossible values raise :class:`QuoteParseError`."""
+def _time_column(
+    frame: pd.DataFrame, column, messages: list[str] | None = None, days_per_unit: float = 1.0
+) -> pd.Series:
+    """A maturity or days column as floats; dates, tenors and impossible values raise :class:`QuoteParseError`.
+
+    ``days_per_unit`` is the column's unit in days when its header states one (7 for weeks), so values worth
+    more than 100 years are refused in any unit.
+    """
     try:
-        values = _numeric(frame, column)[0]
+        values = _numeric(frame, column, messages)[0]
     except QuoteParseError:
-        sample = frame[column].dropna().astype(str).head(50)
-        dates = pd.to_datetime(sample, errors="coerce", format="mixed")
-        if len(sample) and dates.notna().mean() > 0.5:
+        sample = frame[column].dropna().astype(str).str.strip().head(50)
+        if len(sample) and sample.str.lower().str.fullmatch(_TENOR).mean() > 0.5:
+            raise QuoteParseError(
+                f"column '{column}' holds tenors (e.g. '{sample.iloc[0]}'), but the surface needs the time to expiry "
+                "as a number: add a Days column (calendar days to expiry) or a Maturity column in years"
+            ) from None
+        dates = pd.to_datetime(sample, errors="coerce", format="mixed", utc=True)
+        if len(sample) and (dates.dt.year >= 1900).mean() > 0.5:  # a time alone ("5h") parses to the year 1
             raise QuoteParseError(
                 f"column '{column}' holds dates (e.g. '{sample.iloc[0]}'), but the surface needs the time to expiry: "
                 "add a Days column (calendar days to expiry) or a Maturity column in years"
             ) from None
         raise
     largest = values.max()
-    if largest > MAX_DAYS:
+    if largest * days_per_unit > MAX_DAYS:
         hint = " (8-digit values look like YYYYMMDD dates)" if 19_000_101 <= largest <= 29_991_231 else ""
+        what = "neither years nor days" if days_per_unit == 1.0 else "more than 100 years"
         raise QuoteParseError(
-            f"column '{column}' goes up to {largest:,.0f}, which is neither years nor days{hint}; "
+            f"column '{column}' goes up to {largest:,.0f}, which is {what}{hint}; "
             "add a Days column (calendar days to expiry) or a Maturity column in years"
         )
     return values
@@ -644,21 +713,30 @@ def _maturities(
 ) -> tuple[pd.Series, _GuessedYears | None]:
     """Time to expiry in years, from a days column if there is one, otherwise from a maturity column.
 
-    A maturity column whose header does not say years is converted from days when its values go above 30 (no
-    listed option runs that many years). Up to 30, whole numbers from 5 up are as likely to be years (a 1, 2, 3,
-    5, 7, 10-year tenor grid) as days (a weekly chain at 7, 14, 21, 28), so the file is refused with a request
-    to name the unit; anything smaller is read as years. Returns ``(years, guess)``: ``guess`` is a
-    :class:`_GuessedYears` when years was only assumed (suspect for small whole numbers and values above
-    :data:`MAX_USUAL_YEARS`), else None; :func:`parse_quotes` warns about the suspect ones.
+    A unit of months, weeks, hours or minutes stated in the header is converted; ``"m"`` alone (months or
+    minutes) is refused. A maturity column whose header does not say years is converted from days when its
+    values go above 30 (no listed option runs that many years). Up to 30, whole numbers from 5 up are as likely
+    to be years (a 1, 2, 3, 5, 7, 10-year tenor grid) as days (a weekly chain at 7, 14, 21, 28), so the file is
+    refused with a request to name the unit; anything smaller is read as years. Returns ``(years, guess)``:
+    ``guess`` is a :class:`_GuessedYears` when years was only assumed (suspect for small whole numbers and
+    values above :data:`MAX_USUAL_YEARS`), else None; :func:`parse_quotes` warns about the suspect ones.
     """
+    column, unit = found["days"] if "days" in found else found["maturity"]
+    if unit == "m":
+        raise QuoteParseError(
+            f"the unit 'm' in '{column}' could mean months or minutes; name the column 'Maturity (months)', "
+            "'Days' or 'Maturity (years)'"
+        )
+    if "days" in found and "maturity" in found:
+        messages.append(f"Ignored '{found['maturity'][0]}': the time to expiry comes from '{column}'.")
+    if unit in _TIME_UNITS:
+        days_per_unit, described = _TIME_UNITS[unit]
+        used.append(f"maturity from '{column}' ({described})")
+        return _time_column(frame, column, messages, days_per_unit) * (days_per_unit / 365.0), None
     if "days" in found:
-        column = found["days"][0]
         used.append(f"maturity from '{column}' (days, converted to years with ACT/365)")
-        if "maturity" in found:
-            messages.append(f"Ignored '{found['maturity'][0]}': the time to expiry comes from '{column}'.")
-        return _time_column(frame, column) / 365.0, None
-    column, unit = found["maturity"]
-    values = _time_column(frame, column)
+        return _time_column(frame, column, messages) / 365.0, None
+    values = _time_column(frame, column, messages)
     positive = values[values > 0]
     largest = values.max()
     whole = bool(len(positive)) and bool(np.all(positive == positive.round()))
@@ -683,6 +761,24 @@ def _maturities(
 
 
 SPREAD_CHECK_VOL = 0.01  # vol error allowed on each quote before prices that run the wrong way with strike count
+FLY_CHECK_VOL = 0.005  # vol error allowed on each quote before a butterfly with a negative cost counts
+
+
+def _black_prices(strike, iv, T: float, forward: float, vol_error: float):
+    """Strikes in ascending order with their undiscounted Black call and put prices at ``forward``, and the slack.
+
+    The slack is how far a price moves when its vol is ``vol_error`` off (vega times the error), plus 1e-12 of
+    the forward for rounding.
+    """
+    order = np.argsort(strike, kind="stable")
+    strike, iv = np.asarray(strike, dtype=float)[order], np.asarray(iv, dtype=float)[order]
+    sd = iv * np.sqrt(T)
+    d1 = np.log(forward / strike) / sd + 0.5 * sd
+    # Both prices directly: a call from put-call parity is rounding noise far out of the money.
+    put = strike * ndtr(sd - d1) - forward * ndtr(-d1)
+    call = forward * ndtr(d1) - strike * ndtr(d1 - sd)
+    slack = vol_error * forward * np.sqrt(T) * np.exp(-0.5 * d1 * d1) / np.sqrt(2.0 * np.pi) + 1e-12 * forward
+    return strike, call, put, slack
 
 
 def _spread_arbitrage(strike, iv, T: float, forward: float) -> bool:
@@ -692,18 +788,38 @@ def _spread_arbitrage(strike, iv, T: float, forward: float) -> bool:
     direction removes the arbitrage. No arbitrage-free market prices a put below a lower-strike put or a call
     above a lower-strike call, so this is model-free.
     """
-    order = np.argsort(strike, kind="stable")
-    strike, iv = np.asarray(strike, dtype=float)[order], np.asarray(iv, dtype=float)[order]
-    sd = iv * np.sqrt(T)
-    d1 = np.log(forward / strike) / sd + 0.5 * sd
-    # Both prices directly: a call from put-call parity is rounding noise far out of the money.
-    put = strike * ndtr(sd - d1) - forward * ndtr(-d1)
-    call = forward * ndtr(d1) - strike * ndtr(d1 - sd)
-    vega_error = SPREAD_CHECK_VOL * forward * np.sqrt(T) * np.exp(-0.5 * d1 * d1) / np.sqrt(2.0 * np.pi)
-    slack = vega_error + 1e-12 * forward  # each quote's vol may be off by 1 point; prices round at 1e-12
+    _, call, put, slack = _black_prices(strike, iv, T, forward, SPREAD_CHECK_VOL)
     put_floor = np.maximum.accumulate(put - slack)[:-1]  # a put at a higher strike is worth at least this
     call_cap = np.minimum.accumulate(call + slack)[:-1]  # a call at a higher strike is worth at most this
     return bool(np.any(put[1:] + slack[1:] < put_floor) or np.any(call[1:] - slack[1:] > call_cap))
+
+
+def _butterfly_arbitrage(strike, iv, T: float, forward: float) -> tuple[int, tuple[float, float, float] | None]:
+    """Butterflies of three neighbouring quoted strikes that cost less than nothing: ``(count, worst strikes)``.
+
+    A long butterfly ``lam C(K1) - C(K2) + (1 - lam) C(K3)`` with ``K2 = lam K1 + (1 - lam) K3`` never pays
+    less than zero, so in an arbitrage-free market it costs at least zero (call prices are convex in strike;
+    put butterflies cost the same by put-call parity). Undiscounted Black prices at ``forward``; each quote's
+    vol may be off by :data:`FLY_CHECK_VOL` in whichever direction removes the arbitrage, so quote noise is
+    not reported. Model-free: it checks the quotes, not a fitted smile. Repeated strikes are averaged first.
+    """
+    unique, which = np.unique(np.asarray(strike, dtype=float), return_inverse=True)
+    if len(unique) < 3:
+        return 0, None
+    iv = np.bincount(which, np.asarray(iv, dtype=float)) / np.bincount(which)
+    K, call, _, slack = _black_prices(unique, iv, T, forward, FLY_CHECK_VOL)
+    lam = (K[2:] - K[1:-1]) / (K[2:] - K[:-2])
+    cost = lam * (call[:-2] + slack[:-2]) + (1.0 - lam) * (call[2:] + slack[2:]) - (call[1:-1] - slack[1:-1])
+    bad = cost < 0
+    if not bad.any():
+        return 0, None
+    worst = int(np.argmin(np.where(bad, cost, np.inf)))
+    return int(bad.sum()), (float(K[worst]), float(K[worst + 1]), float(K[worst + 2]))
+
+
+def _strike_text(strike: float) -> str:
+    """A strike for a message: thousands separators and no trailing zeros (``2,452.5``, ``100``)."""
+    return f"{strike:,.2f}".rstrip("0").rstrip(".")
 
 
 def _option_kind(frame: pd.DataFrame, column) -> pd.Series:
@@ -711,18 +827,67 @@ def _option_kind(frame: pd.DataFrame, column) -> pd.Series:
     return first.map({"c": "call", "p": "put"})
 
 
+def _expiries(maturity) -> np.ndarray:
+    """Expiry labels for times to expiry in years: each expiry spans at most :data:`MATURITY_TOLERANCE`.
+
+    A label starts at the shortest time not yet labelled and takes every time up to half a day longer, so one
+    expiry quoted at different times of a session (fractional days to expiry) gets one label, while listed
+    expiries, at least a day apart, keep their own; times spread over more than half a day are never chained
+    into one expiry.
+    """
+    maturity = np.asarray(maturity, dtype=float)
+    unique = np.unique(maturity)
+    labels = np.zeros(len(unique), dtype=int)
+    start = unique[0] if len(unique) else 0.0
+    for i in range(1, len(unique)):
+        if unique[i] - start > MATURITY_TOLERANCE:
+            start = unique[i]
+            labels[i] = labels[i - 1] + 1
+        else:
+            labels[i] = labels[i - 1]
+    return labels[np.searchsorted(unique, maturity)]
+
+
+def _merge_close_maturities(data: pd.DataFrame, messages: list[str]) -> pd.DataFrame:
+    """Set the times to expiry of each expiry (:func:`_expiries`) to their median, keeping total variance."""
+    maturity = data["maturity"].to_numpy(float)
+    labels = _expiries(maturity)
+    n_times, n_expiries = len(np.unique(maturity)), int(labels.max()) + 1
+    if n_expiries == n_times:
+        return data
+    snapped = pd.Series(maturity).groupby(labels).transform("median").to_numpy()
+    messages.append(
+        f"Read {n_times} times to expiry as {n_expiries} expiries: times within half a day of each other were "
+        "set to their median, keeping each quote's total implied variance."
+    )
+    return data.assign(maturity=snapped, iv=data["iv"].to_numpy(float) * np.sqrt(maturity / snapped))
+
+
+def _out_of_the_money(
+    data: pd.DataFrame, spot: float, rate: float, dividend_yield: float, messages: list[str]
+) -> pd.DataFrame:
+    """Where an expiry and strike are quoted for both a call and a put, keep the out-of-the-money one.
+
+    In-the-money quotes are the less reliable side (wide spreads, stale trades, early-exercise premium, and
+    the placeholder vols some data feeds write). Rows without a call/put type are kept.
+    """
+    forward = spot * np.exp((rate - dividend_yield) * data["maturity"])
+    otm = (data["type"] == "call") == (data["strike"] >= forward)
+    expiry = _expiries(data["maturity"])
+    both = data.assign(expiry=expiry).groupby(["expiry", "strike"])["type"].transform("nunique") > 1
+    if (both & ~otm & data["type"].notna()).any():
+        messages.append(
+            f"Used the out-of-the-money option at {int((both & otm).sum())} strike(s) quoted for both calls and puts."
+        )
+        data = data[~both | otm | data["type"].isna()]
+    return data
+
+
 def _prices_to_vols(
     data: pd.DataFrame, spot: float, rate: float, dividend_yield: float, messages: list[str]
 ) -> pd.DataFrame:
     """Invert option prices into Black-Scholes-Merton implied vols, keeping the out-of-the-money side."""
-    forward = spot * np.exp((rate - dividend_yield) * data["maturity"])
-    otm = (data["type"] == "call") == (data["strike"] >= forward)
-    both = data.groupby(["maturity", "strike"])["type"].transform("nunique") > 1
-    if (both & ~otm).any():
-        messages.append(
-            f"Used the out-of-the-money option at {int((both & otm).sum())} strike(s) quoted for both calls and puts."
-        )
-        data = data[~both | otm]
+    data = _out_of_the_money(data, spot, rate, dividend_yield, messages)
     if len(data) > MAX_PRICE_QUOTES:
         raise QuoteParseError(
             f"the file has {len(data):,} option prices to invert; at most {MAX_PRICE_QUOTES:,} are supported, "
@@ -751,6 +916,46 @@ def _prices_to_vols(
     return data
 
 
+def _option_prices(
+    frame: pd.DataFrame, found: dict, used: list[str], messages: list[str]
+) -> tuple[pd.Series, pd.Series]:
+    """Each row's option price, and the rows dropped (with a message) for a zero bid or an ask below the bid.
+
+    The quoted price (Price, Mid, Mark) where it is positive, else the bid/ask midpoint, else the last trade: an
+    empty or partly blank price column next to valid bids and asks no longer blocks them.
+    """
+    price = pd.Series(np.nan, index=frame.index)
+    unusable = pd.Series(False, index=frame.index)
+    if "price" in found:
+        column = found["price"][0]
+        price = _numeric(frame, column, messages, required=False)[0].where(lambda values: values > 0)
+        if price.notna().any():
+            used.append(f"option price from '{column}'")
+    if "bid" in found and "ask" in found and price.isna().any():
+        bid = _numeric(frame, found["bid"][0], messages, required=False)[0]
+        ask = _numeric(frame, found["ask"][0], messages, required=False)[0]
+        need = price.isna() & bid.notna() & ask.notna()
+        unusable = need & ((bid <= 0) | (ask < bid))
+        if unusable.any():
+            messages.append(f"Dropped {int(unusable.sum())} quote(s) with a zero bid or an ask below the bid.")
+        filled = need & ~unusable
+        if filled.any():
+            price = price.where(~filled, (bid + ask) / 2)
+            where = f" where '{found['price'][0]}' is blank" if "price" in found else ""
+            used.append(f"option price as the bid/ask midpoint of '{found['bid'][0]}' and '{found['ask'][0]}'{where}")
+    if "last" in found and (price.isna() & ~unusable).any():
+        last = _numeric(frame, found["last"][0], messages, required=False)[0]
+        filled = price.isna() & ~unusable & (last > 0)
+        if filled.any():
+            price = price.where(~filled, last)
+            where = " where no other price is given" if "price" in found or "bid" in found else ""
+            used.append(f"option price from '{found['last'][0]}' (last trade){where}")
+    if price.isna().all() and not unusable.all():
+        columns = ", ".join(repr(found[key][0]) for key in ("price", "bid", "ask", "last") if key in found)
+        raise QuoteParseError(f"no numeric option price in {columns}")
+    return price, unusable
+
+
 def parse_quotes(
     frame: pd.DataFrame, spot: float | None = None, rate: float = 0.0, dividend_yield: float = 0.0
 ) -> tuple[pd.DataFrame, list[str]]:
@@ -759,14 +964,21 @@ def parse_quotes(
     Accepts (case, spacing and punctuation ignored; common aliases allowed) a
     ``Strike`` column, a ``Days`` column or a ``Maturity`` column in years (a days
     column wins when both are present), and either an ``ImpliedVol`` column
-    (decimal or percent) or option prices (``Price``/``Mid``, or ``Bid`` and ``Ask``)
-    with a call/put ``Type`` column. Prices are inverted with Black-Scholes-Merton
-    at ``spot``, ``rate`` and ``dividend_yield``. Units in brackets are read
-    (``IV (%)``, ``Maturity (days)``), values may carry ``%`` signs and thousands
-    separators, a maturity column that can only hold days (see :func:`_maturities`)
-    is converted, and one that could hold years or days is refused; values read as
-    years without a stated unit get a warning when they could well be days. Dates
-    and values above 100 years' worth of days are refused.
+    (decimal or percent) or option prices (``Price``/``Mid``, with ``Bid`` and ``Ask``
+    filling the rows where it is blank) with a call/put ``Type`` column. Prices are
+    inverted with Black-Scholes-Merton at ``spot``, ``rate`` and ``dividend_yield``;
+    where an expiry and strike are quoted for both a call and a put, the
+    out-of-the-money one is kept, for implied vols too when a ``Type`` column and the
+    spot are given. Units in brackets are read (``IV (%)``, ``Maturity (days)``,
+    ``Maturity (months)``, ``Maturity (weeks)``, ``DTE (hours)``; a bare ``m`` is
+    refused as months or minutes), values may carry ``%`` signs, thousands
+    separators or decimal commas, a maturity column that can only hold days (see
+    :func:`_maturities`) is converted, and one that could hold years or days is
+    refused; values read as years without a stated unit get a warning when they
+    could well be days. Dates, tenors (``3M``) and values above 100 years are
+    refused. Times to expiry within half a day of each other are one expiry
+    (:func:`_expiries`), and implied vols below :data:`MIN_QUOTED_VOL` are dropped as
+    placeholders.
 
     Returns ``(clean, messages)`` where ``clean`` has columns ``strike``,
     ``maturity`` (years), ``iv`` (decimal) and ``messages`` describes every
@@ -796,7 +1008,7 @@ def parse_quotes(
         )
 
     frame = frame.reset_index(drop=True)
-    data = pd.DataFrame({"strike": _numeric(frame, found["strike"][0])[0]})
+    data = pd.DataFrame({"strike": _numeric(frame, found["strike"][0], messages)[0]})
     used = [f"strike from '{found['strike'][0]}'"]
     reported = pd.Series(False, index=data.index)  # rows already dropped with a specific message
     data["maturity"], guess = _maturities(frame, found, used, messages)
@@ -804,9 +1016,12 @@ def parse_quotes(
     iv_percent = None
     if "iv" in found:
         column, unit = found["iv"]
-        data["iv"], percent_signs = _numeric(frame, column)
+        data["iv"], percent_signs = _numeric(frame, column, messages)
         iv_percent = "header" if unit == "percent" else "values" if percent_signs else None
         used.append(f"implied vol from '{column}'")
+        if "type" in found and spot is not None:  # calls and puts stacked: keep the out-of-the-money side
+            data["type"] = _option_kind(frame, found["type"][0])
+            used.append(f"call/put from '{found['type'][0]}'")
     else:
         if "type" not in found:
             raise QuoteParseError(
@@ -816,21 +1031,8 @@ def parse_quotes(
         if spot is None:
             raise QuoteParseError("option prices need the spot price, rate and dividend yield to be inverted")
         data["type"] = _option_kind(frame, found["type"][0])
-        if "price" in found:
-            data["price"] = _numeric(frame, found["price"][0])[0]
-            used.append(f"option price from '{found['price'][0]}'")
-        elif "bid" in found and "ask" in found:
-            bid = _numeric(frame, found["bid"][0])[0]
-            ask = _numeric(frame, found["ask"][0])[0]
-            unusable = (bid <= 0) | (ask < bid)
-            if unusable.any():
-                messages.append(f"Dropped {int(unusable.sum())} quote(s) with a zero bid or an ask below the bid.")
-            reported |= unusable
-            data["price"] = ((bid + ask) / 2).where(~unusable)
-            used.append(f"option price as the bid/ask midpoint of '{found['bid'][0]}' and '{found['ask'][0]}'")
-        else:
-            data["price"] = _numeric(frame, found["last"][0])[0]
-            used.append(f"option price from '{found['last'][0]}' (last trade)")
+        data["price"], unusable = _option_prices(frame, found, used, messages)
+        reported |= unusable
         used.append(f"call/put from '{found['type'][0]}'")
         bad_type = data["type"].isna() & frame[found["type"][0]].notna()
         if bad_type.any():
@@ -839,7 +1041,9 @@ def parse_quotes(
     messages.insert(0, "Read " + ", ".join(used) + ".")
 
     value = "iv" if "iv" in data else "price"
-    valid = data.replace([np.inf, -np.inf], np.nan).notna().all(axis=1)
+    # An implied vol needs no type: a row whose type is blank or unknown is kept as it is.
+    checked = data.drop(columns="type") if value == "iv" and "type" in data else data
+    valid = checked.replace([np.inf, -np.inf], np.nan).notna().all(axis=1)
     valid &= (data["strike"] > 0) & (data["maturity"] > 0) & (data[value] > 0)
     unexplained = int((~valid & ~reported).sum())
     if unexplained:
@@ -855,6 +1059,17 @@ def parse_quotes(
                 "no option price could be inverted into an implied vol; check the spot, rate and units"
             )
     else:
+        if "type" in data:
+            data = _out_of_the_money(data, spot, rate, dividend_yield, messages)
+        placeholder = data["iv"] < MIN_QUOTED_VOL
+        if placeholder.any():
+            messages.append(
+                f"Dropped {int(placeholder.sum())} quote(s) with an implied vol below {MIN_QUOTED_VOL:g}, a "
+                "placeholder some data feeds write where there is no vol."
+            )
+            data = data[~placeholder]
+            if data.empty:
+                raise QuoteParseError("no valid rows remain after cleaning")
         median = float(data["iv"].median())
         if iv_percent is not None:
             data["iv"] = data["iv"] / 100.0
@@ -879,6 +1094,7 @@ def parse_quotes(
     if data.empty:
         raise QuoteParseError("no valid rows remain after cleaning")
 
+    data = _merge_close_maturities(data, messages)
     data = data.assign(maturity=data["maturity"].round(10))
     duplicated = data.duplicated(["maturity", "strike"], keep=False)
     if duplicated.any():
@@ -1054,7 +1270,7 @@ def fit_market_surface(
     """
     notes: list[str] = []
     carry = rate - dividend_yield
-    Ts, fits, quoted, rmse, used, binned, arbitraged = [], [], [], [], [], [], []
+    Ts, fits, quoted, rmse, used, binned, arbitraged, flies = [], [], [], [], [], [], [], []
     for T, grp in quotes.groupby("maturity"):
         T = float(T)
         if grp["strike"].nunique() < MIN_STRIKES_PER_SLICE:
@@ -1072,10 +1288,14 @@ def fit_market_surface(
         quoted.append((y.min(), y.max()))
         rmse.append(float(np.sqrt(np.mean((fitted - iv) ** 2))))
         arbitraged.append(_spread_arbitrage(grp["strike"].to_numpy(float), iv, T, spot * np.exp(carry * T)))
+        flies.append(_butterfly_arbitrage(grp["strike"].to_numpy(float), iv, T, spot * np.exp(carry * T)))
         used.append(grp.assign(moneyness=grp["strike"] / spot, fitted_iv=fitted))
     if len(fits) < 2:
+        n_maturities = quotes["maturity"].nunique()
         raise QuoteParseError(
-            f"local volatility needs at least two maturities with {MIN_STRIKES_PER_SLICE}+ strikes each"
+            f"local volatility needs at least two maturities with {MIN_STRIKES_PER_SLICE}+ strikes each; the quotes "
+            f"have {n_maturities} maturit{'y' if n_maturities == 1 else 'ies'}, {len(fits)} of them with "
+            f"{MIN_STRIKES_PER_SLICE}+ strikes"
         )
     if binned:
         notes.append(
@@ -1116,6 +1336,30 @@ def fit_market_surface(
                 f"maturities {', '.join(f'{t:.3g}y' for t in Ts[which])}{cause} The Smiles chart shows how far "
                 "the fit is from each quote."
             )
+    # Static arbitrage in the quotes themselves: the arbitrage-free SVI fit smooths it out of the surface, so the
+    # surface's arbitrage counts cannot show it. Maturities already named in the note above are left out.
+    fly = np.array([count > 0 for count, _ in flies]) & ~crossed
+    spread = np.array(arbitraged) & ~crossed
+    if fly.any() or spread.any():
+        parts = []
+        if fly.any():
+            first = int(np.argmax(fly))
+            k1, k2, k3 = (_strike_text(k) for k in flies[first][1])
+            parts.append(
+                f"at maturities {', '.join(f'{t:.3g}y' for t in Ts[fly])} a butterfly of neighbouring strikes costs "
+                f"less than nothing (a negative risk-neutral density) even if each quote is {FLY_CHECK_VOL * 100:g} "
+                f"vol point off, e.g. {k1}/{k2}/{k3} at {Ts[first]:.3g}y"
+            )
+        if spread.any():
+            parts.append(
+                f"at maturities {', '.join(f'{t:.3g}y' for t in Ts[spread])} a put costs less than one at a lower "
+                "strike, or a call more than one at a lower strike, even if each quote is "
+                f"{SPREAD_CHECK_VOL * 100:g} vol point off"
+            )
+        notes.append(
+            f"The quotes have static arbitrage that the fitted surface smooths out: {'; '.join(parts)}. The "
+            "arbitrage counts above describe the fitted surface, not the quotes, so check these quotes."
+        )
 
     moneyness = _moneyness_grid(np.exp(quoted_y + carry * Ts[:, None]), n_moneyness)
     values = _market_values(fits, Ts, quoted_y, carry, moneyness)

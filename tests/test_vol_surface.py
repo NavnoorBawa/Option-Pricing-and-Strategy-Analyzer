@@ -1,4 +1,5 @@
 import io
+import re
 
 import numpy as np
 import pandas as pd
@@ -144,6 +145,33 @@ def test_svi_fit_follows_a_steep_nearly_linear_skew():
     )  # SSVI quotes plus 0.3 vol-point noise
     assert all(b > 1e-4 for _, b, _, _, _ in vs._svi_start_points(y, iv, t))
     assert vol_rmse(vs.fit_svi(y, iv, t), y, iv, t) <= 1.5 * vol_rmse(ssvi_slice(STEEP, t), y, iv, t)
+
+
+@pytest.mark.parametrize("bad_vol", [0.001, 0.002])
+def test_one_very_low_implied_vol_does_not_abort_the_fit(bad_vol):
+    # One quote at 0.1% next to normal vols made a start-point normal matrix exactly singular: numpy's
+    # LinAlgError ('Singular matrix') aborted the whole fit (80 of the sample's 104 placements at 0.001).
+    raw = vs.sample_quotes(100, 0.05, 0.0)
+    clean_fit = vs.fit_market_surface(vs.parse_quotes(raw, 100, 0.05)[0], 100, 0.05, 0.0)
+    raw.loc[2, "ImpliedVol"] = bad_vol  # strike 80 at the first maturity
+    quotes, _ = vs.parse_quotes(raw, 100, 0.05)
+    t = quotes["maturity"].iloc[0]
+    y = np.log(quotes.loc[quotes["maturity"] == t, "strike"].to_numpy() / 100) - 0.05 * t
+    assert len(vs._svi_start_points(y, quotes.loc[quotes["maturity"] == t, "iv"].to_numpy(), t)) == 3
+    fitted = vs.fit_market_surface(quotes, 100, 0.05, 0.0)
+    assert fitted.fit_rmse[0] > vs.POOR_FIT_RMSE  # the bad slice is reported, not hidden ...
+    assert any("0.0822y" in note and "SVI smile" in note for note in fitted.notes)
+    assert np.array_equal(fitted.implied_vol[1:], clean_fit.implied_vol[1:], equal_nan=True)  # ... the rest unchanged
+
+
+def test_placeholder_implied_vols_are_dropped_with_a_message():
+    # Some chains write 1e-05 where there is no implied vol; one per maturity made every fit fail.
+    raw = vs.sample_quotes(100, 0.05, 0.0)
+    raw.loc[raw.index % 13 == 2, "ImpliedVol"] = 1e-05
+    clean, messages = vs.parse_quotes(raw, 100, 0.05)
+    assert len(clean) == 104 - 8 and clean["iv"].min() > 0.1
+    assert any("Dropped 8 quote(s) with an implied vol below 0.0001" in m and "placeholder" in m for m in messages)
+    vs.fit_market_surface(clean, 100, 0.05, 0.0)
 
 
 def test_svi_fit_reaches_the_generating_accuracy_on_steep_noisy_skews():
@@ -449,6 +477,38 @@ def test_fit_requires_two_usable_maturities():
     )
     with pytest.raises(vs.QuoteParseError, match="two maturities"):
         vs.fit_market_surface(quotes, 100, 0.0, 0.0)
+    sparse = pd.concat([quotes, pd.DataFrame({"strike": [100.0], "maturity": [1.0], "iv": [0.2]})])
+    with pytest.raises(vs.QuoteParseError, match=r"the quotes have 2 maturities, 1 of them with 5\+ strikes"):
+        vs.fit_market_surface(sparse, 100, 0.0, 0.0)
+
+
+@pytest.mark.parametrize("decimals", [3, 5])
+def test_times_to_expiry_of_one_expiry_quoted_through_a_session_are_one_maturity(decimals):
+    # Days to expiry taken from each quote's own time (29.86, 29.74, 29.96, ...) made every row its own maturity:
+    # 51 one-strike slices, and the file was refused for lacking two maturities with five strikes.
+    params, r = vs.SSVIParams(), 0.04
+    rng = np.random.default_rng(5)
+    rows = []
+    for days in (30, 58, 93):
+        for strike in np.arange(80, 120.01, 2.5):
+            dte = round(days - rng.uniform(0, 0.27), decimals)  # up to 6.5 hours before the close
+            t = dte / 365
+            iv = np.sqrt(params.total_variance(np.log(strike / 100) - r * t, t)[0] / t)
+            rows.append({"Strike": strike, "DTE": dte, "IV": float(iv)})
+    clean, messages = vs.parse_quotes(pd.DataFrame(rows), 100.0, r)
+    assert clean["maturity"].nunique() == 3
+    assert any(re.match(r"Read \d+ times to expiry as 3 expiries: times within half a day", m) for m in messages)
+    fitted = vs.fit_market_surface(clean, 100.0, r, 0.0)
+    assert np.allclose(fitted.maturities * 365, (30, 58, 93), atol=0.3)
+    true = vs.ssvi_surface(params, r, 0.0, fitted.moneyness, fitted.maturities)
+    assert np.nanmax(np.abs(fitted.implied_vol - true.implied_vol)) < 5e-4  # total variance kept per quote
+    assert fitted.calendar_violations == 0 and fitted.butterfly_violations == 0
+
+
+def test_expiries_a_day_apart_stay_apart_and_a_chain_is_never_merged_over_more_than_half_a_day():
+    days = np.array([1.0, 2.0, 3.0, 3.2, 3.4, 3.6, 3.8, 4.0, 4.2])
+    labels = vs._expiries(days / 365)
+    assert labels.tolist() == [0, 1, 2, 2, 2, 3, 3, 3, 4]  # each expiry spans at most half a day
 
 
 # ---------------------------------------------------------------------------
@@ -558,6 +618,74 @@ def test_maturity_headers_in_days_are_recognised(header):
     assert "days" in messages[0]
 
 
+@pytest.mark.parametrize(
+    "header, values, days_each, described",
+    [
+        ("Maturity (months)", (0.5, 1, 1.5, 2, 3), 365 / 12, "months, divided by 12"),
+        ("Maturity (months)", (1, 2, 3), 365 / 12, "months, divided by 12"),
+        ("Maturity_months", (1, 2, 3, 6, 9, 12), 365 / 12, "months, divided by 12"),
+        ("Tenor (mo)", (1, 2, 3), 365 / 12, "months, divided by 12"),
+        ("Maturity (weeks)", (1, 2, 4, 8), 7, "weeks of 7 days"),
+        ("DTE (hours)", (24, 48, 72, 168), 1 / 24, "hours, converted to years with ACT/365"),
+        ("Time to expiry (minutes)", (1440, 2880, 10080), 1 / 1440, "minutes, converted to years with ACT/365"),
+    ],
+)
+def test_a_time_unit_stated_in_the_header_is_converted(header, values, days_each, described):
+    # The header's unit was thrown away: months were read as years (0.5-3 months became 182-1,095 days) and hours
+    # or minutes as days, with no warning and a message repeating the wrong unit.
+    years = np.array(values, dtype=float) * days_each / 365
+    rows = [
+        {"Strike": 100 * m, header: v, "IV": np.sqrt(vs.SSVIParams().total_variance(np.log(m), t)[0] / t)}
+        for v, t in zip(values, years, strict=True)
+        for m in np.linspace(0.8, 1.2, 9)
+    ]
+    clean, messages = vs.parse_quotes(pd.DataFrame(rows), 100.0)
+    assert np.allclose(np.sort(clean["maturity"].unique()), years, rtol=1e-12)
+    assert f"maturity from '{header}' ({described}" in messages[0]
+    assert not any(isinstance(m, vs.QuoteWarning) for m in messages)
+
+
+def test_a_months_header_recovers_the_surface():
+    params = vs.SSVIParams()
+    months = (0.5, 1, 1.5, 2, 3)
+    rows = []
+    for mo in months:
+        t = mo / 12
+        for m in np.linspace(0.8, 1.2, 9):
+            iv = np.sqrt(params.total_variance(np.log(m) - 0.05 * t, t)[0] / t)
+            rows.append({"Strike": 100 * m, "Maturity (months)": mo, "IV": iv})
+    fitted = vs.fit_market_surface(vs.parse_quotes(pd.DataFrame(rows), 100.0, 0.05)[0], 100.0, 0.05, 0.0)
+    assert np.allclose(fitted.maturities, np.array(months) / 12)
+    assert fitted.butterfly_violations == 0  # 66 points when the months were read as years
+    lv_err, iv_err = relative_local_vol_error(fitted, params, 0.05, 0.0)
+    assert iv_err.max() < 1e-6 and lv_err[1:-1].max() < 0.01
+
+
+@pytest.mark.parametrize("header", ["Maturity (M)", "Tenor (m)", "DTE (m)"])
+def test_the_ambiguous_unit_m_is_refused(header):
+    rows = [{"Strike": k, header: v, "IV": 0.2} for v in (1, 2, 3) for k in range(90, 111, 5)]
+    with pytest.raises(vs.QuoteParseError, match=rf"unit 'm' in '{re.escape(header)}' could mean months or minutes"):
+        vs.parse_quotes(pd.DataFrame(rows))
+
+
+@pytest.mark.parametrize("tenors", [("1M", "3M", "6M"), ("1m", "3m", "6m"), ("3 M", "6 M", "9 M"), ("1W", "1M", "3M")])
+def test_tenor_strings_are_called_tenors_not_dates(tenors):
+    # pd.to_datetime reads '1M' as a time on 1 January of the year 1, so tenors were reported as "dates".
+    frame = pd.DataFrame(
+        {"Strike": [90, 100, 110] * len(tenors), "Tenor": np.repeat(tenors, 3), "IV": [0.25, 0.2, 0.22] * len(tenors)}
+    )
+    with pytest.raises(vs.QuoteParseError) as error:
+        vs.parse_quotes(frame)
+    assert f"column 'Tenor' holds tenors (e.g. '{tenors[0]}')" in str(error.value)
+    assert "dates" not in str(error.value) and "add a Days column" in str(error.value)
+
+
+def test_times_of_day_are_not_called_dates():
+    frame = pd.DataFrame({"Strike": [90, 100, 110] * 2, "Expiry": ["5h"] * 3 + ["10h"] * 3, "IV": [0.2] * 6})
+    with pytest.raises(vs.QuoteParseError, match="has no numeric values"):
+        vs.parse_quotes(frame)
+
+
 def test_maturities_that_can_only_be_days_are_converted():
     raw = vs.sample_quotes(100, 0.04, 0.0)
     raw["Maturity"] = (raw["Maturity"] * 365).round()
@@ -594,6 +722,36 @@ def test_percent_signs_and_thousands_separators_are_stripped():
     assert clean["strike"].min() == pytest.approx(2450.0) and clean["strike"].max() == pytest.approx(4550.0)
     assert clean["iv"].between(0.15, 0.6).all()
     assert any("% signs" in m for m in messages)
+
+
+def test_decimal_commas_are_read_as_decimal_points():
+    # Every comma was deleted as a thousands separator: '25,3%' became 253% and '80,5' became 805, silently.
+    raw = vs.sample_quotes(100, 0.04, 0.0)
+    text = raw.assign(
+        Strike=[f"{k + 0.5:.1f}".replace(".", ",") for k in raw["Strike"]],
+        Maturity=[f"{t:.4f}".replace(".", ",") for t in raw["Maturity"]],
+        ImpliedVol=[f"{v * 100:.2f}%".replace(".", ",") for v in raw["ImpliedVol"]],
+    )
+    frame = pd.read_csv(io.StringIO(text.to_csv(index=False)))  # quoted, comma-separated
+    clean, messages = vs.parse_quotes(frame)
+    expected, _ = vs.parse_quotes(raw.assign(Strike=raw["Strike"] + 0.5))
+    assert np.allclose(clean.to_numpy(), expected.to_numpy(), rtol=0, atol=1e-12)
+    assert clean["strike"].min() == pytest.approx(70.5) and clean["iv"].max() < 0.6
+    for column in ("Strike", "Maturity", "ImpliedVol"):
+        example = text[column].iloc[0].rstrip("%")  # '70,5', '0,0822', '54,..'
+        assert f"Read the commas in '{column}' as decimal points (e.g. '{example}')." in messages
+
+
+@pytest.mark.parametrize("values", [["1.234,5", "1.300,0"], ["25.3", "25,3"], ["1,2,3", "4,5,6"]])
+def test_commas_that_are_neither_thousands_nor_decimals_are_refused(values):
+    frame = pd.DataFrame({"Strike": [90, 100] * 3, "Days": [30] * 6, "IV": values * 3})
+    with pytest.raises(vs.QuoteParseError, match=r"column 'IV' has commas that are neither thousands separators"):
+        vs.parse_quotes(frame)
+
+
+@pytest.mark.parametrize("text, value", [("1,250", 1250.0), ("$2,450.00", 2450.0), ("-1,250.5", -1250.5)])
+def test_thousands_separators_still_read_as_thousands(text, value):
+    assert vs._numeric(pd.DataFrame({"x": [text, "7"]}), "x")[0].tolist() == [value, 7.0]
 
 
 def test_a_column_without_numbers_is_named():
@@ -859,6 +1017,85 @@ def test_bid_ask_quotes_keep_the_out_of_the_money_side_and_drop_impossible_price
     assert fitted.implied_vol_at(1.0, 0.4) == pytest.approx(sigma, abs=0.005)
 
 
+def _stacked_calls_and_puts(itm_vol) -> pd.DataFrame:
+    """Calls and puts at every strike with a Type column: exact SSVI vols out of the money, ``itm_vol(iv)`` in it."""
+    params, r = vs.SSVIParams(), 0.05
+    rows = []
+    for days in (16, 30, 44, 79, 107, 170):
+        t = days / 365
+        for strike in np.arange(70, 130.01, 2.5):
+            iv = float(np.sqrt(params.total_variance(np.log(strike / 100) - r * t, t)[0] / t))
+            for kind in ("Call", "Put"):
+                otm = (kind == "Call") == (strike >= 100 * np.exp(r * t))
+                rows.append(
+                    {"Type": kind, "Strike": strike, "Days": days, "impliedVolatility": iv if otm else itm_vol(iv)}
+                )
+    return pd.DataFrame(rows)
+
+
+@pytest.mark.parametrize("itm_vol", [lambda iv: 1e-05, lambda iv: iv + 0.02], ids=["placeholder", "two-points-high"])
+def test_an_implied_vol_file_with_a_type_column_keeps_the_out_of_the_money_side(itm_vol):
+    # The Type column was ignored for implied vols: a call and a put at one strike were averaged as duplicates, so
+    # placeholder in-the-money vols (1e-05) put the fit 32 vol points off, and in-the-money vols 2 points rich
+    # (an American put read as European) moved every maturity's ATM vol 0.4 points with no note.
+    clean, messages = vs.parse_quotes(_stacked_calls_and_puts(itm_vol), 100.0, 0.05)
+    assert "call/put from 'Type'" in messages[0]
+    assert "Used the out-of-the-money option at 150 strike(s) quoted for both calls and puts." in messages
+    assert not any("duplicate" in m for m in messages)
+    fitted = vs.fit_market_surface(clean, 100.0, 0.05, 0.0)
+    true = vs.ssvi_surface(vs.SSVIParams(), 0.05, 0.0, fitted.moneyness, fitted.maturities)
+    assert np.nanmax(np.abs(fitted.implied_vol - true.implied_vol)) < 1e-6
+
+
+def test_an_implied_vol_file_keeps_rows_whose_type_is_blank():
+    frame = _stacked_calls_and_puts(lambda iv: iv)
+    frame.loc[frame.index % 7 == 0, "Type"] = None
+    clean, _ = vs.parse_quotes(frame, 100.0, 0.05)
+    assert len(clean) == 6 * 25  # one vol per expiry and strike: blank-type rows kept and averaged in
+    no_spot, messages = vs.parse_quotes(frame)  # no forward to pick a side with: averaged, as before
+    assert np.allclose(no_spot["iv"], clean["iv"]) and any("Averaged" in m for m in messages)
+
+
+def _bid_ask_chain(**extra) -> pd.DataFrame:
+    rows = []
+    for days in (30, 60, 90, 180):
+        t = days / 365
+        for strike in range(80, 121, 5):
+            kind = "call" if strike >= 100 else "put"
+            value = bs.price(100.0, strike, t, 0.03, 0.25, 0.0, kind)
+            rows.append({"Strike": strike, "DTE": days, "Type": kind, "Bid": value - 0.01, "Ask": value + 0.01})
+    return pd.DataFrame(rows).assign(**extra)
+
+
+@pytest.mark.parametrize("column", ["Mid", "Mark", "Price"])
+@pytest.mark.parametrize("blank", [np.nan, "-"])
+def test_an_empty_price_column_falls_back_to_bid_and_ask(column, blank):
+    # An empty Mid next to valid Bid and Ask raised "column 'Mid' has no numeric values".
+    expected, _ = vs.parse_quotes(_bid_ask_chain(), 100.0, 0.03)
+    clean, messages = vs.parse_quotes(_bid_ask_chain(**{column: blank}), 100.0, 0.03)
+    pd.testing.assert_frame_equal(clean, expected)
+    assert f"option price as the bid/ask midpoint of 'Bid' and 'Ask' where '{column}' is blank" in messages[0]
+    assert any("zero bid" in m for m in messages) and not any("missing, non-numeric" in m for m in messages)
+
+
+def test_a_partly_blank_price_column_is_filled_from_bid_and_ask():
+    chain = _bid_ask_chain()
+    chain = chain[chain["Bid"] > 0].reset_index(drop=True)
+    mid = ((chain["Bid"] + chain["Ask"]) / 2).where(chain.index % 2 == 0)
+    clean, messages = vs.parse_quotes(chain.assign(Mid=mid), 100.0, 0.03)
+    assert len(clean) == len(chain)  # the rows with a blank Mid used to be dropped
+    assert "option price from 'Mid'" in messages[0] and "where 'Mid' is blank" in messages[0]
+    assert np.allclose(clean["iv"], 0.25, atol=1e-3)
+
+
+def test_an_empty_price_column_without_bid_and_ask_is_refused():
+    chain = _bid_ask_chain(Mid=np.nan).drop(columns=["Bid", "Ask"])
+    with pytest.raises(vs.QuoteParseError, match="no numeric option price in 'Mid'"):
+        vs.parse_quotes(chain, 100.0, 0.03)
+    last = vs.parse_quotes(chain.assign(Last=_bid_ask_chain()["Bid"] + 0.01), 100.0, 0.03)[1][0]
+    assert "option price from 'Last' (last trade) where no other price is given" in last
+
+
 def test_prices_need_a_type_column_and_market_inputs():
     frame = vs.sample_quotes(prices=True)
     with pytest.raises(vs.QuoteParseError, match="Type column"):
@@ -874,3 +1111,65 @@ def test_flat_smiles_have_no_strike_arbitrage(vol, T):
     strikes = 100 * np.linspace(0.8, 1.2, 41)
     assert not vs._spread_arbitrage(strikes, np.full(41, vol), T, 100.0)
     assert vs._spread_arbitrage(strikes, np.clip(0.25 - 2.0 * np.log(strikes / 100), 0.01, None), 2.0, 100.0)
+
+
+def _spiked_smiles(spike: float) -> pd.DataFrame:
+    """Rounded SSVI vols at $1 strikes, 14-91 days, with the 30-day at-the-money vol ``spike`` too high."""
+    params, r = vs.SSVIParams(), 0.05
+    rows = []
+    for days in (14, 30, 60, 91):
+        t = days / 365
+        for strike in range(90, 111):
+            iv = round(float(np.sqrt(params.total_variance(np.log(strike / 100) - r * t, t)[0] / t)), 4)
+            iv += spike if (days, strike) == (30, 100) else 0.0
+            rows.append({"strike": float(strike), "maturity": t, "iv": iv})
+    return pd.DataFrame(rows)
+
+
+@pytest.mark.parametrize("spike", [0.02, 0.03])
+def test_butterfly_arbitrage_in_the_quotes_is_reported(spike):
+    # The SVI fit smooths a rich at-the-money quote away, so the surface showed 0 butterfly-arbitrage points and
+    # no note although the quoted 99/100/101 call butterfly costs less than nothing (-0.38 at 2 vol points).
+    fitted = vs.fit_market_surface(_spiked_smiles(spike), 100.0, 0.05, 0.0)
+    assert fitted.butterfly_violations == 0  # the fitted surface is still arbitrage-free ...
+    notes = [note for note in fitted.notes if "static arbitrage" in note]
+    assert len(notes) == 1  # ... and the quotes' arbitrage is reported
+    assert "at maturities 0.0822y a butterfly of neighbouring strikes costs less than nothing" in notes[0]
+    assert "e.g. 99/100/101 at 0.0822y" in notes[0] and "describe the fitted surface, not the quotes" in notes[0]
+    assert "0.5 vol point off" in notes[0]
+
+
+def test_quote_noise_within_half_a_vol_point_is_not_butterfly_arbitrage():
+    def flagged(quotes) -> bool:
+        return any("static arbitrage" in note for note in vs.fit_market_surface(quotes, 100.0, 0.05, 0.0).notes)
+
+    assert not flagged(_spiked_smiles(0.0))
+    for seed in range(4):  # the samples carry 0.2 vol points of noise, and some of their butterflies cost < 0
+        for prices in (False, True):
+            assert not flagged(
+                vs.parse_quotes(vs.sample_quotes(100, 0.05, 0.0, seed=seed, prices=prices), 100, 0.05)[0]
+            )
+    rng = np.random.default_rng(7)
+    assert not flagged(_spiked_smiles(0.0).assign(iv=lambda q: q["iv"] + rng.normal(0, 0.002, len(q))))
+
+
+def test_butterfly_check_is_model_free_and_tolerates_repeated_strikes():
+    strikes = np.arange(90.0, 111.0)
+    flat = np.full(strikes.size, 0.2)
+    assert vs._butterfly_arbitrage(strikes, flat, 30 / 365, 100.0) == (0, None)
+    spiked = flat.copy()
+    spiked[10] += 0.02  # 2 vol points rich at 100
+    assert vs._butterfly_arbitrage(strikes, spiked, 30 / 365, 100.0) == (1, (99.0, 100.0, 101.0))
+    assert vs._butterfly_arbitrage(np.r_[strikes, 100.0], np.r_[flat, 0.2], 30 / 365, 100.0) == (0, None)
+
+
+def test_vertical_spread_arbitrage_in_the_quotes_is_reported_even_when_the_fit_is_close():
+    # Spread arbitrage only chose the wording of a poor-fit note, so it went unreported under 1 vol point of RMSE.
+    quotes = _spiked_smiles(0.0)
+    quotes.loc[(quotes["maturity"] == 30 / 365) & (quotes["strike"] == 110.0), "iv"] += 0.06
+    fitted = vs.fit_market_surface(quotes, 100.0, 0.05, 0.0)
+    assert fitted.fit_rmse[1] < vs.POOR_FIT_RMSE
+    notes = [note for note in fitted.notes if "static arbitrage" in note]
+    assert (
+        len(notes) == 1 and "a call more than one at a lower strike, even if each quote is 1 vol point off" in notes[0]
+    )

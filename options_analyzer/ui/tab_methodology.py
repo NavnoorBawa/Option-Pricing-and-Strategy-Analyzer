@@ -121,8 +121,8 @@ $$\sigma_{\text{loc}}^2 = \frac{\partial_T w}{1 - \frac{y}{w}\partial_y w + \fra
 The numerator and denominator are exactly the calendar and butterfly no-arbitrage conditions; where either
 fails local volatility is undefined and is reported rather than patched. The parametric surface is SSVI
 (Gatheral & Jacquier, 2014), arbitrage-free when $\eta(1+|\rho|) \le 2$. Uploaded quotes (implied vols, or
-option prices inverted with Black–Scholes–Merton, out-of-the-money side preferred) are fitted per maturity
-with Gatheral's raw SVI smile
+option prices inverted with Black–Scholes–Merton; where a Type column gives both a call and a put at one
+strike, the out-of-the-money one is used) are fitted per maturity with Gatheral's raw SVI smile
 
 $$w(y) = a + b\left(\rho\,(y-m) + \sqrt{(y-m)^2 + s^2}\right)$$
 
@@ -130,8 +130,14 @@ by least squares on implied vols, with $b \ge 0$, $|\rho| < 1$, $s > 0$, a non-n
 Lee's wing bound $b(1+|\rho|) \le 2$. The search starts from Zeliade's quasi-explicit fits: for fixed $m$ and
 $s$ the smile is linear in $a$, $bs$ and $\rho bs$, solved on a grid of $(m, s)$ with $|\rho| < 1$ imposed, so
 steep, nearly linear equity skews are followed too. SSVI slices are exactly SVI, so noise-free SSVI quotes are
-recovered. A maturity column whose header gives no unit is converted from days when its values go above 30,
-refused when they are whole numbers from 5 to 30 (they could be years or days), and otherwise read as years,
+recovered. The fit can smooth over quotes that are not free of arbitrage, so the quotes themselves are also
+checked without a model: a butterfly of three neighbouring strikes that costs less than nothing even if each
+quote's vol is half a point off, or a put priced below one at a lower strike (a call above one) even if each
+is a vol point off, is reported as static arbitrage in the quotes. A maturity header may state days,
+years, months, weeks, hours or minutes ('Maturity (months)'); a bare 'm' could be months or minutes and is
+refused, and times to expiry within half a day of each other are taken as one expiry (keeping each quote's
+total variance). A maturity column whose header gives no unit is converted from days when its values go above
+30, refused when they are whole numbers from 5 to 30 (they could be years or days), and otherwise read as years,
 with a warning to name the unit when they are small whole numbers or go above 3 (listed options rarely run
 longer), as they could then be days.
 $\partial_y w$ and $\partial_{yy} w$ are analytic; $\partial_T w$ at fixed $y$ comes from secants between
