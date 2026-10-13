@@ -130,6 +130,10 @@ def _plain(text: str) -> str:
     return stripped if stripped.strip("0.,") == "" else text
 
 
+#: Height (px) above the plot area kept for the marker-line labels; the histogram's tail note sits above it.
+NOTE_SHIFT = 22
+
+
 def histogram_chart(
     values,
     x_title: str,
@@ -159,9 +163,9 @@ def histogram_chart(
     below, above = int(np.sum(values < lo)), int(np.sum(values > hi))
     outside = []
     if below:
-        outside.append(f"{below:,} below the axis (lowest {value_text(values.min())})")
+        outside.append(f"{below:,} outcomes below the plotted range (lowest {value_text(values.min())})")
     if above:
-        outside.append(f"{above:,} above it (highest {value_text(values.max())})")
+        outside.append(f"{above:,} outcomes above the plotted range (highest {value_text(values.max())})")
     fig = go.Figure(
         go.Bar(
             x=centres,
@@ -174,13 +178,31 @@ def histogram_chart(
     )
     if pdf is not None:
         fig.add_trace(go.Scatter(x=pdf[0], y=pdf[1], name="Log-normal density", line=dict(color=ACCENT, width=2)))
-    for x, label, color in lines:
-        _vline(fig, x, label, color=color, dash="dash")
-    # The note goes in a small title above the marker labels, where it cannot cover the bars or the lines.
-    fig = apply_layout(fig, "Outcomes not shown: " + "; ".join(outside) if outside else None, x_title, "Density")
-    fig.update_layout(bargap=0.02, hovermode="closest", title_font=dict(size=12, color=NEUTRAL))
+    # With several lines the left-most label goes to the left of its line and the others to the right, so that close
+    # lines (ES and VaR) do not print their labels on top of each other.
+    for rank, (x, label, color) in enumerate(sorted(lines, key=lambda line: line[0])):
+        position = "top" if len(lines) == 1 else ("top left" if rank == 0 else "top right")
+        _vline(fig, x, label, color=color, dash="dash", position=position)
+    fig = apply_layout(fig, None, x_title, "Density")
+    fig.update_layout(bargap=0.02, hovermode="closest")
     if outside:
-        fig.update_layout(margin=dict(t=60))
+        # A small note above the marker labels, where it cannot cover the bars or the lines: one short line per
+        # side, so that it fits a phone-width or half-width chart.
+        fig.add_annotation(
+            text="<br>".join(outside),
+            name="outside",
+            x=0.0,
+            xref="paper",
+            xanchor="left",
+            y=1.0,
+            yref="paper",
+            yanchor="bottom",
+            yshift=NOTE_SHIFT,
+            align="left",
+            showarrow=False,
+            font=dict(size=11, color=NEUTRAL),
+        )
+        fig.update_layout(margin=dict(t=NOTE_SHIFT + 16 * len(outside) + 6))
     return _legend_below(fig)
 
 
@@ -252,11 +274,26 @@ def payoff_chart(
     return _legend_below(fig)
 
 
-def pnl_heatmap(x_labels, y_labels, z, x_title: str, y_title: str):
-    """P&L grid with the value in each cell (whole dollars, or cents for small positions)."""
+def pnl_cell_text(value: float, bound: float) -> str:
+    """A heatmap cell value, short enough to stay legible in a narrow cell.
+
+    ``bound`` is the largest absolute value in the grid: cents below $10, then one decimal, whole dollars below
+    $10,000, and thousands (``-21.6k``, ``216k``) or millions (``-2.16M``) above.
+    """
+    if bound < 1e4:
+        return _plain(f"{value:,.{0 if bound >= 100 else (1 if bound >= 10 else 2)}f}")
+    scale, suffix, decimals = (1e6, "M", 2) if bound >= 1e6 else (1e3, "k", 1 if bound < 1e5 else 0)
+    text = _plain(f"{value / scale:,.{decimals}f}")
+    return "0" if text.strip("0.,") == "" else text + suffix
+
+
+def pnl_heatmap(x_labels, y_labels, z, x_title: str, y_title: str, colorbar: bool = True):
+    """P&L grid with the value in each cell (see :func:`pnl_cell_text`; the hover shows it to the cent).
+
+    ``colorbar=False`` leaves out the colour scale, which repeats the cell values, to give the cells its width.
+    """
     z = np.asarray(z, dtype=float)
     bound = float(np.nanmax(np.abs(z))) or 1.0
-    decimals = 0 if bound >= 100 else (1 if bound >= 10 else 2)
     fig = go.Figure(
         go.Heatmap(
             x=x_labels,
@@ -265,10 +302,11 @@ def pnl_heatmap(x_labels, y_labels, z, x_title: str, y_title: str):
             zmin=-bound,
             zmax=bound,
             colorscale=DIVERGING,
-            text=np.vectorize(lambda v: _plain(f"{v:,.{decimals}f}"))(z),
+            text=np.vectorize(lambda v: pnl_cell_text(v, bound))(z),
             texttemplate="%{text}",
             textfont=dict(color="white"),
             colorbar=dict(title="P&L ($)"),
+            showscale=colorbar,
             hovertemplate=f"{x_title} %{{x}}<br>{y_title} %{{y}}<br>P&L %{{z:$,.2f}}<extra></extra>",
         )
     )

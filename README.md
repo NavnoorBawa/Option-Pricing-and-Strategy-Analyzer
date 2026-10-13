@@ -30,16 +30,17 @@ pandas); the Streamlit app is a thin interface on top of it.
   jade lizard, synthetics, calendars and diagonals — or any custom combination of calls, puts and stock.
 - Every leg is editable: side and size, strike, its own expiry and implied volatility, and your actual fill price.
   Your edits are kept per template when sidebar inputs change. Contract multiplier and commissions are included.
-- Strike spacing is a percentage of the strike; by default it is about half the expected move σ√T, rounded to a
-  listed-style strike step, so short-dated templates are realistic trades.
+- Strike spacing is a percentage of the strike, rounded to the cent; by default it is about half the expected
+  move σ√T, rounded to a listed-style strike step, so short-dated templates are realistic trades.
 - P&L at expiry, today and at any intermediate date, with an implied-volatility shift, exact breakevens,
   unlimited-risk detection, probability of profit, expected P&L and position/per-leg Greeks.
 - Legs are valued as European options with Black–Scholes–Merton; with an American tree in the sidebar, a leg
   that is the sidebar contract shows its American value next to the European value used.
 
 **Risk & Scenarios** (for the position you built)
-- Spot × implied-vol and spot × date P&L heatmaps, time-decay curves and position Greeks across spot, all from
-  full re-pricing, with spot steps scaled to the expected move σ√T.
+- P&L heatmaps of spot × implied vol (over a ± % spot range) and spot × date, and time-decay curves, all from
+  full re-pricing; the spot × date grid and the time-decay curves step the spot in units of the expected move
+  σ√T. Position Greeks across spot use the analytical Black–Scholes–Merton Greeks.
 - Stress tests calibrated to Black Monday, the dot-com bust, the 2008 crisis, Volmageddon, the COVID crash, the
   2022 rate shock, the April 2025 tariff shock and the Fed's 2026 severely adverse scenario, plus custom shocks.
 - Monte Carlo VaR and Expected Shortfall with Normal, Student-t or GARCH(1,1) returns and optional implied-vol

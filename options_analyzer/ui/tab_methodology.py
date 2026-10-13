@@ -66,8 +66,9 @@ reported as unlimited when the P&L keeps rising or falling with the spot, and th
 integrates the log-normal density of the price at the front expiry over the profitable intervals (drift = the
 risk-free rate by default). Premium financing is ignored unless you switch it on; early exercise is ignored,
 whatever the sidebar pricing model. Multi-strike templates space their strikes $w$ apart, a percentage of the
-strike that by default is about half the expected move, $w \approx \tfrac12 K\sigma\sqrt{T}$, rounded to a strike
-step of 1, 2, 2.5 or 5 times a power of ten and capped at 25 % of the strike.
+strike rounded to the cent (to two significant figures below ten cents). By default $w$ is about half the
+expected move, $w \approx \tfrac12 K\sigma\sqrt{T}$, rounded to a strike step of 1, 2, 2.5 or 5 times a power
+of ten and capped at 25 % of the strike.
 
 ### Scenarios and stress tests
 Every scenario re-prices all legs at the shocked spot, implied volatility, rate and remaining time. Historical

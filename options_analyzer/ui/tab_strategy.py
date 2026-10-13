@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 
 import numpy as np
@@ -24,6 +25,10 @@ MAX_WIDTH_PCT = 45.0
 #: The automatic width never exceeds this, so very volatile or long-dated templates stay readable.
 MAX_AUTO_WIDTH_PCT = 25.0
 
+#: Strikes with as many decimals as they have (up to 8 significant digits): 100, 102.5, 0.975. Static, like the
+#: rest of the editor's configuration.
+STRIKE_FORMAT = "%.8g"
+
 #: The column help is static on purpose: the editor's identity hashes its column configuration, so text that
 #: changed with the sidebar would recreate the editor and throw away the user's edits.
 LEG_COLUMN_CONFIG = {
@@ -34,7 +39,7 @@ LEG_COLUMN_CONFIG = {
         required=True,
     ),
     "Strike": st.column_config.NumberColumn(
-        min_value=0.01, format="%.2f", help="Blank = the sidebar strike. Ignored for stock."
+        min_value=0.0001, format=STRIKE_FORMAT, help="Blank = the sidebar strike. Ignored for stock."
     ),
     "Days": st.column_config.NumberColumn(
         min_value=1, max_value=3650, step=1, format="%d", help="Days to expiry. Blank = the sidebar days to expiry."
@@ -120,10 +125,16 @@ def _round_step(x: float) -> float:
     return min(steps, key=lambda s: abs(np.log(s / x)))
 
 
+def round_width(width: float) -> float:
+    """A strike width on a price tick: whole cents, or two significant figures below ten cents."""
+    decimals = max(2, 1 - int(np.floor(np.log10(width))))
+    return round(float(width), decimals)
+
+
 def auto_width(strike: float, volatility: float, expiry: float) -> float:
     """Default strike spacing ($): about half the one-standard-deviation move σ√T, on a round strike step."""
     step = _round_step(0.5 * volatility * np.sqrt(expiry) * strike)
-    return float(np.clip(step, strike * MIN_WIDTH_PCT / 100, strike * MAX_AUTO_WIDTH_PCT / 100))
+    return round_width(float(np.clip(step, strike * MIN_WIDTH_PCT / 100, strike * MAX_AUTO_WIDTH_PCT / 100)))
 
 
 def _selector(inputs: Inputs):
@@ -158,14 +169,18 @@ def _selector(inputs: Inputs):
         bind="query-params",
         disabled=not uses_width,
         help="Distance w between adjacent strikes (K ± w, K ± 2w) as a percentage of the sidebar strike, so it "
-        "moves with the strike. Leave blank for the automatic width: about half the expected move σ√T to expiry, "
-        "rounded to a strike step of 1, 2, 2.5 or 5 times a power of ten (at most 25% of the strike).",
+        "moves with the strike; it is rounded to the cent (two significant figures below ten cents). Leave blank "
+        "for the automatic width: about half the expected move σ√T to expiry, rounded to a strike step of 1, 2, "
+        "2.5 or 5 times a power of ten (at most 25% of the strike).",
     )
-    width = automatic if width_pct is None else inputs.strike * float(width_pct) / 100.0
+    width = automatic if width_pct is None else round_width(inputs.strike * float(width_pct) / 100.0)
     width_text = ""
     if uses_width:
         source = "automatic" if width_pct is None else "set by you"
-        width_text = md(f" · **Width** w = {money(width)} ({100 * width / inputs.strike:.2f}% of the strike, {source})")
+        width_text = md(
+            f" · **Width** w = {money(width, price_decimals(width))} ({100 * width / inputs.strike:.2f}% of the "
+            f"strike, {source})"
+        )
     return name, template, width, width_text
 
 
@@ -184,19 +199,31 @@ def _editor_key(name: str, state: dict) -> str:
     return f"legs::{name}::{state['version']}"
 
 
+def _new_legs(base: pd.DataFrame, version: int) -> dict:
+    return {"base": base, "seed": base, "edited": base, "template": base, "edits": None, "version": version}
+
+
 def _legs_state(name: str, base: pd.DataFrame) -> dict:
     """The legs of strategy ``name`` across reruns, kept in the session so that edits are never silently lost.
 
-    ``seed`` is the frame the editor shows; the editor holds the user's edits as changes on top of it and
-    ``edited`` is the result from the last run. Legs the user has not edited follow the template when its
-    inputs change (sidebar strike or expiry, strike width); edited legs are kept until reset.
+    ``seed`` is the frame the editor starts from and ``base`` the template it was built from; the editor holds
+    the user's edits on top of the seed. ``edited``, ``template`` and ``edits`` are the legs, the template and the
+    editor's raw edits at the end of the last run. Legs that matched the template on screen follow it when its
+    inputs change (sidebar strike or expiry, strike width); legs that differed from it are kept until they match
+    the template again or are reset, so a later rerun from an unrelated widget never moves them.
     """
     store = st.session_state.setdefault("strategy_legs", {})
     state = store.get(name)
-    if state is None or (_same(state["edited"], state["base"]) and not _same(state["base"], base)):
-        version = 0 if state is None else state["version"]
-        state = store[name] = {"base": base, "seed": base, "edited": base, "version": version}
-    elif _editor_key(name, state) not in st.session_state and not _same(state["seed"], state["edited"]):
+    if state is None:
+        state = store[name] = _new_legs(base, 0)
+        return state
+    key = _editor_key(name, state)
+    # An edit sent with this rerun (together with a sidebar change) is not in ``edited`` yet: keep the legs for it.
+    editing = key in st.session_state and st.session_state[key] != state["edits"]
+    if not editing and _same(state["edited"], state["template"]) and not _same(state["template"], base):
+        # A new editor key, so that nothing typed on the old legs can apply to the new ones.
+        state = store[name] = _new_legs(base, state["version"] + 1)
+    elif key not in st.session_state and not _same(state["seed"], state["edited"]):
         # The editor was not on screen in the last run (another strategy was selected), so it no longer holds
         # the edits: show the edited legs as its new starting point.
         state["seed"] = state["edited"]
@@ -275,29 +302,26 @@ def render(inputs: Inputs) -> Position | None:
     base_frame = _template_frame(base)
     state = _legs_state(name, base_frame)
     st.markdown("**Legs** — edit, add or delete rows to customise the position.")
+    key = _editor_key(name, state)
     edited = st.data_editor(
         state["seed"],
-        key=_editor_key(name, state),
+        key=key,
         num_rows="dynamic",
         hide_index=True,
         placeholder="auto",
         column_config=LEG_COLUMN_CONFIG,
     )
-    state["edited"] = edited
-    if template is not None and not _same(state["base"], base_frame):
+    state.update(edited=edited, template=base_frame, edits=copy.deepcopy(st.session_state.get(key)))
+    if template is not None and not _same(state["base"], base_frame) and not _same(edited, base_frame):
         st.info(
-            "These legs include your edits, so they were kept when the template's inputs changed since: the "
-            "sidebar strike or days to expiry, or the strike width (the automatic width follows the volatility "
-            "and the expiry). **Reset legs to template** rebuilds them from the current inputs.",
+            "These legs differ from the template because you edited them, so they were kept when the template's "
+            "inputs changed: the sidebar strike or days to expiry, or the strike width (the automatic width "
+            "follows the volatility and the expiry). **Reset legs to template** rebuilds them from the current "
+            "inputs.",
             icon=":material/edit_note:",
         )
     if st.button("Reset legs to template", key="reset_legs", icon=":material/restart_alt:"):
-        st.session_state["strategy_legs"][name] = {
-            "base": base_frame,
-            "seed": base_frame,
-            "edited": base_frame,
-            "version": state["version"] + 1,
-        }
+        st.session_state["strategy_legs"][name] = _new_legs(base_frame, state["version"] + 1)
         st.rerun()
 
     legs, errors = _legs_from_frame(edited, inputs.strike)
@@ -394,6 +418,14 @@ def _money_help(value: float, text: str = "", signed: bool = False) -> str | Non
     return md(text) if text else None
 
 
+def price_decimals(value: float, most: int = 8) -> int:
+    """Decimals needed to show ``value`` exactly: at least two (cents), at most ``most``."""
+    for decimals in range(2, most):
+        if abs(round(value, decimals) - value) <= 1e-9 * max(1.0, abs(value)):
+            return decimals
+    return most
+
+
 def number(value: float, decimals: int) -> str:
     """Fixed-point number without a negative zero (``-0.00`` reads as a short position)."""
     if abs(value) < 0.5 * 10**-decimals:
@@ -401,11 +433,15 @@ def number(value: float, decimals: int) -> str:
     return f"{value:,.{decimals}f}"
 
 
-def probability_text(p: float) -> str:
-    """Probability with one decimal, but never rounded to a certainty it is not (``>99.9%``, ``<0.1%``)."""
-    if 0.9995 <= p < 1.0:
+def probability_text(p: float, sure: bool = False, never: bool = False) -> str:
+    """Probability of profit with one decimal, never rounded to a certainty the payoff does not have.
+
+    ``sure`` says the position cannot lose and ``never`` that it cannot profit. Otherwise a probability that
+    rounds (or saturates in floating point) to 100 % or 0 % is shown as ``>99.9%`` or ``<0.1%``.
+    """
+    if p >= 0.9995 and not sure:
         return ">99.9%"
-    if 0.0 < p < 0.0005:
+    if p <= 0.0005 and not never:
         return "<0.1%"
     return f"{p:.1%}"
 
@@ -419,6 +455,29 @@ def reward_risk_text(metrics: strat.StrategyMetrics, units: float) -> str:
     if rr > 1000:
         return "> 1,000 : 1"
     return f"{rr:,.2f} : 1"
+
+
+#: Decimals the legs table shows per column (its column formats), used to write values that round to zero as 0.
+LEGS_TABLE_DECIMALS = {
+    "Model value": 4,
+    "Entry price": 4,
+    "Cost": 2,
+    "Delta": 2,
+    "Gamma": 4,
+    "Theta/day": 2,
+    "Vega/pt": 2,
+}
+
+
+def legs_table(strategy: strat.Strategy, market: strat.Market, units: float) -> pd.DataFrame:
+    """Per-leg values and Greeks of the whole position, without negative zeros (``-$0.00`` reads as a credit)."""
+    table = pd.DataFrame(strat.leg_table(strategy, market)).drop(columns="Leg")
+    for col in ("Cost", "Delta", "Gamma", "Theta / day", "Vega / vol pt"):
+        table[col] = table[col] * units
+    table = table.rename(columns={"Days to expiry": "Days", "Theta / day": "Theta/day", "Vega / vol pt": "Vega/pt"})
+    for col, decimals in LEGS_TABLE_DECIMALS.items():
+        table[col] = table[col].mask(table[col].abs() < 0.5 * 10**-decimals, 0.0)
+    return table
 
 
 def _join(parts: list[str]) -> str:
@@ -483,9 +542,10 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
         c[2].metric("Max loss", money_short(loss), border=True, help=_money_help(loss))
     c[3].metric(
         "Probability of profit",
-        probability_text(metrics.probability_of_profit),
+        probability_text(metrics.probability_of_profit, sure=metrics.max_loss < 0, never=metrics.max_profit <= 0),
         border=True,
-        help="At the front expiry, log-normal terminal price with the chosen drift and the sidebar volatility.",
+        help="At the front expiry, log-normal terminal price with the chosen drift and the sidebar volatility. "
+        "Shown as >99.9% or <0.1% when it rounds to 100% or 0% but the position can still lose or profit.",
     )
     be = metrics.breakevens
     st.markdown(
@@ -611,14 +671,11 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
     c[2].metric("Drift used", f"{metrics.drift:.2%}", help="Annual expected return of the underlying.")
 
     st.markdown("**Legs at inception**")
-    table = pd.DataFrame(strat.leg_table(strategy, market)).drop(columns="Leg")
-    for col in ("Cost", "Delta", "Gamma", "Theta / day", "Vega / vol pt"):
-        table[col] = table[col] * units
     st.dataframe(
-        table.rename(columns={"Days to expiry": "Days", "Theta / day": "Theta/day", "Vega / vol pt": "Vega/pt"}),
+        legs_table(strategy, market, units),
         hide_index=True,
         column_config={
-            "Strike": st.column_config.NumberColumn(format="%.2f"),
+            "Strike": st.column_config.NumberColumn(format=STRIKE_FORMAT),
             "Days": st.column_config.NumberColumn(format="%d", help="Days to expiry."),
             "IV": st.column_config.NumberColumn(format="percent"),
             "Model value": st.column_config.NumberColumn(

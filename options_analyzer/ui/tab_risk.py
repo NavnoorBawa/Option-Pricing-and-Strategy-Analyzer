@@ -18,6 +18,7 @@ from .tab_strategy import Position, money_short
 
 CONFIDENCE_LEVELS = (0.95, 0.975, 0.99, 0.995, 0.999)
 PATH_CHOICES = (10_000, 25_000, 50_000, 100_000, 250_000, 500_000)
+STRESS_HEADERS = {"IV shock damped": "IV damped", "Rate change (bp)": "Rate Δ (bp)"}
 
 
 def shock_label(x: float) -> str:
@@ -31,11 +32,22 @@ def shock_label(x: float) -> str:
 
 
 def price_labels(prices) -> list[str]:
-    """Price labels with enough decimals to tell neighbouring grid columns apart."""
+    """Price labels that tell every grid point apart (a category axis merges equal labels).
+
+    Ordinary grids get one fixed number of decimals, at least two; grids that need more than six decimals, such
+    as prices spanning many orders of magnitude at extreme volatility, get as many significant digits as needed.
+    """
     prices = np.asarray(prices, dtype=float)
-    step = float(np.min(np.diff(np.sort(prices)))) if prices.size > 1 else 0.0
-    decimals = int(np.clip(np.ceil(-np.log10(step)) + 1, 2, 6)) if step > 0 else 2
-    return [f"{p:,.{decimals}f}" for p in prices]
+    unique = np.unique(prices).size
+    for decimals in range(2, 7):
+        labels = [f"{p:,.{decimals}f}" for p in prices]
+        if len(set(labels)) == unique:
+            return labels
+    for digits in range(3, 18):
+        labels = [f"{p:,.{digits}g}" for p in prices]
+        if len(set(labels)) == unique:
+            break
+    return labels
 
 
 def _sigma_t(position: Position, front_days: float) -> float:
@@ -67,7 +79,8 @@ def _scenario_grid(position: Position, front_days: float) -> None:
     )
     st.caption(
         "Every cell re-prices all legs at the shocked spot and implied volatility (relative change) "
-        f"after {horizon} day(s); values are P&L of the whole position versus its current model value."
+        f"after {horizon} day(s); values are P&L of the whole position versus its current model value, in "
+        "thousands (k) or millions (M) of dollars when large (hover a cell for the exact amount)."
     )
 
 
@@ -79,27 +92,37 @@ def _date_grid(position: Position, front_days: float) -> None:
         value=2.0,
         format_func=lambda z: f"±{z:g}σ",
         key="date_grid_reach",
-        help="Columns are spaced evenly in standard deviations σ√T of the log price at the front expiry, so the "
+        help="Rows are spaced evenly in standard deviations σ√T of the log price at the front expiry, so the "
         "range follows the volatility and the time left.",
     )
     z = np.linspace(-reach, reach, 13)
     spot_changes = np.exp(z * sigma_t) - 1.0
     days = np.unique(np.round(np.linspace(0.0, front_days, 8)))
     grid = scenarios.pnl_grid(position.strategy, position.market, spot_changes, days=days, multiplier=position.units)
-    rows = ["Today" if d == 0 else f"Day {d:.0f}" for d in days]
-    rows[-1] = f"Expiry (day {days[-1]:.0f})" if np.isclose(days[-1], front_days) else rows[-1]
+    dates = ["Today" if d == 0 else f"Day {d:.0f}" for d in days]
+    at_expiry = bool(np.isclose(days[-1], front_days))
+    if at_expiry:
+        dates[-1] = "Expiry"
     st.plotly_chart(
-        # Reversed so that today is the top row.
+        # Dates (at most 8) are the columns and prices the rows, highest at the top, so that the cells stay wide
+        # enough to read on a phone.
         charts.pnl_heatmap(
-            price_labels(position.market.spot * (1.0 + spot_changes)), rows[::-1], grid[::-1], "Underlying price", ""
+            dates,
+            price_labels(position.market.spot * (1.0 + spot_changes)),
+            grid.T,
+            "Date",
+            "Underlying price",
+            colorbar=False,
         ),
         key="date_heatmap",
     )
+    expiry = f", up to the front expiry on day {days[-1]:.0f}" if at_expiry else ""
     st.caption(
-        f"Columns run from {-reach:g}σ to +{reach:g}σ in 13 even steps of the log price, where σ√T = {sigma_t:.1%} "
-        "is one standard deviation of the price at the front expiry (sidebar volatility); rows are days from "
-        "today. Every cell re-prices all legs at the spot and date shown with implied volatility unchanged; values "
-        "are P&L of the whole position versus its current model value."
+        f"Rows run from {-reach:g}σ to +{reach:g}σ in 13 even steps of the log price, where σ√T = {sigma_t:.1%} is "
+        "one standard deviation of the price at the front expiry (sidebar volatility); columns are days from "
+        f"today{expiry}. Every cell re-prices all legs at the spot and date shown with implied volatility "
+        "unchanged; values are P&L of the whole position versus its current model value, in thousands (k) or "
+        "millions (M) of dollars when large (hover a cell for the exact amount)."
     )
 
 
@@ -200,7 +223,8 @@ def _stress_tests(position: Position) -> None:
     if elapsed or custom_on:
         columns += ["Days elapsed", "Legs expired"]
     st.dataframe(
-        table[columns],
+        # Short headers so that every one fits its narrow column; the help gives the full name.
+        table[columns].rename(columns=STRESS_HEADERS),
         hide_index=True,
         height=35 * (len(table) + 1) + 3,  # show every scenario without an inner scrollbar
         column_config={
@@ -209,10 +233,13 @@ def _stress_tests(position: Position) -> None:
             "IV multiplier": st.column_config.NumberColumn(
                 format="%.2fx", width="small", help="Multiplier on implied vol."
             ),
-            "IV shock damped": st.column_config.CheckboxColumn(
-                width="small", help="One-month shock, damped for longer-dated legs (see the toggle above)."
+            "IV damped": st.column_config.CheckboxColumn(
+                width="small",
+                help="IV shock damped: a one-month shock, damped for longer-dated legs (see the toggle above).",
             ),
-            "Rate change (bp)": st.column_config.NumberColumn(format="%+.0f", width="small"),
+            "Rate Δ (bp)": st.column_config.NumberColumn(
+                format="%+.0f", width="small", help="Rate change in basis points (100 bp = 1 percentage point)."
+            ),
             "P&L": st.column_config.NumberColumn(format="dollar", width="small"),
             "Days elapsed": st.column_config.NumberColumn(width="small"),
             "Legs expired": st.column_config.NumberColumn(

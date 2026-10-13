@@ -168,6 +168,39 @@ def test_blank_strike_means_the_sidebar_strike():
     assert "Long 1 × 100 Call, Short 1 × 110 Call, Long 1 × 90 Put" in _position(editor.run())
 
 
+def test_reverted_edit_on_kept_legs_is_not_moved_by_a_later_rerun():
+    # Round-1 verifier: after a strike change kept the edited legs, editing them back to the old template values
+    # left them on the old strikes, and the next rerun from any widget silently moved them to the new template.
+    editor = LegsEditor(_app())
+    editor.edit({"0": {"Quantity": 3}})
+    editor.at.sidebar.number_input(key="strike").set_value(95.0)
+    editor.run()
+    editor.state = {**NO_EDITS, "edited_rows": {"0": {"Quantity": 1}}}
+    at = editor.run()
+    kept = "**Bull Call Spread (modified)** — Long 1 × 100 Call, Short 1 × 110 Call"
+    assert kept in _position(at)
+    assert any("kept" in info.value for info in at.info)
+    at.number_input(key="contracts").set_value(2)
+    at = editor.run()
+    assert f"{kept} · 2 × 100 multiplier" in _position(at)
+    # Once the legs match the template on screen again, they follow it.
+    at.sidebar.number_input(key="strike").set_value(100.0)
+    at = editor.run()
+    assert "**Bull Call Spread** — Long 1 × 100 Call, Short 1 × 110 Call" in _position(at)
+    assert not any("kept" in info.value for info in at.info)
+    at.sidebar.number_input(key="strike").set_value(90.0)
+    assert "**Bull Call Spread** — Long 1 × 90 Call, Short 1 × 100 Call" in _position(editor.run())
+
+
+def test_an_edit_that_arrives_with_a_strike_change_is_kept():
+    # The browser sends both in one rerun when the strike changes while the edit's own rerun is still running.
+    editor = LegsEditor(_app())
+    editor.at.sidebar.number_input(key="strike").set_value(95.0)
+    at = editor.edit({"0": {"Quantity": 3}})
+    assert "**Bull Call Spread (modified)** — Long 3 × 100 Call, Short 1 × 110 Call" in _position(at)
+    assert any("kept" in info.value for info in at.info)
+
+
 def test_editor_identity_does_not_depend_on_sidebar_values():
     # Root cause of the lost edits: the column help quoted the sidebar values and so changed the editor's identity.
     at = _app(strategy_width_pct=10)  # a fixed width keeps the template itself unchanged
@@ -207,6 +240,38 @@ def test_default_width_scales_with_the_expected_move(strike, vol, years, width):
     assert tab_strategy.auto_width(strike, vol, years) == pytest.approx(width)
 
 
+@pytest.mark.parametrize(
+    ("width", "rounded"), [(10.137, 10.14), (2.5, 2.5), (0.123, 0.12), (0.065, 0.065), (0.0123, 0.012), (0.025, 0.025)]
+)
+def test_round_width_keeps_strikes_on_a_price_tick(width, rounded):
+    assert tab_strategy.round_width(width) == rounded
+
+
+def _caption(at: AppTest, text: str) -> str:
+    return next(c.value for c in at.caption if text in c.value)
+
+
+def test_percent_width_is_rounded_to_the_cent_and_shown_as_used():
+    # Round-1 verifier: 10% of a 101.37 strike gave a 111.507 call while the caption said w = $10.14.
+    at = _app(spot=101.37, strike=101.37, strategy_width_pct=10)
+    assert "Long 1 × 101.37 Call, Short 1 × 111.51 Call" in _position(at)
+    assert "w = \\$10.14 (10.00% of the strike, set by you)" in _caption(at, "Width")
+
+
+def test_sub_cent_strikes_are_shown_in_full():
+    # Round-1 verifier: a penny condor's 0.975/1.025 strikes showed as 0.97/1.02 and its width as $0.03.
+    at = _app(spot=1, strike=1, days=30, strategy_category="Range-bound")
+    at.selectbox(key="strategy_Range-bound").set_value("Iron Condor").run()
+    _ok(at)
+    assert "Long 1 × 0.95 Put, Short 1 × 0.975 Put, Short 1 × 1.025 Call, Long 1 × 1.05 Call" in _position(at)
+    assert "w = \\$0.025 (2.50% of the strike, automatic)" in _caption(at, "Width")
+    editor = next(n.proto for n in _walk(at._tree) if "legs::" in getattr(getattr(n, "proto", None), "id", ""))
+    assert json.loads(editor.columns)["Strike"]["type_config"]["format"] == tab_strategy.STRIKE_FORMAT
+    # The format is printf-style and the browser applies it the way Python's % operator does.
+    shown = [tab_strategy.STRIKE_FORMAT % k for k in (0.95, 0.975, 1.025, 1.05, 100.0, 111.51, 1 - 2 * 0.025)]
+    assert shown == ["0.95", "0.975", "1.025", "1.05", "100", "111.51", "0.95"]
+
+
 def test_short_dated_condor_is_not_degenerate_by_default():
     # Review finding: a 10%-of-strike width put a 7-day condor's short strikes 3.6 standard deviations away.
     at = _app(days=7, strategy_category="Range-bound")
@@ -221,9 +286,26 @@ def test_short_dated_condor_is_not_degenerate_by_default():
 def test_probability_text_never_rounds_to_a_certainty():
     assert tab_strategy.probability_text(0.99962) == ">99.9%"
     assert tab_strategy.probability_text(0.0003) == "<0.1%"
-    assert tab_strategy.probability_text(1.0) == "100.0%"
-    assert tab_strategy.probability_text(0.0) == "0.0%"
+    # Probabilities that saturate to exactly 1 or 0 in floating point are no certainty either...
+    assert tab_strategy.probability_text(1.0) == ">99.9%"
+    assert tab_strategy.probability_text(0.0) == "<0.1%"
+    # ...unless the payoff itself cannot lose or cannot profit.
+    assert tab_strategy.probability_text(1.0, sure=True) == "100.0%"
+    assert tab_strategy.probability_text(0.0, never=True) == "0.0%"
     assert tab_strategy.probability_text(0.523) == "52.3%"
+
+
+def test_probability_of_profit_is_not_a_certainty_when_the_position_can_lose_or_profit():
+    # Round-1 verifier: a 7-day short 60 put has a probability of exactly 1.0 in floating point but can lose
+    # $6,000, and a far out-of-the-money call spread showed 0.0% with a $200 maximum profit.
+    at = _app(days=7, strike=60, strategy_category="Single option")
+    at.selectbox(key="strategy_Single option").set_value("Short Put").run()
+    _ok(at)
+    assert _metric(at, "Max loss").value == "$6,000.00"
+    assert _metric(at, "Probability of profit").value == ">99.9%"
+    at = _app(days=7, strike=150)
+    assert _metric(at, "Max profit").value.startswith("$")
+    assert _metric(at, "Probability of profit").value == "<0.1%"
 
 
 # --- Metrics -----------------------------------------------------------------------------------------------------
@@ -276,6 +358,29 @@ def test_cannot_lose_and_no_profit_wording_and_no_arrows():
     assert _metric(at, "Max profit").value == "No profit"
 
 
+def test_legs_table_has_no_negative_zeros():
+    # Round-1 verifier: far out-of-the-money legs showed Cost -$0.00, Delta -0.00, Gamma -0.0000 and so on.
+    at = _app(strike=150, days=7)
+    table = next(df.value for df in at.dataframe if "Model value" in df.value.columns)
+    rounded = 0
+    shown_decimals = {
+        "Model value": 4,
+        "Entry price": 4,
+        "Cost": 2,
+        "Delta": 2,
+        "Gamma": 4,
+        "Theta/day": 2,
+        "Vega/pt": 2,
+    }
+    for col, decimals in shown_decimals.items():
+        values = table[col].to_numpy(dtype=float)
+        shown = [f"{v:.{decimals}f}" for v in values]
+        assert not [s for s in shown if re.fullmatch(r"-0\.0+", s)], (col, shown)
+        rounded += int(np.sum(np.abs(values) < 0.5 * 10**-decimals))
+    assert rounded >= 5  # the case has values that round to zero
+    assert shown_decimals == tab_strategy.LEGS_TABLE_DECIMALS
+
+
 def test_number_has_no_negative_zero():
     assert tab_strategy.number(-1e-12, 2) == "0.00"
     assert tab_strategy.number(-0.004, 2) == "0.00"
@@ -320,14 +425,26 @@ def test_risk_heatmap_labels_show_the_exact_spot_shocks():
 def test_spot_date_grid_steps_in_standard_deviations():
     at = _app()
     heat = _chart(at, "date_heatmap")["data"][0]
-    prices = np.array([float(x.replace(",", "")) for x in heat["x"]])
+    # Dates are the (at most 8) columns and prices the rows, lowest first so that the highest is at the top: the
+    # 13 price columns were unreadable on a phone.
+    prices = np.array([float(y.replace(",", "")) for y in heat["y"]])
     assert prices[0] == pytest.approx(100 * np.exp(-0.4), abs=0.005)
     assert prices[-1] == pytest.approx(100 * np.exp(0.4), abs=0.005)
     assert np.diff(np.log(prices)) == pytest.approx(np.full(12, 0.8 / 12), abs=1e-4)
-    assert heat["y"][-1] == "Today" and heat["y"][0] == "Expiry (day 365)"
-    # At expiry and the strike, the bull call spread has lost its premium versus today's value.
-    expiry_row = _array(heat["z"])[0]
-    assert expiry_row[0] == pytest.approx(-441.05, abs=0.01)
+    assert heat["x"] == ["Today", "Day 52", "Day 104", "Day 156", "Day 209", "Day 261", "Day 313", "Expiry"]
+    z = _array(heat["z"])
+    assert z.shape == (13, 8)
+    # At expiry and the lowest price, the bull call spread has lost its premium versus today's value.
+    assert z[0, -1] == pytest.approx(-441.05, abs=0.01)
+    assert z[6, 0] == pytest.approx(0.0, abs=1e-9)  # today at today's spot
+    assert any("front expiry on day 365" in c.value for c in at.caption)
+
+
+@pytest.mark.parametrize("query", [{"vol": 500, "days": 3650}, {"spot": 0.01, "strike": 0.01, "days": 1, "vol": 0.1}])
+def test_spot_date_grid_labels_stay_distinct_at_the_sidebar_limits(query):
+    # Round-1 verifier: at these sidebar limits the price labels repeated and Plotly merged the rows.
+    heat = _chart(_app(**query), "date_heatmap")["data"][0]
+    assert len(set(heat["y"])) == len(heat["y"]) == 13
 
 
 def test_time_decay_moves_scale_with_volatility():
@@ -355,6 +472,28 @@ def test_position_greek_profiles():
     assert _chart(at, "greek_profiles")["layout"]["yaxis"]["title"]["text"] == "Vega ($ per vol point)"
 
 
+def test_stress_table_headers_are_short_with_the_full_name_in_the_help():
+    # Round-1 verifier: in the narrow columns 'Rate change (bp)' was cut to 'Rate change (bp', losing its unit.
+    at = _app()
+    at.toggle(key="stress_elapsed").set_value(True).run()
+    _ok(at)
+    frame = next(df for df in at.dataframe if "Scenario" in df.value.columns)
+    headers = list(frame.value.columns)
+    assert headers == [
+        "Scenario",
+        "P&L",
+        "Spot change",
+        "IV multiplier",
+        "IV damped",
+        "Rate Δ (bp)",
+        "Days elapsed",
+        "Legs expired",
+    ]
+    config = json.loads(frame.proto.columns)
+    assert "IV shock damped" in config["IV damped"]["help"]
+    assert "basis points" in config["Rate Δ (bp)"]["help"]
+
+
 def test_stress_table_and_var_cards():
     at = _app()
     labels = [m.label for m in at.metric]
@@ -370,6 +509,10 @@ def test_stress_table_and_var_cards():
 # --- Chart and label helpers ---------------------------------------------------------------------------------
 
 
+def _note(fig):
+    return next((a for a in fig.layout.annotations if a.name == "outside"), None)
+
+
 def test_histogram_does_not_pile_the_tails_into_the_end_bins():
     # Review finding: outcomes beyond the 0.05%/99.95% quantiles were clipped into spikes at both ends.
     rng = np.random.default_rng(3)
@@ -382,15 +525,30 @@ def test_histogram_does_not_pile_the_tails_into_the_end_bins():
     assert np.sum(bars.y) * width == pytest.approx(inside)
     assert bars.y[0] < 2 * bars.y[3] and bars.y[-1] < 2 * bars.y[-4]
     below, above = int(np.sum(values < lo)), int(np.sum(values > hi))
-    title = fig.layout.title.text
-    assert f"{below} below the axis (lowest -60.00)" in title and f"{above} above it (highest 45.00)" in title
+    # One short line per side (round-1 verifier: a single line was wider than a phone-width or half-width chart).
+    assert _note(fig).text.split("<br>") == [
+        f"{below} outcomes below the plotted range (lowest -60.00)",
+        f"{above} outcomes above the plotted range (highest 45.00)",
+    ]
+    # Above the marker labels, with room for both lines in the top margin.
+    assert _note(fig).yanchor == "bottom" and _note(fig).yshift == charts.NOTE_SHIFT
+    assert fig.layout.margin.t >= charts.NOTE_SHIFT + 2 * 15
 
 
 def test_histogram_axis_includes_marker_lines():
     values = np.random.default_rng(4).standard_normal(50_000)
     fig = charts.histogram_chart(values, "P&L", [(-9.0, "ES", charts.ACCENT)])
     assert fig.data[0].x[0] < -9.0
-    assert fig.layout.title.text is None or "below" not in fig.layout.title.text
+    assert _note(fig) is None or "below" not in _note(fig).text
+
+
+def test_histogram_labels_of_close_marker_lines_go_to_opposite_sides():
+    values = np.random.default_rng(5).standard_normal(20_000)
+    fig = charts.histogram_chart(values, "P&L", [(-2.3, "VaR", charts.LOSS), (-2.6, "ES", charts.ACCENT)])
+    sides = {a.text: a.xanchor for a in fig.layout.annotations if a.name != "outside"}
+    assert sides == {"ES": "right", "VaR": "left"}  # ES text ends at its line, VaR text starts at its line
+    single = charts.histogram_chart(values, "Price", [(0.0, "strike", charts.NEUTRAL)])
+    assert [a.xanchor for a in single.layout.annotations if a.name != "outside"] == ["center"]
 
 
 def test_pnl_heatmap_cells_have_no_negative_zero():
@@ -398,6 +556,29 @@ def test_pnl_heatmap_cells_have_no_negative_zero():
     assert np.asarray(fig.data[0].text).tolist() == [["0", "0"], ["-150", "200"]]
     small = charts.pnl_heatmap(["a"], ["x"], [[-0.004]], "spot", "vol")
     assert np.asarray(small.data[0].text).tolist() == [["0.00"]]
+
+
+@pytest.mark.parametrize(
+    ("value", "bound", "text"),
+    [
+        (-4.414, 5.0, "-4.41"),
+        (-44.14, 50.0, "-44.1"),
+        (-4410.4, 5000.0, "-4,410"),
+        (-21571.5, 25000.0, "-21.6k"),
+        (-215715.2, 250000.0, "-216k"),
+        (0.2, 250000.0, "0"),
+        (-1234567.0, 2e6, "-1.23M"),
+    ],
+)
+def test_pnl_cell_text_stays_short(value, bound, text):
+    # Long cell values made Plotly shrink the heatmap text to about 6 px on a phone.
+    assert charts.pnl_cell_text(value, bound) == text
+
+
+def test_spot_date_heatmap_gives_the_colour_scale_width_to_its_cells():
+    at = _app()
+    assert _chart(at, "date_heatmap")["data"][0]["showscale"] is False  # the cell values already say it
+    assert _chart(at, "risk_heatmap")["data"][0].get("showscale", True) is True
 
 
 @pytest.mark.parametrize(("x", "label"), [(-0.125, "-12.5%"), (0.0, "0%"), (0.3, "+30%"), (-1 / 12, "-8.3%")])
@@ -408,6 +589,13 @@ def test_shock_label(x, label):
 def test_price_labels_tell_close_prices_apart():
     labels = tab_risk.price_labels(0.65 * np.exp(np.linspace(-0.02, 0.02, 13)))
     assert len(set(labels)) == 13
+    assert tab_risk.price_labels([67.03, 100.0, 149.18]) == ["67.03", "100.00", "149.18"]
+    # Beyond six decimals (prices over 27 orders of magnitude at 500% volatility over ten years, or a 0.01 spot at
+    # 0.1% volatility over a day) the labels switch to significant digits.
+    wide = tab_risk.price_labels(100 * np.exp(np.linspace(-31.6, 31.6, 13)))
+    assert len(set(wide)) == 13 and max(map(len, wide)) <= 9
+    narrow = tab_risk.price_labels(0.01 * np.exp(np.linspace(-1.05e-4, 1.05e-4, 13)))
+    assert len(set(narrow)) == 13
 
 
 def test_payoff_range_keeps_the_strikes_readable():
