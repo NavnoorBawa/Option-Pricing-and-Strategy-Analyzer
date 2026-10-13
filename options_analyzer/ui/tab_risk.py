@@ -13,8 +13,8 @@ import streamlit as st
 from .. import risk, scenarios
 from .. import strategies as strat
 from . import cache, charts
-from .format import md, money
-from .tab_strategy import Position, money_short
+from .format import md, money, money_short
+from .tab_strategy import Position
 
 CONFIDENCE_LEVELS = (0.95, 0.975, 0.99, 0.995, 0.999)
 PATH_CHOICES = (10_000, 25_000, 50_000, 100_000, 250_000, 500_000)

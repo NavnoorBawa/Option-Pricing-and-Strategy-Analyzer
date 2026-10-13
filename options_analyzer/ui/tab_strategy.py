@@ -12,7 +12,7 @@ import streamlit as st
 from .. import black_scholes as bs
 from .. import strategies as strat
 from . import cache, charts
-from .format import md, money
+from .format import md, money, money_short, number, number_short, shown_decimals
 from .inputs import Inputs
 
 CUSTOM = "Custom"
@@ -25,9 +25,10 @@ MAX_WIDTH_PCT = 45.0
 #: The automatic width never exceeds this, so very volatile or long-dated templates stay readable.
 MAX_AUTO_WIDTH_PCT = 25.0
 
-#: Strikes with as many decimals as they have (up to 8 significant digits): 100, 102.5, 0.975. Static, like the
-#: rest of the editor's configuration.
-STRIKE_FORMAT = "%.8g"
+#: Strikes with as many decimals as they have (up to 10 significant digits, enough for every cent of a template
+#: strike at the sidebar's largest strike): 100, 102.5, 0.975, 1234567.89. Static, like the rest of the editor's
+#: configuration.
+STRIKE_FORMAT = "%.10g"
 
 #: The column help is static on purpose: the editor's identity hashes its column configuration, so text that
 #: changed with the sidebar would recreate the editor and throw away the user's edits.
@@ -354,7 +355,13 @@ def _is_sidebar_contract(leg: strat.Leg, inputs: Inputs) -> bool:
 
 
 def _valuation_note(inputs: Inputs, strategy: strat.Strategy) -> None:
-    """State that legs are European BSM values and, under an American tree, compare with the sidebar contract."""
+    """State that legs are European BSM values and, under an American tree, what early exercise adds to the
+    sidebar contract.
+
+    Like the Pricing tab, the early-exercise premium is the American price minus the European price on the same
+    lattice, so the tree's discretisation error cancels. Set against the closed-form European price, that error
+    would read as an early-exercise value, even a negative one.
+    """
     model = inputs.model
     european = (
         "Legs are valued as European options with Black-Scholes-Merton at each leg's implied volatility, "
@@ -376,20 +383,28 @@ def _valuation_note(inputs: Inputs, strategy: strat.Strategy) -> None:
         inputs.dividend_yield,
     )
     try:
-        tree = cache.tree_results(S, K, T, r, sigma, q, model.steps, True, model.tree_method)
+        trees = {
+            style: cache.tree_results(S, K, T, r, sigma, q, model.steps, style == "American", model.tree_method)
+            for style in ("American", "European")
+        }
     except ValueError:
         st.caption(european)
         return
-    comparisons = " and ".join(
-        f"one {K:g} {kind} (the sidebar contract) is worth {money(tree[kind].price, 4)} with early exercise "
-        f"against {money(bs.price(S, K, T, r, sigma, q, kind), 4)} European"
-        for kind in kinds
-    )
+    sentences = []
+    for kind in kinds:
+        on_tree = {style: tree[kind].price for style, tree in trees.items()}
+        sentences.append(
+            f"For one {strat.strike_text(K)} {kind} (the sidebar contract), early exercise adds "
+            f"{money(on_tree['American'] - on_tree['European'], 4)} per share on this tree: "
+            f"{money(on_tree['American'], 4)} American against {money(on_tree['European'], 4)} European. "
+            f"The strategy values it at {money(bs.price(S, K, T, r, sigma, q, kind), 4)}, its European "
+            "Black-Scholes-Merton value."
+        )
     st.info(
         md(
             f"**Early exercise is not modelled here.** The price cards use the sidebar's American tree "
             f"({model.label}), but strategy legs are valued as European options with Black-Scholes-Merton. "
-            f"Per share, {comparisons}."
+            + " ".join(sentences)
         ),
         icon=":material/info:",
     )
@@ -400,22 +415,19 @@ def _valuation_note(inputs: Inputs, strategy: strat.Strategy) -> None:
 # ---------------------------------------------------------------------------
 
 
-def money_short(value: float, signed: bool = False) -> str:
-    """Dollar amount short enough for a metric card: no cents from $100,000 and millions as ``$1.23M``."""
-    if value is None or not np.isfinite(value) or abs(value) < 1e5:
-        return money(value, 2, signed)
-    if abs(value) < 1e6:
-        return money(value, 0, signed)
-    sign = "-" if value < 0 else ("+" if signed else "")
-    return f"{sign}${abs(value) / 1e6:,.2f}M"
+def _exact_help(text: str, shown: str, exact: str) -> str | None:
+    """Metric help with the exact value whenever the card shows a shortened one."""
+    if shown != exact:
+        text = f"{text} Exact: {exact}.".strip()
+    return md(text) if text else None
 
 
 def _money_help(value: float, text: str = "", signed: bool = False) -> str | None:
-    """Metric help with the exact amount whenever the card shows a shortened one."""
-    exact = money(value, 2, signed)
-    if money_short(value, signed) != exact:
-        text = f"{text} Exact: {exact}.".strip()
-    return md(text) if text else None
+    return _exact_help(text, money_short(value, signed), money(value, 2, signed))
+
+
+def _number_help(value: float, decimals: int, text: str) -> str | None:
+    return _exact_help(text, number_short(value, decimals), number(value, decimals))
 
 
 def price_decimals(value: float, most: int = 8) -> int:
@@ -424,13 +436,6 @@ def price_decimals(value: float, most: int = 8) -> int:
         if abs(round(value, decimals) - value) <= 1e-9 * max(1.0, abs(value)):
             return decimals
     return most
-
-
-def number(value: float, decimals: int) -> str:
-    """Fixed-point number without a negative zero (``-0.00`` reads as a short position)."""
-    if abs(value) < 0.5 * 10**-decimals:
-        value = 0.0
-    return f"{value:,.{decimals}f}"
 
 
 def probability_text(p: float, sure: bool = False, never: bool = False) -> str:
@@ -467,17 +472,39 @@ LEGS_TABLE_DECIMALS = {
     "Theta/day": 2,
     "Vega/pt": 2,
 }
+#: Whole-position columns of the legs table. Like the metric cards, they show fewer decimals as their largest value
+#: grows (whole dollars from $10,000), so that an index-sized position fits the page on a laptop.
+LEGS_TABLE_DOLLARS = ("Cost", "Theta/day", "Vega/pt")
+LEGS_TABLE_COUNTS = ("Delta", "Gamma")
 
 
-def legs_table(strategy: strat.Strategy, market: strat.Market, units: float) -> pd.DataFrame:
-    """Per-leg values and Greeks of the whole position, without negative zeros (``-$0.00`` reads as a credit)."""
+def legs_table(strategy: strat.Strategy, market: strat.Market, units: float) -> tuple[pd.DataFrame, dict[str, int]]:
+    """Per-leg values and Greeks of the whole position, and the decimals each number column shows.
+
+    The entry price is left out when every leg is entered at its model value. Whole-position columns show fewer
+    decimals as they grow (:func:`~.format.shown_decimals`); a dollar column in whole dollars is rounded here, as
+    the browser would truncate it. No value shows as a negative zero (``-$0.00`` reads as a credit).
+    """
     table = pd.DataFrame(strat.leg_table(strategy, market)).drop(columns="Leg")
     for col in ("Cost", "Delta", "Gamma", "Theta / day", "Vega / vol pt"):
         table[col] = table[col] * units
     table = table.rename(columns={"Days to expiry": "Days", "Theta / day": "Theta/day", "Vega / vol pt": "Vega/pt"})
-    for col, decimals in LEGS_TABLE_DECIMALS.items():
-        table[col] = table[col].mask(table[col].abs() < 0.5 * 10**-decimals, 0.0)
-    return table
+    if all(leg.premium is None for leg in strategy.legs):
+        table = table.drop(columns="Entry price")
+    decimals = {col: d for col, d in LEGS_TABLE_DECIMALS.items() if col in table}
+    for col in (*LEGS_TABLE_DOLLARS, *LEGS_TABLE_COUNTS):
+        decimals[col] = shown_decimals(table[col].abs().max(), decimals[col])
+    for col in LEGS_TABLE_DOLLARS:
+        if decimals[col] == 0:
+            table[col] = table[col].round()
+    for col, d in decimals.items():
+        table[col] = table[col].mask(table[col].abs() < 0.5 * 10**-d, 0.0)
+    return table, decimals
+
+
+def _dollar_column(decimals: int, help: str):
+    """A whole-position dollar column, in whole dollars when ``decimals`` is 0 (a step of 1 sets the decimals)."""
+    return st.column_config.NumberColumn(format="dollar", step=1 if decimals == 0 else None, help=help)
 
 
 def _join(parts: list[str]) -> str:
@@ -556,14 +583,17 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
     )
 
     greeks = strat.position_greeks(strategy, market)
+    delta, gamma = greeks["delta"] * units, greeks["gamma"] * units
     c = st.columns(4)
     c[0].metric(
         "Delta (shares)",
-        number(greeks["delta"] * units, 2),
+        number_short(delta, 2),
         border=True,
-        help="Share-equivalent exposure: P&L change for a $1 move in the underlying.",
+        help=_number_help(delta, 2, "Share-equivalent exposure: P&L change for a $1 move in the underlying."),
     )
-    c[1].metric("Gamma", number(greeks["gamma"] * units, 4), border=True, help="Change in delta per $1 move.")
+    c[1].metric(
+        "Gamma", number_short(gamma, 4), border=True, help=_number_help(gamma, 4, "Change in delta per $1 move.")
+    )
     theta, vega = greeks["theta"] * units / 365, greeks["vega"] * units / 100
     c[2].metric(
         "Theta / day",
@@ -671,22 +701,27 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
     c[2].metric("Drift used", f"{metrics.drift:.2%}", help="Annual expected return of the underlying.")
 
     st.markdown("**Legs at inception**")
+    table, decimals = legs_table(strategy, market, units)
     st.dataframe(
-        legs_table(strategy, market, units),
+        table,
         hide_index=True,
         column_config={
             "Strike": st.column_config.NumberColumn(format=STRIKE_FORMAT),
             "Days": st.column_config.NumberColumn(format="%d", help="Days to expiry."),
             "IV": st.column_config.NumberColumn(format="percent"),
             "Model value": st.column_config.NumberColumn(
-                format="$%.4f", help="Black-Scholes-Merton (European) value per share."
+                format="$%.4f",
+                help="Black-Scholes-Merton (European) value per share. A leg is entered at this value unless you "
+                "give it a premium; the Entry price column then shows what you paid or received.",
             ),
             "Entry price": st.column_config.NumberColumn(format="$%.4f", help="Premium paid/received per share."),
-            "Cost": st.column_config.NumberColumn(format="dollar", help="Whole position; negative = credit."),
-            "Delta": st.column_config.NumberColumn(format="%.2f", help="Whole position, in shares."),
-            "Gamma": st.column_config.NumberColumn(format="%.4f", help="Whole position, per $1 move."),
-            "Theta/day": st.column_config.NumberColumn(format="dollar", help="Whole position, per calendar day."),
-            "Vega/pt": st.column_config.NumberColumn(format="dollar", help="Whole position, per vol point."),
+            "Cost": _dollar_column(decimals["Cost"], "Whole position; negative = credit."),
+            "Delta": st.column_config.NumberColumn(format=f"%.{decimals['Delta']}f", help="Whole position, in shares."),
+            "Gamma": st.column_config.NumberColumn(
+                format=f"%.{decimals['Gamma']}f", help="Whole position, per $1 move."
+            ),
+            "Theta/day": _dollar_column(decimals["Theta/day"], "Whole position, per calendar day."),
+            "Vega/pt": _dollar_column(decimals["Vega/pt"], "Whole position, per vol point."),
         },
     )
     if strategy.fees:

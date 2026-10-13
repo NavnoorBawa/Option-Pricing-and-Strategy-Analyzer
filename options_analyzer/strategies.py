@@ -53,6 +53,7 @@ __all__ = [
     "pnl",
     "position_greeks",
     "position_value",
+    "strike_text",
     "unbounded_loss_from_dividends",
 ]
 
@@ -110,10 +111,23 @@ class Leg:
 
     def label(self) -> str:
         side = "Long" if self.quantity > 0 else "Short"
-        qty = f"{abs(self.quantity):g}"
+        qty = strike_text(abs(self.quantity))
         if self.kind == "stock":
             return f"{side} {qty} share{'s' if abs(self.quantity) != 1 else ''}"
-        return f"{side} {qty} × {self.strike:g} {self.kind.capitalize()}"
+        return f"{side} {qty} × {strike_text(self.strike)} {self.kind.capitalize()}"
+
+
+def strike_text(value: float, most: int = 8) -> str:
+    """A strike (or quantity) with every decimal it has, up to ``most``, and thousands separators.
+
+    ``100``, ``102.5``, ``0.975``, ``12,345.67``: never rounded to a few significant digits or written in
+    scientific notation, so a label shows the same strike as the legs table.
+    """
+    decimals = next(
+        (d for d in range(most) if abs(round(value, d) - value) <= 1e-12 * max(1.0, abs(value))),
+        most,
+    )
+    return f"{value:,.{decimals}f}"
 
 
 @dataclass(frozen=True)

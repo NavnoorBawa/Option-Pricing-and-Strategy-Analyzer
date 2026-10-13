@@ -10,6 +10,7 @@ import pytest
 from streamlit.proto.WidgetStates_pb2 import WidgetState
 from streamlit.testing.v1 import AppTest
 
+from options_analyzer import black_scholes as bs
 from options_analyzer import strategies as strat
 from options_analyzer.ui import charts, tab_risk, tab_strategy
 
@@ -272,6 +273,54 @@ def test_sub_cent_strikes_are_shown_in_full():
     assert shown == ["0.95", "0.975", "1.025", "1.05", "100", "111.51", "0.95"]
 
 
+def _legs_table(at: AppTest):
+    return next(df for df in at.dataframe if "Model value" in df.value.columns)
+
+
+def test_large_strikes_are_shown_in_full():
+    # Round-2 verifier: labels used 6 significant digits, so the Risk header read 'Long 1 × 12345.7 Put' and
+    # 'Long 1 × 1.23457e+06 Call', and the legs table cut 1234567.89 to 1234567.9.
+    at = _app(spot=12345.67, strike=12345.67, strategy_category="Single option")
+    at.selectbox(key="strategy_Single option").set_value("Long Put").run()
+    _ok(at)
+    assert "Long Put** — Long 1 × 12,345.67 Put ·" in _position(at)
+    assert "one 12,345.67 put (the sidebar contract)" in _american_note(_american(at))
+    at = _app(spot=1234567.89, strike=1234567.89)
+    assert "Long 1 × 1,234,567.89 Call, Short 1 × 1,334,567.89 Call" in _position(at)
+    table = _legs_table(at)
+    assert json.loads(table.proto.columns)["Strike"]["type_config"]["format"] == tab_strategy.STRIKE_FORMAT
+    shown = [tab_strategy.STRIKE_FORMAT % k for k in table.value["Strike"]]
+    assert shown == ["1234567.89", "1334567.89"]
+    assert [tab_strategy.STRIKE_FORMAT % k for k in (12345.67, 9999999.99, 9999999.99 * 1.9)] == [
+        "12345.67",
+        "9999999.99",
+        "18999999.98",
+    ]
+
+
+def test_index_sized_legs_table_fits_a_laptop_screen():
+    # Round-2 verifier: at 1,280 px the legs table of a 100-lot SPX iron condor was 13 px wider than the page and
+    # cut its last column. Entry prices equal to the model values are no longer repeated, and dollar columns of
+    # $10,000 or more show whole dollars, rounded rather than truncated by the browser.
+    at = _app(spot=4500, strike=4500, contracts=100, strategy_category="Range-bound")
+    at.selectbox(key="strategy_Range-bound").set_value("Iron Condor").run()
+    _ok(at)
+    table = _legs_table(at)
+    assert "Entry price" not in table.value.columns
+    config = json.loads(table.proto.columns)
+    for col in ("Cost", "Vega/pt"):
+        values = table.value[col].to_numpy(dtype=float)
+        assert np.abs(values).max() >= 1e4
+        assert config[col]["type_config"] == {"type": "number", "format": "dollar", "step": 1}
+        assert np.array_equal(values, np.round(values))
+    assert table.value["Vega/pt"].tolist() == [49391.0, -115530.0, -176740.0, 145020.0]
+    assert config["Theta/day"]["type_config"].get("step") is None  # below $10,000: cents
+    assert config["Delta"]["type_config"]["format"] == "%.2f" and config["Gamma"]["type_config"]["format"] == "%.4f"
+    at = LegsEditor(at).edit({"0": {"Premium": 2.5}})
+    table = _legs_table(at)
+    assert table.value["Entry price"].tolist()[:2] == [2.5, pytest.approx(92.55996, abs=1e-5)]
+
+
 def test_short_dated_condor_is_not_degenerate_by_default():
     # Review finding: a 10%-of-strike width put a 7-day condor's short strikes 3.6 standard deviations away.
     at = _app(days=7, strategy_category="Range-bound")
@@ -336,8 +385,65 @@ def test_large_amounts_are_shortened_with_the_exact_value_in_the_help():
     premium = _metric(at, "Net premium")
     assert premium.value == "$215,715"
     assert "Exact: \\$215,715" in premium.proto.help
-    assert tab_strategy.money_short(-2_345_678.9, signed=True) == "-$2.35M"
-    assert tab_strategy.money_short(19_847.23) == "$19,847.23"
+
+
+@pytest.mark.parametrize(
+    ("value", "signed", "text"),
+    [
+        (9_999.99, False, "$9,999.99"),
+        (9_999.996, False, "$10,000"),
+        (19_847.23, False, "$19,847"),
+        (-97_858.24, True, "-$97,858"),
+        (999_999.6, False, "$1.00M"),
+        (-2_345_678.9, True, "-$2.35M"),
+        (999_996_000.0, False, "$1.00B"),
+        (2_157_150_000.0, True, "+$2.16B"),
+        (441_049_535_530_000.0, False, "$441.05T"),
+        (-999_996_000_000_000.0, False, "-$1.00e+15"),
+        (1.5e16, False, "$1.50e+16"),
+    ],
+)
+def test_money_short_fits_a_metric_card(value, signed, text):
+    # Round-2 verifier: amounts were cut at "M", so the cards showed '$441,049,535.53M' at the input limits, and at
+    # 1,280 px a vega of -$97,858.24 was already wider than its card. Every amount is now at most nine characters
+    # and a sign.
+    assert tab_strategy.money_short(value, signed) == text
+    assert len(text.lstrip("+-")) <= 9
+
+
+@pytest.mark.parametrize(
+    ("value", "decimals", "text"),
+    [
+        (-532.554, 2, "-532.55"),
+        (-1e-12, 2, "0.00"),
+        (-2.41634, 4, "-2.4163"),
+        (999.99994, 4, "999.9999"),
+        (1234.56789, 4, "1,234.57"),
+        (-9_999.99, 2, "-9,999.99"),
+        (20_000.0, 4, "20,000"),
+        (187_182_738.53, 2, "187.18M"),
+        (-3.2e15, 2, "-3.20e+15"),
+    ],
+)
+def test_number_short_fits_a_metric_card(value, decimals, text):
+    assert tab_strategy.number_short(value, decimals) == text
+    assert len(text.lstrip("+-")) <= 9
+
+
+def test_cards_stay_readable_at_the_input_limits():
+    # Round-2 verifier, at spot and strike 9,999,999, 100,000 contracts and 10,000 shares per contract (all within
+    # the input limits): every dollar card and the share delta were cut off with an ellipsis.
+    at = _app(spot=9999999, strike=9999999, contracts=100000, multiplier=10000)
+    assert _metric(at, "Net premium").value == "$441.05T"
+    assert "Exact: \\$441,049,535," in _metric(at, "Net premium").proto.help
+    delta = _metric(at, "Delta (shares)")
+    assert delta.value == "187.18M"
+    assert "Exact: 187,182,738.53" in delta.proto.help
+    shortened = ["Net premium", "Max profit", "Max loss", "Delta (shares)", "Theta / day", "Vega / vol pt"]
+    for label in [*shortened, "Gamma", "Expected P&L at expiry", "P&L standard deviation"]:
+        assert len(_metric(at, label).value.lstrip("+-")) <= 9, (label, _metric(at, label).value)
+    for label in shortened:
+        assert "Exact:" in _metric(at, label).proto.help, label
 
 
 def test_cannot_lose_and_no_profit_wording_and_no_arrows():
@@ -373,12 +479,28 @@ def test_legs_table_has_no_negative_zeros():
         "Vega/pt": 2,
     }
     for col, decimals in shown_decimals.items():
+        if col not in table:  # the entry price is left out when every leg is entered at model value
+            continue
         values = table[col].to_numpy(dtype=float)
         shown = [f"{v:.{decimals}f}" for v in values]
         assert not [s for s in shown if re.fullmatch(r"-0\.0+", s)], (col, shown)
         rounded += int(np.sum(np.abs(values) < 0.5 * 10**-decimals))
     assert rounded >= 5  # the case has values that round to zero
     assert shown_decimals == tab_strategy.LEGS_TABLE_DECIMALS
+
+
+def test_whole_dollar_columns_have_no_negative_zeros():
+    market = strat.Market(4500, 0.05, 0.2, 7 / 365)
+    # The short put's vega is about -$0.20 for the position, which rounds to a whole-dollar -0.
+    strategy = strat.Strategy("x", (strat.Leg("call", 1, 4500), strat.Leg("put", -1, 3940, premium=0.0)))
+    table, decimals = tab_strategy.legs_table(strategy, market, 10_000)
+    assert decimals["Cost"] == decimals["Vega/pt"] == 0 and decimals["Gamma"] == 4
+    assert table["Vega/pt"].iloc[1] == 0.0 and not np.signbit(table["Vega/pt"].iloc[1])
+    assert table["Entry price"].tolist()[1] == 0.0  # a fill price was entered, so the column is shown
+    # Share counts shorten the same way as the Delta and Gamma cards: two decimals from 1,000, none from 10,000.
+    assert (decimals["Delta"], decimals["Gamma"]) == (2, 4)
+    table, decimals = tab_strategy.legs_table(strategy, market, 1_000_000)
+    assert (decimals["Delta"], decimals["Gamma"], decimals["Theta/day"]) == (0, 2, 0)
 
 
 def test_number_has_no_negative_zero():
@@ -395,17 +517,54 @@ def test_calendar_is_described_with_its_expiries():
     assert "Short 1 × 100 Call (365d), Long 1 × 100 Call (730d)" in _position(at)
 
 
-def test_american_sidebar_model_is_compared_with_the_european_leg_value():
-    at = _app(div=3)
+def _american(at: AppTest, method: str = "lr", steps: int = 501) -> AppTest:
     at.sidebar.radio(key="model").set_value("binomial").run()
+    at.sidebar.radio(key="tree").set_value(method)
+    at.sidebar.slider(key="steps").set_value(steps)
     at.sidebar.segmented_control(key="style").set_value("American").run()
-    at.selectbox(key="strategy_category").set_value("Single option").run()
+    _ok(at)
+    return at
+
+
+def _american_note(at: AppTest) -> str:
+    return next(i.value for i in at.info if "Early exercise is not modelled" in i.value)
+
+
+def _dollars(text: str, after: str) -> float:
+    """The (Markdown-escaped) dollar amount that directly precedes ``after`` in ``text``."""
+    return float(re.search(r"\\\$([\d,.]+)" + re.escape(after), text).group(1).replace(",", ""))
+
+
+@pytest.mark.parametrize(
+    ("method", "steps", "days"), [("crr", 10, 365), ("lr", 10, 365), ("crr", 10, 30), ("lr", 501, 365)]
+)
+def test_american_note_measures_early_exercise_on_one_tree(method, steps, days):
+    # Round-2 verifier: the note set the American tree against the closed-form European value, so the tree's
+    # discretisation error read as early exercise. A no-dividend call, which is never exercised early, was "worth
+    # $10.2534 with early exercise against $10.4506 European" on a 10-step tree: less than the European option.
+    at = _american(_app(days=days), method, steps)
+    note = _american_note(at)
+    assert "one 100 call (the sidebar contract)" in note
+    assert "early exercise adds \\$0.0000 per share on this tree" in note
+    american, european = _dollars(note, " American"), _dollars(note, " European")
+    assert american == european == float(_metric(at, "Call value").value.lstrip("$"))
+    assert any("Early-exercise premium \\$0.0000 (same tree" in c.value for c in at.caption)
+    bsm = bs.price(100, 100, days / 365, 0.05, 0.2, 0.0, "call")
+    assert f"The strategy values it at \\${bsm:.4f}" in note  # the leg's Black-Scholes-Merton value
+
+
+def test_american_note_reports_the_same_premium_as_the_pricing_tab():
+    at = _american(_app(div=3, strategy_category="Single option"))
     at.selectbox(key="strategy_Single option").set_value("Long Put").run()
     _ok(at)
-    american = _metric(at, "Put value").value
-    note = next(i.value for i in at.info if "Early exercise is not modelled" in i.value)
-    assert american.replace("$", "\\$") in note
-    assert "\\$6.7309 European" in note  # the leg's Black-Scholes-Merton value, which the strategy uses
+    note = _american_note(at)
+    assert "one 100 put (the sidebar contract)" in note
+    premium = _dollars(note, " per share on this tree")
+    american, european = _dollars(note, " American"), _dollars(note, " European")
+    assert american == float(_metric(at, "Put value").value.lstrip("$"))
+    assert premium > 0 and premium == pytest.approx(american - european, abs=1.5e-4)
+    assert any(f"Early-exercise premium +\\${premium:.4f} (same tree" in c.value for c in at.caption)
+    assert "The strategy values it at \\$6.7309" in note
     assert _metric(at, "Net premium").value == "$673.09"
     assert any("whatever the sidebar pricing model" in c.value for c in at.caption)
 

@@ -293,3 +293,30 @@ def test_leg_labels_show_expiries_only_when_they_tell_legs_apart():
     assert S.leg_labels(custom, market) == ["Long 1 share", "Short 1 × 105 Call (90d, IV 25%, filled at $3.50)"]
     same_iv = S.Strategy("same", (S.Leg("put", 2, 95, volatility=0.2, premium=1.23456),))
     assert S.leg_labels(same_iv, market) == ["Long 2 × 95 Put (filled at $1.2346)"]
+
+
+@pytest.mark.parametrize(
+    ("strike", "text"),
+    [
+        (100.0, "100"),
+        (102.5, "102.5"),
+        (0.975, "0.975"),
+        (1 - 2 * 0.025, "0.95"),
+        (111.51, "111.51"),
+        (12345.67, "12,345.67"),
+        (12345.67 + 2 * 1234.57, "14,814.81"),
+        (1234567.89, "1,234,567.89"),
+        (1234567.891, "1,234,567.891"),
+        (9999999.99 * 1.9, "18,999,999.981"),
+    ],
+)
+def test_strikes_are_labelled_with_every_decimal(strike, text):
+    # Round-2 verifier: labels used 6 significant digits, so a 12345.67 strike read "12345.7" and a 1234567.89
+    # strike "1.23457e+06", unlike the legs table on the same page.
+    assert S.strike_text(strike) == text
+    assert S.Leg("put", 1, strike).label() == f"Long 1 × {text} Put"
+
+
+def test_large_quantities_are_labelled_in_full():
+    assert S.Leg("call", -1234567, 100).label() == "Short 1,234,567 × 100 Call"
+    assert S.Leg("stock", 2.5).label() == "Long 2.5 shares"

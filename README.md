@@ -35,7 +35,8 @@ pandas); the Streamlit app is a thin interface on top of it.
 - P&L at expiry, today and at any intermediate date, with an implied-volatility shift, exact breakevens,
   unlimited-risk detection, probability of profit, expected P&L and position/per-leg Greeks.
 - Legs are valued as European options with Black–Scholes–Merton; with an American tree in the sidebar, a leg
-  that is the sidebar contract shows its American value next to the European value used.
+  that is the sidebar contract shows what early exercise adds to it on that tree (American minus European
+  exercise on the same lattice, as on the Pricing tab) next to the European value used.
 
 **Risk & Scenarios** (for the position you built)
 - P&L heatmaps of spot × implied vol (over a ± % spot range) and spot × date, and time-decay curves, all from
