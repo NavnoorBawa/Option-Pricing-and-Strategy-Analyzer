@@ -304,6 +304,23 @@ def test_no_exercise_boundary_is_drawn_when_early_exercise_is_never_optimal():
     assert any("Early exercise is never optimal" in i.value for i in at.info)
 
 
+def test_exercise_boundaries_are_drawn_for_a_small_rate_equal_to_the_dividend_yield():
+    # A 0.01% rate and dividend yield over one day at 0.1% volatility: both options have an exercise region ending at
+    # the strike, but gains below 1e-12 of the strike were not counted, so the chart vanished and the app said early
+    # exercise was never optimal.
+    at = AppTest.from_file(APP, default_timeout=120)
+    at.query_params.update(
+        {"days": "1", "vol": "0.1", "rate": "0.01", "div": "0.01", "model": "Binomial tree", "style": "American"}
+    )
+    at.run()
+    _ok(at)
+    assert not any("Early exercise is never optimal" in i.value for i in at.info)
+    curves = {t["name"]: _values(t["y"]) for t in _chart(at, "exercise_boundary")["data"]}
+    assert set(curves) == {"Call boundary", "Put boundary"}
+    assert curves["Put boundary"].max() == pytest.approx(100, abs=1e-3) and curves["Put boundary"].max() < 100
+    assert curves["Call boundary"].min() == pytest.approx(100, abs=1e-3) and curves["Call boundary"].min() > 100
+
+
 def test_both_exercise_boundaries_are_drawn_in_their_option_colours(app):
     # With dividends both boundaries are drawn, the call's first; it used to get the put's orange and vice versa.
     app.sidebar.number_input(key="div").set_value(3.0).run()
@@ -346,6 +363,23 @@ def test_monte_carlo_cards_stay_right_at_hundreds_of_percent_of_volatility_over_
         for k in ("call", "put")
     )
     assert any(tab_pricing.HEAVY_TAIL_NOTE in c.value for c in at.caption)
+
+
+def test_monte_carlo_call_without_control_variate_follows_from_parity_at_large_sigma_sqrt_t():
+    # Four years at 250% volatility with the control variate off: the cards showed a call of $31.0160 with a standard
+    # error of $16.1587 (value 98.8770) next to a correct put of $80.7879, breaking put-call parity by $68.
+    at = AppTest.from_file(APP, default_timeout=120)
+    at.query_params.update(
+        {"days": "1460", "vol": "250", "model": "Monte Carlo", "seed": "103", "control_variate": "false"}
+    )
+    at.run()
+    _ok(at)
+    assert at.sidebar.toggle(key="control_variate").value is False
+    cards = _metrics(at)
+    assert (cards["Call value"], cards["Put value"], cards["Std. error"]) == ("$98.9148", "$80.7879", "$0.0242")
+    assert _dollars(cards["Call value"]) - _dollars(cards["Put value"]) == pytest.approx(100 - 100 * np.exp(-0.2), 1e-4)
+    assert any(tab_pricing.HEAVY_TAIL_NOTE in c.value for c in at.caption)
+    assert any("from σ√T = 2 on the call follows from the put by parity" in c.value for c in at.caption)
 
 
 def test_monte_carlo_diagnostics_leave_undefined_cells_blank():

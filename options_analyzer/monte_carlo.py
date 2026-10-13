@@ -25,7 +25,12 @@ discounted terminal price then misses ``S e^{-qT}`` by many standard errors,
 and neither the call's payoff nor the control variate can be trusted. That
 gap is checked on every run: beyond 5 standard errors the put, whose payoff is
 bounded by ``K e^{-rT}``, is averaged directly and the call follows from
-put-call parity with the exact forward. Every estimate is also kept within the
+put-call parity with the exact forward. Without the control variate the call's
+own average fails much earlier: its mean and its standard error rest on the
+same rare scenarios, so from ``sigma sqrt(T)`` of about 2 its 95% interval
+misses the value more often than one run in 20 (about one in five at 3),
+mostly while that gap is still below 5 standard errors. From 2 on the call
+then follows from parity as well. Every estimate is also kept within the
 no-arbitrage bounds of a European option.
 
 Calls and puts are priced from the *same* draws (common random numbers) and
@@ -48,6 +53,11 @@ _Z_95 = 1.959963984540054
 #: ``S e^{-qT}`` before the sample is treated as heavy-tailed (see the module docstring). Samples that price
 #: correctly stay within about 3; the failing ones miss by 6 to 1e15.
 _CONTROL_Z_LIMIT = 5.0
+#: Without the control variate the call's own payoff is averaged only while ``sigma sqrt(T)`` is below this. Above
+#: it the scenarios that carry the call's mean and variance are too rare to draw: at S = K = 100 with 100,000
+#: antithetic draws its 95% interval missed the value in 8% of 400 runs at 2, 13% at 2.5 and 22% at 3 (by up to
+#: 87), against 6-8% (by at most 0.24) for the call by parity.
+_PLAIN_CALL_MAX_VST = 2.0
 
 
 @dataclass(frozen=True)
@@ -65,9 +75,10 @@ class MonteCarloResult:
     control_variate: bool
     #: Fraction of simulated terminal prices that finished in the money.
     itm_fraction: float = float("nan")
-    #: The sample is heavy-tailed (its discounted terminal prices miss their known mean by more than 5 standard
-    #: errors): the put is the plain average of its payoff and the call follows from put-call parity, with the
-    #: put's standard error.
+    #: The sample is too heavy-tailed to average the call's payoff: its discounted terminal prices miss their known
+    #: mean by more than 5 standard errors or, without the control variate, ``sigma sqrt(T)`` is 2 or more. The put
+    #: is then the plain average of its payoff and the call follows from put-call parity, with the put's standard
+    #: error.
     heavy_tailed: bool = False
 
     @property
@@ -125,7 +136,8 @@ def price_european(
     (pair averages when antithetic sampling is on). It is NaN when the sample
     cannot estimate it (see :class:`MonteCarloResult`). A heavy-tailed sample
     prices the put directly and the call by put-call parity, whatever
-    ``control_variate`` says (see the module docstring).
+    ``control_variate`` says; without the control variate so does every sample
+    with ``sigma sqrt(T)`` of 2 or more (see the module docstring).
     """
     n_paths = int(n_paths)
     if n_paths < 100:
@@ -164,7 +176,12 @@ def price_european(
     x = samples(discount * s_t)
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         control_z = (x.mean() - control_mean) / (x.std(ddof=1) / np.sqrt(x.size))
-    heavy_tailed = not abs(control_z) <= _CONTROL_Z_LIMIT  # NaN counts as heavy-tailed
+    # NaN counts as heavy-tailed. Without the control variate a sample can stay within the limit and still miss
+    # the call's value by far more than its standard error says, so the call follows from parity from a fixed
+    # sigma sqrt(T) on.
+    heavy_tailed = not abs(control_z) <= _CONTROL_Z_LIMIT or (
+        not control_variate and sigma * np.sqrt(T) >= _PLAIN_CALL_MAX_VST
+    )
     use_control = control_variate and not heavy_tailed
 
     def estimate(phi: int) -> tuple[float, float]:

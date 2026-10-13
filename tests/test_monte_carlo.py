@@ -107,6 +107,41 @@ def test_heavy_tailed_samples_price_the_put_directly_and_the_call_by_parity(T, s
     assert res["call"].price - res["put"].price == pytest.approx(100 - 100 * np.exp(-0.05 * T), abs=1e-9)
 
 
+@pytest.mark.parametrize(("T", "sigma", "seed"), [(4, 2.5, 103), (5, 1.5, 185), (1, 2.0, 7)])
+def test_without_control_variate_the_call_follows_from_parity_from_a_sigma_sqrt_t_of_2(T, sigma, seed):
+    # The 5-standard-error check did not fire, and the plain call read $31.0160 with SE 16.16 against 98.8770 (4
+    # years, 250%) and $63.6000 with SE 8.25 against 91.7617 (5 years, 150%), while the put was right.
+    res = mc.price_european(100, 100, T, 0.05, sigma, 0.0, n_paths=100_000, seed=seed, control_variate=False)
+    call, put = res["call"], res["put"]
+    assert call.heavy_tailed and put.heavy_tailed and not call.control_variate
+    assert call.price - put.price == pytest.approx(100 - 100 * np.exp(-0.05 * T), abs=1e-9)
+    assert call.std_error == put.std_error
+    lo, hi = call.ci95
+    assert lo <= bs.price(100, 100, T, 0.05, sigma, 0.0, "call") <= hi
+
+
+def test_without_control_variate_the_call_stays_close_over_many_seeds_at_large_sigma_sqrt_t():
+    # Four years at 250% volatility (sigma sqrt(T) = 5): the plain call missed its interval in 11 of these 40 runs,
+    # by up to tens of dollars.
+    value = bs.price(100, 100, 4, 0.05, 2.5, 0.0, "call")
+    errors = [
+        mc.price_european(100, 100, 4, 0.05, 2.5, 0.0, n_paths=100_000, seed=seed, control_variate=False)["call"].price
+        - value
+        for seed in range(40)
+    ]
+    assert max(abs(e) for e in errors) < 0.1
+
+
+def test_without_control_variate_the_call_is_averaged_below_a_sigma_sqrt_t_of_2():
+    # Just below the threshold the toggle still shows plain Monte Carlo: the call is its own average (not the put
+    # plus the forward), with its own, larger standard error.
+    res = mc.price_european(100, 100, 4, 0.05, 0.99, 0.0, n_paths=100_000, seed=3, control_variate=False)
+    call, put = res["call"], res["put"]
+    assert not call.heavy_tailed and not call.control_variate
+    assert call.price - put.price != pytest.approx(100 - 100 * np.exp(-0.2), abs=1e-6)
+    assert call.std_error > 10 * put.std_error
+
+
 @pytest.mark.parametrize("control_variate", [True, False])
 def test_ordinary_samples_are_not_treated_as_heavy_tailed(control_variate):
     for seed in range(20):

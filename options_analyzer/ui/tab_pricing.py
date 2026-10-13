@@ -18,7 +18,7 @@ from .inputs import Inputs
 SAMPLE_PATHS = 60
 #: What a heavy-tailed Monte Carlo sample does instead of the usual estimator (see ``monte_carlo``).
 HEAVY_TAIL_NOTE = (
-    "Heavy-tailed sample (very large σ√T): the put is averaged directly and the call follows from put-call parity"
+    "Heavy-tailed sample (large σ√T): the put is averaged directly and the call follows from put-call parity"
 )
 
 
@@ -544,8 +544,10 @@ def _monte_carlo_diagnostics(inputs: Inputs, prices: Prices) -> None:
         "with the control variate on. At very large σ√T (hundreds of percent of volatility over years) the mean of "
         "the price at expiry rests on scenarios too rare to draw: when the simulated discounted prices miss their "
         "known mean S·e^(−qT) by more than 5 standard errors, the put, whose payoff is at most its strike, is "
-        "averaged directly (no control variate) and the call follows from put-call parity. Every estimate is kept "
-        "within the no-arbitrage bounds of a European option."
+        "averaged directly (no control variate) and the call follows from put-call parity. Without the control "
+        "variate the call's own average fails much sooner: from σ√T = 2 its 95% interval misses the value more "
+        "often than 1 run in 20 (about 1 in 5 at σ√T = 3), so from σ√T = 2 on the call follows from the put by "
+        "parity as well. Every estimate is kept within the no-arbitrage bounds of a European option."
         + (
             " This sample is heavy-tailed: the prices above come from the put's direct average and parity."
             if any(res.heavy_tailed for res in prices.mc.values())
