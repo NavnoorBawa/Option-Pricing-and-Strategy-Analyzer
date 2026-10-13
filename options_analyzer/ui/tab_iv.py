@@ -7,10 +7,21 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from .. import black_scholes as bs
-from ..implied_vol import ImpliedVolError, american_bounds, implied_volatility, no_arbitrage_bounds
+from ..binomial import METHODS
+from ..implied_vol import (
+    ImpliedVolError,
+    american_bounds,
+    implied_volatility,
+    lowest_tree_volatility,
+    no_arbitrage_bounds,
+)
 from . import cache, charts
 from .format import md, money, pct
 from .inputs import Inputs
+
+
+def _reset_quote() -> None:
+    st.session_state["iv_quote_generation"] = st.session_state.get("iv_quote_generation", 0) + 1
 
 
 @st.fragment
@@ -23,45 +34,64 @@ def render(inputs: Inputs) -> None:
         inputs.dividend_yield,
         inputs.volatility,
     )
+    model = inputs.model
+    # American quotes are inverted on the sidebar's tree when the binomial model is selected, so the headline
+    # American price reproduces the sidebar volatility here.
+    steps, method = (model.steps, model.tree_method) if model.kind == "binomial" else cache.DEFAULT_TREE
+    tree_name = f"{steps:,}-step {METHODS[method]} tree"
     st.caption(
         f"Uses the sidebar contract: S = {S:,.2f}, K = {K:,.2f}, {inputs.days} days, r = {r:.2%}, q = {q:.2%}. "
-        "The default quote is the model value at the sidebar volatility."
+        "The quote starts at the model value at the sidebar volatility and is kept when you change the volatility "
+        "or the exercise style; it starts again when the contract changes."
     )
     c1, c2, c3 = st.columns([1, 1, 2])
     option_type = c1.segmented_control(
         "Option", ["call", "put"], default="call", required=True, format_func=str.capitalize, key="iv_type"
     )
-    american_model = inputs.model.kind == "binomial" and inputs.model.american
+    # Follow the sidebar's exercise style until the user picks one here; the choice lasts until the sidebar
+    # style changes again (the key, and so the widget, changes with it).
+    sidebar_style = "American" if model.kind == "binomial" and model.american else "European"
     style = c2.segmented_control(
         "Exercise",
         ["European", "American"],
-        default="American" if american_model else "European",
+        default=sidebar_style,
         required=True,
-        key="iv_style",
-        help="European quotes are inverted with Black-Scholes-Merton; American quotes (listed single-stock "
-        "options) on a 501-step Leisen-Reimer tree.",
+        key=f"iv_style_{sidebar_style.lower()}",
+        help="Follows the sidebar's pricing model unless you choose here. European quotes are inverted with "
+        f"Black-Scholes-Merton; American quotes (listed single-stock options) on a {tree_name}"
+        + (" (the sidebar's tree)." if model.kind == "binomial" else "."),
     )
     american = style == "American"
+    lowest = lowest_tree_volatility(T, r, q, steps, method) if american else 0.0
 
     def model_price(vol: float) -> float:
         if american:
-            return cache.american_value(S, K, T, r, max(vol, 1e-6), q, option_type)
+            return cache.american_value(S, K, T, r, max(vol, lowest), q, option_type, steps, method)
         return bs.price(S, K, T, r, vol, q, option_type)
 
     model_value = model_price(sigma)
-    # Deliberately un-keyed: the quote resets to the model value when the contract changes.
-    price = c3.number_input("Market price", min_value=0.0, value=float(model_value), step=0.05, format="%.4f")
+    # The quote belongs to the contract: its widget key holds the contract (not the volatility or the exercise
+    # style), so the typed quote survives those changes and the reset button starts a fresh widget.
+    generation = st.session_state.get("iv_quote_generation", 0)
+    quote_key = f"iv_quote|{S!r}|{K!r}|{inputs.days}|{r!r}|{q!r}|{option_type}|{generation}"
+    price = c3.number_input(
+        "Market price", min_value=0.0, value=float(model_value), step=0.05, format="%.4f", key=quote_key
+    )
+    c3.button(
+        "Reset to model value",
+        on_click=_reset_quote,
+        key="iv_quote_reset",
+        help=f"Set the quote to the model value at the sidebar volatility ({money(model_value, 4)}).",
+    )
     lower, upper = (
         american_bounds(S, K, T, r, q, option_type) if american else no_arbitrage_bounds(S, K, T, r, q, option_type)
     )
-    st.caption(
-        md(f"No-arbitrage bounds for this {style.lower()} {option_type}: {money(lower, 4)} ≤ price < {money(upper, 4)}")
-    )
+    st.caption(md(f"No-arbitrage bounds for this {style} {option_type}: {money(lower, 4)} ≤ price < {money(upper, 4)}"))
 
     try:
         if american:
             with st.spinner("Inverting the binomial tree…"):
-                iv = cache.american_iv(price, S, K, T, r, q, option_type)
+                iv = cache.american_iv(price, S, K, T, r, q, option_type, steps, method)
         else:
             iv = implied_volatility(price, S, K, T, r, q, option_type)
     except ImpliedVolError as exc:
@@ -77,16 +107,20 @@ def render(inputs: Inputs) -> None:
 
     if american:
         bump = 0.005
-        vega = (model_price(iv + bump) - model_price(max(iv - bump, 1e-6))) / (iv + bump - max(iv - bump, 1e-6)) / 100
+        low_vol = max(iv - bump, lowest)
+        vega = (model_price(iv + bump) - model_price(low_vol)) / (iv + bump - low_vol) / 100
     else:
         vega = bs.greeks(S, K, T, r, max(iv, 1e-6), q, option_type)["vega"] / 100
+    intrinsic = max(bs.option_sign(option_type) * (S - K), 0.0)
+    gap = (iv - sigma) * 100
     c = st.columns(4)
     c[0].metric(
         "Implied volatility",
         pct(iv, 3),
-        f"{(iv - sigma) * 100:+.2f} vol pts vs sidebar",
+        f"{0.0 if abs(gap) < 0.005 else gap:+.2f} vol pts vs sidebar",
         border=True,
         delta_color="off",
+        delta_arrow="off",
     )
     c[1].metric(
         "Model check",
@@ -95,7 +129,17 @@ def render(inputs: Inputs) -> None:
         help="Model value at the implied volatility (should equal the quote).",
     )
     c[2].metric("Vega at IV", money(vega, 4), border=True, help="Price change per 1 vol point at the solution.")
-    c[3].metric("Time value", money(price - lower, 4), border=True, help="Quote minus the lower bound.")
+    c[3].metric(
+        "Time value",
+        money(price - intrinsic, 4),
+        border=True,
+        help=md(
+            f"Quote minus intrinsic value max({'S − K' if option_type == 'call' else 'K − S'}, 0) = "
+            f"{money(intrinsic, 4)}. A European option can trade below intrinsic (deep in-the-money puts, calls "
+            f"on high-dividend stocks), so this can be negative. The quote is {money(price - lower, 4)} above the "
+            "no-arbitrage lower bound."
+        ),
+    )
     if iv == 0.0:
         st.warning(
             "The quote equals the option's zero-volatility value (for an American option, typically the value of "
@@ -109,7 +153,7 @@ def render(inputs: Inputs) -> None:
 
     max_vol = max(2.5 * iv, 2.0 * sigma, 0.6)
     if american:
-        vols, curve = cache.american_curve(S, K, T, r, q, option_type, max_vol)
+        vols, curve = cache.american_curve(S, K, T, r, q, option_type, max_vol, steps, method)
     else:
         vols = np.linspace(0.005, max_vol, 400)
         curve = bs.price(S, K, T, r, vols, q, option_type)
@@ -136,6 +180,6 @@ def render(inputs: Inputs) -> None:
     st.caption(
         "The quote is checked against the no-arbitrage bounds first. European quotes are converted to their "
         "out-of-the-money equivalent through put-call parity and solved with Brent's method; American quotes are "
-        "solved with Brent's method on the tree. Option value increases with volatility, so a solution is unique "
-        "whenever vega is not zero."
+        f"solved with Brent's method on the {tree_name}. Option value increases with volatility, so a solution is "
+        "unique whenever vega is not zero."
     )

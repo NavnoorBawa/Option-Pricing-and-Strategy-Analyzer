@@ -78,3 +78,30 @@ def test_standard_error_is_kept_without_control_variate_when_every_path_is_in_th
     assert res.itm_fraction == 1.0 and 0 < res.std_error < 0.01
     lo, hi = res.ci95
     assert lo <= bs.price(100, 50, 0.25, 0.05, 0.2) <= hi
+
+
+@pytest.mark.parametrize("antithetic", [False, True])
+def test_scenario_paths_end_at_the_pricing_draws(antithetic):
+    # The sample-paths chart used to come from a separate simulation, so none of its end points was a scenario
+    # behind the price.
+    times, paths = mc.scenario_paths(100, 1, 0.05, 0.2, 0.01, 100_000, 42, antithetic, n_show=60, n_steps=50)
+    draws = mc.terminal_prices(100, 1, 0.05, 0.2, 0.01, 100_000, 42, antithetic)
+    assert paths.shape == (60, 51) and times[0] == 0 and times[-1] == 1
+    np.testing.assert_array_equal(paths[:, -1], draws[:60])
+    np.testing.assert_allclose(paths[:, 0], 100.0, rtol=1e-12)
+
+
+def test_scenario_paths_are_gbm_paths():
+    # A Brownian bridge to a log-normal end point has the GBM marginal at every date.
+    times, paths = mc.scenario_paths(100, 2, 0.05, 0.3, 0.0, 40_000, 7, False, n_show=40_000, n_steps=8)
+    log_mid = np.log(paths[:, 4] / 100)
+    t = times[4]
+    assert log_mid.mean() == pytest.approx((0.05 - 0.5 * 0.3**2) * t, abs=4 * 0.3 * np.sqrt(t / 40_000))
+    assert log_mid.std() == pytest.approx(0.3 * np.sqrt(t), rel=0.02)
+    increments = np.diff(np.log(paths), axis=1)
+    assert np.corrcoef(increments[:, 0], increments[:, -1])[0, 1] == pytest.approx(0.0, abs=0.03)
+
+
+def test_scenario_paths_without_volatility_follow_the_forward():
+    times, paths = mc.scenario_paths(100, 1, 0.05, 0.0, 0.02, 1_000, 1, True, n_show=3, n_steps=4)
+    np.testing.assert_allclose(paths, np.tile(100 * np.exp(0.03 * times), (3, 1)))

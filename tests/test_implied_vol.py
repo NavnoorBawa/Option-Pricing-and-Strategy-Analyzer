@@ -1,5 +1,6 @@
 import itertools
 
+import numpy as np
 import pytest
 
 from options_analyzer import black_scholes as bs
@@ -7,6 +8,7 @@ from options_analyzer.implied_vol import (
     ImpliedVolError,
     implied_volatility,
     implied_volatility_american,
+    lowest_tree_volatility,
     no_arbitrage_bounds,
 )
 
@@ -98,3 +100,30 @@ def test_american_volatility_up_to_the_cap_is_solved():
 
     price = binomial.price(100, 100, 0.1, 0.05, 17.0, 0, "call", 501, american=True, method="lr")
     assert implied_volatility_american(price, 100, 100, 0.1, 0.05, 0, "call") == pytest.approx(17.0, rel=1e-6)
+
+
+@pytest.mark.parametrize(("method", "steps"), [("crr", 101), ("crr", 1000), ("lr", 101), ("lr", 1001)])
+@pytest.mark.parametrize("kind", ["call", "put"])
+def test_american_iv_on_a_given_tree_gives_back_its_volatility(method, steps, kind):
+    # The Implied Volatility tab inverts on the sidebar's tree, so the headline American price maps back to the
+    # sidebar volatility (a CRR price inverted on the 501-step Leisen-Reimer tree used to give 20.009%).
+    from options_analyzer import binomial
+
+    price = binomial.price(100, 100, 1, 0.05, 0.2, 0.02, kind, steps, american=True, method=method)
+    iv = implied_volatility_american(price, 100, 100, 1, 0.05, 0.02, kind, steps=steps, method=method)
+    assert iv == pytest.approx(0.2, abs=1e-7)
+
+
+def test_crr_american_iv_searches_only_volatilities_the_tree_can_represent():
+    from options_analyzer import binomial
+
+    lowest = lowest_tree_volatility(1, 0.30, 0.0, 10, "crr")
+    assert lowest == pytest.approx(0.30 * np.sqrt(0.1), rel=1e-5)
+    assert lowest_tree_volatility(1, 0.30, 0.0, 10, "lr") == 1e-6
+    price = binomial.price(100, 100, 1, 0.30, 0.15, 0, "put", 10, american=True, method="crr")
+    assert implied_volatility_american(price, 100, 100, 1, 0.30, 0, "put", steps=10, method="crr") == pytest.approx(
+        0.15, abs=1e-7
+    )
+    # Below the value at the lowest volatility the tree can represent (1.5e-6 here): reported, not a crash.
+    with pytest.raises(ImpliedVolError, match="CRR tree can represent"):
+        implied_volatility_american(1e-7, 100, 100, 1, 0.30, 0, "put", steps=10, method="crr")

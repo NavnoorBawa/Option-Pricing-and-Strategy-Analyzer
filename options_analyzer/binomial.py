@@ -11,6 +11,14 @@ Two lattices are provided:
   An odd number of steps is used (an even request is rounded up by one, or
   down at the 20,000-step limit).
 
+Calls are priced as the symmetric put (McDonald & Schroder, 1998):
+``C(S, K, T; r, q) = P(K, S, T; q, r)``. On the lattice this is an exact change
+of numeraire (the call tree is the put tree turned upside down, node for node,
+so both give the same value), but a put's payoff is bounded by its strike. Very
+wide lattices (high volatility, long expiry, many steps) have to cap their top
+nodes to stay finite, and a call valued on capped nodes would lose most of its
+value; the put is unaffected.
+
 Backward induction is vectorised over the nodes of each time step: a
 2,000-step American tree prices in tens of milliseconds.
 """
@@ -23,20 +31,28 @@ import numpy as np
 
 from . import black_scholes as bs
 
-__all__ = ["METHODS", "TreeResult", "price", "price_with_greeks"]
+__all__ = ["METHODS", "TreeResult", "extrapolated_price", "price", "price_with_greeks"]
 
 METHODS = {"crr": "Cox-Ross-Rubinstein", "lr": "Leisen-Reimer"}
 
 _MAX_STEPS = 20_000
 #: Node spots are capped at e^700 (about 1e304) so that very wide lattices (high volatility, long expiry,
-#: many steps) stay finite. Nodes that far out carry negligible risk-neutral probability.
+#: many steps) stay finite. Only puts are valued on the lattice (calls by put-call symmetry), and a put is
+#: worth nothing at such nodes, so the cap does not change any value.
 _MAX_LOG_SPOT = 700.0
 _MAX_SPOT = float(np.exp(_MAX_LOG_SPOT))
+#: Bumps for the finite-difference vega (half a volatility point) and rho / dividend rho (25 basis points).
+_VOL_BUMP = 0.005
+_RATE_BUMP = 0.0025
 
 
 @dataclass(frozen=True)
 class TreeResult:
-    """Price and tree Greeks. ``theta`` is per year of calendar time."""
+    """Price and tree Greeks in model units, as in :func:`black_scholes.greeks`.
+
+    ``theta`` is per year of calendar time; ``vega``, ``rho`` and ``epsilon``
+    (dividend rho) are per 1.00 of volatility, rate and dividend yield.
+    """
 
     price: float
     delta: float
@@ -45,11 +61,17 @@ class TreeResult:
     steps: int
     method: str
     american: bool
-    #: ``(times, spot)`` of the early-exercise boundary for American options
-    #: (the highest exercised node for puts, the lowest for calls). Only time
-    #: steps where the boundary lies inside the lattice are recorded, so it is
-    #: empty when early exercise is never optimal.
+    #: ``(times, spot)`` of the early-exercise boundary for American options: the critical spot price below
+    #: which a put (above which a call) is exercised. At each time step it is interpolated between the last
+    #: exercised node and its neighbour, where the exercise gain changes sign; consecutive steps are averaged
+    #: because even and odd steps sit on interleaved spot grids, and the result is fitted to be monotone in
+    #: time, as the exact boundary is. Only steps where the boundary lies inside the lattice are used, so it
+    #: is empty when early exercise is never optimal.
     exercise_boundary: tuple[np.ndarray, np.ndarray] | None = None
+    #: Bump-and-reprice sensitivities: central differences on trees with the same steps and lattice type.
+    vega: float = float("nan")
+    rho: float = float("nan")
+    epsilon: float = float("nan")
 
 
 def _peizer_pratt(z: float, n: int) -> float:
@@ -127,35 +149,128 @@ def _spots(S: float, log_u: float, log_d: float, i: int) -> np.ndarray:
     return np.exp(np.minimum(np.log(S) + j * log_u + (i - j) * log_d, _MAX_LOG_SPOT))
 
 
-def _induct(S, K, T, r, sigma, q, phi, steps, american, method, keep_levels=False):
-    """Backward induction. Returns ``(value, (level1, level2), (boundary_t, boundary_s), lattice)``."""
+def _induct_put(S, K, T, r, sigma, q, steps, american, method, keep_levels=False):
+    """Backward induction for a put. Returns ``(value, levels, boundary, (log_u, log_d))``.
+
+    With ``keep_levels``, ``levels`` holds the node values at steps 0-2 and ``boundary`` the critical prices.
+    """
     dt, u, d, p = _lattice(S, K, T, r, sigma, q, steps, method)
     disc = np.exp(-r * dt)
     log_u, log_d = np.log(u), np.log(d)
     spot = _spots(S, log_u, log_d, steps)
-    values = np.maximum(phi * (spot - K), 0.0)
+    values = np.maximum(K - spot, 0.0)
     inv_d = 1.0 / d
     levels = {}
-    boundary_t: list[float] = []
-    boundary_s: list[float] = []
+    boundary_steps: list[int] = []
+    boundary_spots: list[float] = []
     for i in range(steps - 1, -1, -1):
         values = disc * (p * values[1:] + (1.0 - p) * values[:-1])
         if american:
             # Level-i spots from level i+1 (one multiply instead of an exp per node), capped like _spots.
             # The root is set exactly so that immediate exercise is worth exactly the intrinsic value.
             spot = np.minimum(spot[:-1] * inv_d, _MAX_SPOT) if i else np.array([float(S)])
-            exercise = phi * (spot - K)
+            exercise = K - spot
             if keep_levels:
-                exercised = exercise > values
-                # Record the boundary only where it is interior to the level: if the edge node is exercised
+                gain = exercise - values
+                exercised = gain > 0.0
+                # Record the boundary only where it is interior to the level: if the top node is exercised
                 # the boundary lies beyond the lattice (the spot started inside the exercise region).
-                if exercised.any() and not exercised[-1 if phi < 0 else 0]:
-                    boundary_t.append(i * dt)
-                    boundary_s.append(spot[exercised].max() if phi < 0 else spot[exercised].min())
+                if exercised.any() and not exercised[-1]:
+                    k = int(np.flatnonzero(exercised)[-1])
+                    # The exercise gain is positive at node k and not at node k+1: take the spot where its
+                    # linear interpolant crosses zero (exercising a put is only ever optimal below K).
+                    weight = gain[k] / (gain[k] - gain[k + 1])
+                    boundary_steps.append(i)
+                    boundary_spots.append(min(spot[k] + weight * (spot[k + 1] - spot[k]), K))
             values = np.maximum(values, exercise)
         if keep_levels and i <= 2:
             levels[i] = values.copy()
-    return float(values[0]), levels, (boundary_t, boundary_s), (log_u, log_d)
+    return float(values[0]), levels, _boundary_curve(boundary_steps, boundary_spots, dt), (log_u, log_d)
+
+
+def _boundary_curve(steps: list[int], spots: list[float], dt: float) -> tuple[np.ndarray, np.ndarray]:
+    """Smooth the per-step critical prices of a put (``steps`` arrive in descending order).
+
+    Even and odd steps sit on interleaved spot grids, so the per-step estimates alternate around the true
+    boundary; the mean of each pair of consecutive steps cancels that odd/even alternation. A put's exercise
+    region can only grow as expiry approaches (more time to expiry is never worth less), so the boundary is
+    non-decreasing in time: the small ripple left by lattices whose levels do not interleave exactly (such
+    as Leisen-Reimer away from the money) is removed by the least-squares non-decreasing fit.
+    """
+    i = np.asarray(steps[::-1], dtype=int)
+    b = np.asarray(spots[::-1], dtype=float)
+    if i.size < 2:
+        return np.empty(0), np.empty(0)
+    pair = np.diff(i) == 1
+    return ((i[:-1] + 0.5) * dt)[pair], _non_decreasing_fit((0.5 * (b[:-1] + b[1:]))[pair])
+
+
+def _non_decreasing_fit(y: np.ndarray) -> np.ndarray:
+    """Least-squares non-decreasing fit (pool-adjacent-violators algorithm)."""
+    means: list[float] = []
+    sizes: list[int] = []
+    for value in y:
+        means.append(float(value))
+        sizes.append(1)
+        while len(means) > 1 and means[-2] > means[-1]:
+            size = sizes[-2] + sizes[-1]
+            means[-2:] = [(means[-2] * sizes[-2] + means[-1] * sizes[-1]) / size]
+            sizes[-2:] = [size]
+    return np.repeat(means, sizes)
+
+
+def _induct(S, K, T, r, sigma, q, phi, steps, american, method, keep_levels=False):
+    """Backward induction. Returns ``(value, levels, (boundary_t, boundary_s), (log_u, log_d))``.
+
+    A call is the put on swapped inputs, ``C(S, K; r, q) = P(K, S; q, r)``. Node ``m`` (up-moves) of step
+    ``i`` of the call lattice is node ``i - m`` of that put's lattice, whose spot is ``K S / x``, and the call
+    is worth ``x / S`` times the put there, so the call's node values and boundary follow exactly.
+    """
+    if phi < 0:
+        return _induct_put(S, K, T, r, sigma, q, steps, american, method, keep_levels)
+    value, put_levels, (times, put_boundary), (log_u_put, log_d_put) = _induct_put(
+        K, S, T, q, sigma, r, steps, american, method, keep_levels
+    )
+    log_u, log_d = -log_d_put, -log_u_put
+    levels = {}
+    for i, put_values in put_levels.items():
+        ups = np.arange(i + 1)
+        levels[i] = np.exp(ups * log_u + (i - ups) * log_d) * put_values[::-1]
+    valid = put_boundary > 0.0
+    return value, levels, (times[valid], K * S / put_boundary[valid]), (log_u, log_d)
+
+
+def _difference(f, x: float, h: float, base: float, lower: float = -np.inf) -> float:
+    """Central difference of ``f`` at ``x``; one-sided where a bumped tree is invalid (e.g. CRR with p > 1)."""
+
+    def value(y: float) -> float | None:
+        if y <= lower:
+            return None
+        try:
+            return f(y)
+        except ValueError:
+            return None
+
+    up, down = value(x + h), value(x - h)
+    if up is not None and down is not None:
+        return (up - down) / (2.0 * h)
+    if up is not None:
+        return (up - base) / h
+    if down is not None:
+        return (base - down) / h
+    return float("nan")
+
+
+def _bumped_greeks(S, K, T, r, sigma, q, option_type, steps, american, method, base) -> tuple[float, float, float]:
+    """Vega, rho and dividend rho by repricing on trees with the same steps and lattice type."""
+
+    def tree(r_: float = r, sigma_: float = sigma, q_: float = q) -> float:
+        return price(S, K, T, r_, sigma_, q_, option_type, steps, american, method)
+
+    vega = _difference(lambda v: tree(sigma_=v), sigma, min(_VOL_BUMP, 0.5 * sigma), base, lower=0.0)
+    rho = _difference(lambda x: tree(r_=x), r, _RATE_BUMP, base)
+    epsilon = _difference(lambda x: tree(q_=x), q, _RATE_BUMP, base)
+    return vega, rho, epsilon
 
 
 def price_with_greeks(
@@ -176,7 +291,9 @@ def price_with_greeks(
     uses the middle node at step 2 for CRR (where ``u d = 1``). The
     Leisen-Reimer middle node is not at the current spot, so its theta is a
     central difference in time to expiry on the same tree, whose value is
-    smooth in ``T``.
+    smooth in ``T``. Vega, rho and dividend rho are central differences on
+    trees with the same number of steps and lattice type (half a volatility
+    point and 25 basis points either side), so they include early exercise.
     """
     phi, method, steps = _validate(S, K, sigma, option_type, steps, method)
 
@@ -184,22 +301,26 @@ def price_with_greeks(
         g = bs.greeks(S, K, T, r, sigma, q, option_type)
         value = bs.price(S, K, T, r, sigma, q, option_type)
         delta, gamma, theta = g["delta"], g["gamma"], g["theta"]
+        vega, rho, epsilon = g["vega"], g["rho"], g["epsilon"]
         if american:
             if T > 0:
                 early, when = _deterministic_american(S, K, T, r, q, phi)
             else:
                 early, when = max(phi * (S - K), 0.0), 0.0
             if early > value:
-                # Exercise at a fixed date before expiry: the value no longer depends on the time to
-                # expiry (theta 0) and is linear in the spot.
+                # Exercise at a fixed date w before expiry: the value phi (S e^{-q w} - K e^{-r w}) no longer
+                # depends on the time to expiry (theta 0) and is linear in the spot.
                 value, delta, gamma, theta = early, float(phi * np.exp(-q * when)), 0.0, 0.0
-        return TreeResult(value, delta, gamma, theta, steps, method, american, None)
+                vega = 0.0
+                rho = float(phi * K * when * np.exp(-r * when))
+                epsilon = float(-phi * S * when * np.exp(-q * when))
+        return TreeResult(value, delta, gamma, theta, steps, method, american, None, vega, rho, epsilon)
 
     # Greeks need the node values at steps 1 and 2 before the terminal layer.
     if steps < 3:
         steps = 3
 
-    value, levels, (boundary_t, boundary_s), (log_u, log_d) = _induct(
+    value, levels, boundary, (log_u, log_d) = _induct(
         S, K, T, r, sigma, q, phi, steps, american, method, keep_levels=True
     )
     level1, level2 = levels[1], levels[2]
@@ -218,11 +339,10 @@ def price_with_greeks(
         longer = price(S, K, T + h, r, sigma, q, option_type, steps, american, method)
         theta = (shorter - longer) / (2.0 * h)
 
-    boundary = None
-    if american:
-        order = np.argsort(boundary_t)
-        boundary = (np.asarray(boundary_t)[order], np.asarray(boundary_s)[order])
-    return TreeResult(value, delta, gamma, theta, steps, method, american, boundary)
+    vega, rho, epsilon = _bumped_greeks(S, K, T, r, sigma, q, option_type, steps, american, method, value)
+    return TreeResult(
+        value, delta, gamma, theta, steps, method, american, boundary if american else None, vega, rho, epsilon
+    )
 
 
 def price(
@@ -246,3 +366,31 @@ def price(
             value = max(value, extra)
         return float(value)
     return _induct(S, K, T, r, sigma, q, phi, steps, american, method)[0]
+
+
+def extrapolated_price(
+    S: float,
+    K: float,
+    T: float,
+    r: float,
+    sigma: float,
+    q: float = 0.0,
+    option_type: str = "call",
+    american: bool = True,
+    steps: int = 2001,
+) -> float:
+    """Converged value: Richardson extrapolation of Leisen-Reimer trees with ``steps`` and twice as many.
+
+    With early exercise the Leisen-Reimer error is close to ``c / n``, so ``(n2 V2 - n1 V1) / (n2 - n1)``
+    removes its leading term; at the defaults the result agrees with 20,000-step references to about 1e-5.
+    European values use the closed form.
+    """
+    if not american:
+        return float(bs.price(S, K, T, r, sigma, q, option_type))
+    _, _, n1 = _validate(S, K, sigma, option_type, steps, "lr")
+    _, _, n2 = _validate(S, K, sigma, option_type, min(2 * n1, _MAX_STEPS), "lr")
+    v1 = price(S, K, T, r, sigma, q, option_type, n1, True, "lr")
+    if n2 <= n1:
+        return v1
+    v2 = price(S, K, T, r, sigma, q, option_type, n2, True, "lr")
+    return float((n2 * v2 - n1 * v1) / (n2 - n1))

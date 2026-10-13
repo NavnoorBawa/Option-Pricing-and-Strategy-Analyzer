@@ -138,34 +138,50 @@ def sidebar() -> Inputs:
         bind="query-params",
         label_visibility="collapsed",
     )
+    default = ModelConfig()
     config = ModelConfig(kind=kind)
     if kind == "binomial":
         method = sb.radio(
             "Lattice",
             list(METHODS),
+            index=list(METHODS).index(default.tree_method),
             format_func=METHODS.get,
             key="tree",
+            bind="query-params",
             horizontal=True,
             help="Leisen-Reimer converges smoothly and much faster; CRR is the classic tree.",
         )
-        steps = sb.slider("Steps", 10, 2000, 501, step=1, key="steps")
+        steps = sb.slider("Steps", 10, 2000, default.steps, step=1, key="steps", bind="query-params")
         style = sb.segmented_control(
-            "Exercise", ["European", "American"], default="European", key="style", required=True
+            "Exercise", ["European", "American"], default="European", key="style", required=True, bind="query-params"
         )
         config = ModelConfig(kind=kind, tree_method=method, steps=int(steps), american=style == "American")
     elif kind == "monte_carlo":
-        n_paths = sb.select_slider("Paths", PATH_CHOICES, value=100_000, format_func=lambda n: f"{n:,}", key="paths")
+        n_paths = sb.select_slider(
+            "Paths",
+            PATH_CHOICES,
+            value=default.n_paths,
+            format_func=lambda n: f"{n:,}",
+            key="paths",
+            bind="query-params",
+        )
         seed = sb.number_input(
             "Random seed",
             min_value=0,
             max_value=2**32 - 1,
-            value=42,
+            value=default.seed,
             step=1,
             key="seed",
+            bind="query-params",
             help="Fixed seed = reproducible prices that do not jitter between reruns.",
         )
-        antithetic = sb.toggle("Antithetic variates", value=True, key="antithetic")
-        control = sb.toggle("Control variate (discounted spot)", value=True, key="control_variate")
+        antithetic = sb.toggle("Antithetic variates", value=default.antithetic, key="antithetic", bind="query-params")
+        control = sb.toggle(
+            "Control variate (discounted spot)",
+            value=default.control_variate,
+            key="control_variate",
+            bind="query-params",
+        )
         config = ModelConfig(
             kind=kind, n_paths=int(n_paths), seed=int(seed), antithetic=antithetic, control_variate=control
         )

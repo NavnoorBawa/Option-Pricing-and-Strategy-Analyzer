@@ -11,8 +11,9 @@ The solver
 3. brackets the root and solves with Brent's method, which is guaranteed to
    converge once a bracket exists (unlike an undamped Newton iteration).
 
-:func:`implied_volatility_american` inverts the Leisen-Reimer binomial tree
-for American quotes (listed single-stock options), with American bounds.
+:func:`implied_volatility_american` inverts a binomial tree (Leisen-Reimer by
+default) for American quotes (listed single-stock options), with American
+bounds.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ __all__ = [
     "american_bounds",
     "implied_volatility",
     "implied_volatility_american",
+    "lowest_tree_volatility",
     "no_arbitrage_bounds",
 ]
 
@@ -125,6 +127,17 @@ def american_bounds(S: float, K: float, T: float, r: float, q: float = 0.0, opti
     return max(phi * (S - K), euro_lower, 0.0), (S if phi > 0 else K)
 
 
+def lowest_tree_volatility(T: float, r: float, q: float = 0.0, steps: int = 501, method: str = "lr") -> float:
+    """Lowest volatility the American solver uses on the given tree.
+
+    A Cox-Ross-Rubinstein tree is arbitrage-free only when ``sigma sqrt(dt) > |r - q| dt``, so it cannot
+    represent volatilities below ``|r - q| sqrt(dt)``; Leisen-Reimer works down to :data:`MIN_VOL`.
+    """
+    if str(method).lower() != "crr" or T <= 0:
+        return MIN_VOL
+    return max(MIN_VOL, abs(r - q) * math.sqrt(T / max(int(steps), 1)) * (1.0 + 1e-6))
+
+
 def implied_volatility_american(
     price: float,
     S: float,
@@ -135,14 +148,16 @@ def implied_volatility_american(
     option_type: str = "call",
     *,
     steps: int = 501,
+    method: str = "lr",
     tol: float = 1e-8,
 ) -> float:
-    """Volatility that reproduces an American ``price`` on a Leisen-Reimer tree.
+    """Volatility that reproduces an American ``price`` on a binomial tree (Leisen-Reimer by default).
 
     The American value is increasing in volatility, so Brent's method on a
     bracket is again guaranteed to converge. Raises :class:`ImpliedVolError`
     for quotes outside the American bounds or below the zero-volatility value
-    (which already includes the value of optimal early exercise).
+    (which already includes the value of optimal early exercise). On a CRR
+    tree the search starts at :func:`lowest_tree_volatility`.
     """
     for name, value in (("price", price), ("spot", S), ("strike", K), ("time to expiry", T)):
         if not np.isfinite(value):
@@ -162,17 +177,23 @@ def implied_volatility_american(
         raise ImpliedVolError(f"price {price:.6g} is at or above the American upper bound {upper:.6g}")
 
     def objective(vol: float) -> float:
-        return binomial.price(S, K, T, r, vol, q, option_type, steps, american=True, method="lr") - price
+        return binomial.price(S, K, T, r, vol, q, option_type, steps, american=True, method=method) - price
 
-    floor = objective(MIN_VOL)
+    lowest = lowest_tree_volatility(T, r, q, steps, method)
+    floor = objective(lowest)
     if floor >= 0.0:
         if floor <= 1e-10 * scale:
             # The quote equals the zero-volatility value (e.g. immediate exercise is optimal): every
             # volatility up to some level reproduces it, so report zero like the European solver does.
             return 0.0
+        if lowest > MIN_VOL:
+            raise ImpliedVolError(
+                f"price {price:.6g} is below {price + floor:.6g}, the value at {lowest:.4%} volatility, the lowest "
+                f"a {steps}-step CRR tree can represent; use more steps or the Leisen-Reimer tree"
+            )
         raise ImpliedVolError(
             f"price {price:.6g} is below the zero-volatility American value {price + floor:.6g}; "
             "no volatility can produce it"
         )
     hi = _upper_bracket(objective)
-    return float(brentq(objective, MIN_VOL, hi, xtol=tol, maxiter=200))
+    return float(brentq(objective, lowest, hi, xtol=tol, maxiter=200))

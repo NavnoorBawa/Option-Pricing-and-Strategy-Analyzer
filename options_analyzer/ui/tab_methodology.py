@@ -31,12 +31,20 @@ verified against high-precision finite differences in the test-suite.
 ### Binomial trees
 * **Cox–Ross–Rubinstein:** $u = e^{\sigma\sqrt{\Delta t}}$, $d = 1/u$,
   $p = (e^{(r-q)\Delta t} - d)/(u - d)$. The tree refuses inputs with $p \notin (0,1)$ (arbitrage).
-* **Leisen–Reimer:** Peizer–Pratt inversion centres the tree on the strike; convergence is smooth, roughly
-  second order for European exercise and first order with early exercise (an odd number of steps is used).
+* **Leisen–Reimer** (the default): Peizer–Pratt inversion centres the tree on the strike; convergence is
+  smooth, roughly second order for European exercise and first order with early exercise (an odd number of
+  steps is used).
+* Calls are priced as the symmetric put, $C(S, K, T; r, q) = P(K, S, T; q, r)$ (McDonald–Schroder). On the
+  lattice this is an exact change of numeraire, and a put's payoff is bounded by its strike, so the value
+  stays accurate even when extreme volatility × expiry forces the tree to cap its top nodes.
 * American exercise compares continuation and exercise value at every node; delta and gamma are read off
-  the tree, theta from the step-2 middle node (CRR) or a central difference in time (Leisen–Reimer), and the
-  early-exercise boundary is traced from the exercised nodes. The early-exercise premium is measured on the
-  same tree with European exercise, so the discretisation error cancels.
+  the tree, theta from the step-2 middle node (CRR) or a central difference in time (Leisen–Reimer), and
+  vega, rho and dividend rho from repricing on a tree with the same steps (±0.5 vol point, ±25 bp). The
+  early-exercise boundary is the critical price where the exercise gain changes sign, interpolated between
+  adjacent nodes, averaged over consecutive steps (whose nodes interleave) and fitted to be monotone in
+  time, as the exact boundary is. The early-exercise premium is measured on the same tree with European
+  exercise, so the discretisation error cancels; the American reference in the convergence chart
+  extrapolates Leisen–Reimer trees with 2,001 and 4,003 steps.
 
 ### Monte Carlo
 European payoffs depend only on $S_T$, which is sampled exactly:
@@ -45,16 +53,19 @@ control variate (the discounted terminal price, with known mean $S e^{-qT}$) red
 standard error uses the unbiased sample deviation of the independent samples. It is left blank when the
 sample cannot estimate it: every simulated price finished out of the money, or every one in the money with
 the control variate on (the residuals are then constant). Calls and puts share
-draws and a fixed seed makes results reproducible.
+draws and a fixed seed makes results reproducible. The sample-path chart draws the first 60 of these
+scenarios, each filled in from today to its sampled $S_T$ with a Brownian bridge (exact for GBM given the
+end point).
 
 ### Implied volatility
 Quotes outside the no-arbitrage bounds
 $\max(S e^{-qT} - K e^{-rT}, 0) \le C < S e^{-qT}$ (and the put analogue) are rejected, because no
 volatility can produce them. Otherwise the quote is converted to its out-of-the-money equivalent through
 put–call parity and solved with Brent's method, which always converges on a bracketed root. American quotes
-are inverted on a 501-step Leisen–Reimer tree against American bounds; a quote equal to the option's
-zero-volatility value (for example the value of exercising now) does not identify a volatility and is
-reported as such.
+are inverted against American bounds on the sidebar's binomial tree when that model is selected (so the
+headline American price gives back the sidebar volatility), otherwise on a 501-step Leisen–Reimer tree; a
+quote equal to the option's zero-volatility value (for example the value of exercising now) does not
+identify a volatility and is reported as such.
 
 ### Strategies
 Each position is a list of legs. Options are valued with Black–Scholes–Merton at each leg's implied

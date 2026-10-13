@@ -4,7 +4,9 @@ A European payoff depends only on the terminal price, and GBM has an exact
 terminal distribution, so the estimator samples ``S_T`` directly instead of
 stepping through time: this is unbiased, needs ``O(n_paths)`` memory and is
 orders of magnitude faster than simulating full paths. Full paths are only
-generated (in small numbers) for plotting, see :func:`simulate_paths`.
+generated (in small numbers) for plotting: :func:`scenario_paths` fills in the
+path to expiry of the scenarios behind the price, :func:`simulate_paths`
+simulates independent paths.
 
 Variance reduction
 ------------------
@@ -27,7 +29,7 @@ import numpy as np
 
 from . import black_scholes as bs
 
-__all__ = ["MonteCarloResult", "price_european", "simulate_paths", "terminal_prices"]
+__all__ = ["MonteCarloResult", "price_european", "scenario_paths", "simulate_paths", "terminal_prices"]
 
 _Z_95 = 1.959963984540054
 
@@ -149,6 +151,43 @@ def price_european(
         std_error = float("nan") if degenerate else float(y.std(ddof=1) / np.sqrt(y.size))
         results[kind] = MonteCarloResult(estimate, std_error, n_paths, antithetic, control_variate, n_itm / n_paths)
     return results
+
+
+def scenario_paths(
+    S: float,
+    T: float,
+    r: float,
+    sigma: float,
+    q: float = 0.0,
+    n_paths: int = 100_000,
+    seed: int | None = 42,
+    antithetic: bool = True,
+    n_show: int = 60,
+    n_steps: int = 252,
+) -> tuple[np.ndarray, np.ndarray]:
+    """The first ``n_show`` scenarios behind :func:`price_european`, drawn as paths from today to expiry.
+
+    The estimator samples only the terminal price, so each path is a Brownian bridge from ``S`` today to
+    that scenario's ``S_T``: given its end point, a GBM path is a Brownian bridge in log space, so these
+    are exact sample paths of the scenarios used for the price. Returns ``(times, paths)`` with ``paths``
+    of shape ``(n_show, n_steps + 1)``; ``paths[:, -1]`` equals ``terminal_prices(...)[:n_show]``.
+    """
+    n_steps = max(int(n_steps), 1)
+    tau = max(T, 0.0)
+    times = np.linspace(0.0, tau, n_steps + 1)
+    s_t = terminal_prices(S, T, r, sigma, q, max(int(n_paths), int(n_show)), seed, antithetic)[: int(n_show)]
+    if tau == 0.0 or sigma == 0.0:
+        return times, np.tile(S * np.exp((r - q) * times), (s_t.size, 1))
+    drift = r - q - 0.5 * sigma**2
+    w_end = (np.log(s_t / S) - drift * tau) / sigma
+    # Independent stream for the interior points, so the scenarios themselves are those of the pricing draws.
+    rng = np.random.default_rng(None if seed is None else [int(seed), 1])
+    steps = np.sqrt(tau / n_steps) * rng.standard_normal((s_t.size, n_steps))
+    free = np.concatenate([np.zeros((s_t.size, 1)), np.cumsum(steps, axis=1)], axis=1)
+    bridge = free + (times / tau) * (w_end - free[:, -1])[:, None]
+    paths = S * np.exp(drift * times + sigma * bridge)
+    paths[:, -1] = s_t
+    return times, paths
 
 
 def simulate_paths(
