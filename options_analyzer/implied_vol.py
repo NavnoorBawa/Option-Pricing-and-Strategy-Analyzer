@@ -121,10 +121,15 @@ def _upper_bracket(objective) -> float:
 
 
 def american_bounds(S: float, K: float, T: float, r: float, q: float = 0.0, option_type: str = "call"):
-    """Bounds ``(lower, upper)`` for an American option: at least immediate exercise and the European floor."""
+    """Bounds ``(lower, upper)`` for an American option.
+
+    Lower: immediate exercise and the European floor. Upper: :func:`binomial.american_upper_bound`, the most
+    exercise can be worth, ``K max(1, e^(-rT))`` for a put and ``S max(1, e^(-qT))`` for a call (more than
+    the strike or the spot when the rate or the dividend yield is negative).
+    """
     phi = bs.option_sign(option_type)
     euro_lower, _ = no_arbitrage_bounds(S, K, T, r, q, option_type)
-    return max(phi * (S - K), euro_lower, 0.0), (S if phi > 0 else K)
+    return max(phi * (S - K), euro_lower, 0.0), binomial.american_upper_bound(S, K, T, r, q, option_type)
 
 
 def lowest_tree_volatility(T: float, r: float, q: float = 0.0, steps: int = 501, method: str = "lr") -> float:

@@ -6,6 +6,7 @@ import pytest
 from options_analyzer import black_scholes as bs
 from options_analyzer.implied_vol import (
     ImpliedVolError,
+    american_bounds,
     implied_volatility,
     implied_volatility_american,
     lowest_tree_volatility,
@@ -81,6 +82,42 @@ def test_american_bounds_reject_impossible_quotes():
         implied_volatility_american(5.0, 100, 90, 1, 0.05, 0, "call")
     with pytest.raises(ImpliedVolError, match="upper bound"):
         implied_volatility_american(150.0, 100, 90, 1, 0.05, 0, "call")
+
+
+@pytest.mark.parametrize(
+    ("S", "K", "r", "q", "kind"),
+    [(50, 100, -0.05, 0.0, "put"), (100, 50, 0.0, -0.05, "call"), (30, 100, -0.03, 0.02, "put")],
+)
+def test_american_quote_above_the_strike_with_a_negative_rate_is_solved(S, K, r, q, kind):
+    # With a negative rate a put is worth up to K e^(-rT), more than its strike (and a call with a negative
+    # dividend yield up to S e^(-qT)). The bounds used to stop at K (or S): at S = 50, K = 100, ten years and
+    # r = -5% the lower bound 114.8721 was above the upper bound 100, and the tree's own value 115.5045 was
+    # rejected as "at or above the American upper bound 100".
+    from options_analyzer import binomial
+
+    price = binomial.price(S, K, 10, r, 0.2, q, kind, 501, american=True, method="lr")
+    lower, upper = american_bounds(S, K, 10, r, q, kind)
+    assert lower <= price < upper
+    assert implied_volatility_american(price, S, K, 10, r, q, kind) == pytest.approx(0.2, abs=1e-7)
+
+
+@pytest.mark.parametrize(("r", "q"), [(-0.05, 0.0), (-0.02, 0.03), (0.0, -0.05), (0.05, -0.02), (0.05, 0.0)])
+@pytest.mark.parametrize("S", [1, 50, 100, 200])
+@pytest.mark.parametrize("kind", ["call", "put"])
+def test_american_bounds_are_ordered_and_contain_the_tree_value(S, r, q, kind):
+    from options_analyzer import binomial
+
+    lower, upper = american_bounds(S, 100, 10, r, q, kind)
+    assert lower <= upper
+    # The upper bound is the strike (or spot) received when exercise is worth most: at once, or at expiry
+    # when the rate (or dividend yield) is negative.
+    if kind == "put":
+        assert upper == pytest.approx(100 * max(1.0, np.exp(-r * 10)), rel=1e-15)
+    else:
+        assert upper == pytest.approx(S * max(1.0, np.exp(-q * 10)), rel=1e-15)
+    for sigma in (0.2, 1.0, 3.0):
+        value = binomial.price(S, 100, 10, r, sigma, q, kind, 501, american=True, method="lr")
+        assert lower - 1e-9 * upper <= value <= upper * (1 + 1e-12)
 
 
 @pytest.mark.parametrize("sigma", [16.5, 18.0, 19.9])

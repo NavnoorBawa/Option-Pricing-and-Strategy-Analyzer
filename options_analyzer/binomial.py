@@ -31,7 +31,7 @@ import numpy as np
 
 from . import black_scholes as bs
 
-__all__ = ["METHODS", "TreeResult", "extrapolated_price", "price", "price_with_greeks"]
+__all__ = ["METHODS", "TreeResult", "american_upper_bound", "extrapolated_price", "price", "price_with_greeks"]
 
 METHODS = {"crr": "Cox-Ross-Rubinstein", "lr": "Leisen-Reimer"}
 
@@ -422,19 +422,29 @@ def extrapolated_price(
     return float(max(min(value, upper), lower))
 
 
+def american_upper_bound(S: float, K: float, T: float, r: float, q: float = 0.0, option_type: str = "call") -> float:
+    """Model-free upper bound of an American option: the most exercise can be worth.
+
+    A put pays at most its strike, received at once or, when the rate is negative, at expiry:
+    ``K max(1, e^(-rT))``. A call is bounded as the symmetric put, ``C(S, K; r, q) = P(K, S; q, r)``:
+    ``S max(1, e^(-qT))``. The value approaches the bound as volatility grows without limit.
+    """
+    if bs.option_sign(option_type) > 0:
+        S, K, r, q = K, S, q, r
+    return float(K * max(1.0, np.exp(-r * T)))
+
+
 def _american_bounds(S, K, T, r, sigma, q, phi, european) -> tuple[float, float]:
     """No-arbitrage bounds ``(lower, upper)`` of an American option.
 
-    Lower: the European value and the intrinsic value. Upper: the most exercise can be worth, the strike of a
-    put received at once, or at expiry when the rate is negative (``K max(1, e^(-rT))``), and the perpetual
-    American value, which no finite expiry can exceed (finite for a put when ``r > 0``). A call is bounded as
-    the symmetric put, ``C(S, K; r, q) = P(K, S; q, r)``: by ``S max(1, e^(-qT))``, and by the perpetual call
-    when ``q > 0``. The lower bound wins if rounding ever puts the two in the wrong order.
+    Lower: the European value and the intrinsic value. Upper: :func:`american_upper_bound` and the perpetual
+    American value, which no finite expiry can exceed (finite for a put when ``r > 0``, and for a call, the
+    symmetric put, when ``q > 0``). The lower bound wins if rounding ever puts the two in the wrong order.
     """
     lower = max(european, phi * (S - K))
+    upper = american_upper_bound(S, K, T, r, q, "call" if phi > 0 else "put")
     if phi > 0:
         S, K, r, q = K, S, q, r
-    upper = K * max(1.0, float(np.exp(-r * T)))
     if r > 0 and sigma > 0:
         upper = min(upper, _perpetual_put(S, K, r, q, sigma))
     return lower, max(upper, lower)

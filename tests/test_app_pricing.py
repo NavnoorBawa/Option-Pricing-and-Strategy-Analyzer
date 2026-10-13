@@ -356,6 +356,22 @@ def test_iv_tab_inverts_american_quotes_on_the_sidebar_tree(app):
     assert any("501-step Cox-Ross-Rubinstein tree" in c.value for c in app.caption)
 
 
+def test_iv_tab_accepts_an_american_put_worth_more_than_its_strike_under_a_negative_rate():
+    # With a negative rate the put is worth up to K e^(-rT): the tab used to cap it at the strike, showing the
+    # bounds "$114.8721 <= price < $100.0000" and rejecting its own model value $115.5045 as a quote.
+    at = AppTest.from_file(APP, default_timeout=120)
+    at.query_params.update(
+        {"spot": "50", "strike": "100", "days": "3650", "rate": "-5", "model": "Binomial tree", "style": "American"}
+    )
+    at.run()
+    next(s for s in at.segmented_control if s.key == "iv_type").set_value("put").run()
+    _ok(at)
+    assert _quote(at).value == pytest.approx(115.5045, abs=1e-4)
+    bounds = next(c.value for c in at.caption if c.value.startswith("No-arbitrage bounds for this American put"))
+    assert bounds.replace("\\", "").endswith("$114.8721 ≤ price < $164.8721")
+    assert _metrics(at)["Implied volatility"] == "20.000%"
+
+
 def test_iv_time_value_is_quote_minus_intrinsic_value(app):
     assert _metrics(app)["Time value"] == "$10.4506"  # at the money: all of the premium
     app.sidebar.number_input(key="strike").set_value(120.0).run()
