@@ -173,6 +173,33 @@ def test_price_cards_wrap_in_pairs_of_equal_width(app):
 
 
 @pytest.mark.parametrize(
+    ("values", "phone"),
+    # Default inputs, and an index-level underlying (the forward is the widest value), on a 340 and a 360 px phone.
+    [
+        (("$10.4506", "$5.5735", "$105.1271", "55.96%"), 340),
+        (("$10,450.5836", "$5,573.5260", "$105,127.1096", "55.96%"), 360),
+    ],
+)
+def test_price_cards_stay_two_by_two_on_a_phone(app, values, phone):
+    # Every card was based on its full one-line width (186 px), so on phones narrower than about 420 px both pairs
+    # stacked: four full-width cards that pushed the tabs below the first screen. Where the row is narrower than one
+    # full-size pair, the labels now wrap and the values shrink with the row (down to 20 px).
+    style = app.get("html")[0].proto.body
+    assert ".st-key-price_cards { container: price-cards / inline-size; }" in style
+    assert "@container price-cards (width < 388px) {" in style
+    assert "white-space: normal;" in style
+    assert "font-size: clamp(20px, calc((50cqw - 40px) / 4.25), 36px);" in style  # 4.25 em: "$105.1271"
+    labels = ["Call value", "Put value", "Forward price", "Call ITM probability"]
+    compact = tab_pricing._cards_style(list(zip(labels, values, strict=True)))
+    pair = int(compact.split("@container")[1].split("flex-basis: ")[1].split("px")[0])
+    row = phone - 2 * 16  # the page's side margins on a phone
+    assert pair <= row  # two cards side by side
+    em = max(tab_pricing._value_em(v) for v in values)
+    font = min(max(20.0, ((row - 16) / 2 - 32) / em), 36.0)  # the clamp() at this row width
+    assert font * em <= (row - 16) / 2 - 32  # the widest value fits its card
+
+
+@pytest.mark.parametrize(
     ("label", "value", "measured"),
     # max-content widths of the cards in Chromium, in px
     [
@@ -240,6 +267,20 @@ def test_converged_reference_stays_below_the_strike_for_extreme_volatility_and_e
     reference = float(next(t for t in texts if t.startswith("Converged ")).split()[1].replace(",", ""))
     assert put < reference < 100.0
     assert reference == pytest.approx(put, abs=0.1)
+
+
+def test_converged_reference_of_a_put_with_a_negative_rate_is_not_capped_at_the_strike():
+    # With a negative rate the put is worth up to K e^(-rT), more than its strike: the "Converged" line read
+    # 100.0000, 15.5 below both tree curves and the put card ($115.5045).
+    at = AppTest.from_file(APP, default_timeout=120)
+    at.query_params.update(
+        {"spot": "50", "strike": "100", "days": "3650", "rate": "-5", "model": "Binomial tree", "style": "American"}
+    )
+    at.run()
+    _ok(at)
+    assert _metrics(at)["Put value"] == "$115.5045"
+    texts = [a["text"] for a in _chart(at, "tree_convergence_put")["layout"]["annotations"]]
+    assert "Converged 115.5045" in texts
 
 
 def test_both_exercise_boundaries_are_drawn_in_their_option_colours(app):

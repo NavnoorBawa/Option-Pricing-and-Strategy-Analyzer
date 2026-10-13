@@ -402,10 +402,10 @@ def extrapolated_price(
 
     With early exercise the Leisen-Reimer error is usually close to ``c / n``, so ``(n2 V2 - n1 V1) / (n2 - n1)``
     removes its leading term: at the defaults the result agrees with the 20,000-step references in the tests to
-    about 1e-5. Where the tree's error is irregular (e.g. a put at very low volatility with a high rate) the
-    extrapolation is only about as accurate as the finer tree. The result is kept within the no-arbitrage bounds
-    of an American option: at least the European value and the intrinsic value, at most the spot (call) or the
-    strike (put). European values use the closed form.
+    about 1e-5. Where the tree's error is irregular (e.g. a put at very low volatility with a high rate, or
+    several hundred percent volatility over years) the extrapolation is only about as accurate as the finer
+    tree. The result is kept within the no-arbitrage bounds of an American option (see :func:`_american_bounds`).
+    European values use the closed form.
     """
     european = float(bs.price(S, K, T, r, sigma, q, option_type))
     if not american:
@@ -418,6 +418,39 @@ def extrapolated_price(
     else:
         v2 = price(S, K, T, r, sigma, q, option_type, n2, True, "lr")
         value = (n2 * v2 - n1 * v1) / (n2 - n1)
+    lower, upper = _american_bounds(S, K, T, r, sigma, q, phi, european)
+    return float(max(min(value, upper), lower))
+
+
+def _american_bounds(S, K, T, r, sigma, q, phi, european) -> tuple[float, float]:
+    """No-arbitrage bounds ``(lower, upper)`` of an American option.
+
+    Lower: the European value and the intrinsic value. Upper: the most exercise can be worth, the strike of a
+    put received at once, or at expiry when the rate is negative (``K max(1, e^(-rT))``), and the perpetual
+    American value, which no finite expiry can exceed (finite for a put when ``r > 0``). A call is bounded as
+    the symmetric put, ``C(S, K; r, q) = P(K, S; q, r)``: by ``S max(1, e^(-qT))``, and by the perpetual call
+    when ``q > 0``. The lower bound wins if rounding ever puts the two in the wrong order.
+    """
     lower = max(european, phi * (S - K))
-    upper = S if phi > 0 else K
-    return float(min(max(value, lower), upper))
+    if phi > 0:
+        S, K, r, q = K, S, q, r
+    upper = K * max(1.0, float(np.exp(-r * T)))
+    if r > 0 and sigma > 0:
+        upper = min(upper, _perpetual_put(S, K, r, q, sigma))
+    return lower, max(upper, lower)
+
+
+def _perpetual_put(S: float, K: float, r: float, q: float, sigma: float) -> float:
+    """Perpetual American put (Merton, 1973) for ``r > 0``: exercised at or below ``b = K beta / (beta - 1)``,
+    worth ``(K - b) (S / b)^beta`` above it, where ``beta < 0`` solves
+    ``sigma^2 beta (beta - 1) / 2 + (r - q) beta - r = 0``."""
+    a = (r - q) / sigma**2 - 0.5
+    c = 2.0 * r / sigma**2
+    root = np.sqrt(a * a + c)
+    beta = -a - root if a >= 0 else -c / (root - a)  # the same root, without cancellation when a < 0
+    if not beta < 0:
+        return float("inf")
+    log_s_over_b = np.log(S / K) + np.log1p(-1.0 / beta)
+    if log_s_over_b <= 0:
+        return float(K - S)
+    return float(K / (1.0 - beta) * np.exp(beta * log_s_over_b))

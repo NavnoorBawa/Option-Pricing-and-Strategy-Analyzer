@@ -136,13 +136,24 @@ _VALUE_PX, _LABEL_PX, _LABEL_EM = 36.0, 14.0, 0.47
 _CHAR_EM = {",": 0.25, ".": 0.25, " ": 0.2, "-": 0.31, "%": 0.83}
 #: Card padding and border, the label's help icon, and the gap between cards (gap="small").
 _CARD_CHROME_PX, _HELP_ICON_PX, _CARD_GAP_PX = 32.0, 22.0, 16.0
+#: Smallest value size on a narrow screen, where the values shrink so that the cards stay two by two.
+_MIN_VALUE_PX = 20.0
+
+_PAIRS = ".st-key-price_cards > :has(> .st-key-price_cards_prices, > .st-key-price_cards_model)"
+_CARDS = ".st-key-price_cards_prices > *, .st-key-price_cards_model > *"
 
 
-def _card_width(label: str, value: str) -> float:
-    """Width in px a headline card needs to show its label and value on one line each."""
-    value_px = _VALUE_PX * sum(_CHAR_EM.get(c, 0.5) for c in value)
-    label_px = _LABEL_PX * _LABEL_EM * len(label) + _HELP_ICON_PX
-    return max(value_px, label_px) + _CARD_CHROME_PX
+def _value_em(value: str) -> float:
+    """Width of a card value in ems of its font size."""
+    return sum(_CHAR_EM.get(c, 0.5) for c in value)
+
+
+def _card_width(label: str, value: str, value_px: float = _VALUE_PX, wrap_label: bool = False) -> float:
+    """Width in px a headline card needs to show its value on one line and its label on one line (or, with
+    ``wrap_label``, one word per line)."""
+    longest = max(len(word) for word in label.split()) if wrap_label else len(label)
+    label_px = _LABEL_PX * _LABEL_EM * longest + _HELP_ICON_PX
+    return max(value_px * _value_em(value), label_px) + _CARD_CHROME_PX
 
 
 def _cards_style(cards: list[tuple[str, str]]) -> str:
@@ -152,14 +163,33 @@ def _cards_style(cards: list[tuple[str, str]]) -> str:
     the second pair to its own line before either pair has to stack its cards, and both pairs stack at the same
     width. (Streamlit bases each card on its own content and each container on a fixed 8rem, so on its own the
     row wraps 3 + 1, or stacks one pair's cards but not the other's.)
+
+    Where the row is narrower than one pair at full size (a phone), the labels wrap and the values shrink with
+    the row so that the widest still fits half of it, down to 20 px: the cards stay two by two on any phone
+    instead of stacking into four full-width cards that push the tabs below the first screen. The sizes follow
+    the row's own width (a container query), so an open sidebar on a narrow window is covered too.
     """
     card = int(np.ceil(max(_card_width(label, value) for label, value in cards)))
     pair = 2 * card + int(_CARD_GAP_PX)
+    compact = int(np.ceil(max(_card_width(label, value, _MIN_VALUE_PX, True) for label, value in cards)))
+    em = max(_value_em(value) for _, value in cards)
+    # Each card of a full-width pair is half the row less half the gap; its value gets that less the padding.
+    value_space = f"50cqw - {_CARD_GAP_PX / 2 + _CARD_CHROME_PX:g}px"
     return (
         "<style>"
-        f".st-key-price_cards > :has(> .st-key-price_cards_prices, > .st-key-price_cards_model) "
-        f"{{ flex: 1 1 {pair}px !important; }} "
-        f".st-key-price_cards_prices > *, .st-key-price_cards_model > * {{ flex: 1 1 {card}px !important; }}"
+        ".st-key-price_cards { container: price-cards / inline-size; } "
+        f"{_PAIRS} {{ flex: 1 1 {pair}px !important; }} "
+        f"{_CARDS} {{ flex: 1 1 {card}px !important; }} "
+        f"@container price-cards (width < {pair}px) {{ "
+        f"{_PAIRS} {{ flex-basis: {2 * compact + int(_CARD_GAP_PX)}px !important; }} "
+        f"{_CARDS} {{ flex-basis: {compact}px !important; }} "
+        ".st-key-price_cards_prices, .st-key-price_cards_model { align-items: stretch; } "
+        ".st-key-price_cards [data-testid='stMetric'] { height: 100%; } "
+        ".st-key-price_cards [data-testid='stMetricLabel'] :is([data-testid='stMarkdownContainer'], p) "
+        "{ white-space: normal; } "
+        ".st-key-price_cards [data-testid='stMetricValue'] "
+        f"{{ font-size: clamp({_MIN_VALUE_PX:g}px, calc(({value_space}) / {em:g}), {_VALUE_PX:g}px); }} "
+        "}"
         "</style>"
     )
 

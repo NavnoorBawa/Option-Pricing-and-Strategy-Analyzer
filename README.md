@@ -20,8 +20,10 @@ pandas); the Streamlit app is a thin interface on top of it.
 - Binomial trees: Leisen–Reimer (the default, ≈O(1/n²) convergence for European exercise) and Cox–Ross–Rubinstein,
   European or American exercise. Tree Greeks include bump-and-reprice vega, rho and dividend rho, so American
   hedge ratios are available; convergence charts for the call and the put and a smooth early-exercise boundary.
-  Calls are priced by put–call symmetry and every level's node prices come from their logarithms, so even extreme
-  volatility × expiry stays accurate, with early exercise too. A 2,000-step American tree prices in about 25 ms.
+  Calls are priced by put–call symmetry, and a lattice wide enough to need its node prices capped (at e^±700)
+  computes each level's prices from their logarithms, so a capped node never feeds an earlier step: even
+  extreme volatility × expiry stays accurate, with early exercise too. A 2,000-step American tree prices in
+  about 25 ms.
 - Monte Carlo with exact terminal sampling, antithetic and control variates, reproducible seeds and 95 % confidence
   intervals; the sample-path chart draws 60 of the scenarios behind the price.
 - All 14 Greeks (delta … ultima, plus rho and dividend rho) for calls and puts, with explicit units, a sensitivity

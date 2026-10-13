@@ -295,3 +295,39 @@ def test_extrapolated_price_stays_within_the_no_arbitrage_bounds(S, monkeypatch)
     # A finer tree that overshot would not lift the value above the strike (put) or the spot (call).
     monkeypatch.setattr(bn, "price", lambda *args: 2.0 * args[0] if args[7] > 2001 else 0.9 * args[0])
     assert bn.extrapolated_price(S, 100, 1, 0.05, 0.3, 0.0, "call") == S
+
+
+# --- Regression tests for the fifth review round ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("S", "K", "r", "q", "option_type"), [(50, 100, -0.05, 0.0, "put"), (100, 50, 0.0, -0.05, "call")]
+)
+def test_extrapolated_price_with_a_negative_rate_keeps_the_european_value(S, K, r, q, option_type):
+    # With a negative rate a put is never exercised early and is worth up to K e^(-rT), more than its strike. The
+    # reference was clamped to the strike: 100.0000 here, against 115.5045 from the European value and from the
+    # 2,001- and 4,003-step American trees. The call is the same option by put-call symmetry.
+    european = bs.price(S, K, 10, r, 0.2, q, option_type)
+    assert european == pytest.approx(115.5045, abs=1e-4)
+    assert bn.price(S, K, 10, r, 0.2, q, option_type, 4003, True, "lr") == pytest.approx(european, abs=1e-6)
+    assert bn.extrapolated_price(S, K, 10, r, 0.2, q, option_type) == pytest.approx(european, abs=1e-6)
+
+
+@pytest.mark.parametrize(
+    ("r", "sigma", "q", "option_type"),
+    [
+        (0.10, 4.0, 0.00, "put"),
+        (0.05, 5.0, 0.02, "put"),
+        (0.02, 4.0, 0.05, "put"),
+        (0.02, 5.0, 0.05, "call"),
+        (0.10, 5.0, 0.05, "call"),
+    ],
+)
+def test_extrapolated_price_never_exceeds_the_perpetual_american_value(r, sigma, q, option_type):
+    # At several hundred percent volatility over ten years the trees' error is irregular and the extrapolation
+    # overshot: 93.4975 for the first put, above the perpetual value 93.4865 that no finite expiry can exceed
+    # (the 16,015-step tree gives 93.4842). The tree approaches the value from below.
+    bound = _perpetual_american(100, 100, r, q, sigma, option_type)
+    value = bn.extrapolated_price(100, 100, 10, r, sigma, q, option_type)
+    assert value <= bound * (1 + 1e-12)  # equal to it where the extrapolation overshoots
+    assert value > bn.price(100, 100, 10, r, sigma, q, option_type, 4003, True, "lr")
