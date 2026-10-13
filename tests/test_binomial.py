@@ -240,6 +240,80 @@ def test_exercise_boundary_of_an_american_call_with_dividends_falls_towards_the_
     assert spots[-1] == pytest.approx(125.0, abs=1.5)  # max(K, rK/q) = 125 at expiry
 
 
+@pytest.mark.parametrize(
+    ("T", "r", "sigma", "q", "kind", "steps", "method"),
+    [
+        (30 / 365, 0.0, 0.2, 0.0, "put", 2000, "lr"),
+        (30 / 365, 0.0, 0.2, 0.0, "call", 2000, "lr"),
+        (30 / 365, 1e-13, 0.2, 0.0, "put", 2000, "lr"),  # a rate within rounding of zero: a premium of 1e-13
+        (1, 0.0, 0.1, 0.0, "put", 501, "lr"),
+        (1, 0.0, 0.1, 0.0, "call", 501, "lr"),
+        (5, 0.0, 1.0, 0.03, "put", 501, "lr"),
+        (5, 0.05, 1.0, 0.0, "call", 501, "lr"),
+        (1, 0.05, 1.0, 0.0, "call", 2000, "crr"),
+    ],
+)
+def test_no_exercise_boundary_where_early_exercise_is_never_optimal(T, r, sigma, q, kind, steps, method):
+    # A put with r <= 0 and q >= 0 (and a call with q <= 0 and r >= 0) is worth its European value, so it has no
+    # exercise region. Rounding noise of about 1e-14 in the exercise gain drew fake boundaries: put 67-99.5 and call
+    # 100.5-148.5 at r = 0, and a call "boundary" near 1e15 at 5% and 100% volatility over five years. A rate within
+    # rounding of zero is treated as zero.
+    res = bn.price_with_greeks(100, 100, T, r, sigma, q, kind, steps, True, method)
+    european = bn.price(100, 100, T, r, sigma, q, kind, steps, False, method)
+    assert res.price == pytest.approx(european, abs=1e-9)  # no early-exercise premium on the same tree
+    assert res.exercise_boundary[0].size == 0 and res.exercise_boundary[1].size == 0
+
+
+@pytest.mark.parametrize(("sigma", "steps"), [(0.05, 2000), (0.001, 501), (0.2, 2000), (0.05, 501)])
+def test_exercise_boundaries_reach_the_strike_at_expiry_when_the_rate_equals_the_dividend_yield(sigma, steps):
+    # With r = q > 0 both options have an exercise region whose boundary ends at the strike: min(K, r K / q) = K for
+    # the put and max(K, r K / q) = K for the call. Next to it the exercise gain is only about r dt (K - S), far below
+    # 1e-12 of the strike at a 0.01% rate over one day. Counting only gains above that flattened the put boundary at
+    # 99.27 and the call's at 100.73 (5% volatility, 2,000 steps), and at 0.1% volatility removed both, so the app
+    # said early exercise was never optimal.
+    T = 1 / 365
+    spacing = 2 * 100 * sigma * np.sqrt(T / steps)  # distance between neighbouring spots on a level
+    for kind in ("put", "call"):
+        times, spots = bn.price_with_greeks(100, 100, T, 1e-4, sigma, 1e-4, kind, steps, True, "lr").exercise_boundary
+        assert times.size > 0.75 * steps and times[-1] > T * (1 - 2 / steps), kind
+        assert abs(spots[-1] - 100) < 2 * spacing, kind
+        assert np.all(spots < 100) if kind == "put" else np.all(spots > 100)
+
+
+@pytest.mark.parametrize(("kind", "first", "last"), [("put", 99.97565, 99.99971), ("call", 100.02435, 100.00029)])
+def test_exercise_boundary_starts_where_an_extended_precision_induction_puts_it(kind, first, last):
+    # One day at 0.1% volatility with r = q = 0.01% on 2,000 steps: on each of the first 417 exercised levels the
+    # largest exercise gain is below 1e-13 of the strike (2e-15 on the first). Skipping such levels as rounding
+    # noise started the curve 31% of the way to expiry. The same lattice inducted in 80-bit precision has a boundary
+    # from 10.4% of the way on: 1,792 points from 99.97565 to 99.99971 for the put (100.02435 to 100.00029 for the
+    # call).
+    T = 1 / 365
+    times, spots = bn.price_with_greeks(100, 100, T, 1e-4, 0.001, 1e-4, kind, 2000, True, "lr").exercise_boundary
+    assert times.size == 1792 and times[0] == pytest.approx(0.1042 * T, abs=1e-4 * T)
+    assert spots[0] == pytest.approx(first, abs=1e-5) and spots[-1] == pytest.approx(last, abs=1e-5)
+
+
+def test_rate_within_rounding_of_zero_draws_no_boundary_on_long_wide_lattices():
+    # On 5,000- to 20,000-step lattices at 500% volatility over ten years the node values carry rounding of 1e-13 of
+    # the strike or more. A rate of 1e-13 gives a real exercise gain of at most 1e-13 dt of the strike, far below
+    # that, so it is treated as zero and nothing is drawn (with only a per-level tolerance of 1e-13 of the strike, a
+    # point near 8.5e6 was drawn for the 20,000-step put).
+    for S, K in ((1e7, 1.0), (100.0, 125.0)):
+        res = bn.price_with_greeks(S, K, 10, 1e-13, 5.0, 0.0, "put", 5001, True, "lr")
+        assert res.exercise_boundary[1].size == 0
+    _, _, (times, spots), _ = bn._induct_put(1, 1e7, 10, 1e-13, 5.0, 0.0, 20_000, True, "lr", keep_levels=True)
+    assert times.size == 0 and spots.size == 0
+
+
+def test_real_exercise_boundary_survives_next_to_a_call_that_is_never_exercised():
+    # Five years at 100% volatility and a 5% rate: the put has a real boundary between its perpetual critical
+    # price K beta / (beta - 1) = 100 / 11 (beta = -0.1) and the strike, while the call has none.
+    times, spots = bn.price_with_greeks(100, 100, 5, 0.05, 1.0, 0, "put", 501, True, "lr").exercise_boundary
+    assert len(times) > 400 and np.all(np.diff(spots) >= 0.0)
+    assert np.all(spots > 100 / 11) and np.all(spots < 100)
+    assert spots[0] == pytest.approx(11.3, abs=0.5) and spots[-1] == pytest.approx(78.3, abs=1.0)
+
+
 @pytest.mark.parametrize(("S", "K", "T", "r", "sigma", "q", "kind", "value"), AMERICAN_REFERENCE)
 def test_extrapolated_price_matches_converged_references(S, K, T, r, sigma, q, kind, value):
     assert bn.extrapolated_price(S, K, T, r, sigma, q, kind) == pytest.approx(value, abs=2e-5)

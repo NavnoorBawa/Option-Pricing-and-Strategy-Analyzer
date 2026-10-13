@@ -216,6 +216,15 @@ def test_card_width_estimate_covers_the_rendered_card(label, value, measured):
     assert measured <= tab_pricing._card_width(label, value) <= measured + 20
 
 
+@pytest.mark.parametrize(
+    ("delta", "measured"),
+    # max-content widths in Chromium of the implied-volatility card (value 20.000%) with its delta line, in px
+    [("+0.00 vol pts vs sidebar", 178.0), ("-12.34 vol pts vs sidebar", 182.4), ("+123.45 vol pts vs sidebar", 192.0)],
+)
+def test_card_width_estimate_covers_the_delta_line(delta, measured):
+    assert measured <= tab_pricing._card_width("Implied volatility", "20.000%", delta=delta) <= measured + 20
+
+
 # --- Pricing & Greeks tab --------------------------------------------------------------------------------------
 
 
@@ -283,6 +292,35 @@ def test_converged_reference_of_a_put_with_a_negative_rate_is_not_capped_at_the_
     assert "Converged 115.5045" in texts
 
 
+def test_no_exercise_boundary_is_drawn_when_early_exercise_is_never_optimal():
+    # At a zero rate without dividends neither option is ever exercised early (the premium card reads $0.0000), but
+    # rounding noise drew a call boundary from about 148 down to 100 and a put boundary from about 67 up to 100.
+    at = AppTest.from_file(APP, default_timeout=120)
+    at.query_params.update({"rate": "0", "vol": "10", "model": "Binomial tree", "style": "American"})
+    at.run()
+    _ok(at)
+    assert _metrics(at)["Exercise premium"] == "$0.0000"
+    assert not [c for c in at.get("plotly_chart") if c.proto.id.endswith("-exercise_boundary")]
+    assert any("Early exercise is never optimal" in i.value for i in at.info)
+
+
+def test_exercise_boundaries_are_drawn_for_a_small_rate_equal_to_the_dividend_yield():
+    # A 0.01% rate and dividend yield over one day at 0.1% volatility: both options have an exercise region ending at
+    # the strike, but gains below 1e-12 of the strike were not counted, so the chart vanished and the app said early
+    # exercise was never optimal.
+    at = AppTest.from_file(APP, default_timeout=120)
+    at.query_params.update(
+        {"days": "1", "vol": "0.1", "rate": "0.01", "div": "0.01", "model": "Binomial tree", "style": "American"}
+    )
+    at.run()
+    _ok(at)
+    assert not any("Early exercise is never optimal" in i.value for i in at.info)
+    curves = {t["name"]: _values(t["y"]) for t in _chart(at, "exercise_boundary")["data"]}
+    assert set(curves) == {"Call boundary", "Put boundary"}
+    assert curves["Put boundary"].max() == pytest.approx(100, abs=1e-3) and curves["Put boundary"].max() < 100
+    assert curves["Call boundary"].min() == pytest.approx(100, abs=1e-3) and curves["Call boundary"].min() > 100
+
+
 def test_both_exercise_boundaries_are_drawn_in_their_option_colours(app):
     # With dividends both boundaries are drawn, the call's first; it used to get the put's orange and vice versa.
     app.sidebar.number_input(key="div").set_value(3.0).run()
@@ -308,6 +346,59 @@ def test_monte_carlo_sample_paths_are_scenarios_behind_the_price(app):
     assert _values(mean["y"])[-1] != pytest.approx(draws.mean(), abs=1e-3)
     assert any("differs from it by sampling noise" in c.value for c in app.caption)
     assert any("60 of the 100,000 scenarios behind the price" in m.value for m in app.markdown)
+
+
+@pytest.mark.parametrize(("vol", "call", "put"), [("400", "$100.0000", "$60.6531"), ("300", "$99.9993", "$60.6524")])
+def test_monte_carlo_cards_stay_right_at_hundreds_of_percent_of_volatility_over_years(vol, call, put):
+    # Ten years at 400% volatility showed a call of $0.0000 and a put of -$39.3469; at 300% a call of $95.0341 with a
+    # standard error of $0.0000 (the values are 100.0000 / 60.6531 and 99.9998 / 60.6529).
+    at = AppTest.from_file(APP, default_timeout=120)
+    at.query_params.update({"days": "3650", "vol": vol, "model": "Monte Carlo"})
+    at.run()
+    _ok(at)
+    cards = _metrics(at)
+    assert (cards["Call value"], cards["Put value"]) == (call, put)
+    assert all(
+        abs(_dollars(cards[f"{k.capitalize()} value"]) - bs.price(100, 100, 10, 0.05, float(vol) / 100, 0, k)) < 1e-3
+        for k in ("call", "put")
+    )
+    assert any(tab_pricing.HEAVY_TAIL_NOTE in c.value for c in at.caption)
+
+
+def test_monte_carlo_call_without_control_variate_follows_from_parity_at_large_sigma_sqrt_t():
+    # Four years at 250% volatility with the control variate off: the cards showed a call of $31.0160 with a standard
+    # error of $16.1587 (value 98.8770) next to a correct put of $80.7879, breaking put-call parity by $68.
+    at = AppTest.from_file(APP, default_timeout=120)
+    at.query_params.update(
+        {"days": "1460", "vol": "250", "model": "Monte Carlo", "seed": "103", "control_variate": "false"}
+    )
+    at.run()
+    _ok(at)
+    assert at.sidebar.toggle(key="control_variate").value is False
+    cards = _metrics(at)
+    assert (cards["Call value"], cards["Put value"], cards["Std. error"]) == ("$98.9148", "$80.7879", "$0.0242")
+    assert _dollars(cards["Call value"]) - _dollars(cards["Put value"]) == pytest.approx(100 - 100 * np.exp(-0.2), 1e-4)
+    assert any(tab_pricing.HEAVY_TAIL_NOTE in c.value for c in at.caption)
+    assert any("from σ√T = 2 on the call follows from the put by parity" in c.value for c in at.caption)
+
+
+def test_monte_carlo_diagnostics_leave_undefined_cells_blank():
+    # Streamlit writes "None" in missing cells unless told otherwise, right above a caption saying they are blank.
+    at = AppTest.from_file(APP, default_timeout=120)
+    at.query_params.update({"model": "Monte Carlo", "strike": "300", "days": "30", "vol": "10", "paths": "10,000"})
+    at.run()
+    _ok(at)
+    table = next(d for d in at.dataframe if "Error / SE" in d.value.columns)
+    assert table.value["Std. error"].isna().all() and table.value["Error / SE"].isna().all()
+    assert table.proto.HasField("placeholder") and table.proto.placeholder == ""
+    assert any("The standard error is left blank" in c.value for c in at.caption)
+
+
+def test_greek_names_get_a_column_wide_enough_for_the_longest(app):
+    # The grid sized the column from the first rows it drew and ignored "Epsilon (dividend rho) ε" as an outlier,
+    # so the name was cut at 1,280 px and on phones ("Epsilon (di", and "Vomma (vo" with the higher-order Greeks).
+    table = next(d for d in app.dataframe if "Greek" in d.value.columns)
+    assert json.loads(table.proto.columns)["Greek"]["width"] == "medium"
 
 
 # --- Implied Volatility tab --------------------------------------------------------------------------------------
@@ -380,6 +471,30 @@ def test_iv_time_value_is_quote_minus_intrinsic_value(app):
     assert _dollars(_metrics(app)["Time value"]) == pytest.approx(put - 20.0, abs=1e-4)
 
 
+def test_iv_cards_wrap_in_pairs_like_the_price_cards(app):
+    # The four cards sat in st.columns(4) with no room to grow: at 1,280 px "Model check" read "$10.450…" for the
+    # default contract, and with a $10,000,000 underlying every dollar card lost digits even at 1,400 px.
+    assert [m.label for m in _block(app, "iv_cards_solution").metric] == ["Implied volatility", "Model check"]
+    assert [m.label for m in _block(app, "iv_cards_option").metric] == ["Vega at IV", "Time value"]
+    style = next(h.proto.body for h in app.get("html") if ".st-key-iv_cards " in h.proto.body)
+    assert ".st-key-iv_cards { container: iv-cards / inline-size; }" in style
+    cards = [m for m in app.metric if m.label in ("Implied volatility", "Model check", "Vega at IV", "Time value")]
+    card = int(np.ceil(max(tab_pricing._card_width(m.label, m.value, delta=m.proto.delta) for m in cards)))
+    assert f".st-key-iv_cards_solution > *, .st-key-iv_cards_option > * {{ flex: 1 1 {card}px !important; }}" in style
+    # On a phone the delta line wraps with the labels instead of being cut off.
+    assert (
+        "[data-testid='stMetricDelta']) :is([data-testid='stMarkdownContainer'], p) { white-space: normal; }" in style
+    )
+
+
+def test_iv_model_check_shows_the_quote_precision_and_the_full_value_in_its_help(app):
+    # Six decimals did not fit the card; the full value and its distance from the quote are in the help.
+    check = next(m for m in app.metric if m.label == "Model check")
+    assert check.value == "$10.4506"
+    value = bs.price(100, 100, 1, 0.05, 0.2)
+    assert f"\\${value:,.6f}, " in check.proto.help and "from the quote." in check.proto.help
+
+
 def test_iv_gap_to_the_sidebar_never_shows_a_negative_zero(app):
     app.sidebar.number_input(key="strike").set_value(40.0).run()
     _ok(app)
@@ -405,6 +520,23 @@ def test_price_heatmap_keeps_every_row_and_column_for_low_prices_and_volatilitie
     # Cell text keeps about three significant digits of the largest value instead of reading 0.00 everywhere.
     largest = max(float(t.replace(",", "")) for row in trace.text for t in row)
     assert largest == pytest.approx(values.max(), rel=5e-3)
+
+
+def test_price_heatmaps_give_their_cells_the_full_width(app):
+    # Side by side, each with a colour scale, the 9-column grids left the cell text at 5 px on a phone, 7 px at
+    # 1,280 px and 9 px at 1,400 px (Plotly shrinks it to fit the cell). They are now stacked, without the scale.
+    def parent(node, key):
+        for child in getattr(node, "children", {}).values():
+            if str(getattr(getattr(child, "proto", None), "id", "")).endswith(f"-{key}"):
+                return node
+            if (found := parent(child, key)) is not None:
+                return found
+        return None
+
+    for kind in ("call", "put"):
+        assert _chart(app, f"heatmap_{kind}")["data"][0]["showscale"] is False
+        assert parent(app.main, f"heatmap_{kind}").type == "expander"  # not one of two columns
+    assert charts.price_heatmap([1.0, 2.0], [0.1, 0.2], np.ones((2, 2)), "Call").data[0].showscale is False
 
 
 def test_exercise_boundary_colours_follow_the_option_type():

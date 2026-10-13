@@ -174,6 +174,25 @@ def _induct_put(S, K, T, r, sigma, q, steps, american, method, keep_levels=False
     levels = {}
     boundary_steps: list[int] = []
     boundary_spots: list[float] = []
+    # The boundary is where the exercise gain, K - S minus the continuation value, changes sign. Taken as that
+    # difference it subtracts two nearly equal numbers deep in the money, where only rounding (up to about 1e-13 of
+    # the strike on wide lattices) decides its sign: the gain there is exactly zero at r = 0, and -S (1 - e^(-r dt))
+    # at the tiny spots of the swapped lattice of a call with q = 0, so rounding drew boundaries where early
+    # exercise is never optimal. On the risk-neutral lattice (p u + (1 - p) d = e^((r - q) dt)) the gain at a node
+    # with spot S is exactly
+    #     K (1 - e^(-r dt)) - S (1 - e^(-q dt)) - e^(-r dt) (p a_up + (1 - p) a_down),
+    # where a >= 0 is the value minus K - S at the two following nodes (exactly zero where they are exercised).
+    # Near the boundary every term is small (of order r dt K or q dt S), so rounding is relative to them rather than
+    # to the strike, and the sign is right even where the gain is far below rounding of the strike: about
+    # r dt (K - S) next to the boundary when r = q. The gain is at most K max(1 - e^(-r dt), e^(-q dt) - e^(-r dt)).
+    # That is <= 0 for a put with r <= 0 and q >= 0 (and, through C(S, K; r, q) = P(K, S; q, r), for a call with
+    # q <= 0 and r >= 0), which is never exercised early; a rate that keeps it within rounding of the strike counts
+    # as zero.
+    largest_gain = K * max(-np.expm1(-r * dt), np.expm1(-q * dt) - np.expm1(-r * dt))
+    record_boundary = keep_levels and american and largest_gain > 1e-13 * K
+    if record_boundary:
+        strike_carry, spot_carry = -K * np.expm1(-r * dt), np.expm1(-q * dt)
+        above = values - (K - spot)  # a at expiry: zero below the strike
     for i in range(steps - 1, -1, -1):
         values = disc * (p * values[1:] + (1.0 - p) * values[:-1])
         if american:
@@ -189,8 +208,8 @@ def _induct_put(S, K, T, r, sigma, q, steps, american, method, keep_levels=False
             else:
                 spot = _spots(S, log_u, log_d, i, ups_log)
             exercise = K - spot
-            if keep_levels:
-                gain = exercise - values
+            if record_boundary:
+                gain = strike_carry + spot_carry * spot - disc * (p * above[1:] + (1.0 - p) * above[:-1])
                 exercised = gain > 0.0
                 # Record the boundary only where it is interior to the level: if the top node is exercised
                 # the boundary lies beyond the lattice (the spot started inside the exercise region).
@@ -202,6 +221,8 @@ def _induct_put(S, K, T, r, sigma, q, steps, american, method, keep_levels=False
                     boundary_steps.append(i)
                     boundary_spots.append(min(spot[k] + weight * (spot[k + 1] - spot[k]), K))
             values = np.maximum(values, exercise)
+            if record_boundary:
+                above = values - exercise
         if keep_levels and i <= 2:
             levels[i] = values.copy()
     return float(values[0]), levels, _boundary_curve(boundary_steps, boundary_spots, dt), (log_u, log_d)
