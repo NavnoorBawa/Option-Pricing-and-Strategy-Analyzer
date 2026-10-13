@@ -130,22 +130,60 @@ def _model_card(inputs: Inputs, prices: Prices) -> tuple[str, str, str, str]:
     )
 
 
+#: Headline-card text in Streamlit's Source Sans: values at 36 px, labels at 14 px. Digits (tabular) and "$" are
+#: half an em wide; the narrower and wider characters are listed. Labels average under 0.47 em per character.
+_VALUE_PX, _LABEL_PX, _LABEL_EM = 36.0, 14.0, 0.47
+_CHAR_EM = {",": 0.25, ".": 0.25, " ": 0.2, "-": 0.31, "%": 0.83}
+#: Card padding and border, the label's help icon, and the gap between cards (gap="small").
+_CARD_CHROME_PX, _HELP_ICON_PX, _CARD_GAP_PX = 32.0, 22.0, 16.0
+
+
+def _card_width(label: str, value: str) -> float:
+    """Width in px a headline card needs to show its label and value on one line each."""
+    value_px = _VALUE_PX * sum(_CHAR_EM.get(c, 0.5) for c in value)
+    label_px = _LABEL_PX * _LABEL_EM * len(label) + _HELP_ICON_PX
+    return max(value_px, label_px) + _CARD_CHROME_PX
+
+
+def _cards_style(cards: list[tuple[str, str]]) -> str:
+    """Flex sizes that wrap the four cards in pairs: 4 across, then 2 + 2, then 1 per row (never 3 + 1).
+
+    Every card is based on the widest card's width, and each pair on two of them side by side, so the row moves
+    the second pair to its own line before either pair has to stack its cards, and both pairs stack at the same
+    width. (Streamlit bases each card on its own content and each container on a fixed 8rem, so on its own the
+    row wraps 3 + 1, or stacks one pair's cards but not the other's.)
+    """
+    card = int(np.ceil(max(_card_width(label, value) for label, value in cards)))
+    pair = 2 * card + int(_CARD_GAP_PX)
+    return (
+        "<style>"
+        f".st-key-price_cards > :has(> .st-key-price_cards_prices, > .st-key-price_cards_model) "
+        f"{{ flex: 1 1 {pair}px !important; }} "
+        f".st-key-price_cards_prices > *, .st-key-price_cards_model > * {{ flex: 1 1 {card}px !important; }}"
+        "</style>"
+    )
+
+
 def render_price_cards(inputs: Inputs, prices: Prices) -> None:
     S, T, r, q = inputs.spot, inputs.expiry, inputs.rate, inputs.dividend_yield
     forward = S * np.exp((r - q) * T)
     label, value, caption, help_text = _model_card(inputs, prices)
-    # A wrapping row: four cards side by side on a desktop, two by two on a phone. The per-option notes are in
-    # the tooltips so the cards stay short on narrow screens.
+    # Two pairs of cards in a wrapping row (sizes in _cards_style). The per-option notes are in the tooltips so
+    # the cards stay short on narrow screens.
+    cards = [
+        ("Call value", money(prices.call, 4), md(prices.call_note)),
+        ("Put value", money(prices.put, 4), md(prices.put_note)),
+        ("Forward price", money(forward, 4), f"F = S·e^((r−q)T). Discount factor e^(−rT) = {np.exp(-r * T):.6f}."),
+        (label, value, md(help_text)),
+    ]
+    st.html(_cards_style([(name, text) for name, text, _ in cards]))
     row = st.container(horizontal=True, gap="small", key="price_cards")
-    row.metric("Call value", money(prices.call, 4), border=True, help=md(prices.call_note))
-    row.metric("Put value", money(prices.put, 4), border=True, help=md(prices.put_note))
-    row.metric(
-        "Forward price",
-        money(forward, 4),
-        border=True,
-        help=f"F = S·e^((r−q)T). Discount factor e^(−rT) = {np.exp(-r * T):.6f}.",
+    pairs = (
+        row.container(horizontal=True, gap="small", key="price_cards_prices"),
+        row.container(horizontal=True, gap="small", key="price_cards_model"),
     )
-    row.metric(label, value, border=True, help=md(help_text))
+    for i, (name, text, help_text) in enumerate(cards):
+        pairs[i // 2].metric(name, text, border=True, help=help_text)
     st.caption(md(f"{inputs.model.label} · {caption}"))
 
 
@@ -348,7 +386,7 @@ def _tree_diagnostics(inputs: Inputs, prices: Prices) -> None:
         "Leisen-Reimer converges smoothly, "
         + (
             "at first order with early exercise. The converged value extrapolates Leisen-Reimer trees with 2,001 "
-            "and 4,003 steps (Richardson)."
+            "and 4,003 steps (Richardson), kept within the no-arbitrage bounds of an American option."
             if model.american
             else "at roughly O(1/n²), to the closed-form value."
         )
@@ -392,12 +430,13 @@ def _monte_carlo_diagnostics(inputs: Inputs, prices: Prices) -> None:
     with c1:
         st.markdown(f"**Sample paths** ({len(paths)} of the {model.n_paths:,} scenarios behind the price)")
         st.plotly_chart(
-            charts.paths_chart(times * 365, paths, K, S * np.exp((r - q) * times), "Mean of all scenarios"),
+            charts.paths_chart(times * 365, paths, K, S * np.exp((r - q) * times), "Risk-neutral mean (forward)"),
             key="mc_paths",
         )
         st.caption(
             "The price samples each scenario's price at expiry exactly; its path from today is filled in with a "
-            "Brownian bridge. The mean of all scenarios is the forward S·e^((r−q)t)."
+            "Brownian bridge. The purple line is the forward S·e^((r−q)t), the expected price of a scenario at each "
+            "date under the pricing measure; the average of the simulated scenarios differs from it by sampling noise."
         )
     with c2:
         st.markdown("**Terminal price distribution**")

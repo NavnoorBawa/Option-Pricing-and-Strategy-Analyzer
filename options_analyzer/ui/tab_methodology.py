@@ -36,7 +36,9 @@ verified against high-precision finite differences in the test-suite.
   steps is used).
 * Calls are priced as the symmetric put, $C(S, K, T; r, q) = P(K, S, T; q, r)$ (McDonald–Schroder). On the
   lattice this is an exact change of numeraire, and a put's payoff is bounded by its strike, so the value
-  stays accurate even when extreme volatility × expiry forces the tree to cap its top nodes.
+  stays accurate even when extreme volatility × expiry forces the tree to keep its node prices between
+  $e^{-700}$ and $e^{700}$. Each level's prices are computed from their logarithms, so a capped node never
+  feeds the exercise test at an earlier step.
 * American exercise compares continuation and exercise value at every node; delta and gamma are read off
   the tree, theta from the step-2 middle node (CRR) or a central difference in time (Leisen–Reimer), and
   vega, rho and dividend rho from repricing on a tree with the same steps (±0.5 vol point, ±25 bp). The

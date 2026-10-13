@@ -11,7 +11,7 @@ from streamlit.testing.v1 import AppTest
 
 from options_analyzer import binomial, monte_carlo
 from options_analyzer import black_scholes as bs
-from options_analyzer.ui import charts
+from options_analyzer.ui import charts, tab_pricing
 
 APP = str(Path(__file__).resolve().parents[1] / "main.py")
 EUROPEAN_NOTE = "Closed-form Black-Scholes-Merton values for European exercise"
@@ -69,6 +69,22 @@ def _quote(at: AppTest):
 
 def _dollars(text: str) -> float:
     return float(text.replace("\\", "").replace("$", "").replace(",", ""))
+
+
+def _block(at: AppTest, key: str):
+    """The container created with ``key``."""
+
+    def find(node):
+        for child in getattr(node, "children", {}).values():
+            if str(getattr(getattr(child, "proto", None), "id", "")).endswith(f"-{key}"):
+                return child
+            if (found := find(child)) is not None:
+                return found
+        return None
+
+    block = find(at.main)
+    assert block is not None, f"no container with key {key!r}"
+    return block
 
 
 # --- Sidebar ------------------------------------------------------------------------------------------------------
@@ -143,6 +159,36 @@ def test_fourth_card_reports_what_each_model_adds_instead_of_a_zero_parity_gap(a
     assert _dollars(_metrics(app)["Std. error"]) == pytest.approx(max(r.std_error for r in se.values()), abs=1e-4)
 
 
+def test_price_cards_wrap_in_pairs_of_equal_width(app):
+    # The four cards sat in one wrapping row sized by their content, so it broke 3 + 1 (the fourth card stretched
+    # across the whole row) at 1,024 px with the sidebar open, and at 1,400 px with seven-digit prices.
+    assert [m.label for m in _block(app, "price_cards_prices").metric] == ["Call value", "Put value"]
+    assert [m.label for m in _block(app, "price_cards_model").metric] == ["Forward price", "Call ITM probability"]
+    card = int(np.ceil(max(tab_pricing._card_width(m.label, m.value) for m in app.metric[:4])))
+    style = app.get("html")[0].proto.body
+    cards_rule = f".st-key-price_cards_prices > *, .st-key-price_cards_model > * {{ flex: 1 1 {card}px !important; }}"
+    assert cards_rule in style
+    assert f"{{ flex: 1 1 {2 * card + 16}px !important; }}" in style  # each pair: two cards and the gap
+    assert card == 186  # the forward price ($105.1271) and the ITM card's label are the widest
+
+
+@pytest.mark.parametrize(
+    ("label", "value", "measured"),
+    # max-content widths of the cards in Chromium, in px
+    [
+        ("Call value", "$10.4506", 166.2),
+        ("Put value", "$5.5735", 148.3),
+        ("Forward price", "$1,051,271.0964", 273.6),
+        ("Exercise premium", "$5,162.6001", 211.0),
+        ("Tree error vs BSM", "$0.003499", 184.1),
+        ("Call ITM probability", "55.96%", 167.3),
+    ],
+)
+def test_card_width_estimate_covers_the_rendered_card(label, value, measured):
+    # Never narrower than the card (its value would be cut), and not so wide that the row wraps much too early.
+    assert measured <= tab_pricing._card_width(label, value) <= measured + 20
+
+
 # --- Pricing & Greeks tab --------------------------------------------------------------------------------------
 
 
@@ -182,6 +228,31 @@ def test_convergence_charts_show_call_and_put_up_to_the_selected_steps(app):
         assert any(a["text"] == f"Converged {reference:,.4f}" for a in spec["layout"]["annotations"])
 
 
+def test_converged_reference_stays_below_the_strike_for_extreme_volatility_and_expiry():
+    # At 400% volatility and ten years the 4,003-step reference tree rounded its bottom spots to zero: the put's
+    # "Converged" line read 103.7119 (above the strike of 100) next to a put value of $96.2280.
+    at = AppTest.from_file(APP, default_timeout=120)
+    at.query_params.update({"vol": "400", "days": "3650", "model": "Binomial tree", "style": "American"})
+    at.run()
+    _ok(at)
+    put = _dollars(_metrics(at)["Put value"])
+    texts = [a["text"] for a in _chart(at, "tree_convergence_put")["layout"]["annotations"]]
+    reference = float(next(t for t in texts if t.startswith("Converged ")).split()[1].replace(",", ""))
+    assert put < reference < 100.0
+    assert reference == pytest.approx(put, abs=0.1)
+
+
+def test_both_exercise_boundaries_are_drawn_in_their_option_colours(app):
+    # With dividends both boundaries are drawn, the call's first; it used to get the put's orange and vice versa.
+    app.sidebar.number_input(key="div").set_value(3.0).run()
+    _binomial(app, american=True)
+    spec = _chart(app, "exercise_boundary")
+    assert {t["name"]: t["line"]["color"] for t in spec["data"]} == {
+        "Call boundary": charts.CALL,
+        "Put boundary": charts.PUT,
+    }
+
+
 def test_monte_carlo_sample_paths_are_scenarios_behind_the_price(app):
     app.sidebar.radio(key="model").set_value("monte_carlo").run()
     _ok(app)
@@ -190,8 +261,11 @@ def test_monte_carlo_sample_paths_are_scenarios_behind_the_price(app):
     assert len(paths) == 60
     draws = monte_carlo.terminal_prices(100, 1, 0.05, 0.2, 0, 100_000, 42, True)
     np.testing.assert_allclose([_values(p["y"])[-1] for p in paths], draws[:60], rtol=1e-12)
-    mean = next(t for t in spec["data"] if t.get("name") == "Mean of all scenarios")
+    # The line is the forward, the scenarios' expected value, not their sample mean ("Mean of all scenarios").
+    mean = next(t for t in spec["data"] if t.get("name") == "Risk-neutral mean (forward)")
     assert _values(mean["y"])[-1] == pytest.approx(100 * np.exp(0.05))
+    assert _values(mean["y"])[-1] != pytest.approx(draws.mean(), abs=1e-3)
+    assert any("differs from it by sampling noise" in c.value for c in app.caption)
     assert any("60 of the 100,000 scenarios behind the price" in m.value for m in app.markdown)
 
 
@@ -274,6 +348,15 @@ def test_price_heatmap_keeps_every_row_and_column_for_low_prices_and_volatilitie
     # Cell text keeps about three significant digits of the largest value instead of reading 0.00 everywhere.
     largest = max(float(t.replace(",", "")) for row in trace.text for t in row)
     assert largest == pytest.approx(values.max(), rel=5e-3)
+
+
+def test_exercise_boundary_colours_follow_the_option_type():
+    # Colours went by position: the first boundary was orange (the put colour) even when it was the call's.
+    days = np.array([0.0, 100.0])
+    call, put = (days, np.array([130.0, 120.0])), (days, np.array([80.0, 90.0]))
+    both = charts.exercise_boundary_chart({"Call boundary": call, "Put boundary": put}, 100.0)
+    assert {t.name: t.line.color for t in both.data} == {"Call boundary": charts.CALL, "Put boundary": charts.PUT}
+    assert charts.exercise_boundary_chart({"Put boundary": put}, 100.0).data[0].line.color == charts.PUT
 
 
 def test_sensitivity_chart_labels_cannot_overlap_the_axis_or_each_other():

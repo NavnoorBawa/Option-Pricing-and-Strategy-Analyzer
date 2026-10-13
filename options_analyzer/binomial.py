@@ -15,9 +15,9 @@ Calls are priced as the symmetric put (McDonald & Schroder, 1998):
 ``C(S, K, T; r, q) = P(K, S, T; q, r)``. On the lattice this is an exact change
 of numeraire (the call tree is the put tree turned upside down, node for node,
 so both give the same value), but a put's payoff is bounded by its strike. Very
-wide lattices (high volatility, long expiry, many steps) have to cap their top
-nodes to stay finite, and a call valued on capped nodes would lose most of its
-value; the put is unaffected.
+wide lattices (high volatility, long expiry, many steps) have to cap their node
+spots at both ends to stay finite, and a call valued on capped nodes would lose
+most of its value; the put is unaffected.
 
 Backward induction is vectorised over the nodes of each time step: a
 2,000-step American tree prices in tens of milliseconds.
@@ -36,9 +36,11 @@ __all__ = ["METHODS", "TreeResult", "extrapolated_price", "price", "price_with_g
 METHODS = {"crr": "Cox-Ross-Rubinstein", "lr": "Leisen-Reimer"}
 
 _MAX_STEPS = 20_000
-#: Node spots are capped at e^700 (about 1e304) so that very wide lattices (high volatility, long expiry,
-#: many steps) stay finite. Only puts are valued on the lattice (calls by put-call symmetry), and a put is
-#: worth nothing at such nodes, so the cap does not change any value.
+#: Node spots are kept between e^-700 and e^700 (about 1e-304 and 1e304) so that very wide lattices (high
+#: volatility, long expiry, many steps) neither overflow nor round to zero. Only puts are valued on the lattice
+#: (calls by put-call symmetry): a put is worth nothing at the top nodes and, to within 1e-304, its whole strike
+#: at the bottom ones, so the caps do not change any value. Capped levels are computed from their logarithms, so
+#: a capped node never feeds the spots of an earlier level.
 _MAX_LOG_SPOT = 700.0
 _MAX_SPOT = float(np.exp(_MAX_LOG_SPOT))
 #: Bumps for the finite-difference vega (half a volatility point) and rho / dividend rho (25 basis points).
@@ -143,10 +145,15 @@ def _validate(S, K, sigma, option_type, steps, method) -> tuple[int, str, int]:
     return phi, method, steps
 
 
-def _spots(S: float, log_u: float, log_d: float, i: int) -> np.ndarray:
-    """Spot at every node of level ``i`` (capped so that extreme lattices stay finite)."""
-    j = np.arange(i + 1)  # number of up-moves
-    return np.exp(np.minimum(np.log(S) + j * log_u + (i - j) * log_d, _MAX_LOG_SPOT))
+def _spots(S: float, log_u: float, log_d: float, i: int, ups_log: np.ndarray | None = None) -> np.ndarray:
+    """Spot at every node of level ``i``, capped at both ends so that extreme lattices stay finite and positive.
+
+    ``ups_log`` optionally holds ``j (log u - log d)`` for ``j = 0, 1, ...`` (at least ``i + 1`` entries).
+    """
+    if ups_log is None:
+        ups_log = np.arange(i + 1) * (log_u - log_d)
+    log_spot = (np.log(S) + i * log_d) + ups_log[: i + 1]
+    return np.exp(np.clip(log_spot, -_MAX_LOG_SPOT, _MAX_LOG_SPOT))
 
 
 def _induct_put(S, K, T, r, sigma, q, steps, american, method, keep_levels=False):
@@ -157,8 +164,12 @@ def _induct_put(S, K, T, r, sigma, q, steps, american, method, keep_levels=False
     dt, u, d, p = _lattice(S, K, T, r, sigma, q, steps, method)
     disc = np.exp(-r * dt)
     log_u, log_d = np.log(u), np.log(d)
-    spot = _spots(S, log_u, log_d, steps)
+    ups_log = np.arange(steps + 1) * (log_u - log_d)
+    spot = _spots(S, log_u, log_d, steps, ups_log)
     values = np.maximum(K - spot, 0.0)
+    # Whether every node of the lattice lies strictly inside the caps (and so is a normal float).
+    log_s = np.log(S)
+    uncapped = log_s + steps * min(log_d, 0.0) > -_MAX_LOG_SPOT and log_s + steps * max(log_u, 0.0) < _MAX_LOG_SPOT
     inv_d = 1.0 / d
     levels = {}
     boundary_steps: list[int] = []
@@ -166,9 +177,17 @@ def _induct_put(S, K, T, r, sigma, q, steps, american, method, keep_levels=False
     for i in range(steps - 1, -1, -1):
         values = disc * (p * values[1:] + (1.0 - p) * values[:-1])
         if american:
-            # Level-i spots from level i+1 (one multiply instead of an exp per node), capped like _spots.
-            # The root is set exactly so that immediate exercise is worth exactly the intrinsic value.
-            spot = np.minimum(spot[:-1] * inv_d, _MAX_SPOT) if i else np.array([float(S)])
+            # Level-i spots are level i+1's divided by d (one multiply per node) while no node is capped.
+            # Otherwise they come from their logarithms: dividing capped spots would carry the cap back towards
+            # the root (a bottom node held at e^-700, or one rounded to zero, would make exercising worth the
+            # whole strike at nodes far above it). The root is exact, so immediate exercise there is worth
+            # exactly the intrinsic value.
+            if not i:
+                spot = np.array([float(S)])
+            elif uncapped:
+                spot = spot[:-1] * inv_d
+            else:
+                spot = _spots(S, log_u, log_d, i, ups_log)
             exercise = K - spot
             if keep_levels:
                 gain = exercise - values
@@ -236,7 +255,7 @@ def _induct(S, K, T, r, sigma, q, phi, steps, american, method, keep_levels=Fals
     for i, put_values in put_levels.items():
         ups = np.arange(i + 1)
         levels[i] = np.exp(ups * log_u + (i - ups) * log_d) * put_values[::-1]
-    valid = put_boundary > 0.0
+    valid = put_boundary > K * S / _MAX_SPOT  # the call's critical price K S / b stays on the capped lattice
     return value, levels, (times[valid], K * S / put_boundary[valid]), (log_u, log_d)
 
 
@@ -381,16 +400,24 @@ def extrapolated_price(
 ) -> float:
     """Converged value: Richardson extrapolation of Leisen-Reimer trees with ``steps`` and twice as many.
 
-    With early exercise the Leisen-Reimer error is close to ``c / n``, so ``(n2 V2 - n1 V1) / (n2 - n1)``
-    removes its leading term; at the defaults the result agrees with 20,000-step references to about 1e-5.
-    European values use the closed form.
+    With early exercise the Leisen-Reimer error is usually close to ``c / n``, so ``(n2 V2 - n1 V1) / (n2 - n1)``
+    removes its leading term: at the defaults the result agrees with the 20,000-step references in the tests to
+    about 1e-5. Where the tree's error is irregular (e.g. a put at very low volatility with a high rate) the
+    extrapolation is only about as accurate as the finer tree. The result is kept within the no-arbitrage bounds
+    of an American option: at least the European value and the intrinsic value, at most the spot (call) or the
+    strike (put). European values use the closed form.
     """
+    european = float(bs.price(S, K, T, r, sigma, q, option_type))
     if not american:
-        return float(bs.price(S, K, T, r, sigma, q, option_type))
-    _, _, n1 = _validate(S, K, sigma, option_type, steps, "lr")
+        return european
+    phi, _, n1 = _validate(S, K, sigma, option_type, steps, "lr")
     _, _, n2 = _validate(S, K, sigma, option_type, min(2 * n1, _MAX_STEPS), "lr")
     v1 = price(S, K, T, r, sigma, q, option_type, n1, True, "lr")
     if n2 <= n1:
-        return v1
-    v2 = price(S, K, T, r, sigma, q, option_type, n2, True, "lr")
-    return float((n2 * v2 - n1 * v1) / (n2 - n1))
+        value = v1
+    else:
+        v2 = price(S, K, T, r, sigma, q, option_type, n2, True, "lr")
+        value = (n2 * v2 - n1 * v1) / (n2 - n1)
+    lower = max(european, phi * (S - K))
+    upper = S if phi > 0 else K
+    return float(min(max(value, lower), upper))

@@ -244,3 +244,54 @@ def test_exercise_boundary_of_an_american_call_with_dividends_falls_towards_the_
 def test_extrapolated_price_matches_converged_references(S, K, T, r, sigma, q, kind, value):
     assert bn.extrapolated_price(S, K, T, r, sigma, q, kind) == pytest.approx(value, abs=2e-5)
     assert bn.extrapolated_price(S, K, T, r, sigma, q, kind, american=False) == bs.price(S, K, T, r, sigma, q, kind)
+
+
+# --- Regression tests for the fourth review round -----------------------------------------------------------------
+
+
+def _perpetual_american(S, K, r, q, sigma, option_type):
+    """Perpetual American option (Merton, 1973): an upper bound for the same option with any finite expiry."""
+    a = (r - q) / sigma**2 - 0.5
+    root = np.sqrt(a**2 + 2 * r / sigma**2)
+    power = -a + root if option_type == "call" else -a - root
+    boundary = power * K / (power - 1)
+    return bs.option_sign(option_type) * (boundary - K) * (S / boundary) ** power
+
+
+@pytest.mark.parametrize("method", ["crr", "lr"])
+@pytest.mark.parametrize(
+    ("sigma", "q", "option_type"), [(5.5, 0.02, "call"), (6.0, 0.02, "call"), (8.0, 0.02, "call"), (6.0, 0.0, "put")]
+)
+def test_american_value_stays_right_when_the_bottom_nodes_of_the_lattice_are_capped(method, sigma, q, option_type):
+    # With ln S - sigma sqrt(T n) below about -745 the bottom spots rounded to zero, and the American induction
+    # carried the zeros back to the root: exercising was then worth the whole strike at every node, 99.99 for the
+    # call (100 e^(-q dt)) and 99.975 for the put, both above the perpetual American value.
+    bound = _perpetual_american(100, 100, 0.05, q, sigma, option_type)
+    values = [bn.price(100, 100, 10, 0.05, sigma, q, option_type, n, True, method) for n in (1000, 1500, 2000)]
+    assert max(values) < bound
+    assert np.all(np.diff(values) > 0) and np.ptp(values) < 0.05  # converging towards the bound, not jumping
+
+
+def test_american_call_on_a_capped_lattice_matches_its_converged_value():
+    # Perpetual bound 99.1388; the 500-step tree (not capped) gives 99.09.
+    assert bn.price(100, 100, 10, 0.05, 6.0, 0.02, "call", 2000, True, "crr") == pytest.approx(99.13, abs=0.01)
+
+
+@pytest.mark.parametrize("sigma", [4.0, 4.5, 5.0])
+@pytest.mark.parametrize(("q", "option_type"), [(0.0, "put"), (0.02, "call")])
+def test_extrapolated_price_on_a_wide_lattice_stays_close_to_the_tree(sigma, q, option_type):
+    # Inside the sidebar's range (vol up to 500%, 10 years) the 4,003-step tree hit the zero-spot bug and the
+    # extrapolation amplified it: the put's "Converged" line read 103.71 at sigma = 4, above its strike of 100.
+    value = bn.extrapolated_price(100, 100, 10, 0.05, sigma, q, option_type)
+    assert value == pytest.approx(bn.price(100, 100, 10, 0.05, sigma, q, option_type, 2001, True, "lr"), abs=0.02)
+    assert value < 100.0
+
+
+@pytest.mark.parametrize("S", [30.0, 300.0])
+def test_extrapolated_price_stays_within_the_no_arbitrage_bounds(S, monkeypatch):
+    # Without early exercise (a call with no dividends) the American value is the European one; the extrapolation
+    # of two trees used to land up to 4e-8 below it.
+    assert bn.extrapolated_price(S, 100, 1, 0.0, 0.5, 0, "call") == bs.price(S, 100, 1, 0.0, 0.5, 0, "call")
+    # A finer tree that overshot would not lift the value above the strike (put) or the spot (call).
+    monkeypatch.setattr(bn, "price", lambda *args: 2.0 * args[0] if args[7] > 2001 else 0.9 * args[0])
+    assert bn.extrapolated_price(S, 100, 1, 0.05, 0.3, 0.0, "call") == S

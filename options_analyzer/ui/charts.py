@@ -130,7 +130,7 @@ def exercise_boundary_chart(boundaries: dict, strike: float):
     return apply_layout(fig, None, "Days from today", "Critical spot price ($)")
 
 
-def paths_chart(times_days, paths, strike: float, mean_path=None, mean_label: str = "Mean path"):
+def paths_chart(times_days, paths, strike: float, mean_path=None, mean_label: str = "Risk-neutral mean (forward)"):
     fig = go.Figure()
     for i, path in enumerate(paths):
         fig.add_trace(
