@@ -16,6 +16,18 @@ Variance reduction
   ``S e^{-qT}`` is known exactly, is used with the regression-optimal
   coefficient.
 
+Heavy tails
+-----------
+When ``sigma sqrt(T)`` is very large (about 6 or more: hundreds of percent of
+volatility over years), almost every simulated price collapses towards zero
+and the mean of ``S_T`` rests on paths too rare to draw. The sample mean of the
+discounted terminal price then misses ``S e^{-qT}`` by many standard errors,
+and neither the call's payoff nor the control variate can be trusted. That
+gap is checked on every run: beyond 5 standard errors the put, whose payoff is
+bounded by ``K e^{-rT}``, is averaged directly and the call follows from
+put-call parity with the exact forward. Every estimate is also kept within the
+no-arbitrage bounds of a European option.
+
 Calls and puts are priced from the *same* draws (common random numbers) and
 a seeded :class:`numpy.random.Generator` makes results reproducible, so the
 displayed price does not jitter between Streamlit reruns.
@@ -32,10 +44,16 @@ from . import black_scholes as bs
 __all__ = ["MonteCarloResult", "price_european", "scenario_paths", "simulate_paths", "terminal_prices"]
 
 _Z_95 = 1.959963984540054
+#: Largest gap, in standard errors, between the sample mean of the discounted terminal price and its known mean
+#: ``S e^{-qT}`` before the sample is treated as heavy-tailed (see the module docstring). Samples that price
+#: correctly stay within about 3; the failing ones miss by 6 to 1e15.
+_CONTROL_Z_LIMIT = 5.0
 
 
 @dataclass(frozen=True)
 class MonteCarloResult:
+    #: Estimate, kept within the European no-arbitrage bounds ``[max(phi (S e^{-qT} - K e^{-rT}), 0), S e^{-qT}]``
+    #: for a call and ``[..., K e^{-rT}]`` for a put.
     price: float
     #: Standard error of ``price``. NaN when the sample cannot estimate its own error: every simulated price
     #: finished out of the money (all payoffs zero), or every one finished in the money with the control
@@ -43,9 +61,14 @@ class MonteCarloResult:
     std_error: float
     n_paths: int
     antithetic: bool
+    #: Whether the control variate was applied (it is not in a heavy-tailed sample).
     control_variate: bool
     #: Fraction of simulated terminal prices that finished in the money.
     itm_fraction: float = float("nan")
+    #: The sample is heavy-tailed (its discounted terminal prices miss their known mean by more than 5 standard
+    #: errors): the put is the plain average of its payoff and the call follows from put-call parity, with the
+    #: put's standard error.
+    heavy_tailed: bool = False
 
     @property
     def ci95(self) -> tuple[float, float]:
@@ -100,7 +123,9 @@ def price_european(
     Returns a dict ``{option_type: MonteCarloResult}``. The standard error uses
     the unbiased (``ddof=1``) sample deviation of the independent samples
     (pair averages when antithetic sampling is on). It is NaN when the sample
-    cannot estimate it (see :class:`MonteCarloResult`).
+    cannot estimate it (see :class:`MonteCarloResult`). A heavy-tailed sample
+    prices the put directly and the call by put-call parity, whatever
+    ``control_variate`` says (see the module docstring).
     """
     n_paths = int(n_paths)
     if n_paths < 100:
@@ -128,28 +153,49 @@ def price_european(
 
     s_t = terminal_prices(S, T, r, sigma, q, n_paths, seed, antithetic)
     discount = np.exp(-r * T)
-    control = discount * s_t
     control_mean = S * np.exp(-q * T)
+    strike_value = K * discount
+    half = n_paths // 2
 
-    results = {}
-    for kind in option_types:
-        phi = bs.option_sign(kind)
-        y = discount * np.maximum(phi * (s_t - K), 0.0)
-        n_itm = int(np.count_nonzero(y > 0.0))
-        x = control
-        if antithetic:
-            half = n_paths // 2
-            y = 0.5 * (y[:half] + y[half:])
-            x = 0.5 * (x[:half] + x[half:])
-        if control_variate:
+    def samples(values: np.ndarray) -> np.ndarray:
+        """The independent samples: pair averages when antithetic sampling is on."""
+        return 0.5 * (values[:half] + values[half:]) if antithetic else values
+
+    x = samples(discount * s_t)
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        control_z = (x.mean() - control_mean) / (x.std(ddof=1) / np.sqrt(x.size))
+    heavy_tailed = not abs(control_z) <= _CONTROL_Z_LIMIT  # NaN counts as heavy-tailed
+    use_control = control_variate and not heavy_tailed
+
+    def estimate(phi: int) -> tuple[float, float]:
+        """``(price, standard error)`` of the option with sign ``phi`` from its own payoff."""
+        payoff = discount * np.maximum(phi * (s_t - K), 0.0)
+        n_itm = int(np.count_nonzero(payoff > 0.0))
+        y = samples(payoff)
+        if use_control:
             x_centred = x - x.mean()
             var_x = float(np.dot(x_centred, x_centred))
             beta = float(np.dot(x_centred, y - y.mean()) / var_x) if var_x > 0 else 0.0
             y = y - beta * (x - control_mean)
-        estimate = float(y.mean())
-        degenerate = n_itm == 0 or (control_variate and n_itm == n_paths)
-        std_error = float("nan") if degenerate else float(y.std(ddof=1) / np.sqrt(y.size))
-        results[kind] = MonteCarloResult(estimate, std_error, n_paths, antithetic, control_variate, n_itm / n_paths)
+        degenerate = n_itm == 0 or (use_control and n_itm == n_paths)
+        return float(y.mean()), float("nan") if degenerate else float(y.std(ddof=1) / np.sqrt(y.size))
+
+    if heavy_tailed:
+        # The put's payoff is bounded by K e^{-rT}, so its plain average stays reliable; the call follows from
+        # put-call parity with the exact forward and has the same standard error.
+        put, put_error = estimate(-1)
+        by_parity = {"put": (put, put_error), "call": (put + control_mean - strike_value, put_error)}
+
+    results = {}
+    for kind in option_types:
+        phi = bs.option_sign(kind)
+        price, std_error = by_parity[kind] if heavy_tailed else estimate(phi)
+        # Keep the estimate within the European no-arbitrage bounds (a deep out-of-the-money control-variate
+        # estimate can otherwise come out negative).
+        lower = max(phi * (control_mean - strike_value), 0.0)
+        price = min(max(price, lower), control_mean if phi > 0 else strike_value)
+        itm = float(np.count_nonzero(phi * (s_t - K) > 0.0)) / n_paths
+        results[kind] = MonteCarloResult(price, std_error, n_paths, antithetic, use_control, itm, heavy_tailed)
     return results
 
 

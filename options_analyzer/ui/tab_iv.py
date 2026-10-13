@@ -15,7 +15,7 @@ from ..implied_vol import (
     lowest_tree_volatility,
     no_arbitrage_bounds,
 )
-from . import cache, charts
+from . import cache, charts, tab_pricing
 from .format import md, money, pct
 from .inputs import Inputs
 
@@ -131,32 +131,43 @@ def render(inputs: Inputs) -> None:
         vega = bs.greeks(S, K, T, r, max(iv, 1e-6), q, option_type)["vega"] / 100
     intrinsic = max(bs.option_sign(option_type) * (S - K), 0.0)
     gap = (iv - sigma) * 100
-    c = st.columns(4)
-    c[0].metric(
-        "Implied volatility",
-        pct(iv, 3),
-        f"{0.0 if abs(gap) < 0.005 else gap:+.2f} vol pts vs sidebar",
-        border=True,
-        delta_color="off",
-        delta_arrow="off",
-    )
-    c[1].metric(
-        "Model check",
-        money(safe_price(iv), 6),
-        border=True,
-        help="Model value at the implied volatility (should equal the quote).",
-    )
-    c[2].metric("Vega at IV", money(vega, 4), border=True, help="Price change per 1 vol point at the solution.")
-    c[3].metric(
-        "Time value",
-        money(price - intrinsic, 4),
-        border=True,
-        help=md(
-            f"Quote minus intrinsic value max({'S − K' if option_type == 'call' else 'K − S'}, 0) = "
-            f"{money(intrinsic, 4)}. A European option can trade below intrinsic (deep in-the-money puts, calls "
-            f"on high-dividend stocks), so this can be negative. The quote is {money(price - lower, 4)} above the "
-            "no-arbitrage lower bound."
-        ),
+    check = safe_price(iv)
+    # The quote's own four decimals on the card; the full value and its distance from the quote in the help.
+    distance = "equal to the quote" if check == price else f"${abs(check - price):.1e} from the quote"
+    check_detail = f": {money(check, 6)}, {distance}" if np.isfinite(check) else ""
+    # The same wrapping pairs as the price cards, so no value is cut off at laptop or phone width.
+    tab_pricing.card_row(
+        "iv_cards",
+        ("iv_cards_solution", "iv_cards_option"),
+        [
+            (
+                "Implied volatility",
+                pct(iv, 3),
+                {
+                    "delta": f"{0.0 if abs(gap) < 0.005 else gap:+.2f} vol pts vs sidebar",
+                    "delta_color": "off",
+                    "delta_arrow": "off",
+                },
+            ),
+            (
+                "Model check",
+                money(check, 4),
+                {"help": md(f"Model value at the implied volatility (should equal the quote){check_detail}.")},
+            ),
+            ("Vega at IV", money(vega, 4), {"help": "Price change per 1 vol point at the solution."}),
+            (
+                "Time value",
+                money(price - intrinsic, 4),
+                {
+                    "help": md(
+                        f"Quote minus intrinsic value max({'S − K' if option_type == 'call' else 'K − S'}, 0) = "
+                        f"{money(intrinsic, 4)}. A European option can trade below intrinsic (deep in-the-money "
+                        "puts, calls on high-dividend stocks), so this can be negative. The quote is "
+                        f"{money(price - lower, 4)} above the no-arbitrage lower bound."
+                    )
+                },
+            ),
+        ],
     )
     if iv == 0.0:
         st.warning(

@@ -240,6 +240,39 @@ def test_exercise_boundary_of_an_american_call_with_dividends_falls_towards_the_
     assert spots[-1] == pytest.approx(125.0, abs=1.5)  # max(K, rK/q) = 125 at expiry
 
 
+@pytest.mark.parametrize(
+    ("T", "r", "sigma", "q", "kind", "steps", "method"),
+    [
+        (30 / 365, 0.0, 0.2, 0.0, "put", 2000, "lr"),
+        (30 / 365, 0.0, 0.2, 0.0, "call", 2000, "lr"),
+        (30 / 365, 1e-13, 0.2, 0.0, "put", 2000, "lr"),  # a rate within rounding of zero: a premium of 1e-13
+        (1, 0.0, 0.1, 0.0, "put", 501, "lr"),
+        (1, 0.0, 0.1, 0.0, "call", 501, "lr"),
+        (5, 0.0, 1.0, 0.03, "put", 501, "lr"),
+        (5, 0.05, 1.0, 0.0, "call", 501, "lr"),
+        (1, 0.05, 1.0, 0.0, "call", 2000, "crr"),
+    ],
+)
+def test_no_exercise_boundary_where_early_exercise_is_never_optimal(T, r, sigma, q, kind, steps, method):
+    # A put with r <= 0 and q >= 0 (and a call with q <= 0 and r >= 0) is worth its European value, so it has no
+    # exercise region. Rounding noise of about 1e-14 in the exercise gain drew fake boundaries: put 67-99.5 and call
+    # 100.5-148.5 at r = 0, and a call "boundary" near 1e15 at 5% and 100% volatility over five years. A gain within
+    # 1e-12 of the strike is not counted as exercise either.
+    res = bn.price_with_greeks(100, 100, T, r, sigma, q, kind, steps, True, method)
+    european = bn.price(100, 100, T, r, sigma, q, kind, steps, False, method)
+    assert res.price == pytest.approx(european, abs=1e-9)  # no early-exercise premium on the same tree
+    assert res.exercise_boundary[0].size == 0 and res.exercise_boundary[1].size == 0
+
+
+def test_real_exercise_boundary_survives_next_to_a_call_that_is_never_exercised():
+    # Five years at 100% volatility and a 5% rate: the put has a real boundary between its perpetual critical
+    # price K beta / (beta - 1) = 100 / 11 (beta = -0.1) and the strike, while the call has none.
+    times, spots = bn.price_with_greeks(100, 100, 5, 0.05, 1.0, 0, "put", 501, True, "lr").exercise_boundary
+    assert len(times) > 400 and np.all(np.diff(spots) >= 0.0)
+    assert np.all(spots > 100 / 11) and np.all(spots < 100)
+    assert spots[0] == pytest.approx(11.3, abs=0.5) and spots[-1] == pytest.approx(78.3, abs=1.0)
+
+
 @pytest.mark.parametrize(("S", "K", "T", "r", "sigma", "q", "kind", "value"), AMERICAN_REFERENCE)
 def test_extrapolated_price_matches_converged_references(S, K, T, r, sigma, q, kind, value):
     assert bn.extrapolated_price(S, K, T, r, sigma, q, kind) == pytest.approx(value, abs=2e-5)

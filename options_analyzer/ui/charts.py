@@ -78,7 +78,8 @@ def price_heatmap(spots, vols, values, title: str, colorscale: str = "Viridis"):
 
     Label and cell precision follow the grid: low-priced underlyings (penny stocks, FX rates) and very low
     volatilities get more decimals, so neighbouring rows and columns never share a label (Plotly would merge
-    them) and the cell values stay readable.
+    them) and the cell values stay readable. There is no colour scale: it would repeat the cell values and take
+    the width the cells need (Plotly shrinks the cell text to fit its cell).
     """
     values = np.asarray(values, dtype=float)
     spot_dp = _decimals_for_step(spots, 2)
@@ -93,7 +94,7 @@ def price_heatmap(spots, vols, values, title: str, colorscale: str = "Viridis"):
             text=np.vectorize(lambda v: f"{v:,.{value_dp}f}")(values),
             texttemplate="%{text}",
             colorscale=colorscale,
-            colorbar=dict(title="Value"),
+            showscale=False,
             hovertemplate=f"Spot %{{x}}<br>Vol %{{y}}<br>Value %{{z:,.{value_dp + 2}f}}<extra></extra>",
         )
     )

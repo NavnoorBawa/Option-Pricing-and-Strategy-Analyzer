@@ -16,6 +16,10 @@ from .inputs import Inputs
 
 #: Monte Carlo scenarios drawn on the sample-paths chart.
 SAMPLE_PATHS = 60
+#: What a heavy-tailed Monte Carlo sample does instead of the usual estimator (see ``monte_carlo``).
+HEAVY_TAIL_NOTE = (
+    "Heavy-tailed sample (very large σ√T): the put is averaged directly and the call follows from put-call parity"
+)
 
 
 @dataclass(frozen=True)
@@ -62,7 +66,8 @@ def compute_prices(inputs: Inputs) -> Prices:
     if model.kind == "monte_carlo":
         mc = cache.mc_results(S, K, T, r, sigma, q, model.n_paths, model.seed, model.antithetic, model.control_variate)
         notes = {
-            kind: (
+            kind: (f"{HEAVY_TAIL_NOTE}. " if res.heavy_tailed else "")
+            + (
                 f"95% CI {money(res.ci95[0], 3)} – {money(res.ci95[1], 3)} · SE {money(res.std_error, 4)}"
                 if np.isfinite(res.std_error)
                 else "Every simulated price finished on one side of the strike: the error cannot be estimated"
@@ -109,10 +114,12 @@ def _model_card(inputs: Inputs, prices: Prices) -> tuple[str, str, str, str]:
     if model.kind == "monte_carlo":
         se = {kind: prices.mc[kind].std_error for kind in ("call", "put")}
         finite = [v for v in se.values() if np.isfinite(v)]
+        heavy = any(res.heavy_tailed for res in prices.mc.values())
         return (
             "Std. error",
             money(max(finite), 4) if finite else "–",
-            f"standard error: call {money(se['call'], 4)}, put {money(se['put'], 4)}; 95% CI = price ± 1.96 SE",
+            f"standard error: call {money(se['call'], 4)}, put {money(se['put'], 4)}; 95% CI = price ± 1.96 SE"
+            + (f". {HEAVY_TAIL_NOTE}." if heavy else ""),
             "Standard error of the simulated prices (the larger of the call's and the put's is shown); it falls "
             "as one over the square root of the number of paths.",
         )
@@ -130,17 +137,17 @@ def _model_card(inputs: Inputs, prices: Prices) -> tuple[str, str, str, str]:
     )
 
 
-#: Headline-card text in Streamlit's Source Sans: values at 36 px, labels at 14 px. Digits (tabular) and "$" are
-#: half an em wide; the narrower and wider characters are listed. Labels average under 0.47 em per character.
+#: Headline-card text in Streamlit's Source Sans: values at 36 px, labels (and deltas) at 14 px. Digits (tabular)
+#: and "$" are half an em wide; the narrower and wider characters are listed. Labels average under 0.47 em per
+#: character.
 _VALUE_PX, _LABEL_PX, _LABEL_EM = 36.0, 14.0, 0.47
 _CHAR_EM = {",": 0.25, ".": 0.25, " ": 0.2, "-": 0.31, "%": 0.83}
 #: Card padding and border, the label's help icon, and the gap between cards (gap="small").
 _CARD_CHROME_PX, _HELP_ICON_PX, _CARD_GAP_PX = 32.0, 22.0, 16.0
 #: Smallest value size on a narrow screen, where the values shrink so that the cards stay two by two.
 _MIN_VALUE_PX = 20.0
-
-_PAIRS = ".st-key-price_cards > :has(> .st-key-price_cards_prices, > .st-key-price_cards_model)"
-_CARDS = ".st-key-price_cards_prices > *, .st-key-price_cards_model > *"
+#: Keys of the headline price-card row and of its two pairs.
+PRICE_CARDS = ("price_cards", ("price_cards_prices", "price_cards_model"))
 
 
 def _value_em(value: str) -> float:
@@ -148,72 +155,95 @@ def _value_em(value: str) -> float:
     return sum(_CHAR_EM.get(c, 0.5) for c in value)
 
 
-def _card_width(label: str, value: str, value_px: float = _VALUE_PX, wrap_label: bool = False) -> float:
-    """Width in px a headline card needs to show its value on one line and its label on one line (or, with
-    ``wrap_label``, one word per line)."""
-    longest = max(len(word) for word in label.split()) if wrap_label else len(label)
-    label_px = _LABEL_PX * _LABEL_EM * longest + _HELP_ICON_PX
-    return max(value_px * _value_em(value), label_px) + _CARD_CHROME_PX
+def _card_width(
+    label: str, value: str, value_px: float = _VALUE_PX, wrap_label: bool = False, delta: str = ""
+) -> float:
+    """Width in px a headline card needs to show its value on one line and its label and delta (the small line
+    under the value, if any) on one line each (or, with ``wrap_label``, one word per line)."""
+
+    def characters(text: str) -> int:
+        return max((len(word) for word in text.split()), default=0) if wrap_label else len(text)
+
+    label_px = _LABEL_PX * _LABEL_EM * characters(label) + _HELP_ICON_PX
+    delta_px = _LABEL_PX * _LABEL_EM * characters(delta)
+    return max(value_px * _value_em(value), label_px, delta_px) + _CARD_CHROME_PX
 
 
-def _cards_style(cards: list[tuple[str, str]]) -> str:
+def _cards_style(
+    cards: list[tuple[str, ...]], key: str = PRICE_CARDS[0], pair_keys: tuple[str, str] = PRICE_CARDS[1]
+) -> str:
     """Flex sizes that wrap the four cards in pairs: 4 across, then 2 + 2, then 1 per row (never 3 + 1).
+
+    ``cards`` holds ``(label, value)`` or ``(label, value, delta)``; ``key`` is the row's container key and
+    ``pair_keys`` those of its two pairs (see :func:`card_row`).
 
     Every card is based on the widest card's width, and each pair on two of them side by side, so the row moves
     the second pair to its own line before either pair has to stack its cards, and both pairs stack at the same
     width. (Streamlit bases each card on its own content and each container on a fixed 8rem, so on its own the
     row wraps 3 + 1, or stacks one pair's cards but not the other's.)
 
-    Where the row is narrower than one pair at full size (a phone), the labels wrap and the values shrink with
-    the row so that the widest still fits half of it, down to 20 px: the cards stay two by two on any phone
-    instead of stacking into four full-width cards that push the tabs below the first screen. The sizes follow
-    the row's own width (a container query), so an open sidebar on a narrow window is covered too.
+    Where the row is narrower than one pair at full size (a phone), the labels and deltas wrap and the values
+    shrink with the row so that the widest still fits half of it, down to 20 px: the cards stay two by two on any
+    phone instead of stacking into four full-width cards that push the tabs below the first screen. The sizes
+    follow the row's own width (a container query), so an open sidebar on a narrow window is covered too.
     """
-    card = int(np.ceil(max(_card_width(label, value) for label, value in cards)))
+
+    def width(card: tuple[str, ...], value_px: float = _VALUE_PX, wrap: bool = False) -> float:
+        label, value, *delta = card
+        return _card_width(label, value, value_px, wrap, *delta)
+
+    card = int(np.ceil(max(width(c) for c in cards)))
     pair = 2 * card + int(_CARD_GAP_PX)
-    compact = int(np.ceil(max(_card_width(label, value, _MIN_VALUE_PX, True) for label, value in cards)))
-    em = max(_value_em(value) for _, value in cards)
+    compact = int(np.ceil(max(width(c, _MIN_VALUE_PX, True) for c in cards)))
+    em = max(_value_em(c[1]) for c in cards)
     # Each card of a full-width pair is half the row less half the gap; its value gets that less the padding.
     value_space = f"50cqw - {_CARD_GAP_PX / 2 + _CARD_CHROME_PX:g}px"
+    row, name = f".st-key-{key}", key.replace("_", "-")
+    first, second = (f".st-key-{k}" for k in pair_keys)
+    pairs = f"{row} > :has(> {first}, > {second})"
+    each_card = f"{first} > *, {second} > *"
     return (
         "<style>"
-        ".st-key-price_cards { container: price-cards / inline-size; } "
-        f"{_PAIRS} {{ flex: 1 1 {pair}px !important; }} "
-        f"{_CARDS} {{ flex: 1 1 {card}px !important; }} "
-        f"@container price-cards (width < {pair}px) {{ "
-        f"{_PAIRS} {{ flex-basis: {2 * compact + int(_CARD_GAP_PX)}px !important; }} "
-        f"{_CARDS} {{ flex-basis: {compact}px !important; }} "
-        ".st-key-price_cards_prices, .st-key-price_cards_model { align-items: stretch; } "
-        ".st-key-price_cards [data-testid='stMetric'] { height: 100%; } "
-        ".st-key-price_cards [data-testid='stMetricLabel'] :is([data-testid='stMarkdownContainer'], p) "
-        "{ white-space: normal; } "
-        ".st-key-price_cards [data-testid='stMetricValue'] "
+        f"{row} {{ container: {name} / inline-size; }} "
+        f"{pairs} {{ flex: 1 1 {pair}px !important; }} "
+        f"{each_card} {{ flex: 1 1 {card}px !important; }} "
+        f"@container {name} (width < {pair}px) {{ "
+        f"{pairs} {{ flex-basis: {2 * compact + int(_CARD_GAP_PX)}px !important; }} "
+        f"{each_card} {{ flex-basis: {compact}px !important; }} "
+        f"{first}, {second} {{ align-items: stretch; }} "
+        f"{row} [data-testid='stMetric'] {{ height: 100%; }} "
+        f"{row} :is([data-testid='stMetricLabel'], [data-testid='stMetricDelta']) "
+        ":is([data-testid='stMarkdownContainer'], p) { white-space: normal; } "
+        f"{row} [data-testid='stMetricValue'] "
         f"{{ font-size: clamp({_MIN_VALUE_PX:g}px, calc(({value_space}) / {em:g}), {_VALUE_PX:g}px); }} "
         "}"
         "</style>"
     )
 
 
+def card_row(key: str, pair_keys: tuple[str, str], cards: list[tuple[str, str, dict]]) -> None:
+    """Four bordered metric cards ``(label, value, metric options)`` in two pairs that wrap together: 4 across,
+    2 + 2 or 1 per row (sizes in :func:`_cards_style`), so no value is cut off at any width."""
+    texts = [(label, value, str(options.get("delta") or "")) for label, value, options in cards]
+    st.html(_cards_style(texts, key, pair_keys))
+    row = st.container(horizontal=True, gap="small", key=key)
+    pairs = tuple(row.container(horizontal=True, gap="small", key=k) for k in pair_keys)
+    for i, (label, value, options) in enumerate(cards):
+        pairs[i // 2].metric(label, value, border=True, **options)
+
+
 def render_price_cards(inputs: Inputs, prices: Prices) -> None:
     S, T, r, q = inputs.spot, inputs.expiry, inputs.rate, inputs.dividend_yield
     forward = S * np.exp((r - q) * T)
     label, value, caption, help_text = _model_card(inputs, prices)
-    # Two pairs of cards in a wrapping row (sizes in _cards_style). The per-option notes are in the tooltips so
-    # the cards stay short on narrow screens.
+    # The per-option notes are in the tooltips so the cards stay short on narrow screens.
     cards = [
         ("Call value", money(prices.call, 4), md(prices.call_note)),
         ("Put value", money(prices.put, 4), md(prices.put_note)),
         ("Forward price", money(forward, 4), f"F = S·e^((r−q)T). Discount factor e^(−rT) = {np.exp(-r * T):.6f}."),
         (label, value, md(help_text)),
     ]
-    st.html(_cards_style([(name, text) for name, text, _ in cards]))
-    row = st.container(horizontal=True, gap="small", key="price_cards")
-    pairs = (
-        row.container(horizontal=True, gap="small", key="price_cards_prices"),
-        row.container(horizontal=True, gap="small", key="price_cards_model"),
-    )
-    for i, (name, text, help_text) in enumerate(cards):
-        pairs[i // 2].metric(name, text, border=True, help=help_text)
+    card_row(*PRICE_CARDS, [(name, text, {"help": help_text}) for name, text, help_text in cards])
     st.caption(md(f"{inputs.model.label} · {caption}"))
 
 
@@ -305,10 +335,10 @@ def _heatmaps(inputs: Inputs) -> None:
     vols = np.maximum(inputs.volatility * np.linspace(1 - vol_span, 1 + vol_span, 9), 1e-4)
     grid_s, grid_v = np.meshgrid(spots, vols)
     args = (inputs.strike, inputs.expiry, inputs.rate)
-    left, right = st.columns(2)
-    for col, kind in ((left, "call"), (right, "put")):
+    # One above the other at full width: side by side, each cell was too narrow for its value (5 to 9 px text).
+    for kind in ("call", "put"):
         values = bs.price(grid_s, args[0], args[1], args[2], grid_v, inputs.dividend_yield, kind)
-        col.plotly_chart(
+        st.plotly_chart(
             charts.price_heatmap(
                 spots, vols, values, f"{kind.capitalize()} value ($)", "Blues" if kind == "call" else "Oranges"
             ),
@@ -497,6 +527,7 @@ def _monte_carlo_diagnostics(inputs: Inputs, prices: Prices) -> None:
     st.dataframe(
         pd.DataFrame(rows),
         hide_index=True,
+        placeholder="",  # undefined values are left blank, as the caption says (Streamlit would write "None")
         column_config={
             c: st.column_config.NumberColumn(format="%.4f")
             for c in ("Monte Carlo", "Std. error", "95% CI low", "95% CI high", "BSM")
@@ -510,7 +541,16 @@ def _monte_carlo_diagnostics(inputs: Inputs, prices: Prices) -> None:
         "Terminal prices are sampled exactly from the log-normal distribution (no time-stepping bias). "
         "|Error / SE| below about 2 is consistent with an unbiased estimator. The standard error is left blank "
         "when the sample cannot estimate it: every price finished out of the money, or every one in the money "
-        "with the control variate on."
+        "with the control variate on. At very large σ√T (hundreds of percent of volatility over years) the mean of "
+        "the price at expiry rests on scenarios too rare to draw: when the simulated discounted prices miss their "
+        "known mean S·e^(−qT) by more than 5 standard errors, the put, whose payoff is at most its strike, is "
+        "averaged directly (no control variate) and the call follows from put-call parity. Every estimate is kept "
+        "within the no-arbitrage bounds of a European option."
+        + (
+            " This sample is heavy-tailed: the prices above come from the put's direct average and parity."
+            if any(res.heavy_tailed for res in prices.mc.values())
+            else ""
+        )
     )
 
 
@@ -534,6 +574,9 @@ def render(inputs: Inputs, prices: Prices) -> None:
         table.drop(columns="Order"),
         hide_index=True,
         column_config={
+            # A fixed width: the grid sizes columns from the first rows it draws (and drops the longest name as an
+            # outlier), which cut "Epsilon (dividend rho) ε" and, after the toggle, "Vomma (volga)" on phones.
+            "Greek": st.column_config.TextColumn(width="medium"),
             "Call": st.column_config.NumberColumn(format="%.6f"),
             "Put": st.column_config.NumberColumn(format="%.6f"),
         },

@@ -174,6 +174,14 @@ def _induct_put(S, K, T, r, sigma, q, steps, american, method, keep_levels=False
     levels = {}
     boundary_steps: list[int] = []
     boundary_spots: list[float] = []
+    # With r <= 0 and q >= 0 a put is never exercised early: on the risk-neutral lattice its continuation value is
+    # at least K e^(-r tau) - S e^(-q tau) >= K - S (equal deep in the money at r = 0, where only rounding decides
+    # the sign of the exercise gain). Through C(S, K; r, q) = P(K, S; q, r) this also covers a call with r >= 0 and
+    # q <= 0 (whose swapped lattice gains -S (1 - e^(-r dt)) at its tiny bottom spots, which can round above zero).
+    # Elsewhere a gain within rounding of zero (1e-12 of the strike) is not counted as exercise either, so a rate
+    # within rounding of zero behaves like a zero rate.
+    record_boundary = keep_levels and not (r <= 0.0 and q >= 0.0)
+    tolerance = 1e-12 * K
     for i in range(steps - 1, -1, -1):
         values = disc * (p * values[1:] + (1.0 - p) * values[:-1])
         if american:
@@ -189,16 +197,17 @@ def _induct_put(S, K, T, r, sigma, q, steps, american, method, keep_levels=False
             else:
                 spot = _spots(S, log_u, log_d, i, ups_log)
             exercise = K - spot
-            if keep_levels:
+            if record_boundary:
                 gain = exercise - values
-                exercised = gain > 0.0
+                exercised = gain > tolerance
                 # Record the boundary only where it is interior to the level: if the top node is exercised
                 # the boundary lies beyond the lattice (the spot started inside the exercise region).
                 if exercised.any() and not exercised[-1]:
                     k = int(np.flatnonzero(exercised)[-1])
                     # The exercise gain is positive at node k and not at node k+1: take the spot where its
-                    # linear interpolant crosses zero (exercising a put is only ever optimal below K).
-                    weight = gain[k] / (gain[k] - gain[k + 1])
+                    # linear interpolant crosses zero (exercising a put is only ever optimal below K). A gain at
+                    # node k+1 inside the tolerance keeps the crossing between the two nodes.
+                    weight = min(gain[k] / (gain[k] - gain[k + 1]), 1.0)
                     boundary_steps.append(i)
                     boundary_spots.append(min(spot[k] + weight * (spot[k + 1] - spot[k]), K))
             values = np.maximum(values, exercise)
