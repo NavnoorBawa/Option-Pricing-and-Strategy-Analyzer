@@ -473,7 +473,8 @@ LEGS_TABLE_DECIMALS = {
     "Vega/pt": 2,
 }
 #: Whole-position columns of the legs table. Like the metric cards, they show fewer decimals as their largest value
-#: grows (whole dollars from $10,000), so that an index-sized position fits the page on a laptop.
+#: grows (whole dollars from $10,000; the narrower dollar cards switch at $1,000), so that an index-sized position
+#: fits the page on a laptop.
 LEGS_TABLE_DOLLARS = ("Cost", "Theta/day", "Vega/pt")
 LEGS_TABLE_COUNTS = ("Delta", "Gamma")
 
@@ -561,7 +562,7 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
     if metrics.max_loss < 0:
         c[2].metric(
             "Max loss",
-            "Cannot lose",
+            "No loss",
             border=True,
             help=md(f"The position cannot lose: it makes at least {money(-loss)} at the front expiry."),
         )

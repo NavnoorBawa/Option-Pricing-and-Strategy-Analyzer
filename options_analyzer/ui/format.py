@@ -26,7 +26,7 @@ def number(value: float, decimals: int) -> str:
 
 def shown_decimals(size: float, decimals: int) -> int:
     """Decimals that keep a number of magnitude ``size`` short: ``decimals`` below 1,000, at most two below
-    10,000 and none from 10,000. Metric cards and the whole-position columns of the legs table use it."""
+    10,000 and none from 10,000. The share and gamma cards and the whole-position columns of the legs table use it."""
     if round(size, decimals) < 1e3:
         return decimals
     return min(decimals, 2) if round(size, 2) < 1e4 else 0
@@ -37,26 +37,27 @@ SHORT_SCALES = ((1e6, "M"), (1e9, "B"), (1e12, "T"))
 
 
 def _scaled(value: float, prefix: str, signed: bool) -> str:
-    """``1.23M``, ``1.23B`` or ``1.23T`` (with ``prefix`` after the sign), and ``1.23e+15`` beyond."""
+    """``1.23M``, ``1.23B`` or ``1.23T`` (with ``prefix`` after the sign), and ``1.2e+15`` beyond."""
     size = abs(value)
     sign = "-" if value < 0 else ("+" if signed else "")
     for scale, suffix in SHORT_SCALES:
         if round(size / scale, 2) < 1000:
             return f"{sign}{prefix}{size / scale:.2f}{suffix}"
-    return f"{sign}{prefix}{size:.2e}"
+    return f"{sign}{prefix}{size:.1e}"
 
 
 def money_short(value: float, signed: bool = False) -> str:
-    """Dollar amount short enough for a metric card at laptop width: at most nine characters and a sign.
+    """Dollar amount short enough for a metric card at laptop width, sign included: at most nine characters.
 
-    Cents below $10,000, whole dollars below a million, then ``$1.23M``, ``$1.23B`` and ``$1.23T``, and
-    scientific notation (``$1.23e+15``) from a thousand trillion. Show the exact amount next to it (the help).
+    Cents below $1,000, whole dollars below a million, then ``$1.23M``, ``$1.23B`` and ``$1.23T``, and
+    scientific notation (``$1.2e+15``) from a thousand trillion. Show the exact amount next to it (the help).
+    The sign counts: ``+`` is as wide as a digit, so ``+$2,737.18`` would not fit where ``-$2,737.18`` does.
     """
     if value is None or not math.isfinite(value):
         return money(value, 2, signed)
     if round(abs(value)) >= 1e6:
         return _scaled(value, "$", signed)
-    return money(value, shown_decimals(abs(value), 2), signed)
+    return money(value, 2 if round(abs(value), 2) < 1e3 else 0, signed)
 
 
 def number_short(value: float, decimals: int) -> str:

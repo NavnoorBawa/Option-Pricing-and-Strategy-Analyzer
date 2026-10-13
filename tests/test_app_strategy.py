@@ -350,7 +350,7 @@ def test_probability_of_profit_is_not_a_certainty_when_the_position_can_lose_or_
     at = _app(days=7, strike=60, strategy_category="Single option")
     at.selectbox(key="strategy_Single option").set_value("Short Put").run()
     _ok(at)
-    assert _metric(at, "Max loss").value == "$6,000.00"
+    assert _metric(at, "Max loss").value == "$6,000"  # whole dollars from $1,000 on a card
     assert _metric(at, "Probability of profit").value == ">99.9%"
     at = _app(days=7, strike=150)
     assert _metric(at, "Max profit").value.startswith("$")
@@ -387,28 +387,103 @@ def test_large_amounts_are_shortened_with_the_exact_value_in_the_help():
     assert "Exact: \\$215,715" in premium.proto.help
 
 
+#: Advance widths (px) of the metric-card value font (Source Sans, 36 px), measured in Chromium. Digits, ``$`` and
+#: ``+`` are equally wide; ``-``, ``,`` and ``.`` are narrower. The model leaves out kerning, which only narrows.
+CARD_GLYPHS = {
+    **dict.fromkeys("0123456789$+<>", 17.892),
+    "-": 11.196,
+    ",": 8.964,
+    ".": 8.964,
+    "%": 29.664,
+    "e": 17.856,
+    "M": 26.172,
+    "B": 21.168,
+    "C": 20.556,
+    "T": 19.296,
+    "–": 17.280,
+    " ": 7.200,
+    "N": 23.292,
+    "U": 23.220,
+    "a": 18.144,
+    "d": 19.980,
+    "f": 10.512,
+    "g": 18.144,
+    "i": 8.856,
+    "l": 9.180,
+    "m": 29.844,
+    "n": 19.692,
+    "o": 19.512,
+    "p": 19.980,
+    "r": 12.492,
+    "s": 15.084,
+    "t": 12.168,
+}
+#: Width (px) of a card's value in a row of four at 1,280 px with the sidebar open; a wider value ends in "…".
+CARD_WIDTH = 161.0
+
+
+def _card_width(text: str) -> float:
+    return sum(CARD_GLYPHS[c] for c in text)
+
+
+def test_card_width_model_counts_the_sign():
+    # Round-3 verifier: at 1,280 px '+$2,737.18' measured 161.08 px in its 161 px card and was cut to '+$2,737.…',
+    # while '-$2,737.18' (154.4 px) fitted; counting characters without the sign missed it.
+    assert _card_width("+$2,737.18") == pytest.approx(161.08, abs=0.02)
+    assert _card_width("+$2,737.18") > CARD_WIDTH > _card_width("-$2,737.18")
+    assert _card_width("Cannot lose") > CARD_WIDTH  # 178 px: cut to 'Cannot l…'
+
+
 @pytest.mark.parametrize(
     ("value", "signed", "text"),
     [
-        (9_999.99, False, "$9,999.99"),
-        (9_999.996, False, "$10,000"),
+        (999.99, True, "+$999.99"),
+        (-999.994, True, "-$999.99"),
+        (999.996, False, "$1,000"),
+        (2_737.18, True, "+$2,737"),
+        (9_999.99, True, "+$10,000"),
         (19_847.23, False, "$19,847"),
         (-97_858.24, True, "-$97,858"),
+        (999_999.4, True, "+$999,999"),
         (999_999.6, False, "$1.00M"),
         (-2_345_678.9, True, "-$2.35M"),
+        (999_994_000.0, True, "+$999.99M"),
         (999_996_000.0, False, "$1.00B"),
         (2_157_150_000.0, True, "+$2.16B"),
         (441_049_535_530_000.0, False, "$441.05T"),
-        (-999_996_000_000_000.0, False, "-$1.00e+15"),
-        (1.5e16, False, "$1.50e+16"),
+        (-999_996_000_000_000.0, False, "-$1.0e+15"),
+        (1.03e15, True, "+$1.0e+15"),
+        (1.5e16, False, "$1.5e+16"),
     ],
 )
 def test_money_short_fits_a_metric_card(value, signed, text):
     # Round-2 verifier: amounts were cut at "M", so the cards showed '$441,049,535.53M' at the input limits, and at
-    # 1,280 px a vega of -$97,858.24 was already wider than its card. Every amount is now at most nine characters
-    # and a sign.
+    # 1,280 px a vega of -$97,858.24 was already wider than its card. Round-3 verifier: a theta of '+$2,737.18' and
+    # '+$1.00e+15' were still cut, as '+' is as wide as a digit. Cents stop at $1,000 and scientific notation has one
+    # decimal, so every amount is at most nine characters with its sign and fits the card.
     assert tab_strategy.money_short(value, signed) == text
-    assert len(text.lstrip("+-")) <= 9
+    assert len(text) <= 9
+    assert _card_width(text) <= CARD_WIDTH
+
+
+@pytest.mark.parametrize("signed", [False, True])
+@pytest.mark.parametrize("sign", [1, -1])
+def test_every_card_amount_fits_at_laptop_width(sign, signed):
+    # The widest amount of every tier (all digits are equally wide), and the boundaries between tiers.
+    mantissas = (1.0, 5.0, 9.99, 9.994999, 9.995, 9.999999)
+    for exponent in range(-3, 18):
+        for mantissa in mantissas:
+            value = sign * mantissa * 10.0**exponent
+            text = tab_strategy.money_short(value, signed)
+            assert _card_width(text) <= CARD_WIDTH, (value, text)
+            for decimals in (2, 4):
+                text = tab_strategy.number_short(value, decimals)
+                assert _card_width(text) <= CARD_WIDTH, (value, decimals, text)
+
+
+def test_worded_card_values_fit_at_laptop_width():
+    for text in ("No loss", "No profit", "Unlimited", "Too large", "–", ">99.9%", "<0.1%", "100.0%"):
+        assert _card_width(text) <= CARD_WIDTH, text
 
 
 @pytest.mark.parametrize(
@@ -422,31 +497,69 @@ def test_money_short_fits_a_metric_card(value, signed, text):
         (-9_999.99, 2, "-9,999.99"),
         (20_000.0, 4, "20,000"),
         (187_182_738.53, 2, "187.18M"),
-        (-3.2e15, 2, "-3.20e+15"),
+        (-3.2e15, 2, "-3.2e+15"),
     ],
 )
 def test_number_short_fits_a_metric_card(value, decimals, text):
     assert tab_strategy.number_short(value, decimals) == text
-    assert len(text.lstrip("+-")) <= 9
+    assert len(text) <= 9
+    assert _card_width(text) <= CARD_WIDTH
 
 
-def test_cards_stay_readable_at_the_input_limits():
+def test_index_sized_short_premium_cards_fit_at_laptop_width():
+    # Round-3 verifier: a 100-lot SPX iron condor showed Theta / day '+$2,737.…' at 1,280 px.
+    at = _app(spot=4500, strike=4500, contracts=100, strategy_category="Range-bound")
+    at.selectbox(key="strategy_Range-bound").set_value("Iron Condor").run()
+    _ok(at)
+    theta = _metric(at, "Theta / day")
+    assert theta.value == "+$2,737"
+    assert "Exact: +\\$2,737.18" in theta.proto.help
+    for label in ("Net premium", "Max profit", "Max loss", "Delta (shares)", "Gamma", "Theta / day", "Vega / vol pt"):
+        assert _card_width(_metric(at, label).value) <= CARD_WIDTH, (label, _metric(at, label).value)
+
+
+@pytest.mark.parametrize(
+    ("category", "name"),
+    [("Vertical spread", "Bull Call Spread"), ("Volatility", "Long Straddle"), ("Volatility", "Short Straddle")],
+)
+def test_cards_stay_readable_at_the_input_limits(category, name):
     # Round-2 verifier, at spot and strike 9,999,999, 100,000 contracts and 10,000 shares per contract (all within
-    # the input limits): every dollar card and the share delta were cut off with an ellipsis.
+    # the input limits): every dollar card and the share delta were cut off with an ellipsis. Round-3 verifier: the
+    # straddles' theta, '-$1.03e+15' and '+$1.03e+15', were still cut.
+    at = _app(
+        spot=9999999,
+        strike=9999999,
+        contracts=100000,
+        multiplier=10000,
+        vol=500,
+        days=1,
+        strategy_category=category,
+        **{f"strategy_{category}": name},
+    )
+    shortened = ["Net premium", "Max profit", "Max loss", "Delta (shares)", "Theta / day", "Vega / vol pt"]
+    for label in [*shortened, "Gamma", "Probability of profit"]:
+        value = _metric(at, label).value
+        assert len(value) <= 9 and _card_width(value) <= CARD_WIDTH, (label, value)
+    for label in shortened:
+        value = _metric(at, label).value
+        assert value in ("Unlimited", "No loss", "No profit") or "Exact:" in _metric(at, label).proto.help, label
+    if name == "Short Straddle":
+        assert _metric(at, "Theta / day").value == "+$1.0e+15"
+        assert "Exact: +\\$1,03" in _metric(at, "Theta / day").proto.help
+
+
+def test_shortened_amounts_at_the_input_limits_keep_the_exact_value_in_the_help():
     at = _app(spot=9999999, strike=9999999, contracts=100000, multiplier=10000)
     assert _metric(at, "Net premium").value == "$441.05T"
     assert "Exact: \\$441,049,535," in _metric(at, "Net premium").proto.help
     delta = _metric(at, "Delta (shares)")
     assert delta.value == "187.18M"
     assert "Exact: 187,182,738.53" in delta.proto.help
-    shortened = ["Net premium", "Max profit", "Max loss", "Delta (shares)", "Theta / day", "Vega / vol pt"]
-    for label in [*shortened, "Gamma", "Expected P&L at expiry", "P&L standard deviation"]:
-        assert len(_metric(at, label).value.lstrip("+-")) <= 9, (label, _metric(at, label).value)
-    for label in shortened:
-        assert "Exact:" in _metric(at, label).proto.help, label
 
 
-def test_cannot_lose_and_no_profit_wording_and_no_arrows():
+def test_no_loss_and_no_profit_wording_and_no_arrows():
+    # Round-3 verifier: 'Cannot lose' (178 px) was cut to 'Cannot l…' at 1,280 px; the card now says 'No loss', like
+    # 'No profit', and its help keeps the full sentence.
     box = [
         {"Type": "call", "Quantity": -1, "Strike": 110},
         {"Type": "put", "Quantity": 1, "Strike": 110},
@@ -454,7 +567,9 @@ def test_cannot_lose_and_no_profit_wording_and_no_arrows():
     ]
     at = _app(strategy_category="Custom")
     at = LegsEditor(at).edit({"0": {"Strike": 90}}, added_rows=box)
-    assert _metric(at, "Max loss").value == "Cannot lose"
+    loss = _metric(at, "Max loss")
+    assert loss.value == "No loss"
+    assert "The position cannot lose: it makes at least \\$" in loss.proto.help
     assert _metric(at, "Delta (shares)").value == "0.00"
     premium = _metric(at, "Net premium")
     assert premium.proto.delta == "debit (paid)"
@@ -462,6 +577,7 @@ def test_cannot_lose_and_no_profit_wording_and_no_arrows():
     short_box = [{**row, "Quantity": -row["Quantity"]} for row in box]
     at = LegsEditor(_app(strategy_category="Custom")).edit({"0": {"Strike": 90, "Quantity": -1}}, added_rows=short_box)
     assert _metric(at, "Max profit").value == "No profit"
+    assert "No profit is possible" in _metric(at, "Max profit").proto.help
 
 
 def test_legs_table_has_no_negative_zeros():
