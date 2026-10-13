@@ -118,15 +118,50 @@ def paths_chart(times_days, paths, strike: float, mean_path=None):
     return fig
 
 
-def histogram_chart(values, x_title: str, lines: Sequence[tuple[float, str, str]] = (), bins: int = 120, pdf=None):
-    """Histogram from pre-binned counts (keeps the payload small for large samples)."""
+def _legend_below(fig: go.Figure) -> go.Figure:
+    """Horizontal legend under the plot, where the Plotly toolbar cannot cover it."""
+    fig.update_layout(legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="left", x=0.0))
+    return fig
+
+
+def _plain(text: str) -> str:
+    """Normalise a negative zero such as ``-0`` or ``-0.00`` (it reads as a small loss)."""
+    stripped = text.lstrip("-")
+    return stripped if stripped.strip("0.,") == "" else text
+
+
+def histogram_chart(
+    values,
+    x_title: str,
+    lines: Sequence[tuple[float, str, str]] = (),
+    bins: int = 120,
+    pdf=None,
+    value_text=lambda v: f"{v:,.2f}",
+):
+    """Histogram from pre-binned counts (keeps the payload small for large samples).
+
+    The axis spans the 0.05 % to 99.95 % quantiles and every marker line. Outcomes beyond it are left out of the
+    bars rather than piled into the end bins, and a note above the chart says how many there are and how far they go.
+    Densities are relative to the whole sample, so the bars integrate to the share of outcomes shown.
+    """
     values = np.asarray(values, dtype=float)
     lo, hi = np.percentile(values, [0.05, 99.95])
+    marks = [float(x) for x, _, _ in lines if np.isfinite(x)]
+    if marks:
+        lo, hi = min(lo, *marks), max(hi, *marks)
     if hi <= lo:
         lo, hi = values.min() - 1.0, values.max() + 1.0
-    counts, edges = np.histogram(np.clip(values, lo, hi), bins=bins, range=(lo, hi))
+    pad = 0.02 * (hi - lo)
+    lo, hi = lo - pad, hi + pad
+    counts, edges = np.histogram(values[(values >= lo) & (values <= hi)], bins=bins, range=(lo, hi))
     centres = 0.5 * (edges[:-1] + edges[1:])
-    density = counts / (counts.sum() * np.diff(edges))
+    density = counts / (values.size * np.diff(edges))
+    below, above = int(np.sum(values < lo)), int(np.sum(values > hi))
+    outside = []
+    if below:
+        outside.append(f"{below:,} below the axis (lowest {value_text(values.min())})")
+    if above:
+        outside.append(f"{above:,} above it (highest {value_text(values.max())})")
     fig = go.Figure(
         go.Bar(
             x=centres,
@@ -141,25 +176,33 @@ def histogram_chart(values, x_title: str, lines: Sequence[tuple[float, str, str]
         fig.add_trace(go.Scatter(x=pdf[0], y=pdf[1], name="Log-normal density", line=dict(color=ACCENT, width=2)))
     for x, label, color in lines:
         _vline(fig, x, label, color=color, dash="dash")
-    fig = apply_layout(fig, None, x_title, "Density")
-    fig.update_layout(bargap=0.02, hovermode="closest")
-    return fig
+    # The note goes in a small title above the marker labels, where it cannot cover the bars or the lines.
+    fig = apply_layout(fig, "Outcomes not shown: " + "; ".join(outside) if outside else None, x_title, "Density")
+    fig.update_layout(bargap=0.02, hovermode="closest", title_font=dict(size=12, color=NEUTRAL))
+    if outside:
+        fig.update_layout(margin=dict(t=60))
+    return _legend_below(fig)
 
 
 def payoff_chart(
     spots, curves: Sequence[tuple[np.ndarray, str, str, str]], spot: float, strikes, breakevens, band=None
 ):
-    """P&L profile. ``curves`` holds ``(values, name, colour, dash)``; the first is shaded."""
+    """P&L profile. ``curves`` holds ``(values, name, colour, dash)``; the first is shaded.
+
+    The ±1σ band is named in the legend rather than annotated, so its label cannot collide with the spot label.
+    """
     fig = go.Figure()
     if band is not None:
-        fig.add_vrect(
-            x0=band[0],
-            x1=band[1],
-            fillcolor=NEUTRAL,
-            opacity=0.10,
-            line_width=0,
-            annotation_text="±1σ at expiry",
-            annotation_position="top left",
+        fig.add_vrect(x0=band[0], x1=band[1], fillcolor=NEUTRAL, opacity=0.10, line_width=0)
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="markers",
+                name="±1σ range at expiry",
+                marker=dict(symbol="square", size=14, color=NEUTRAL, opacity=0.35),
+                hoverinfo="skip",
+            )
         )
     first = np.asarray(curves[0][0], dtype=float)
     fig.add_trace(
@@ -205,12 +248,15 @@ def payoff_chart(
                 hovertemplate="Breakeven %{x:$,.2f}<extra></extra>",
             )
         )
-    return apply_layout(fig, None, "Underlying price", "Profit / loss ($)", height=480)
+    fig = apply_layout(fig, None, "Underlying price", "Profit / loss ($)", height=500)
+    return _legend_below(fig)
 
 
 def pnl_heatmap(x_labels, y_labels, z, x_title: str, y_title: str):
+    """P&L grid with the value in each cell (whole dollars, or cents for small positions)."""
     z = np.asarray(z, dtype=float)
     bound = float(np.nanmax(np.abs(z))) or 1.0
+    decimals = 0 if bound >= 100 else (1 if bound >= 10 else 2)
     fig = go.Figure(
         go.Heatmap(
             x=x_labels,
@@ -219,7 +265,7 @@ def pnl_heatmap(x_labels, y_labels, z, x_title: str, y_title: str):
             zmin=-bound,
             zmax=bound,
             colorscale=DIVERGING,
-            text=np.vectorize(lambda v: f"{v:,.0f}")(z),
+            text=np.vectorize(lambda v: _plain(f"{v:,.{decimals}f}"))(z),
             texttemplate="%{text}",
             textfont=dict(color="white"),
             colorbar=dict(title="P&L ($)"),
@@ -233,16 +279,26 @@ def pnl_heatmap(x_labels, y_labels, z, x_title: str, y_title: str):
     return fig
 
 
-def lines_chart(x, series: dict, x_title: str, y_title: str, hline: float | None = 0.0, reverse_x: bool = False):
+def lines_chart(
+    x,
+    series: dict,
+    x_title: str,
+    y_title: str,
+    hline: float | None = 0.0,
+    reverse_x: bool = False,
+    vline: tuple[float, str] | None = None,
+):
     fig = go.Figure()
     for i, (name, y) in enumerate(series.items()):
         fig.add_trace(go.Scatter(x=x, y=y, name=name, line=dict(color=SERIES[i % len(SERIES)], width=2.5)))
     if hline is not None:
         fig.add_hline(y=hline, line=dict(color=NEUTRAL, width=1))
+    if vline is not None:
+        _vline(fig, vline[0], vline[1], color=ACCENT, dash="dash")
     fig = apply_layout(fig, None, x_title, y_title)
     if reverse_x:
         fig.update_xaxes(autorange="reversed")
-    return fig
+    return _legend_below(fig)
 
 
 def bar_chart(names, values, x_title: str):

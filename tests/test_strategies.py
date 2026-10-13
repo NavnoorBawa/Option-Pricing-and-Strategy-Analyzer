@@ -275,3 +275,21 @@ def test_riskless_conversion_has_no_dispersion():
     market = S.Market(5000, 0.05, 0.2, 0.5, 0.02)
     conversion = S.Strategy("conv", (S.Leg("stock", 1), S.Leg("put", 1, 5000), S.Leg("call", -1, 5000)))
     assert S.analyze(conversion, market).pnl_std < 1e-9
+
+
+def test_leg_labels_show_expiries_only_when_they_tell_legs_apart():
+    # Review finding: a calendar read "Short 1 × 100 Call, Long 1 × 100 Call", like a flat position.
+    market = S.Market(100, 0.05, 0.2, 30 / 365)
+    calendar = S.build_template("Long Call Calendar", 100, 10, market.expiry)
+    assert S.leg_labels(calendar, market) == ["Short 1 × 100 Call (30d)", "Long 1 × 100 Call (60d)"]
+    diagonal = S.build_template("Diagonal (Poor Man's Covered Call)", 100, 10, market.expiry)
+    assert S.leg_labels(diagonal, market) == ["Long 1 × 90 Call (60d)", "Short 1 × 110 Call (30d)"]
+    assert S.leg_labels(S.build_template("Bull Call Spread", 100, 10), market) == [
+        "Long 1 × 100 Call",
+        "Short 1 × 110 Call",
+    ]
+    # One option with its own expiry, IV and fill price, next to a share.
+    custom = S.Strategy("custom", (S.Leg("stock", 1), S.Leg("call", -1, 105, 90 / 365, 0.25, 3.5)))
+    assert S.leg_labels(custom, market) == ["Long 1 share", "Short 1 × 105 Call (90d, IV 25%, filled at $3.50)"]
+    same_iv = S.Strategy("same", (S.Leg("put", 2, 95, volatility=0.2, premium=1.23456),))
+    assert S.leg_labels(same_iv, market) == ["Long 2 × 95 Put (filled at $1.2346)"]

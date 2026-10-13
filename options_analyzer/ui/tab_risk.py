@@ -14,10 +14,33 @@ from .. import risk, scenarios
 from .. import strategies as strat
 from . import cache, charts
 from .format import md, money
-from .tab_strategy import Position
+from .tab_strategy import Position, money_short
 
 CONFIDENCE_LEVELS = (0.95, 0.975, 0.99, 0.995, 0.999)
 PATH_CHOICES = (10_000, 25_000, 50_000, 100_000, 250_000, 500_000)
+
+
+def shock_label(x: float) -> str:
+    """A relative shock as a percentage: whole percents when exact, otherwise one decimal; zero unsigned."""
+    pct = 100.0 * x
+    if abs(pct) < 1e-9:
+        return "0%"
+    if abs(pct - round(pct)) < 1e-9:
+        return f"{pct:+.0f}%"
+    return f"{pct:+.1f}%"
+
+
+def price_labels(prices) -> list[str]:
+    """Price labels with enough decimals to tell neighbouring grid columns apart."""
+    prices = np.asarray(prices, dtype=float)
+    step = float(np.min(np.diff(np.sort(prices)))) if prices.size > 1 else 0.0
+    decimals = int(np.clip(np.ceil(-np.log10(step)) + 1, 2, 6)) if step > 0 else 2
+    return [f"{p:,.{decimals}f}" for p in prices]
+
+
+def _sigma_t(position: Position, front_days: float) -> float:
+    """Standard deviation of the log price at the front expiry, at the sidebar volatility."""
+    return position.market.volatility * np.sqrt(front_days / 365.0)
 
 
 def _scenario_grid(position: Position, front_days: float) -> None:
@@ -34,8 +57,8 @@ def _scenario_grid(position: Position, front_days: float) -> None:
     grid = scenarios.pnl_grid(position.strategy, position.market, spot_changes, vol_changes, horizon, position.units)
     st.plotly_chart(
         charts.pnl_heatmap(
-            [f"{x:+.0%}" for x in spot_changes],
-            [f"IV {x:+.0%}" for x in vol_changes],
+            [shock_label(x) for x in spot_changes],
+            [f"IV {shock_label(x)}" for x in vol_changes],
             grid,
             "Spot change",
             "Implied-vol change",
@@ -48,18 +71,84 @@ def _scenario_grid(position: Position, front_days: float) -> None:
     )
 
 
+def _date_grid(position: Position, front_days: float) -> None:
+    sigma_t = _sigma_t(position, front_days)
+    reach = st.select_slider(
+        "Spot range (standard deviations of the price at the front expiry)",
+        (1.0, 1.5, 2.0, 2.5, 3.0),
+        value=2.0,
+        format_func=lambda z: f"±{z:g}σ",
+        key="date_grid_reach",
+        help="Columns are spaced evenly in standard deviations σ√T of the log price at the front expiry, so the "
+        "range follows the volatility and the time left.",
+    )
+    z = np.linspace(-reach, reach, 13)
+    spot_changes = np.exp(z * sigma_t) - 1.0
+    days = np.unique(np.round(np.linspace(0.0, front_days, 8)))
+    grid = scenarios.pnl_grid(position.strategy, position.market, spot_changes, days=days, multiplier=position.units)
+    rows = ["Today" if d == 0 else f"Day {d:.0f}" for d in days]
+    rows[-1] = f"Expiry (day {days[-1]:.0f})" if np.isclose(days[-1], front_days) else rows[-1]
+    st.plotly_chart(
+        # Reversed so that today is the top row.
+        charts.pnl_heatmap(
+            price_labels(position.market.spot * (1.0 + spot_changes)), rows[::-1], grid[::-1], "Underlying price", ""
+        ),
+        key="date_heatmap",
+    )
+    st.caption(
+        f"Columns run from {-reach:g}σ to +{reach:g}σ in 13 even steps of the log price, where σ√T = {sigma_t:.1%} "
+        "is one standard deviation of the price at the front expiry (sidebar volatility); rows are days from "
+        "today. Every cell re-prices all legs at the spot and date shown with implied volatility unchanged; values "
+        "are P&L of the whole position versus its current model value."
+    )
+
+
 def _time_decay(position: Position, front_days: float) -> None:
     days = np.linspace(0, front_days, int(np.clip(round(front_days) + 1, 2, 200)))
-    moves = np.array([-0.10, -0.05, 0.0, 0.05, 0.10])
+    sigma_t = _sigma_t(position, front_days)
+    zs = np.array([-1.0, -0.5, 0.0, 0.5, 1.0])
+    moves = np.exp(zs * sigma_t) - 1.0
     grid = scenarios.pnl_grid(position.strategy, position.market, moves, days=days, multiplier=position.units)
-    series = {f"Spot {m:+.0%}" if m else "Spot unchanged": grid[:, i] for i, m in enumerate(moves)}
+    series = {
+        (f"Spot {z:+g}σ ({shock_label(m)})" if z else "Spot unchanged"): grid[:, i]
+        for i, (z, m) in enumerate(zip(zs, moves, strict=True))
+    }
     st.plotly_chart(charts.lines_chart(days, series, "Days from today", "P&L ($)"), key="time_decay")
     theta = strat.position_greeks(position.strategy, position.market)["theta"] * position.units / 365
     st.caption(
         md(
-            "Mark-to-market P&L as time passes with implied volatility unchanged. "
+            "Mark-to-market P&L as time passes with implied volatility unchanged, for spot moves of half and one "
+            f"standard deviation of the price at the front expiry (σ√T = {sigma_t:.1%}). "
             f"Current theta: {money(theta, signed=True)} per day."
         )
+    )
+
+
+GREEK_VIEWS = {
+    "Delta": ("delta", 1.0, "Delta (shares)"),
+    "Gamma": ("gamma", 1.0, "Gamma (delta per $1)"),
+    "Theta": ("theta", 1.0 / 365.0, "Theta ($ per day)"),
+    "Vega": ("vega", 0.01, "Vega ($ per vol point)"),
+}
+
+
+def _greek_profiles(position: Position, front_days: float) -> None:
+    market = position.market
+    greek = st.segmented_control("Greek", list(GREEK_VIEWS), default="Delta", key="risk_greek", required=True)
+    name, scale, title = GREEK_VIEWS[greek]
+    spots = market.spot * np.exp(np.linspace(-3.0, 3.0, 241) * _sigma_t(position, front_days))
+    dates = [d for d in dict.fromkeys([0, round(front_days / 2), round(front_days) - 1]) if 0 <= d < front_days]
+    series = {}
+    for d in dates:
+        values = strat.position_greeks(position.strategy, market, spots, d / 365.0)[name]
+        series["Today" if d == 0 else f"In {d} days"] = np.broadcast_to(values * scale * position.units, spots.shape)
+    st.plotly_chart(
+        charts.lines_chart(spots, series, "Underlying price", title, vline=(market.spot, "spot")),
+        key="greek_profiles",
+    )
+    st.caption(
+        "Position Greeks of the whole position across ±3 standard deviations of the price at the front expiry, "
+        "today and at later dates with implied volatility unchanged (analytical Black-Scholes-Merton Greeks)."
     )
 
 
@@ -105,25 +194,30 @@ def _stress_tests(position: Position) -> None:
         st.info("Select at least one group of scenarios.")
         return
     table = pd.DataFrame(rows)
-    left, right = st.columns([1.1, 1])
-    left.plotly_chart(charts.bar_chart(table["Scenario"], table["P&L"], "P&L ($)"), key="stress_chart")
+    # Chart and table are stacked at full width: side by side, the table hid its right-hand columns.
+    st.plotly_chart(charts.bar_chart(table["Scenario"], table["P&L"], "P&L ($)"), key="stress_chart")
     columns = ["Scenario", "P&L", "Spot change", "IV multiplier", "IV shock damped", "Rate change (bp)"]
     if elapsed or custom_on:
         columns += ["Days elapsed", "Legs expired"]
-    right.dataframe(
+    st.dataframe(
         table[columns],
         hide_index=True,
         height=35 * (len(table) + 1) + 3,  # show every scenario without an inner scrollbar
         column_config={
-            "Spot change": st.column_config.NumberColumn(format="percent"),
-            "IV multiplier": st.column_config.NumberColumn(format="%.2fx", help="Multiplier on implied vol."),
-            "IV shock damped": st.column_config.CheckboxColumn(
-                help="One-month shock, damped for longer-dated legs (see the toggle above)."
+            "Scenario": st.column_config.TextColumn(width="medium"),
+            "Spot change": st.column_config.NumberColumn(format="percent", width="small"),
+            "IV multiplier": st.column_config.NumberColumn(
+                format="%.2fx", width="small", help="Multiplier on implied vol."
             ),
-            "Rate change (bp)": st.column_config.NumberColumn(format="%+.0f"),
-            "P&L": st.column_config.NumberColumn(format="dollar"),
+            "IV shock damped": st.column_config.CheckboxColumn(
+                width="small", help="One-month shock, damped for longer-dated legs (see the toggle above)."
+            ),
+            "Rate change (bp)": st.column_config.NumberColumn(format="%+.0f", width="small"),
+            "P&L": st.column_config.NumberColumn(format="dollar", width="small"),
+            "Days elapsed": st.column_config.NumberColumn(width="small"),
             "Legs expired": st.column_config.NumberColumn(
-                help="Option legs that expire during the episode; they are settled on the end-of-episode price."
+                width="small",
+                help="Option legs that expire during the episode; they are settled on the end-of-episode price.",
             ),
         },
     )
@@ -243,37 +337,43 @@ def _var(position: Position) -> None:
     with st.spinner("Simulating…"):
         result = cache.value_at_risk(position.strategy, position.market, config, position.units)
 
-    c = st.columns(4)
+    ci = md(f"{money(result.var_ci95[0])} to {money(result.var_ci95[1])}")
+    c = st.columns(3)
     c[0].metric(
         f"VaR {confidence:.1%}",
-        money(result.var),
+        money_short(result.var),
         border=True,
-        help=f"Loss not exceeded with {confidence:.1%} probability over {horizon} trading day(s).",
+        help=md(
+            f"Loss not exceeded with {confidence:.1%} probability over {horizon} trading day(s). "
+            f"Exact: {money(result.var)}; 95% simulation interval {money(result.var_ci95[0])} to "
+            f"{money(result.var_ci95[1])}."
+        ),
     )
     c[1].metric(
         f"Expected Shortfall {confidence:.1%}",
-        money(result.expected_shortfall),
+        money_short(result.expected_shortfall),
         border=True,
-        help="Average loss in the worst tail beyond VaR.",
+        help=md(f"Average loss in the worst tail beyond VaR. Exact: {money(result.expected_shortfall)}."),
     )
     c[2].metric(
-        "VaR 95% CI (simulation)",
-        md(f"{money(result.var_ci95[0], 0)} – {money(result.var_ci95[1], 0)}"),
-        border=True,
-        help="Monte Carlo uncertainty of the VaR estimate (order-statistic interval).",
-    )
-    c[3].metric(
         "Delta-normal VaR",
-        money(result.delta_normal_var),
+        money_short(result.delta_normal_var),
         border=True,
-        help="Linear approximation |Δ|·S·σ·√(h/252)·z. Differences from full revaluation show the "
-        "position's non-linearity (gamma, vega).",
+        help=md(
+            "Linear approximation |Δ|·S·σ·√(h/252)·z. Differences from full revaluation show the "
+            f"position's non-linearity (gamma, vega). Exact: {money(result.delta_normal_var)}."
+        ),
+    )
+    st.caption(
+        f"Simulation uncertainty: the 95% confidence interval of the VaR estimate is {ci} "
+        f"(order statistics of the {n_paths:,} simulated outcomes)."
     )
     st.plotly_chart(
         charts.histogram_chart(
             result.pnl,
             f"P&L over {horizon} trading day(s) ($)",
             [(-result.var, f"VaR {confidence:.1%}", charts.LOSS), (-result.expected_shortfall, "ES", charts.ACCENT)],
+            value_text=money,
         ),
         key="var_hist",
     )
@@ -298,7 +398,8 @@ def _var(position: Position) -> None:
     c2.caption(
         f"Full revaluation of every leg on {n_paths:,} simulated {risk.DISTRIBUTIONS[distribution]} paths "
         f"(zero drift, volatility {position.market.volatility:.1%}), with {horizon} trading day(s) of time decay. "
-        "VaR and ES use the Acerbi–Tasche estimators on the sorted P&L. Excess kurtosis is unstable for ν ≤ 4."
+        "VaR and ES use the Acerbi–Tasche estimators on the sorted P&L."
+        + (" Excess kurtosis is unstable for ν ≤ 4." if distribution == "student_t" or garch_t else "")
         + (
             f" {result.settled_legs} option leg(s) expire before the horizon and are settled on the simulated price "
             "at the close of their expiry day."
@@ -315,12 +416,20 @@ def render(position: Position | None) -> None:
         st.info("Build a valid position in the **Strategy Builder** tab to analyse its risk.")
         return
     st.markdown(f"Analysing {position.describe()}")
+    st.caption(
+        "Every scenario, stress test and VaR path re-prices the legs as European options with "
+        "Black-Scholes-Merton, whatever the sidebar pricing model."
+    )
     front_days = strat.front_expiry(position.strategy, position.market) * 365
 
     st.subheader("Scenario P&L: spot × implied volatility")
     _scenario_grid(position, front_days)
+    st.subheader("Scenario P&L: spot × date")
+    _date_grid(position, front_days)
     st.subheader("Time decay")
     _time_decay(position, front_days)
+    st.subheader("Position Greeks across spot")
+    _greek_profiles(position, front_days)
     st.subheader("Stress tests")
     _stress_tests(position)
     st.subheader("Value at Risk & Expected Shortfall")
