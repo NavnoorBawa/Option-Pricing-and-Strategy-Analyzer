@@ -32,6 +32,8 @@ dependency versions. Development tools are pinned in `requirements-dev.txt` and 
   automatically.
 - Use plain units in the interface and say which convention a number follows (per day, per volatility point, per
   share or per position).
+- After an interface change, refresh the README screenshots with `python scripts/screenshots.py` (needs
+  `pip install playwright pillow` and `playwright install chromium`).
 
 ## Reporting bugs
 

@@ -1,0 +1,16 @@
+[theme]
+base = "dark"
+primaryColor = "#FF4B4B"
+
+[server]
+# Uploaded option-quote CSVs are small; cap uploads at 10 MB.
+maxUploadSize = 10
+
+[browser]
+gatherUsageStats = false
+
+[client]
+# "auto" shows developer menu items only on localhost (or to the app's developer on Community Cloud).
+toolbarMode = "auto"
+# Show users only the error type, not stack traces; run with --client.showErrorDetails full while debugging.
+showErrorDetails = "type"

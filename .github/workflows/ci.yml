@@ -80,4 +80,5 @@ jobs:
         working-directory: /tmp
         run: |
           python -c "import options_analyzer, options_analyzer.ui.app; print(options_analyzer.__version__)"
+          python -c "import pathlib, options_analyzer.ui as ui; assert (pathlib.Path(ui.__file__).parent / '.streamlit' / 'config.toml').is_file()"
           command -v options-analyzer

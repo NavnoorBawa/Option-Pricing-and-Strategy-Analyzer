@@ -13,16 +13,21 @@ from options_analyzer.implied_vol import (
     no_arbitrage_bounds,
 )
 
+# 2,520 cases: expiries from 17 hours to 5 years, volatilities from 1% to 300%, negative to positive rates.
 GRID = list(
     itertools.product(
-        [50, 80, 100, 120, 200],  # strike (spot = 100)
-        [0.002, 0.01, 0.25, 1.0, 5.0],  # years
+        [50, 70, 90, 100, 110, 130, 200],  # strike (spot = 100)
+        [0.002, 0.01, 0.05, 0.25, 1.0, 5.0],  # years
         [0.01, 0.05, 0.3, 1.5, 3.0],  # volatility
-        [-0.01, 0.05],  # rate
+        [-0.01, 0.0, 0.05],  # rate
         [0.0, 0.03],  # dividend yield
         ["call", "put"],
     )
 )
+
+
+def test_grid_size():
+    assert len(GRID) == 2_520
 
 
 @pytest.mark.parametrize(("K", "T", "sigma", "r", "q", "kind"), GRID)

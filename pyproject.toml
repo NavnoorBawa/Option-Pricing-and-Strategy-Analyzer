@@ -45,6 +45,10 @@ version = { attr = "options_analyzer.__version__" }
 [tool.setuptools.packages.find]
 include = ["options_analyzer*"]
 
+[tool.setuptools.package-data]
+# Streamlit reads .streamlit/config.toml next to the main script, so the installed app keeps the repo's settings.
+"options_analyzer.ui" = [".streamlit/config.toml"]
+
 [tool.ruff]
 target-version = "py310"
 line-length = 120

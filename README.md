@@ -83,8 +83,9 @@ streamlit run main.py
 The app opens at <http://localhost:8501>. A dev container (VS Code / GitHub Codespaces) is included and starts the
 app automatically.
 
-To use it as an installed package instead: `pip install ".[app]"` installs the app and its `options-analyzer`
-command; `pip install .` installs only the numerical core.
+To use it as an installed package instead, `pip install ".[app]"` installs the app; start it with the
+`options-analyzer` command (it uses the same settings as `streamlit run main.py`). `pip install .` installs only the
+numerical core; the command then explains that it needs the `app` extra.
 
 ## Using the library
 

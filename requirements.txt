@@ -1,5 +1,5 @@
 # Runtime dependencies (Streamlit Community Cloud installs from this file).
-# Development tools are listed in pyproject.toml under [dependency-groups].
+# Development tools (pytest, mpmath, ruff) are pinned in requirements-dev.txt.
 streamlit>=1.64,<2
 numpy>=1.26
 pandas>=2.1
