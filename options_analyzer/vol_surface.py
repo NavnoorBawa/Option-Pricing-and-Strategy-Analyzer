@@ -775,11 +775,13 @@ def _maturities(
 SPREAD_CHECK_VOL = 0.01  # vol error allowed on each quote before prices that run the wrong way with strike count
 FLY_CHECK_VOL = 0.005  # vol error allowed on each quote before a butterfly with a negative cost counts
 # Price error allowed on a quoted implied vol, whose price and tick are unknown: this fraction of the forward or
-# MIN_PRICE_ERROR (half a cent, the rounding of a price in cents), whichever is more.
+# MIN_PRICE_ERROR (half a cent, the rounding of a price in cents; at most 1% of the strike spacing, since sub-cent
+# strikes are priced in sub-cent ticks), whichever is more.
 UNKNOWN_PRICE_ERROR = 1e-4
 MIN_PRICE_ERROR = 0.005
 # Static arbitrage in quoted implied vols that goes away if each price behind them is off by half this tick is
-# reported as possible, not certain: vols inverted from midpoints of bids and asks in 0.05 ticks carry that rounding.
+# reported as possible, not certain: vols inverted from midpoints of bids and asks in 0.05 ticks carry that rounding
+# (at most 5% of the strike spacing).
 QUOTED_VOL_TICK = 0.05
 
 
@@ -1004,7 +1006,7 @@ def _option_prices(
     if bid is not None:
         # A Mid or Mark next to the bid and ask was allowed only its grid's step (0.025 for midpoints of 0.05
         # ticks), so adding Mid = (Bid + Ask) / 2 to an arbitrage-free Bid/Ask file reported static arbitrage.
-        quoted = price.notna() & (bid >= 0) & (ask >= bid)
+        quoted = price.notna() & (bid >= 0) & (ask > 0) & (ask >= bid)  # a 0/0 row is no market, not a spread
         error = error.where(~quoted, np.maximum(error, np.maximum(ask - price, price - bid)))
     if price.isna().all() and not unusable.all():
         columns = ", ".join(repr(found[key][0]) for key in ("price", "bid", "ask", "last") if key in found)
@@ -1333,8 +1335,8 @@ def fit_market_surface(
     arbitrage, or where it is otherwise undefined. The quotes themselves are checked
     for static arbitrage, allowing each price its ``price_error`` (see
     :func:`parse_quotes`; where it is NaN or the column is missing,
-    :data:`UNKNOWN_PRICE_ERROR` of the forward or :data:`MIN_PRICE_ERROR`, whichever
-    is more); arbitrage in quoted vols that half a :data:`QUOTED_VOL_TICK` of error
+    :data:`UNKNOWN_PRICE_ERROR` of the forward or :data:`MIN_PRICE_ERROR` capped by the
+    strike spacing, whichever is more); arbitrage in quoted vols that half a :data:`QUOTED_VOL_TICK` of error
     in each price would remove is reported as possible rather than certain.
     """
     notes: list[str] = []
@@ -1363,12 +1365,17 @@ def fit_market_surface(
         known = grp["price_error"].to_numpy(float) if "price_error" in grp else np.full(len(grp), np.nan)
         unknown = ~np.isfinite(known)
         growth = np.exp(rate * T)
-        price_error = np.where(unknown, max(UNKNOWN_PRICE_ERROR * forward, MIN_PRICE_ERROR * growth), known * growth)
         strike = grp["strike"].to_numpy(float)
+        # Strikes on a sub-cent grid (FX, penny stocks) are priced in sub-cent ticks: scale both floors with the
+        # strike spacing, or a half-cent floor hides gross arbitrage on an underlying priced near 1.
+        gap = float(np.median(np.diff(np.unique(strike)))) if len(np.unique(strike)) > 1 else forward
+        floor = min(MIN_PRICE_ERROR * growth, 0.01 * gap)
+        price_error = np.where(unknown, max(UNKNOWN_PRICE_ERROR * forward, floor), known * growth)
         arbitraged.append(_spread_arbitrage(strike, iv, T, forward, price_error))
         flies.append(_butterfly_arbitrage(strike, iv, T, forward, price_error))
         if unknown.any() and (arbitraged[-1] or flies[-1][0]):  # is it beyond the rounding of QUOTED_VOL_TICK?
-            tick_error = np.where(unknown, np.maximum(price_error, 0.5 * QUOTED_VOL_TICK * growth), price_error)
+            tick = min(0.5 * QUOTED_VOL_TICK * growth, 0.05 * gap)
+            tick_error = np.where(unknown, np.maximum(price_error, tick), price_error)
             certain.append(
                 _spread_arbitrage(strike, iv, T, forward, tick_error)
                 or _butterfly_arbitrage(strike, iv, T, forward, tick_error)[0] > 0
@@ -1462,7 +1469,7 @@ def fit_market_surface(
         if not np.isfinite(errors).all():
             allowed.append(
                 f"the unknown price behind each quoted implied vol to be off by {UNKNOWN_PRICE_ERROR:.2%} of the "
-                f"forward or {MIN_PRICE_ERROR:g}, whichever is more"
+                f"forward or {MIN_PRICE_ERROR:g} (at most 1% of the strike spacing), whichever is more"
             )
         notes.append(
             f"The quotes {'may have' if unsure else 'have'} static arbitrage that the fitted surface smooths out: "

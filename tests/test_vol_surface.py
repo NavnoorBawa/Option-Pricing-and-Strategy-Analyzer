@@ -1360,3 +1360,49 @@ def test_vertical_spread_arbitrage_in_the_quotes_is_reported_even_when_the_fit_i
     assert (
         len(notes) == 1 and "a call more than one at a lower strike, even if each quote is 1 vol point off" in notes[0]
     )
+
+
+def _spiked_chain(spot: float, step: float, spike: float, rate: float = 0.05) -> pd.DataFrame:
+    """Exact SSVI vols (4 dp) on 21 strikes ``step`` apart, with ``spike`` added at the 30-day at-the-money strike."""
+    params, rows = vs.SSVIParams(), []
+    strikes = np.round(spot + step * np.arange(-10, 11), 6)
+    for days in (30, 60, 91, 182):
+        t = days / 365
+        for k in strikes:
+            iv = float(np.sqrt(params.total_variance(np.log(k / spot) - rate * t, t)[0] / t))
+            iv += spike if days == 30 and abs(k - spot) < step / 2 else 0.0
+            rows.append({"Strike": k, "Days": days, "IV": round(iv, 4)})
+    return pd.DataFrame(rows)
+
+
+def _static_arbitrage_noted(frame: pd.DataFrame, spot: float, rate: float = 0.05) -> bool:
+    quotes, _ = vs.parse_quotes(frame, spot, rate)
+    return any("static arbitrage" in note for note in vs.fit_market_surface(quotes, spot, rate, 0.0).notes)
+
+
+def test_quoted_vol_arbitrage_on_a_sub_cent_strike_grid_is_reported():
+    # A fixed half-cent price error hid a 3 vol-point spike (a butterfly worth less than nothing) at spot 1.1.
+    assert _static_arbitrage_noted(_spiked_chain(1.1, 0.01, 0.03), 1.1)
+    assert not _static_arbitrage_noted(_spiked_chain(1.1, 0.01, 0.0), 1.1)
+
+
+def test_rows_without_a_market_keep_their_price_grid_error():
+    # Bid = Ask = 0 (no market) was taken as a spread as wide as the Mark, which hid the arbitrage in those rows.
+    chain = _spiked_chain(100.0, 1.0, 0.03)
+    t = chain["Days"] / 365
+    forward = 100 * np.exp(0.05 * t)
+    kind = np.where(chain["Strike"] >= forward, "call", "put")
+    mark = np.round(
+        [
+            bs.price(100, k, tt, 0.05, iv, 0.0, c)
+            for k, tt, iv, c in zip(chain["Strike"], t, chain["IV"], kind, strict=True)
+        ],
+        2,
+    )
+    frame = pd.DataFrame({"Strike": chain["Strike"], "Days": chain["Days"], "Type": kind, "Mark": mark})
+    frame["Bid"], frame["Ask"] = np.maximum(mark - 0.01, 0.0), mark + 0.01
+    no_market = (frame["Days"] == 30) & frame["Strike"].between(99, 101)
+    frame.loc[no_market, ["Bid", "Ask"]] = 0.0
+    quotes, _ = vs.parse_quotes(frame, 100.0, 0.05)
+    assert quotes.loc[quotes["maturity"] == quotes["maturity"].min(), "price_error"].max() < 0.05
+    assert _static_arbitrage_noted(frame, 100.0)
