@@ -113,8 +113,8 @@ def test_noise_free_quotes_recover_the_surface_including_end_maturities_and_grid
     lv_err, iv_err = relative_local_vol_error(fitted, params, r, q)
     assert iv_err.max() < 1e-9
     assert lv_err[1:-1].max() < 1e-3  # interior maturities: Fritsch-Butland secants (measured 0.014%)
-    assert lv_err[0].max() < 0.01  # one-sided secants at the ends (measured 0.71% and 0.12%)
-    assert lv_err[-1].max() < 0.005
+    assert lv_err[0].max() < 1e-3  # one-sided three-point formula (measured 0.047%; the secant gave 0.71%)
+    assert lv_err[-1].max() < 0.005  # one-sided secant (measured 0.12%)
     assert lv_err[:, [0, -1]].max() < 0.01  # outermost strikes: analytic SVI derivatives, no boundary condition
     assert fitted.calendar_violations == 0 and fitted.butterfly_violations == 0
     assert np.all(fitted.fit_rmse < 1e-9)
@@ -189,8 +189,8 @@ def test_rounded_dense_chains_do_not_raise_spurious_calendar_flags():
 @pytest.mark.parametrize("seed", range(4))
 def test_sample_quotes_local_vol_is_close_to_the_generating_surface(seed):
     # The sample adds 0.2 vol-point noise. The old smoothing-spline fit was off by 57-176 vol points of local
-    # vol (seeds 0-3, max) with no arbitrage flag; the SVI fit is off by at most 4.7-6.0 points, at the far
-    # wing of the first maturity (one-sided secant), and by at most 2.4 points elsewhere.
+    # vol (seeds 0-3, max) with no arbitrage flag. The SVI fit is off by at most 1.9-4.4 points at the first
+    # maturity (three-point end formula; the one-sided secant gave 4.7-6.0) and 1.3-2.3 points elsewhere.
     quotes, _ = vs.parse_quotes(vs.sample_quotes(100, 0.04, 0.0, seed=seed))
     fitted = vs.fit_market_surface(quotes, 100, 0.04, 0.0)
     true = vs.ssvi_surface(vs.SSVIParams(), 0.04, 0.0, fitted.moneyness, fitted.maturities)
@@ -198,10 +198,47 @@ def test_sample_quotes_local_vol_is_close_to_the_generating_surface(seed):
     assert fitted.calendar_violations == 0 and fitted.butterfly_violations == 0
     assert np.isfinite(fitted.local_vol).all()
     assert np.max(np.abs(fitted.implied_vol - true.implied_vol)) < 0.006
-    assert err.max() < 0.07
+    assert err[0].max() < 0.05
     assert err[1:].max() < 0.03
     assert np.median(err) < 0.006
     assert np.all((fitted.fit_rmse > 0.0005) & (fitted.fit_rmse < 0.004))  # about the 0.2-point noise
+
+
+def test_mixed_strike_ranges_keep_every_maturity_finely_gridded_and_the_summary_exact():
+    # A LEAPS quoted 0.3-2.5 next to weeklies quoted 0.9-1.1: a fixed 41-column grid over the union left 4 columns
+    # inside each weekly, the summary read them off that coarse grid (ATM vol off by 0.24 points) and skew and
+    # butterfly were NaN for slices quoted exactly at 0.9 and 1.1.
+    params, r = vs.SSVIParams(), 0.05
+    ranges = {7: (0.9, 1.1, 9), 14: (0.9, 1.1, 9), 30: (0.85, 1.15, 13), 60: (0.8, 1.2, 17), 182: (0.6, 1.4, 17)}
+    ranges[730] = (0.3, 2.5, 23)
+    quotes = pd.concat(ssvi_quotes(params, r, 0.0, (d,), np.linspace(lo, hi, n)) for d, (lo, hi, n) in ranges.items())
+    fitted = vs.fit_market_surface(quotes, 100, r, 0.0)
+    assert fitted.moneyness[0] == pytest.approx(0.3) and fitted.moneyness[-1] == pytest.approx(2.5)
+    assert np.isfinite(fitted.implied_vol).sum(axis=1).min() >= 15
+    summary = vs.surface_summary(fitted)
+    true = vs.ssvi_surface(params, r, 0.0, np.array([0.9, 1.0, 1.1]), fitted.maturities).implied_vol
+    assert np.abs(summary["ATM implied vol"] - true[:, 1]).max() < 1e-4  # 0.01 vol points
+    assert np.allclose(summary["Skew 90-110 (vol pts)"], (true[:, 0] - true[:, 2]) * 100, atol=0.01)
+    assert np.allclose(summary["Butterfly (vol pts)"], (0.5 * (true[:, 0] + true[:, 2]) - true[:, 1]) * 100, atol=0.01)
+    assert np.isfinite(summary["ATM local vol"]).all()
+    assert len(fitted.moneyness) <= vs.MAX_GRID_POINTS
+
+
+def test_identical_ranges_keep_the_plain_uniform_grid():
+    params = vs.SSVIParams()
+    fitted = vs.fit_market_surface(
+        ssvi_quotes(params, 0.04, 0.0, SAMPLE_DAYS, np.linspace(0.8, 1.2, 9)), 100, 0.04, 0.0
+    )
+    assert np.allclose(fitted.moneyness, np.linspace(0.8, 1.2, 41))
+
+
+def test_summary_is_nan_where_a_maturity_has_no_quotes():
+    params = vs.SSVIParams()
+    narrow = ssvi_quotes(params, 0.0, 0.0, (30, 60), np.linspace(0.95, 1.05, 7))
+    wide = ssvi_quotes(params, 0.0, 0.0, (91, 182), np.linspace(0.6, 1.5, 19))
+    summary = vs.surface_summary(vs.fit_market_surface(pd.concat([narrow, wide]), 100, 0.0, 0.0))
+    assert summary["Skew 90-110 (vol pts)"][:2].isna().all() and np.isfinite(summary["Skew 90-110 (vol pts)"][2:]).all()
+    assert np.isfinite(summary["ATM implied vol"]).all()
 
 
 def test_implied_vol_is_blank_outside_each_maturitys_quotes_and_local_vol_needs_covered_neighbours():
@@ -247,10 +284,23 @@ def test_surface_implied_vol_at_a_strike_and_expiry():
     between = fitted.implied_vol_at(0.9, 0.6)  # total variance interpolated linearly in T at fixed K/F
     assert between == pytest.approx(exact(0.9, 0.6), abs=0.002)
     assert np.isnan(fitted.implied_vol_at(1.0, 3.0)) and np.isnan(fitted.implied_vol_at(1.0, 0.05))
+    assert np.isnan(fitted.implied_vol_at(1.0, 29 / 365))  # a day before the first expiry is outside
     assert np.isnan(fitted.implied_vol_at(1.6, 1.0))
     ssvi = vs.ssvi_surface(params, r, q, M, T)
     assert ssvi.implied_vol_at(1.1, 0.7) == pytest.approx(exact(1.1, 0.7), rel=1e-12)
     assert np.isnan(ssvi.implied_vol_at(1.1, 2.5))
+
+
+def test_the_first_expiry_of_a_file_with_rounded_maturities_is_inside_the_surface():
+    # The sample stores 30 days as 0.0822 years, a little after 30/365 = 0.082192: the sidebar's 30 days used to
+    # fall outside the quoted region and the surface gave no implied vol for it.
+    quotes, _ = vs.parse_quotes(vs.sample_quotes(100, 0.05, 0.0))
+    fitted = vs.fit_market_surface(quotes, 100, 0.05, 0.0)
+    assert fitted.maturities[0] > 30 / 365
+    first = fitted.implied_vol_at(1.0, 30 / 365)
+    assert first == pytest.approx(fitted.implied_vol_at(1.0, fitted.maturities[0]), abs=1e-12)
+    assert 0.2 < first < 0.3
+    assert np.isfinite(fitted.implied_vol_at(1.0, 730.4 / 365)) and np.isnan(fitted.implied_vol_at(1.0, 731 / 365))
 
 
 def test_strikes_far_from_the_spot_are_reported():
@@ -258,6 +308,16 @@ def test_strikes_far_from_the_spot_are_reported():
     fitted = vs.fit_market_surface(quotes, 100, 0.05, 0.0)
     assert any("far from the spot 100.00" in note for note in fitted.notes)
     assert not vs.fit_market_surface(quotes, 5000, 0.05, 0.0).notes
+
+
+def test_a_one_sided_chain_next_to_the_spot_is_not_flagged():
+    # Out-of-the-money puts only (strikes 70-95 at spot 100) used to be told the spot was wrong.
+    quotes, _ = vs.parse_quotes(vs.sample_quotes(100, 0.05, 0.0))
+    puts = vs.fit_market_surface(quotes[quotes["strike"] < 100], 100, 0.05, 0.0)
+    calls = vs.fit_market_surface(quotes[quotes["strike"] > 100], 100, 0.05, 0.0)
+    assert not puts.notes and not calls.notes
+    notes = vs.fit_market_surface(quotes, 175, 0.05, 0.0).notes  # nearest strike 130: 26% below the spot
+    assert any("far from the spot 175.00" in note and "26% below it" in note for note in notes)
 
 
 def test_fit_requires_two_usable_maturities():
@@ -281,6 +341,19 @@ def test_summary_and_export():
     frames = surface.to_frames(100.0)
     assert frames["LocalVol"].shape == (len(T), len(M))
     assert not np.allclose(frames["LocalVol"].to_numpy()[:, 0], frames["LocalVol"].to_numpy()[:, -1])
+
+
+def test_summary_is_evaluated_at_the_strikes_it_names_not_read_off_the_grid():
+    params, r = vs.SSVIParams(), 0.04
+    coarse = vs.ssvi_surface(params, r, 0.0, np.linspace(0.7, 1.3, 4), T)  # no grid point at 0.9, 1 or 1.1
+    exact = vs.ssvi_surface(params, r, 0.0, np.array([0.9, 1.0, 1.1]), T)
+    summary = vs.surface_summary(coarse)
+    assert np.allclose(summary["ATM implied vol"], exact.implied_vol[:, 1], rtol=0, atol=1e-12)
+    assert np.allclose(summary["ATM local vol"], exact.local_vol[:, 1], rtol=0, atol=1e-12)
+    skew = (exact.implied_vol[:, 0] - exact.implied_vol[:, 2]) * 100
+    assert np.allclose(summary["Skew 90-110 (vol pts)"], skew, rtol=0, atol=1e-10)
+    narrow = vs.surface_summary(vs.ssvi_surface(params, r, 0.0, np.linspace(0.95, 1.3, 9), T))
+    assert narrow["Skew 90-110 (vol pts)"].isna().all() and np.isfinite(narrow["ATM implied vol"]).all()
 
 
 def test_exported_grid_csv_labels_the_strike_axis():
@@ -400,10 +473,98 @@ def test_percent_signs_and_thousands_separators_are_stripped():
 
 
 def test_a_column_without_numbers_is_named():
+    raw = vs.sample_quotes()
+    raw["ImpliedVol"] = "n/a"
+    with pytest.raises(vs.QuoteParseError, match="column 'ImpliedVol' has no numeric values"):
+        vs.parse_quotes(raw)
+
+
+def test_expiry_dates_without_a_days_column_are_explained():
     raw = vs.sample_quotes().rename(columns={"Maturity": "Expiry"})
     raw["Expiry"] = "2026-12-18"
-    with pytest.raises(vs.QuoteParseError, match="column 'Expiry' has no numeric values"):
+    with pytest.raises(vs.QuoteParseError, match=r"column 'Expiry' holds dates .* add a Days column"):
         vs.parse_quotes(raw)
+
+
+def _with_dte_and_expiry(expiry_format: str | None) -> pd.DataFrame:
+    raw = vs.sample_quotes(100, 0.05, 0.0)
+    raw["DTE"] = (raw["Maturity"] * 365).round().astype(int)
+    expiry = pd.Timestamp("2026-10-13") + pd.to_timedelta(raw["DTE"], unit="D")
+    raw["Expiration"] = expiry.dt.strftime(expiry_format).astype(int if expiry_format == "%Y%m%d" else str)
+    return raw[["Expiration", "DTE", "Strike", "ImpliedVol"]]
+
+
+@pytest.mark.parametrize("expiry_format", ["%Y-%m-%d", "%Y%m%d"])
+def test_a_days_column_wins_over_an_expiry_column(expiry_format):
+    # Chain exports often carry the expiry date next to the days to expiry. The date column used to be read as
+    # the maturity: date strings were refused, and YYYYMMDD integers became 55,510-year maturities.
+    raw = _with_dte_and_expiry(expiry_format)
+    frame = pd.read_csv(io.StringIO(raw.to_csv(index=False)))
+    clean, messages = vs.parse_quotes(frame)
+    assert clean["maturity"].min() == pytest.approx(30 / 365) and clean["maturity"].max() == pytest.approx(2.0)
+    assert "maturity from 'DTE' (days" in messages[0]
+    assert any("Ignored 'Expiration'" in m for m in messages)
+
+
+@pytest.mark.parametrize("expiry_format", ["%Y-%m-%d", "%Y%m%d"])
+def test_an_expiry_date_column_does_not_hide_a_maturity_in_years(expiry_format):
+    raw = _with_dte_and_expiry(expiry_format)
+    raw["TTM"] = (raw.pop("DTE") / 365).round(6)
+    clean, messages = vs.parse_quotes(raw)
+    assert clean["maturity"].max() == pytest.approx(2.0)
+    assert "maturity from 'TTM' (years)" in messages[0]
+
+
+def test_yyyymmdd_expiries_alone_are_refused_not_read_as_days():
+    raw = _with_dte_and_expiry("%Y%m%d").drop(columns="DTE")
+    with pytest.raises(vs.QuoteParseError, match=r"'Expiration' goes up to 20,281,012.*YYYYMMDD"):
+        vs.parse_quotes(raw)
+
+
+@pytest.mark.parametrize("header", ["Maturity", "Expiry", "T", "Tenor"])
+def test_whole_number_maturities_that_look_like_days_are_converted(header):
+    # A weekly chain at 7, 14, 21 and 28 days in a maturity column was read as 7-28 years without a word.
+    quotes = ssvi_quotes(vs.SSVIParams(), 0.04, 0.0, (7, 14, 21, 28), np.linspace(0.9, 1.1, 9))
+    raw = pd.DataFrame({"Strike": quotes["strike"], header: (quotes["maturity"] * 365).round(), "IV": quotes["iv"]})
+    clean, messages = vs.parse_quotes(raw)
+    assert clean["maturity"].max() == pytest.approx(28 / 365)
+    assert any("whole numbers from 7 to 28, which look like days" in m for m in messages)
+
+
+def test_whole_years_stay_years_when_the_header_says_so_and_are_flagged_otherwise():
+    quotes = ssvi_quotes(vs.SSVIParams(), 0.04, 0.0, (365, 730, 1825, 3650), np.linspace(0.8, 1.2, 9))
+    years = (quotes["maturity"]).round()
+    explicit, messages = vs.parse_quotes(
+        pd.DataFrame({"Strike": quotes["strike"], "Maturity (years)": years, "IV": quotes["iv"]})
+    )
+    assert explicit["maturity"].max() == pytest.approx(10.0)
+    assert not any("days" in m for m in messages[1:])
+    short = quotes[quotes["maturity"] < 3]
+    short_years = short["maturity"].round()
+    clean, messages = vs.parse_quotes(
+        pd.DataFrame({"Strike": short["strike"], "Maturity": short_years, "IV": short["iv"]})
+    )
+    assert clean["maturity"].max() == pytest.approx(2.0)  # 1 and 2: read as years, but the user is told
+    assert any("whole numbers up to 2, read as years" in m for m in messages)
+
+
+def test_headers_wrapped_in_brackets_are_read():
+    raw = vs.sample_quotes()
+    raw["Maturity"] = (raw["Maturity"] * 365).round()
+    clean, messages = vs.parse_quotes(
+        raw.rename(columns={"Strike": "[STRIKE]", "Maturity": "[DTE]", "ImpliedVol": "[IV]"})
+    )
+    assert len(clean) == 104 and clean["maturity"].max() == pytest.approx(2.0)
+    assert messages[0].startswith("Read strike from '[STRIKE]', maturity from '[DTE]' (days")
+
+
+@pytest.mark.parametrize("header", ["IV (% p.a.)", "Vol (in %)", "Implied vol [%, mid]"])
+def test_a_percent_sign_anywhere_in_the_header_sets_the_unit(header):
+    raw = vs.sample_quotes().rename(columns={"ImpliedVol": header})
+    raw[header] = raw[header] * 10  # median 2.4: read as decimals without the header unit
+    clean, messages = vs.parse_quotes(raw)
+    assert clean["iv"].median() == pytest.approx(0.024, rel=0.05)
+    assert any("from the column header" in m for m in messages)
 
 
 @pytest.mark.parametrize(

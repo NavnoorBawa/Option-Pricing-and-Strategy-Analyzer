@@ -1,6 +1,8 @@
 """Volatility Surface tab, end to end with streamlit.testing (headless)."""
 
+import io
 import json
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -9,6 +11,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from options_analyzer import vol_surface
+from options_analyzer.ui import tab_surface
 
 APP = str(Path(__file__).resolve().parents[1] / "main.py")
 
@@ -150,3 +153,48 @@ def test_quotes_far_from_the_sidebar_spot_are_flagged(app):
     _upload(app, quotes)
     _ok(app)
     assert any("far from the spot 100.00" in w.value for w in app.warning)
+
+
+def test_sidebar_contract_at_the_first_expiry_of_the_sample_file_gets_an_implied_vol(app):
+    # The sample stores 30 days as 0.0822 years; the sidebar's 30 days used to land just before it and the tab
+    # said the surface gave no implied vol there.
+    app.sidebar.number_input(key="days").set_value(30).run()
+    _upload(app, vol_surface.sample_quotes(100, 0.05, 0.0))
+    _ok(app)
+    readout = [i.value for i in app.info if "the surface's implied vol is" in i.value]
+    assert readout and "expiry 30 days" in readout[0]
+    assert not any("outside the surface's quoted region" in c.value for c in app.caption)
+
+
+def test_an_expiration_date_column_next_to_days_to_expiry_builds_a_surface(app):
+    quotes = vol_surface.sample_quotes(100, 0.05, 0.0)
+    quotes["DTE"] = (quotes.pop("Maturity") * 365).round().astype(int)
+    quotes["Expiration"] = (pd.Timestamp("2026-10-13") + pd.to_timedelta(quotes["DTE"], unit="D")).dt.strftime(
+        "%Y-%m-%d"
+    )
+    _upload(app, quotes)
+    _ok(app)
+    assert _metric(app, "Grid") == "8 × 41"
+    assert any("Ignored 'Expiration'" in c.value for c in app.caption)
+
+
+def test_the_excel_workbook_is_only_built_when_downloaded(app, monkeypatch):
+    # Writing every quote into the workbook on every rerun made each click on a large upload take seconds.
+    built = []
+    writer = pd.ExcelWriter
+
+    def counting_writer(*args, **kwargs):
+        built.append(1)
+        return writer(*args, **kwargs)
+
+    monkeypatch.setattr(pd, "ExcelWriter", counting_writer)
+    _upload(app, vol_surface.sample_quotes(100, 0.05, 0.0))
+    app.selectbox(key="surface_colors").set_value("Plasma").run()
+    _ok(app)
+    assert not built
+    surface = vol_surface.fit_market_surface(vol_surface.parse_quotes(vol_surface.sample_quotes())[0], 100, 0.04, 0.0)
+    workbook = tab_surface._workbook(surface, vol_surface.surface_summary(surface), 100.0)
+    assert built
+    with zipfile.ZipFile(io.BytesIO(workbook)) as archive:
+        sheets = archive.read("xl/workbook.xml").decode()
+    assert all(f'name="{name}"' in sheets for name in ("ImpliedVol", "LocalVol", "Summary", "Quotes"))

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import functools
+import importlib.util
 import io
 import zlib
 
@@ -102,9 +104,9 @@ def _quote_controls(inputs: Inputs) -> vs.VolSurface | None:
         "Option quotes (CSV)",
         type=["csv"],
         key="quotes_file",
-        help="Columns: Strike; Maturity (years) or Days; and either ImpliedVol (decimal or %) or option prices "
-        "(Price, or Bid and Ask) with a Type column saying call or put. At least two maturities with five or "
-        "more strikes each.",
+        help="Columns: Strike; Days (to expiry) or Maturity (years); and either ImpliedVol (decimal or %) or "
+        "option prices (Price, or Bid and Ask) with a Type column saying call or put. At least two maturities "
+        "with five or more strikes each.",
     )
     for label, prices, key in (
         ("Sample with implied vols", False, "sample_quotes"),
@@ -175,6 +177,27 @@ def _contract_readout(surface: vs.VolSurface, inputs: Inputs) -> None:
         )
 
 
+def _workbook(surface: vs.VolSurface, summary: pd.DataFrame, spot: float) -> bytes:
+    """The Excel export: both grids, the summary and, for market quotes, every cleaned quote with its fit."""
+    frames = surface.to_frames(spot)
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer) as writer:
+        frames["ImpliedVol"].to_excel(writer, sheet_name="ImpliedVol")
+        frames["LocalVol"].to_excel(writer, sheet_name="LocalVol")
+        summary.to_excel(writer, sheet_name="Summary", index=False)
+        if surface.quotes is not None:
+            surface.quotes.rename(
+                columns={
+                    "strike": "Strike",
+                    "maturity": "Maturity (years)",
+                    "iv": "Quoted implied vol",
+                    "moneyness": "Moneyness K/S",
+                    "fitted_iv": "SVI implied vol",
+                }
+            ).to_excel(writer, sheet_name="Quotes", index=False)
+    return buffer.getvalue()
+
+
 def _downloads(surface: vs.VolSurface, summary: pd.DataFrame, spot: float) -> None:
     frames = surface.to_frames(spot)
     c = st.columns(3)
@@ -196,28 +219,14 @@ def _downloads(surface: vs.VolSurface, summary: pd.DataFrame, spot: float) -> No
         icon=":material/download:",
         key="dl_lv",
     )
-    buffer = io.BytesIO()
-    try:
-        with pd.ExcelWriter(buffer) as writer:
-            frames["ImpliedVol"].to_excel(writer, sheet_name="ImpliedVol")
-            frames["LocalVol"].to_excel(writer, sheet_name="LocalVol")
-            summary.to_excel(writer, sheet_name="Summary", index=False)
-            if surface.quotes is not None:
-                surface.quotes.rename(
-                    columns={
-                        "strike": "Strike",
-                        "maturity": "Maturity (years)",
-                        "iv": "Quoted implied vol",
-                        "moneyness": "Moneyness K/S",
-                        "fitted_iv": "SVI implied vol",
-                    }
-                ).to_excel(writer, sheet_name="Quotes", index=False)
-    except ImportError:
+    if not any(importlib.util.find_spec(engine) for engine in ("xlsxwriter", "openpyxl")):
         c[2].caption("Install `xlsxwriter` or `openpyxl` for Excel export.")
         return
+    # Built only when clicked: a workbook holding a large quote file takes seconds to write, and building it
+    # on every rerun slowed every interaction on this tab.
     c[2].download_button(
         "Everything (Excel)",
-        buffer.getvalue(),
+        functools.partial(_workbook, surface, summary, spot),
         "volatility_surface.xlsx",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         on_click="ignore",

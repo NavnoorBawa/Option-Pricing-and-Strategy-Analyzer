@@ -27,8 +27,9 @@ Two sources are supported:
   Gatheral's raw SVI smile, which gives ``w'`` and ``w''`` analytically.
   ``dw/dT`` at fixed ``y`` comes from secants between neighbouring maturities
   evaluated at the same ``y``: their Fritsch-Butland weighted harmonic mean
-  inside, the one-sided secant at the first and last maturity. A secant that
-  is negative beyond quote precision is calendar arbitrage.
+  inside, the one-sided three-point formula at the first maturity and the
+  one-sided secant at the last. A secant that is negative beyond quote
+  precision is calendar arbitrage.
 """
 
 from __future__ import annotations
@@ -132,6 +133,7 @@ def _svi_start_points(y, iv, T, n_best: int = 3) -> list[np.ndarray]:
 
 
 QUOTE_PRECISION = 1e-4  # implied-vol precision of a quote: differences below it are noise
+MATURITY_TOLERANCE = 0.5 / 365  # maturities this close (half a day, in years) are the same expiry
 _RHO_MAX = 0.999
 _LOG_S = (-25.0, 5.0)
 
@@ -276,30 +278,59 @@ class VolSurface:
 
         Market surfaces interpolate total variance linearly in maturity at fixed
         forward log-moneyness between the two SVI slices around ``maturity``,
-        and only where both slices were quoted at that strike.
+        and only where both slices were quoted at that strike. A maturity within
+        half a day of a quoted one is read off that slice (quote files often
+        round maturities, e.g. 30 days to 0.0822 years).
         """
         T, Ts = float(maturity), self.maturities
-        if not (moneyness > 0 and Ts[0] - 1e-9 <= T <= Ts[-1] + 1e-9):
+        if not (moneyness > 0 and Ts[0] - MATURITY_TOLERANCE <= T <= Ts[-1] + MATURITY_TOLERANCE):
             return np.nan
-        y = np.log(moneyness) - self.carry * T
         if self.ssvi is not None:
             if not self.moneyness[0] <= moneyness <= self.moneyness[-1]:
                 return np.nan
+            y = np.log(moneyness) - self.carry * T
             return float(np.sqrt(self.ssvi.total_variance(y, T)[0] / T))
         if not self.svi or self.quoted_y is None:
             return np.nan
-        same = np.flatnonzero(np.abs(Ts - T) <= 1e-9)  # quoted maturities are rounded to 10 decimals
-        j = int(same[0]) if same.size else int(np.searchsorted(Ts, T)) - 1
-        around = [j] if same.size else [j, j + 1]
+        nearest = int(np.argmin(np.abs(Ts - T)))
+        snap = abs(Ts[nearest] - T) <= MATURITY_TOLERANCE
+        if snap:
+            T = float(Ts[nearest])
+        y = np.log(moneyness) - self.carry * T
+        j = nearest if snap else int(np.searchsorted(Ts, T)) - 1
+        around = [j] if snap else [j, j + 1]
         if any(not self.quoted_y[k, 0] - 1e-9 <= y <= self.quoted_y[k, 1] + 1e-9 for k in around):
             return np.nan
         variances = [float(self.svi[k].total_variance(y)[0]) for k in around]
-        w = (
-            variances[0]
-            if same.size
-            else variances[0] + (variances[1] - variances[0]) * (T - Ts[j]) / (Ts[j + 1] - Ts[j])
-        )
+        w = variances[0] if snap else variances[0] + (variances[1] - variances[0]) * (T - Ts[j]) / (Ts[j + 1] - Ts[j])
         return float(np.sqrt(w / T)) if w > 0 else np.nan
+
+    def at_moneyness(self, levels) -> tuple[np.ndarray, np.ndarray]:
+        """``(implied, local)`` vol at K/S ``levels`` on every maturity of the surface (rows).
+
+        Evaluated from the model itself (SSVI, or the SVI slices with the same
+        ``dw/dT`` as the grid), not interpolated on the grid, so a coarse grid
+        does not bias them. NaN outside the surface's K/S range (SSVI), outside
+        a maturity's quoted strikes (market quotes), or where local vol is undefined.
+        """
+        levels = np.asarray(levels, dtype=float)
+        if self.ssvi is not None:
+            T = self.maturities[:, None]
+            y = np.log(levels)[None, :] - self.carry * T
+            w, w_y, w_yy, w_t = self.ssvi.total_variance(y, T)
+            local = _local_vol(y, w, w_y, w_yy, w_t)[0]
+            outside = (levels < self.moneyness[0] - 1e-12) | (levels > self.moneyness[-1] + 1e-12)
+            return np.where(outside, np.nan, np.sqrt(w / T)), np.where(outside, np.nan, local)
+        if self.svi and self.quoted_y is not None:
+            values = _market_values(self.svi, self.maturities, self.quoted_y, self.carry, levels)
+            return values.implied, values.local
+        m = self.moneyness
+        outside = (levels < m[0]) | (levels > m[-1])
+
+        def grid(values):  # np.interp gives NaN next to a NaN, so it never bridges a gap
+            return np.array([np.where(outside, np.nan, np.interp(levels, m, row)) for row in values])
+
+        return grid(self.implied_vol), grid(self.local_vol)
 
 
 # ---------------------------------------------------------------------------
@@ -427,21 +458,25 @@ _BRACKETS = re.compile(r"[(\[{]([^)\]}]*)[)\]}]")
 def _header(name) -> tuple[str, str | None]:
     """A column name reduced to lowercase letters and digits, plus the unit it states (percent, days or years).
 
-    Bracketed units are removed but read (``"IV (%)"`` -> ``("iv", "percent")``), as
-    are a ``%`` sign and a trailing unit word (``"Maturity_years"`` -> ``("maturity", "years")``).
+    Bracketed text next to a name is removed but read for a unit (``"IV (% p.a.)"`` ->
+    ``("iv", "percent")``), as are a ``%`` sign and a trailing unit word (``"Maturity_years"`` ->
+    ``("maturity", "years")``). A name wrapped entirely in brackets keeps its text (``"[STRIKE]"`` -> ``"strike"``).
     """
     text = str(name).strip().lower()
-    unit = None
-    for inner in _BRACKETS.findall(text):
-        unit = _UNITS.get(re.sub(r"[^a-z%]", "", inner), unit)
-    text = _BRACKETS.sub(" ", text)
-    if "%" in text:
-        unit = "percent"
+    unit = "percent" if "%" in text else None
+    outside = _BRACKETS.sub(" ", text)
+    if re.search(r"[a-z0-9]", outside):
+        for inner in _BRACKETS.findall(text):
+            for word in re.findall(r"[a-z]+", inner):
+                unit = unit or _UNITS.get(word)
+        text = outside
     base = re.sub(r"[^a-z0-9]", "", text)
     for suffix, suffix_unit in _UNIT_SUFFIXES:
         if base.endswith(suffix) and len(base) > len(suffix):
             base, unit = base[: -len(suffix)], unit or suffix_unit
             break
+    if base.startswith("year"):  # "Years", "Years to expiry"
+        unit = unit or "years"
     return base, unit
 
 
@@ -477,17 +512,27 @@ MAX_ROWS = 200_000
 MAX_PRICE_QUOTES = 10_000
 
 
+def _holds_times(frame: pd.DataFrame, column) -> bool:
+    """Whether a column has numbers that can be a time to expiry (not dates, not YYYYMMDD integers)."""
+    try:
+        return bool(_numeric(frame, column)[0].max() <= MAX_DAYS)
+    except QuoteParseError:
+        return False
+
+
 def _match_columns(frame: pd.DataFrame) -> dict[str, tuple[str, str | None]]:
     headers = {column: _header(column) for column in frame.columns}
     found: dict[str, tuple[str, str | None]] = {}
     claimed: set = set()
     for key, aliases in _ALIAS_KEYS.items():
-        for alias in aliases:
-            column = next((c for c, (base, _) in headers.items() if base == alias and c not in claimed), None)
-            if column is not None:
-                found[key] = (column, headers[column][1])
-                claimed.add(column)
-                break
+        candidates = [c for alias in aliases for c, (base, _) in headers.items() if base == alias and c not in claimed]
+        if not candidates:
+            continue
+        column = candidates[0]
+        if key == "maturity":  # an expiry-date column often sits next to the time to expiry ("Expiration", "TTM")
+            column = next((c for c in candidates if _holds_times(frame, c)), column)
+        found[key] = (column, headers[column][1])
+        claimed.add(column)
     if "maturity" in found and found["maturity"][1] == "days":  # e.g. "Maturity (days)"
         days = found.pop("maturity")
         found.setdefault("days", days)
@@ -513,6 +558,70 @@ def _numeric(frame: pd.DataFrame, column) -> tuple[pd.Series, bool]:
         example = f" (e.g. '{sample.iloc[0]}')" if len(sample) else ""
         raise QuoteParseError(f"column '{column}' has no numeric values{example}")
     return values, percent
+
+
+MAX_DAYS = 36_500  # 100 years: larger "maturities" are neither years nor days (e.g. YYYYMMDD dates)
+
+
+def _time_column(frame: pd.DataFrame, column) -> pd.Series:
+    """A maturity or days column as floats; dates and impossible values raise :class:`QuoteParseError`."""
+    try:
+        values = _numeric(frame, column)[0]
+    except QuoteParseError:
+        sample = frame[column].dropna().astype(str).head(50)
+        dates = pd.to_datetime(sample, errors="coerce", format="mixed")
+        if len(sample) and dates.notna().mean() > 0.5:
+            raise QuoteParseError(
+                f"column '{column}' holds dates (e.g. '{sample.iloc[0]}'), but the surface needs the time to expiry: "
+                "add a Days column (calendar days to expiry) or a Maturity column in years"
+            ) from None
+        raise
+    largest = values.max()
+    if largest > MAX_DAYS:
+        hint = " (8-digit values look like YYYYMMDD dates)" if 19_000_101 <= largest <= 29_991_231 else ""
+        raise QuoteParseError(
+            f"column '{column}' goes up to {largest:,.0f}, which is neither years nor days{hint}; "
+            "add a Days column (calendar days to expiry) or a Maturity column in years"
+        )
+    return values
+
+
+def _maturities(frame: pd.DataFrame, found: dict, used: list[str], messages: list[str]) -> pd.Series:
+    """Time to expiry in years, from a days column if there is one, otherwise from a maturity column.
+
+    A maturity column whose header does not say years is taken to be in days when its values go above 30, or
+    when they are all whole numbers from 5 up (a weekly chain at 7, 14, 21, 28 is days, not decades).
+    """
+    if "days" in found:
+        column = found["days"][0]
+        used.append(f"maturity from '{column}' (days, converted to years with ACT/365)")
+        if "maturity" in found:
+            messages.append(f"Ignored '{found['maturity'][0]}': the time to expiry comes from '{column}'.")
+        return _time_column(frame, column) / 365.0
+    column, unit = found["maturity"]
+    values = _time_column(frame, column)
+    positive = values[values > 0]
+    largest = values.max()
+    whole = bool(len(positive)) and bool(np.all(positive == positive.round()))
+    explicit = unit == "years"
+    if largest > 30 or (whole and largest >= 5 and not explicit):
+        if largest > 30:
+            reason = f"go up to {largest:g}, which only makes sense in days"
+        else:
+            reason = f"are whole numbers from {positive.min():g} to {largest:g}, which look like days"
+        messages.append(
+            f"Maturities in '{column}' {reason}; converted days to years (ACT/365). Name the column 'Days' to make "
+            "this explicit, or 'Maturity (years)' if they are years."
+        )
+        used.append(f"maturity from '{column}' (days)")
+        return values / 365.0
+    if whole and not explicit:
+        messages.append(
+            f"Maturities in '{column}' are whole numbers up to {largest:g}, read as years; name the column 'Days' "
+            "if they are days."
+        )
+    used.append(f"maturity from '{column}' (years)")
+    return values
 
 
 def _option_kind(frame: pd.DataFrame, column) -> pd.Series:
@@ -566,13 +675,14 @@ def parse_quotes(
     """Validate and clean a quotes table.
 
     Accepts (case, spacing and punctuation ignored; common aliases allowed) a
-    ``Strike`` column, a ``Maturity`` column in years or a ``Days`` column, and
-    either an ``ImpliedVol`` column (decimal or percent) or option prices
-    (``Price``/``Mid``, or ``Bid`` and ``Ask``) with a call/put ``Type`` column.
-    Prices are inverted with Black-Scholes-Merton at ``spot``, ``rate`` and
-    ``dividend_yield``. Units in brackets are read (``IV (%)``, ``Maturity (days)``),
-    values may carry ``%`` signs and thousands separators, and a maturity column
-    with values above 30 is taken to be in days.
+    ``Strike`` column, a ``Days`` column or a ``Maturity`` column in years (a days
+    column wins when both are present), and either an ``ImpliedVol`` column
+    (decimal or percent) or option prices (``Price``/``Mid``, or ``Bid`` and ``Ask``)
+    with a call/put ``Type`` column. Prices are inverted with Black-Scholes-Merton
+    at ``spot``, ``rate`` and ``dividend_yield``. Units in brackets are read
+    (``IV (%)``, ``Maturity (days)``), values may carry ``%`` signs and thousands
+    separators, and a maturity column that can only hold days (see :func:`_maturities`)
+    is converted. Dates and values above 100 years' worth of days are refused.
 
     Returns ``(clean, messages)`` where ``clean`` has columns ``strike``,
     ``maturity`` (years), ``iv`` (decimal) and ``messages`` describes every
@@ -604,23 +714,7 @@ def parse_quotes(
     data = pd.DataFrame({"strike": _numeric(frame, found["strike"][0])[0]})
     used = [f"strike from '{found['strike'][0]}'"]
     reported = pd.Series(False, index=data.index)  # rows already dropped with a specific message
-    if "maturity" in found:
-        column = found["maturity"][0]
-        data["maturity"] = _numeric(frame, column)[0]
-        largest = data["maturity"].max()
-        if largest > 30:
-            data["maturity"] = data["maturity"] / 365.0
-            messages.append(
-                f"Maturities in '{column}' go up to {largest:g}, which only makes sense in days; converted days "
-                "to years (ACT/365). Name the column 'Days' to make this explicit."
-            )
-            used.append(f"maturity from '{column}' (days)")
-        else:
-            used.append(f"maturity from '{column}' (years)")
-    else:
-        column = found["days"][0]
-        data["maturity"] = _numeric(frame, column)[0] / 365.0
-        used.append(f"maturity from '{column}' (days, converted to years with ACT/365)")
+    data["maturity"] = _maturities(frame, found, used, messages)
 
     iv_percent = None
     if "iv" in found:
@@ -714,6 +808,9 @@ MIN_STRIKES_PER_SLICE = 5
 MAX_POINTS_PER_SLICE = 200  # denser slices are averaged into this many bins in y before the SVI fit
 EXTRAPOLATION = 0.25  # a neighbour may be evaluated this fraction of its quoted y-range beyond its quotes
 POOR_FIT_RMSE = 0.01
+MIN_GRID_POINTS_PER_SLICE = 16  # the K/S grid is refined until every maturity has about this many points in its quotes
+MAX_GRID_POINTS = 301
+FAR_FROM_SPOT = 0.2  # |ln(K/S)| of the nearest quoted strike beyond which the spot looks wrong (about 22%)
 
 
 def _binned(y: np.ndarray, iv: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -727,41 +824,108 @@ def _binned(y: np.ndarray, iv: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     )
 
 
-def _time_derivative(w, cover, Ts, tol):
+def _moneyness_grid(ranges: np.ndarray, n_base: int) -> np.ndarray:
+    """K/S grid over the union of the quoted ranges (rows of ``ranges``).
+
+    ``n_base`` points span the union, and the spacing is refined inside narrower
+    ranges so that each holds about :data:`MIN_GRID_POINTS_PER_SLICE` points (a
+    short expiry quoted at 0.9-1.1 next to a LEAPS quoted at 0.3-2.5 is not
+    reduced to four columns). At most :data:`MAX_GRID_POINTS` points.
+    """
+    lo, hi = ranges[:, 0].min(), ranges[:, 1].max()
+    ref = np.linspace(lo, hi, 4001)
+    mid = 0.5 * (ref[1:] + ref[:-1])
+    width = np.maximum(ranges[:, 1] - ranges[:, 0], 1e-12)
+    covers = (mid[None, :] >= ranges[:, :1]) & (mid[None, :] <= ranges[:, 1:])
+    needed = np.where(covers, (MIN_GRID_POINTS_PER_SLICE - 1) / width[:, None], 0.0).max(axis=0)
+    density = np.maximum((n_base - 1) / (hi - lo), needed)  # grid points per unit of K/S
+    cumulative = np.concatenate([[0.0], np.cumsum(density * np.diff(ref))])
+    n = min(int(np.ceil(cumulative[-1] - 1e-6)), MAX_GRID_POINTS - 1) + 1
+    grid = np.interp(np.linspace(0.0, cumulative[-1], n), cumulative, ref)
+    grid[0], grid[-1] = lo, hi
+    return grid
+
+
+def _time_derivative(w, cover, tol, Ts):
     """``dw/dT`` at fixed ``y`` from secants between neighbouring maturities, and the calendar-arbitrage mask.
 
-    ``w[k]`` and ``cover[k]`` hold, for every row ``i`` and grid point, slice ``k``
-    evaluated at row ``i``'s ``y`` (axis 1) and whether that is close enough to slice
-    ``k``'s quotes. Returns ``(w_t, calendar_bad, available)`` on the ``(n_T, n_y)`` grid.
+    ``w[k]``, ``cover[k]`` and ``tol[k]`` (``k`` from -1 to 2) hold, for every row ``i``, slice ``i + k``
+    evaluated at row ``i``'s ``y``, whether that is close enough to slice ``i + k``'s quotes, and the
+    total-variance precision of its quotes (NaN / False where slice ``i + k`` does not exist).
+
+    Inside: the Fritsch-Butland weighted harmonic mean of the two secants. First maturity: the one-sided
+    three-point formula (second order, capped at three times the secant), or the one-sided secant where that
+    is not positive or the third maturity is not quoted near this ``y``; at short maturities the secant's
+    truncation error dominates. Last maturity: the one-sided secant, because at long maturities quote noise in
+    total variance (which grows with ``T``) dominates and the three-point formula amplifies it.
+    Returns ``(w_t, calendar_bad, available)``, each ``(n_T, n_y)``.
     """
-    n = len(Ts)
     h = np.diff(Ts)
-    shape = w.shape[1:]
-    w_t = np.full(shape, np.nan)
-    bad = np.zeros(shape, dtype=bool)
-    available = np.zeros(shape, dtype=bool)
-    for i in range(n):
-        sides = []  # (secant, h, covered, negative)
-        for j, step in ((i - 1, h[i - 1] if i > 0 else None), (i + 1, h[i] if i < n - 1 else None)):
-            if step is None:
-                continue
-            lo, hi = sorted((i, j))
-            diff = w[hi, i] - w[lo, i]
-            covered = cover[j, i]
-            negative = covered & (diff < -(tol[lo, i] + tol[hi, i]))
-            sides.append((np.maximum(diff, 0.0) / step, step, covered, negative))
-        if len(sides) == 1:
-            d, _, covered, negative = sides[0]
-        else:
-            (dl, hl, cl, nl), (dr, hr, cr, nr) = sides
-            covered, negative = cl & cr, nl | nr
-            with np.errstate(divide="ignore", invalid="ignore"):
-                harmonic = (3 * hl + 3 * hr) / ((2 * hr + hl) / dl + (hr + 2 * hl) / dr)  # Fritsch-Butland
-            d = np.where((dl > 0) & (dr > 0), harmonic, (hr * dl + hl * dr) / (hl + hr))
-        w_t[i] = d
-        available[i] = covered
-        bad[i] = negative | (covered & ~(d > 0))
+    h_l = np.r_[np.nan, h][:, None]
+    h_r = np.r_[h, np.nan][:, None]
+    diff_l, diff_r = w[0] - w[-1], w[1] - w[0]
+    negative = (cover[-1] & (diff_l < -(tol[-1] + tol[0]))) | (cover[1] & (diff_r < -(tol[0] + tol[1])))
+    d_l, d_r = np.maximum(diff_l, 0.0) / h_l, np.maximum(diff_r, 0.0) / h_r
+    with np.errstate(divide="ignore", invalid="ignore"):
+        harmonic = 3 * (h_l + h_r) / ((2 * h_r + h_l) / d_l + (h_r + 2 * h_l) / d_r)
+    w_t = np.where((d_l > 0) & (d_r > 0), harmonic, (h_r * d_l + h_l * d_r) / (h_l + h_r))
+    available = cover[-1] & cover[1]
+    w_t[0], available[0] = d_r[0], cover[1][0]
+    w_t[-1], available[-1] = d_l[-1], cover[-1][-1]
+    if len(Ts) >= 3:
+        near, far = d_r[0], (w[2][0] - w[1][0]) / h[1]  # secants T0-T1 and T1-T2, both at row 0's y
+        three_point = ((2 * h[0] + h[1]) * near - h[0] * far) / (h[0] + h[1])
+        use = cover[2][0] & (near > 0) & (far > 0) & (three_point > 0)
+        w_t[0] = np.where(use, np.minimum(three_point, 3 * near), near)
+    bad = negative | (available & ~(w_t > 0))
     return w_t, bad, available
+
+
+@dataclass(frozen=True)
+class _MarketValues:
+    implied: np.ndarray
+    local: np.ndarray
+    calendar_bad: np.ndarray
+    butterfly_bad: np.ndarray
+    defined: np.ndarray  # inside the quotes with positive total variance
+    available: np.ndarray  # dw/dT has its neighbours close to their quotes
+    zero_variance: bool
+
+
+def _market_values(fits, Ts, quoted_y, carry, moneyness) -> _MarketValues:
+    """Implied and local vol of the SVI slices at K/S ``moneyness`` (1-D) on every quoted maturity (rows)."""
+    n_T = len(Ts)
+    y = np.log(np.asarray(moneyness, dtype=float))[None, :] - carry * Ts[:, None]
+    lo, hi = quoted_y[:, 0], quoted_y[:, 1]
+    allow = EXTRAPOLATION * (hi - lo)
+    w, cover, tol = {}, {}, {}
+    for offset in range(-1, 3):
+        w[offset] = np.full(y.shape, np.nan)
+        cover[offset] = np.zeros(y.shape, dtype=bool)
+        T_k = np.full((n_T, 1), np.nan)
+        for i in range(max(0, -offset), min(n_T, n_T - offset)):
+            k = i + offset
+            w[offset][i] = fits[k].total_variance(y[i])[0]
+            cover[offset][i] = (y[i] >= lo[k] - allow[k]) & (y[i] <= hi[k] + allow[k])
+            T_k[i] = Ts[k]
+        tol[offset] = 2.0 * np.sqrt(np.maximum(w[offset], 0.0) * T_k) * QUOTE_PRECISION
+
+    own = w[0]
+    inside = (y >= lo[:, None] - 1e-9) & (y <= hi[:, None] + 1e-9)
+    defined = inside & (own > 0)
+    implied = np.where(defined, np.sqrt(np.maximum(own, 0.0) / Ts[:, None]), np.nan)
+    w_y = np.array([svi.total_variance(y[i])[1] for i, svi in enumerate(fits)])
+    w_yy = np.array([svi.total_variance(y[i])[2] for i, svi in enumerate(fits)])
+    w_t, calendar_bad, available = _time_derivative(w, cover, tol, Ts)
+    g = durrleman_g(y, np.where(defined, own, 1.0), w_y, w_yy)
+    calendar_bad &= defined
+    butterfly_bad = defined & (g <= 0)
+    ok = defined & available & ~calendar_bad & ~butterfly_bad
+    with np.errstate(divide="ignore", invalid="ignore"):
+        local = np.where(ok, np.sqrt(np.where(ok, w_t / g, 0.0)), np.nan)
+    return _MarketValues(
+        implied, local, calendar_bad, butterfly_bad, defined, available, bool((inside & (own <= 0)).any())
+    )
 
 
 def fit_market_surface(
@@ -775,10 +939,12 @@ def fit_market_surface(
 
     Every maturity with enough strikes is fitted with raw SVI (:func:`fit_svi`).
     The result is evaluated at the quoted maturities (no extrapolation in time)
-    on a K/S grid spanning the union of the quoted strike ranges. Implied vol is
-    NaN outside each maturity's own quoted range; local vol is also NaN where
-    ``dw/dT`` would need a neighbouring maturity far outside its quotes, where
-    the surface has calendar or butterfly arbitrage, or where it is otherwise undefined.
+    on a K/S grid spanning the union of the quoted strike ranges, with
+    ``n_moneyness`` points across it and more inside narrow ranges
+    (:func:`_moneyness_grid`). Implied vol is NaN outside each maturity's own
+    quoted range; local vol is also NaN where ``dw/dT`` would need a neighbouring
+    maturity far outside its quotes, where the surface has calendar or butterfly
+    arbitrage, or where it is otherwise undefined.
     """
     notes: list[str] = []
     carry = rate - dividend_yield
@@ -812,11 +978,15 @@ def fit_market_surface(
     Ts = np.array(Ts)
     quoted_y = np.array(quoted)
     rmse = np.array(rmse)
-    strikes = pd.concat(used)["strike"]
-    if not strikes.min() <= spot <= strikes.max() or not 0.5 <= strikes.median() / spot <= 2.0:
+    strikes = pd.concat(used)["strike"].to_numpy(float)
+    log_moneyness = np.log(strikes / spot)
+    nearest = int(np.argmin(np.abs(log_moneyness)))
+    if abs(log_moneyness[nearest]) > FAR_FROM_SPOT or not 0.5 <= np.exp(np.median(log_moneyness)) <= 2.0:
+        gap = strikes[nearest] / spot - 1.0
         notes.append(
             f"Quoted strikes run from {strikes.min():,.2f} to {strikes.max():,.2f}, far from the spot {spot:,.2f} "
-            "used to read them; set the sidebar spot to the underlying price the quotes were taken at."
+            f"used to read them (the nearest is {abs(gap):.0%} {'below' if gap < 0 else 'above'} it); set the "
+            "sidebar spot to the underlying price the quotes were taken at."
         )
     poor = Ts[rmse > POOR_FIT_RMSE]
     if poor.size:
@@ -825,50 +995,25 @@ def fit_market_surface(
             f"{', '.join(f'{t:.3g}y' for t in poor)}; check those quotes."
         )
 
-    m_lo = np.exp(quoted_y[:, 0] + carry * Ts).min()
-    m_hi = np.exp(quoted_y[:, 1] + carry * Ts).max()
-    moneyness = np.linspace(m_lo, m_hi, n_moneyness)
-    y_grid = np.log(moneyness)[None, :] - carry * Ts[:, None]
-    n_T = len(Ts)
-
-    # every slice evaluated at every row's y: axis 0 = slice, axis 1 = row
-    w_all = np.array([svi.total_variance(y_grid)[0] for svi in fits])
-    lo, hi = quoted_y[:, 0][:, None, None], quoted_y[:, 1][:, None, None]
-    inside_all = (y_grid[None] >= lo - 1e-9) & (y_grid[None] <= hi + 1e-9)
-    allow = EXTRAPOLATION * (hi - lo)
-    cover_all = (y_grid[None] >= lo - allow) & (y_grid[None] <= hi + allow)
-    tol_all = 2.0 * np.sqrt(np.maximum(w_all, 0.0) * Ts[:, None, None]) * QUOTE_PRECISION
-
-    rows = np.arange(n_T)
-    w = w_all[rows, rows]
-    inside = inside_all[rows, rows] & (w > 0)
-    implied = np.where(inside, np.sqrt(np.maximum(w, 0.0) / Ts[:, None]), np.nan)
-    w_y = np.array([svi.total_variance(y_grid[i])[1] for i, svi in enumerate(fits)])
-    w_yy = np.array([svi.total_variance(y_grid[i])[2] for i, svi in enumerate(fits)])
-    w_t, calendar_bad, available = _time_derivative(w_all, cover_all, Ts, tol_all)
-    g = durrleman_g(y_grid, np.where(inside, w, 1.0), w_y, w_yy)
-    calendar_bad &= inside
-    butterfly_bad = inside & (g <= 0)
-    ok = inside & available & ~calendar_bad & ~butterfly_bad
-    with np.errstate(divide="ignore", invalid="ignore"):
-        local = np.where(ok, np.sqrt(np.where(ok, w_t / g, 0.0)), np.nan)
-    uncovered = int((inside & ~available).sum())
+    moneyness = _moneyness_grid(np.exp(quoted_y + carry * Ts[:, None]), n_moneyness)
+    values = _market_values(fits, Ts, quoted_y, carry, moneyness)
+    uncovered = int((values.defined & ~values.available).sum())
     if uncovered:
         notes.append(
             f"Local vol is left blank at {uncovered} grid point(s) where dw/dT would need a neighbouring maturity "
             "far outside its quoted strikes."
         )
-    if (inside_all[rows, rows] & (w <= 0)).any():
+    if values.zero_variance:
         notes.append("The fitted surface has zero total variance at some quoted points; check the quotes.")
 
     clean_quotes = pd.concat(used).reset_index(drop=True)[["strike", "maturity", "iv", "moneyness", "fitted_iv"]]
     return VolSurface(
         moneyness,
         Ts,
-        implied,
-        local,
-        int(calendar_bad.sum()),
-        int(butterfly_bad.sum()),
+        values.implied,
+        values.local,
+        int(values.calendar_bad.sum()),
+        int(values.butterfly_bad.sum()),
         "Market quotes",
         tuple(notes),
         carry=carry,
@@ -909,21 +1054,18 @@ def sample_quotes(
 def surface_summary(surface: VolSurface) -> pd.DataFrame:
     """ATM level, 90/110 skew and smile curvature per maturity (vol points), plus the fit RMSE for quotes.
 
-    Values are NaN where the surface is undefined at the strikes they need
-    (interpolation never bridges a gap or clamps to the nearest defined point).
+    Evaluated exactly at K/S = 0.9, 1 and 1.1 (:meth:`VolSurface.at_moneyness`),
+    not interpolated on the grid; NaN where the surface is undefined at the
+    strikes a value needs (outside a maturity's quotes, or no local vol there).
     """
+    implied, local = surface.at_moneyness([0.9, 1.0, 1.1])
     rows = []
-    m = surface.moneyness
-
-    def at(level, values):
-        return float(np.interp(level, m, values)) if m[0] <= level <= m[-1] else np.nan
-
-    for i, (T, ivs, lvs) in enumerate(zip(surface.maturities, surface.implied_vol, surface.local_vol, strict=True)):
-        atm, lo, hi = at(1.0, ivs), at(0.9, ivs), at(1.1, ivs)
+    for i, T in enumerate(surface.maturities):
+        lo, atm, hi = implied[i]
         row = {
             "Maturity (years)": T,
             "ATM implied vol": atm,
-            "ATM local vol": at(1.0, lvs),
+            "ATM local vol": local[i, 1],
             "Skew 90-110 (vol pts)": (lo - hi) * 100,
             "Butterfly (vol pts)": (0.5 * (lo + hi) - atm) * 100,
         }
