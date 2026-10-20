@@ -17,7 +17,8 @@ in `requirements-oracle.txt`, which includes the dev tools:
 
 ```bash
 pip install -r requirements-oracle.txt
-pytest -m oracle                             # without these libraries the oracle tests are skipped
+REQUIRE_ORACLES=1 pytest -m oracle           # as CI does: a missing library or a skipped oracle test fails
+pytest -m oracle                             # without REQUIRE_ORACLES, missing libraries skip the oracle tests
 ```
 
 Running the tests:
@@ -29,7 +30,9 @@ HYPOTHESIS_PROFILE=ci pytest                 # Hypothesis profiles: dev (default
 ```
 
 Tests run with outbound network access blocked (`tests/conftest.py`); a test that really needs the internet must be
-marked `@pytest.mark.network`. The shared Streamlit fixtures `app` and `new_app` are also in `tests/conftest.py`.
+marked `@pytest.mark.network`. Proxy settings (`HTTPS_PROXY` and the like) are switched off inside unmarked tests,
+so a proxy on your machine cannot fetch pages for them and a test that passes locally also passes in CI, which has no
+proxy. The shared Streamlit fixtures `app` and `new_app` are also in `tests/conftest.py`.
 
 ## Before opening a pull request
 

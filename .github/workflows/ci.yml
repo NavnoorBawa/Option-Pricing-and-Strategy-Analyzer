@@ -78,6 +78,10 @@ jobs:
   oracle:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      # An oracle library that does not import stops the run, and an oracle test that would be skipped fails
+      # (tests/conftest.py), so that this job cannot pass with no oracle check run.
+      REQUIRE_ORACLES: "1"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
