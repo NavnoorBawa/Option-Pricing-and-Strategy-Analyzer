@@ -1,8 +1,9 @@
-# Runtime dependencies (Streamlit Community Cloud installs from this file).
-# Development tools (pytest, mpmath, ruff) are pinned in requirements-dev.txt.
-streamlit>=1.64,<2
+# Runtime dependencies (Streamlit Community Cloud installs from this file); keep them in step with pyproject.toml.
+# Development tools are pinned in requirements-dev.txt, the independent test oracles in requirements-oracle.txt.
+streamlit>=1.65,<2
 numpy>=1.26
 pandas>=2.1
 plotly>=5.24
 scipy>=1.11
+tzdata>=2022.7; sys_platform == "win32"
 xlsxwriter>=3.1

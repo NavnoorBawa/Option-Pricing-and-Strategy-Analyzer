@@ -13,6 +13,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Hypothesis: 300 examples per property from a fixed seed, without an example database (tests/conftest.py).
+  HYPOTHESIS_PROFILE: ci
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -45,7 +50,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
       - name: Run tests
-        run: pytest -q
+        # One worker per CPU; --dist loadfile keeps each test file (and its Streamlit AppTests) on one worker.
+        # Network canaries and browser tests run in their own workflows.
+        run: pytest -n auto --dist loadfile -q -m "not network and not e2e"
 
   # The oldest dependency versions the project declares, so that the lower bounds stay true.
   oldest-dependencies:
@@ -57,11 +64,35 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install the declared minimum versions
-        run: >
-          pip install "numpy==1.26.*" "pandas==2.1.*" "scipy==1.11.*" "plotly==5.24.*" "streamlit==1.64.*"
-          "xlsxwriter==3.1.*" mpmath==1.4.1 pytest==9.1.1
+        # The test tools come from requirements-dev.txt (the one place they are pinned); the constraints hold each
+        # runtime dependency at its lower bound.
+        run: |
+          printf '%s\n' "numpy==1.26.*" "pandas==2.1.*" "scipy==1.11.*" "plotly==5.24.*" "streamlit==1.65.*" \
+            "xlsxwriter==3.1.*" > "$RUNNER_TEMP/oldest.txt"
+          pip install -r requirements-dev.txt -c "$RUNNER_TEMP/oldest.txt"
+          pip list
       - name: Run tests
-        run: pytest -q
+        run: pytest -n auto --dist loadfile -q -m "not network and not e2e"
+
+  # Cross-checks against independent libraries (QuantLib, Let's Be Rational), which are test-only dependencies.
+  oracle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # An oracle library that does not import stops the run, and an oracle test that would be skipped fails
+      # (tests/conftest.py), so that this job cannot pass with no oracle check run.
+      REQUIRE_ORACLES: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Install the dev tools and the oracles
+        run: pip install -r requirements-oracle.txt
+      - name: Run the oracle tests
+        run: pytest -n auto --dist loadfile -q -m oracle
 
   package:
     runs-on: ubuntu-latest
@@ -76,6 +107,18 @@ jobs:
           pip install build
           python -m build --wheel
           pip install "$(ls dist/*.whl)[app]"
+      - name: Check that the wheel ships every file of the package
+        # Fonts, stylesheets and Methodology text are package data; a missing glob would drop them silently.
+        run: |
+          python - <<'EOF'
+          import pathlib, subprocess, zipfile
+          wheel = next(pathlib.Path("dist").glob("*.whl"))
+          shipped = set(zipfile.ZipFile(wheel).namelist())
+          tracked = subprocess.run(["git", "ls-files", "options_analyzer"], capture_output=True, text=True, check=True)
+          missing = [path for path in tracked.stdout.splitlines() if path not in shipped]
+          assert not missing, f"{wheel.name} lacks {missing}"
+          print(f"{wheel.name} ships all {len(tracked.stdout.splitlines())} tracked package files")
+          EOF
       - name: Import the core and the app outside the checkout
         working-directory: /tmp
         run: |

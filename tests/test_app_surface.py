@@ -3,7 +3,6 @@
 import io
 import json
 import zipfile
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -12,16 +11,6 @@ from streamlit.testing.v1 import AppTest
 
 from options_analyzer import black_scholes, implied_vol, vol_surface
 from options_analyzer.ui import charts, tab_surface
-
-APP = str(Path(__file__).resolve().parents[1] / "main.py")
-
-
-@pytest.fixture
-def app() -> AppTest:
-    at = AppTest.from_file(APP, default_timeout=120)
-    at.run()
-    assert not at.exception, at.exception
-    return at
 
 
 def _ok(at: AppTest) -> None:
