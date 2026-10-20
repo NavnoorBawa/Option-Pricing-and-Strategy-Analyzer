@@ -91,16 +91,25 @@ def show(fig: go.Figure, *, key: str, container=None, **kwargs):
 
 def style(fig: go.Figure, palette: dict[str, str] | None = None, height: int | None = None) -> go.Figure:
     """Apply the desk house style: template, height, margins, full series names in the hover label, and the grid,
-    axis-line and crosshair colours of ``palette``. The zero lines are off: charts that need one draw it."""
+    axis-line, crosshair and text colours of ``palette``. The zero lines are off: charts that need one draw it.
+
+    The axis text (tick labels and titles), and any label without a colour of its own, is in the muted colour: 6.36:1
+    on the dark background and 5.73:1 on the light one, where the theme's own faded grey was 3.62:1 at 10.5 px.
+    (Legends and chart titles keep the theme's text colours.)
+    """
     colors = palette or theme.palette()
     fig.update_layout(
         template=TEMPLATE,
         height=height or fig.layout.height or HEIGHT,
         margin=MARGIN,
         hoverlabel=dict(namelength=-1),
+        font=dict(color=colors["muted"]),
     )
-    fig.update_xaxes(linecolor=colors["rule"], gridcolor=colors["rule"], spikecolor=colors["muted"], zeroline=False)
-    fig.update_yaxes(linecolor=colors["rule"], gridcolor=colors["rule"], zeroline=False)
+    text = dict(tickfont=dict(color=colors["muted"]), title_font=dict(color=colors["muted"]))
+    fig.update_xaxes(
+        linecolor=colors["rule"], gridcolor=colors["rule"], spikecolor=colors["muted"], zeroline=False, **text
+    )
+    fig.update_yaxes(linecolor=colors["rule"], gridcolor=colors["rule"], zeroline=False, **text)
     return fig
 
 
@@ -114,15 +123,21 @@ def apply_layout(
 ) -> go.Figure:
     """:func:`style` plus a title (top left; the legend then moves to the top right) and the axis titles."""
     style(fig, palette, height)
-    fig.update_layout(xaxis_title=x_title, yaxis_title=y_title)
+    fig.update_layout(xaxis_title_text=x_title, yaxis_title_text=y_title)  # keeps the title font of style()
     if title:
         fig.update_layout(title=dict(text=title, x=0.0, xanchor="left"), legend=dict(x=1.0, xanchor="right"))
     return fig
 
 
 def _legend_below(fig: go.Figure) -> go.Figure:
-    """Horizontal legend under the plot, where the Plotly toolbar cannot cover it."""
-    fig.update_layout(legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="left", x=0.0))
+    """Horizontal legend at the bottom of the figure, under the x-axis title, where the Plotly toolbar cannot cover
+    it.
+
+    The legend is placed in the figure's own coordinates (``yref="container"``), so Plotly keeps room for it under
+    the tick labels and the axis title at any chart height and for any number of legend rows. Placed a fraction of
+    the plot height under the plot, it ran into the axis title on the shorter charts.
+    """
+    fig.update_layout(legend=dict(orientation="h", x=0.0, xanchor="left", yref="container", y=0.0, yanchor="bottom"))
     return fig
 
 
@@ -578,12 +593,14 @@ def bar_chart(names, values, x_title: str, palette: dict[str, str] | None = None
     return fig
 
 
-def surface_3d(moneyness, maturities, z, title: str, colorscale: str):
+def surface_3d(moneyness, maturities, z, title: str, colorscale: str, palette: dict[str, str] | None = None):
     # A cube-shaped scene (Plotly's automatic aspect stretches some surfaces out of view) and a colour bar under
     # the plot. Plotly sizes a 3-D scene by the plot's height, not its width, so the camera distance fixes the
     # scene at about 270 px across: every axis, tick label and title stays inside a chart at least that wide
     # (a phone column is 328 px or more; the Volatility Surface tab wraps the two charts before they get
     # narrower). A margin does not help: the scene is clipped at its own domain, so a margin only moves the cut.
+    # The axis and colour-bar text is in the muted colour, as in style().
+    text = dict(color=(palette or theme.palette())["muted"])
     fig = go.Figure(
         go.Surface(
             x=moneyness,
@@ -591,7 +608,8 @@ def surface_3d(moneyness, maturities, z, title: str, colorscale: str):
             z=z,
             colorscale=colorscale,
             colorbar=dict(
-                title=dict(text="Volatility", side="top"),
+                title=dict(text="Volatility", side="top", font=text),
+                tickfont=text,
                 tickformat=".0%",
                 orientation="h",
                 thickness=12,
@@ -610,10 +628,11 @@ def surface_3d(moneyness, maturities, z, title: str, colorscale: str):
         title=dict(text=title, x=0.0),
         height=560,
         margin=dict(l=0, r=0, t=MARGIN["t"], b=70),
+        font=text,
         scene=dict(
-            xaxis_title="Moneyness K/S",
-            yaxis_title="Maturity (years)",
-            zaxis=dict(title="Volatility", tickformat=".0%"),
+            xaxis=dict(title=dict(text="Moneyness K/S", font=text), tickfont=text),
+            yaxis=dict(title=dict(text="Maturity (years)", font=text), tickfont=text),
+            zaxis=dict(title=dict(text="Volatility", font=text), tickfont=text, tickformat=".0%"),
             aspectmode="cube",
             camera=dict(eye=dict(x=2.47, y=-2.47, z=1.43), center=dict(x=0.0, y=0.0, z=-0.12)),
         ),
@@ -662,5 +681,4 @@ def smile_chart(
         _vline(fig, spot_line, "ATM", colors, position="top right")
     fig = apply_layout(fig, None, x_title, "Volatility", height=480, palette=colors)
     fig.update_yaxes(tickformat=".0%")
-    fig.update_layout(legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="left", x=0.0))
-    return fig
+    return _legend_below(fig)

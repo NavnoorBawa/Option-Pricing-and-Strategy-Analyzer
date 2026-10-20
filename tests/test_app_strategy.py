@@ -460,40 +460,41 @@ def test_large_amounts_are_shortened_with_the_exact_value_in_the_help():
     assert "Exact: \\$215,715" in premium.proto.help
 
 
-#: Advance widths (px) of the metric-card value font (Source Sans, 36 px), measured in Chromium. Digits, ``$`` and
-#: ``+`` are equally wide; ``-``, ``,`` and ``.`` are narrower. The model leaves out kerning, which only narrows.
+#: Advance widths (px) of the metric-card value font (the theme's IBM Plex Sans Medium at 22.75 px), measured in
+#: Chromium and rounded up. Digits, ``$``, ``+``, ``<`` and ``>`` are equally wide (``$`` is 0.02 px narrower); ``-``,
+#: ``,`` and ``.`` are narrower. The model leaves out kerning, which narrows the card strings (checked below).
 CARD_GLYPHS = {
-    **dict.fromkeys("0123456789$+<>", 17.892),
-    "-": 11.196,
-    ",": 8.964,
-    ".": 8.964,
-    "%": 29.664,
-    "e": 17.856,
-    "M": 26.172,
-    "B": 21.168,
-    "C": 20.556,
-    "T": 19.296,
-    "–": 17.280,
-    " ": 7.200,
-    "N": 23.292,
-    "U": 23.220,
-    "a": 18.144,
-    "d": 19.980,
-    "f": 10.512,
-    "g": 18.144,
-    "i": 8.856,
-    "l": 9.180,
-    "m": 29.844,
-    "n": 19.692,
-    "o": 19.512,
-    "p": 19.980,
-    "r": 12.492,
-    "s": 15.084,
-    "t": 12.168,
+    **dict.fromkeys("0123456789$+<>", 13.650),
+    "-": 9.124,
+    ",": 6.598,
+    ".": 6.598,
+    "%": 21.545,
+    "e": 12.650,
+    "M": 18.519,
+    "B": 14.993,
+    "C": 14.424,
+    "T": 13.128,
+    "–": 13.378,
+    " ": 5.370,
+    "N": 16.244,
+    "U": 15.608,
+    "a": 12.490,
+    "d": 13.468,
+    "f": 7.736,
+    "g": 12.218,
+    "i": 6.029,
+    "l": 6.485,
+    "m": 20.066,
+    "n": 13.196,
+    "o": 12.832,
+    "p": 13.468,
+    "r": 8.714,
+    "s": 11.240,
+    "t": 8.304,
 }
 #: Width (px) of a card's value in a row of four at 1,280 px with the sidebar open, leaving room for the main
-#: area's 10 px scrollbar where the browser shows one (161 px without it); a wider value ends in "…".
-CARD_WIDTH = 158.5
+#: area's 10 px scrollbar where the browser shows one (181 px without it); a wider value ends in "…".
+CARD_WIDTH = 178.5
 
 
 def _card_width(text: str) -> float:
@@ -501,11 +502,23 @@ def _card_width(text: str) -> float:
 
 
 def test_card_width_model_counts_the_sign():
-    # Round-3 verifier: at 1,280 px '+$2,737.18' measured 161.08 px in its 161 px card and was cut to '+$2,737.…',
-    # while '-$2,737.18' (154.4 px) fitted; counting characters without the sign missed it.
-    assert _card_width("+$2,737.18") == pytest.approx(161.08, abs=0.02)
-    assert _card_width("+$2,737.18") > CARD_WIDTH > _card_width("-$2,737.18")
-    assert _card_width("Cannot lose") > CARD_WIDTH  # 178 px: cut to 'Cannot l…'
+    # Round-3 verifier: '+$2,737.18' was cut to '+$2,737.…' in its card while '-$2,737.18' fitted: '+' is as wide as
+    # a digit and '-' much narrower, so counting characters without the sign missed it. Widths measured in Chromium
+    # (Plex Sans Medium, 22.75 px, with kerning): the model is never narrower (Chromium rounds to 1/64 px), and at
+    # most half a pixel wider.
+    assert _card_width("+$2,737.18") - _card_width("-$2,737.18") == pytest.approx(13.650 - 9.124)
+    measured = {
+        "+$2,737.18": 122.375,
+        "-$2,737.18": 117.859,
+        "+$1.0e+15": 114.781,
+        "Cannot lose": 122.953,
+        "No profit": 91.188,
+        "Unlimited": 101.750,
+        "$441.0T": 87.953,
+        ">99.9%": 82.750,
+    }
+    for text, width in measured.items():
+        assert width - 1 / 64 <= _card_width(text) <= width + 0.5, text
 
 
 @pytest.mark.parametrize(

@@ -159,17 +159,22 @@ def test_fourth_card_reports_what_each_model_adds_instead_of_a_zero_parity_gap(a
     assert _dollars(_metrics(app)["Std. error"]) == pytest.approx(max(r.std_error for r in se.values()), abs=1e-4)
 
 
+def _price_card_style(at: AppTest) -> str:
+    """The price cards' stylesheet (the app's own stylesheet comes first)."""
+    return next(h.proto.body for h in at.get("html") if ".st-key-price_cards " in h.proto.body)
+
+
 def test_price_cards_wrap_in_pairs_of_equal_width(app):
     # The four cards sat in one wrapping row sized by their content, so it broke 3 + 1 (the fourth card stretched
     # across the whole row) at 1,024 px with the sidebar open, and at 1,400 px with seven-digit prices.
     assert [m.label for m in _block(app, "price_cards_prices").metric] == ["Call value", "Put value"]
     assert [m.label for m in _block(app, "price_cards_model").metric] == ["Forward price", "Call ITM probability"]
     card = int(np.ceil(max(tab_pricing._card_width(m.label, m.value) for m in app.metric[:4])))
-    style = app.get("html")[0].proto.body
+    style = _price_card_style(app)
     cards_rule = f".st-key-price_cards_prices > *, .st-key-price_cards_model > * {{ flex: 1 1 {card}px !important; }}"
     assert cards_rule in style
-    assert f"{{ flex: 1 1 {2 * card + 16}px !important; }}" in style  # each pair: two cards and the gap
-    assert card == 186  # the forward price ($105.1271) and the ITM card's label are the widest
+    assert f"{{ flex: 1 1 {2 * card + 14}px !important; }}" in style  # each pair: two cards and the gap
+    assert card == 174  # the ITM card's label is the widest
 
 
 @pytest.mark.parametrize(
@@ -183,32 +188,34 @@ def test_price_cards_wrap_in_pairs_of_equal_width(app):
 def test_price_cards_stay_two_by_two_on_a_phone(app, values, phone):
     # Every card was based on its full one-line width (186 px), so on phones narrower than about 420 px both pairs
     # stacked: four full-width cards that pushed the tabs below the first screen. Where the row is narrower than one
-    # full-size pair, the labels now wrap and the values shrink with the row (down to 20 px).
-    style = app.get("html")[0].proto.body
+    # full-size pair, the labels now wrap and the values shrink with the row (down to 16 px). In IBM Plex Sans the
+    # values also never grow beyond their desktop size of 22.75 px: at 36 px on a phone they were cut to '$10.45…'.
+    style = _price_card_style(app)
     assert ".st-key-price_cards { container: price-cards / inline-size; }" in style
-    assert "@container price-cards (width < 388px) {" in style
+    assert "@container price-cards (width < 362px) {" in style
     assert "white-space: normal;" in style
-    assert "font-size: clamp(20px, calc((50cqw - 40px) / 4.25), 36px);" in style  # 4.25 em: "$105.1271"
+    # 5.19 em: "$105.1271" and a tenth of an em to spare
+    assert "font-size: clamp(16px, calc((50cqw - 35px) / 5.19), 22.75px);" in style
     labels = ["Call value", "Put value", "Forward price", "Call ITM probability"]
     compact = tab_pricing._cards_style(list(zip(labels, values, strict=True)))
     pair = int(compact.split("@container")[1].split("flex-basis: ")[1].split("px")[0])
-    row = phone - 2 * 16  # the page's side margins on a phone
+    row = phone - 2 * 14  # the page's side margins on a phone
     assert pair <= row  # two cards side by side
     em = max(tab_pricing._value_em(v) for v in values)
-    font = min(max(20.0, ((row - 16) / 2 - 32) / em), 36.0)  # the clamp() at this row width
-    assert font * em <= (row - 16) / 2 - 32  # the widest value fits its card
+    font = min(max(16.0, ((row - 14) / 2 - 28) / em), 22.75)  # the clamp() at this row width
+    assert font * em <= (row - 14) / 2 - 28  # the widest value fits its card
 
 
 @pytest.mark.parametrize(
     ("label", "value", "measured"),
-    # max-content widths of the cards in Chromium, in px
+    # max-content widths of the cards in Chromium (IBM Plex Sans, the theme's 14 px base), rounded up, in px
     [
-        ("Call value", "$10.4506", 166.2),
-        ("Put value", "$5.5735", 148.3),
-        ("Forward price", "$1,051,271.0964", 273.6),
-        ("Exercise premium", "$5,162.6001", 211.0),
-        ("Tree error vs BSM", "$0.003499", 184.1),
-        ("Call ITM probability", "55.96%", 167.3),
+        ("Call value", "$10.4506", 130.2),
+        ("Put value", "$5.5735", 116.5),
+        ("Forward price", "$1,051,271.0964", 211.6),
+        ("Exercise premium", "$5,162.6001", 164.1),
+        ("Tree error vs BSM", "$0.003499", 144.4),
+        ("Call ITM probability", "55.96%", 154.6),
     ],
 )
 def test_card_width_estimate_covers_the_rendered_card(label, value, measured):
@@ -219,7 +226,7 @@ def test_card_width_estimate_covers_the_rendered_card(label, value, measured):
 @pytest.mark.parametrize(
     ("delta", "measured"),
     # max-content widths in Chromium of the implied-volatility card (value 20.000%) with its delta line, in px
-    [("+0.00 vol pts vs sidebar", 178.0), ("-12.34 vol pts vs sidebar", 182.4), ("+123.45 vol pts vs sidebar", 192.0)],
+    [("+0.00 vol pts vs sidebar", 169.3), ("-12.34 vol pts vs sidebar", 174.2), ("+123.45 vol pts vs sidebar", 184.0)],
 )
 def test_card_width_estimate_covers_the_delta_line(delta, measured):
     assert measured <= tab_pricing._card_width("Implied volatility", "20.000%", delta=delta) <= measured + 20

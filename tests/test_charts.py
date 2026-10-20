@@ -36,7 +36,7 @@ def _builders(palette):
         "pnl_heatmap": charts.pnl_heatmap(list("abcd"), list("vwxyz"), grid, "Date", "Spot", palette=palette),
         "lines": charts.lines_chart(X, {"a": X, "b": X + 1}, "x", "y", vline=(100.0, "spot"), palette=palette),
         "bar": charts.bar_chart(["Crash", "Rally"], [-1234.5, 880.0], "P&L ($)", palette=palette),
-        "surface": charts.surface_3d(m, [0.5, 1.0], np.full((2, 9), 0.2), "Implied volatility", "Viridis"),
+        "surface": charts.surface_3d(m, [0.5, 1.0], np.full((2, 9), 0.2), "Implied volatility", "Viridis", palette),
         "smile": charts.smile_chart(m, [("30d", m * 0 + 0.2, m * 0 + 0.21)], "K/S", palette=palette),
     }  # fmt: skip
 
@@ -87,6 +87,37 @@ def test_style_sets_grid_and_axis_colours_explicitly(palette):
     assert fig.layout.xaxis.zeroline is False and fig.layout.yaxis.zeroline is False
     assert fig.layout.hoverlabel.namelength == -1
     assert charts.style(go.Figure()).layout.height == charts.HEIGHT
+    # Tick labels and axis titles too: the light theme's own faded grey was 3.62:1 at 10.5 px.
+    for axis in (fig.layout.xaxis, fig.layout.yaxis):
+        assert axis.tickfont.color == axis.title.font.color == palette["muted"]
+
+
+@pytest.mark.parametrize("palette", [DARK, LIGHT], ids=["dark", "light"])
+def test_every_builder_writes_its_axis_text_in_the_muted_colour(palette):
+    # Also labels without a colour of their own (the Implied Volatility tab's "market price" and "lower bound" were
+    # 3.62:1 in light mode) and the 3-D surface's axes and colour bar.
+    for name, fig in _builders(palette).items():
+        assert fig.layout.font.color == palette["muted"], name
+        if name == "surface":
+            scene = fig.layout.scene
+            axes = (scene.xaxis, scene.yaxis, scene.zaxis)
+            colorbar = fig.data[0].colorbar
+            assert colorbar.tickfont.color == colorbar.title.font.color == palette["muted"]
+        else:
+            axes = (fig.layout.xaxis, fig.layout.yaxis)
+        for axis in axes:
+            assert axis.tickfont.color == axis.title.font.color == palette["muted"], name
+
+
+def test_legends_under_the_plot_sit_at_the_bottom_of_the_figure():
+    # A legend placed 20% of the plot height under the plot ran into the x-axis title once the charts were 360 px
+    # high with outside ticks ('Days from today' was drawn through 'Spot +0.5σ (+10.5%)'). Placed in the figure's
+    # coordinates, Plotly keeps room for it under the tick labels and the axis title.
+    figures = _builders(DARK)
+    for name in ("histogram", "payoff", "lines", "smile"):
+        legend = figures[name].layout.legend
+        assert (legend.orientation, legend.x, legend.xanchor) == ("h", 0.0, "left"), name
+        assert (legend.yref, legend.y, legend.yanchor) == ("container", 0.0, "bottom"), name
 
 
 def test_plotly_config():

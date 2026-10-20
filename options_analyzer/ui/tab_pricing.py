@@ -137,22 +137,27 @@ def _model_card(inputs: Inputs, prices: Prices) -> tuple[str, str, str, str]:
     )
 
 
-#: Headline-card text in Streamlit's Source Sans: values at 36 px, labels (and deltas) at 14 px. Digits (tabular)
-#: and "$" are half an em wide; the narrower and wider characters are listed. Labels average under 0.47 em per
-#: character.
-_VALUE_PX, _LABEL_PX, _LABEL_EM = 36.0, 14.0, 0.47
-_CHAR_EM = {",": 0.25, ".": 0.25, " ": 0.2, "-": 0.31, "%": 0.83}
-#: Card padding and border, the label's help icon, and the gap between cards (gap="small").
-_CARD_CHROME_PX, _HELP_ICON_PX, _CARD_GAP_PX = 32.0, 22.0, 16.0
-#: Smallest value size on a narrow screen, where the values shrink so that the cards stay two by two.
-_MIN_VALUE_PX = 20.0
+#: Headline-card text in the theme's IBM Plex Sans: values in Medium at 22.75 px (the theme's metricValueFontSize,
+#: 1.625rem of its 14 px base), labels (and deltas) in Regular at 12.25 px. Digits (tabular), "$", "+" and "−" are
+#: 0.6 em wide in Plex Sans Medium; the narrower and wider characters are listed. Labels average at most 0.517 em
+#: per character.
+_VALUE_PX, _LABEL_PX, _LABEL_EM = 22.75, 12.25, 0.517
+_DIGIT_EM = 0.6
+_CHAR_EM = {",": 0.29, ".": 0.29, " ": 0.236, "-": 0.401, "%": 0.947}
+#: Room to spare on every value (about 2 px on a desktop), for browsers that round the glyph widths differently.
+_VALUE_SPARE_EM = 0.1
+#: Card padding and border, the label's help icon and its margin, and the gap between cards (gap="small").
+_CARD_CHROME_PX, _HELP_ICON_PX, _CARD_GAP_PX = 28.0, 19.25, 14.0
+#: Smallest value size on a narrow screen, where the values shrink so that the cards stay two by two (an
+#: index-level forward, "$105,127.1096", still fits half of a 360 px phone).
+_MIN_VALUE_PX = 16.0
 #: Keys of the headline price-card row and of its two pairs.
 PRICE_CARDS = ("price_cards", ("price_cards_prices", "price_cards_model"))
 
 
 def _value_em(value: str) -> float:
-    """Width of a card value in ems of its font size."""
-    return sum(_CHAR_EM.get(c, 0.5) for c in value)
+    """Width of a card value in ems of its font size, with a little room to spare."""
+    return sum(_CHAR_EM.get(c, _DIGIT_EM) for c in value) + _VALUE_SPARE_EM
 
 
 def _card_width(
@@ -183,9 +188,10 @@ def _cards_style(
     row wraps 3 + 1, or stacks one pair's cards but not the other's.)
 
     Where the row is narrower than one pair at full size (a phone), the labels and deltas wrap and the values
-    shrink with the row so that the widest still fits half of it, down to 20 px: the cards stay two by two on any
-    phone instead of stacking into four full-width cards that push the tabs below the first screen. The sizes
-    follow the row's own width (a container query), so an open sidebar on a narrow window is covered too.
+    shrink with the row so that the widest still fits half of it, down to 16 px (they never grow beyond their
+    desktop size): the cards stay two by two on any phone instead of stacking into four full-width cards that push
+    the tabs below the first screen. The sizes follow the row's own width (a container query), so an open sidebar
+    on a narrow window is covered too.
     """
 
     def width(card: tuple[str, ...], value_px: float = _VALUE_PX, wrap: bool = False) -> float:

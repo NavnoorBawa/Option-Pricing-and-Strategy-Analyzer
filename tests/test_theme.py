@@ -3,13 +3,22 @@
 from __future__ import annotations
 
 import ast
+import base64
 import hashlib
 import itertools
+import json
 import math
+import os
 import re
+import socket
+import subprocess
+import sys
+import time
+import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from options_analyzer.ui import charts, theme
@@ -223,6 +232,36 @@ def test_no_primary_buttons():
     assert not offenders
 
 
+#: Widgets that Streamlit (1.65, 1.66) fills with the primary colour and writes white on, with the test id the
+#: stylesheet covers them by: multiselect chips, a number input's step buttons while hovered or focused, and the
+#: camera input's button while pressed (not covered: the app has none). Primary buttons: test_no_primary_buttons.
+WHITE_ON_PRIMARY = {"multiselect": "stMultiSelect", "number_input": "stNumberInput", "camera_input": None}
+
+
+def test_text_on_the_primary_colour_is_legible():
+    # Streamlit also writes white on the primary colour in multiselect chips and in a number input's step buttons
+    # while they are hovered: the dark Volatility Surface tab showed its maturities ('29d', '1.07y') at 2.16:1.
+    for kind in theme.MODES:
+        assert contrast(theme.ON_PRIMARY[kind], _mode(kind)["primaryColor"]) >= 4.5, kind
+    assert theme.ON_PRIMARY["dark"] == _mode("dark")["backgroundColor"]
+    assert theme.ON_PRIMARY["light"] == "#FFFFFF"  # Streamlit's own colour, kept where it is legible
+    rule = re.fullmatch(r"(.+) \{ color: light-dark\((#[0-9A-F]{6}), (#[0-9A-F]{6})\); \}", theme.STYLESHEET)
+    assert rule and rule[1] == ", ".join(theme.ON_PRIMARY_SELECTORS)
+    assert (rule[2], rule[3]) == (theme.ON_PRIMARY["light"], theme.ON_PRIMARY["dark"])
+    # Every widget the app uses that Streamlit fills with the primary colour and writes white on is covered.
+    source = "\n".join(p.read_text("utf-8") for p in (ROOT / "options_analyzer").rglob("*.py"))
+    for widget, testid in WHITE_ON_PRIMARY.items():
+        if f".{widget}(" in source:
+            assert testid and any(testid in selector for selector in theme.ON_PRIMARY_SELECTORS), widget
+
+
+def test_apply_stylesheet_sends_style_only_html(monkeypatch):
+    sent = []
+    monkeypatch.setattr(theme.st, "html", sent.append)
+    theme.apply_stylesheet()
+    assert sent == [f"<style>{theme.STYLESHEET}</style>"]
+
+
 # --- Palettes pass the colour-vision checks -----------------------------------------------------------------------
 
 
@@ -343,15 +382,15 @@ def test_static_folders_hold_ibm_plex_and_its_licence(folder):
     assert sum((fonts / name).stat().st_size for name in FONTS) <= 400_000
 
 
-def test_the_entry_points_share_one_app_and_find_the_fonts_next_to_them():
+def test_the_entry_points_share_one_script_and_find_the_fonts_next_to_them():
     # Streamlit serves the static/ folder and reads .streamlit/config.toml next to the script it runs: main.py for
     # `streamlit run main.py` and Community Cloud, ui/streamlit_app.py for the installed options-analyzer command.
+    # main.py only calls streamlit_app.main, so both load the same stylesheet and app.
+    shim = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
+    imports = [(n.module, [a.name for a in n.names]) for n in ast.walk(shim) if isinstance(n, ast.ImportFrom)]
+    assert imports == [("options_analyzer.ui.streamlit_app", ["main"])]
+    assert [getattr(n.func, "id", None) for n in ast.walk(shim) if isinstance(n, ast.Call)] == ["main"]
     for script in (ROOT / "main.py", UI / "streamlit_app.py"):
-        tree = ast.parse(script.read_text(encoding="utf-8"))
-        imports = [n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
-        assert any(n.module == "options_analyzer.ui.app" and [a.name for a in n.names] == ["run"] for n in imports)
-        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "run"]
-        assert len(calls) == 1, script
         assert (script.parent / "static" / "fonts" / "IBMPlexSans-Regular.woff2").is_file()
         assert (script.parent / ".streamlit" / "config.toml").read_bytes() == (
             ROOT / ".streamlit" / "config.toml"
@@ -360,12 +399,69 @@ def test_the_entry_points_share_one_app_and_find_the_fonts_next_to_them():
     assert 'with_name("streamlit_app.py")' in launcher
 
 
+def test_every_run_loads_the_stylesheet_before_the_app(monkeypatch):
+    from options_analyzer.ui import streamlit_app
+
+    calls = []
+    monkeypatch.setattr(theme, "apply_stylesheet", lambda: calls.append("stylesheet"))
+    monkeypatch.setattr(streamlit_app, "run", lambda: calls.append("app"))
+    streamlit_app.main()
+    assert calls == ["stylesheet", "app"]
+
+
+def test_the_page_carries_the_stylesheet():
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file(str(ROOT / "main.py"), default_timeout=120).run()
+    assert not at.exception, at.exception
+    assert at.get("html")[0].proto.body == f"<style>{theme.STYLESHEET}</style>"
+
+
 def test_both_static_folders_are_identical():
     root, package = (sorted(p.relative_to(f) for p in f.rglob("*") if p.is_file()) for f in STATIC_FOLDERS)
     fonts_only = [p for p in package if p.parts[0] == "fonts"]
     assert root == fonts_only  # the root copy holds the fonts only
     for path in root:
         assert (STATIC_FOLDERS[0] / path).read_bytes() == (STATIC_FOLDERS[1] / path).read_bytes(), path
+
+
+#: Labels of the headline cards (Pricing and Implied Volatility tabs), whose widths tab_pricing estimates.
+CARD_LABELS = (
+    "Call value", "Put value", "Forward price", "Call ITM probability", "Exercise premium", "Tree error vs BSM",
+    "Std. error", "Implied volatility", "Model check", "Vega at IV", "Time value",
+)  # fmt: skip
+
+
+def test_the_card_width_model_uses_the_theme_font_sizes():
+    # The cards' sizes come from a model of their text in the theme's font: with values modelled at Streamlit's
+    # default 36 px in Source Sans, the Plex values on a phone grew to 36 px and were cut to '$10.45…'.
+    from options_analyzer.ui import tab_pricing
+
+    base = THEME["baseFontSize"]
+    value_px = base * float(THEME["metricValueFontSize"].removesuffix("rem"))
+    small_px = base * 0.875  # Streamlit's small text: the card labels and deltas
+    assert (tab_pricing._VALUE_PX, tab_pricing._LABEL_PX) == (value_px, small_px) == (22.75, 12.25)
+    assert THEME["metricValueFontWeight"] == 500  # the value widths are those of Plex Sans Medium
+
+
+def test_the_card_width_model_matches_plex_sans():
+    pytest.importorskip("brotli")  # WOFF2 decompression
+    ttlib = pytest.importorskip("fontTools.ttLib")
+    from options_analyzer.ui import tab_pricing
+
+    def advances(weight: str) -> dict[str, float]:
+        font = ttlib.TTFont(STATIC_FOLDERS[1] / "fonts" / f"IBMPlexSans-{weight}.woff2")
+        cmap, metrics, units = font.getBestCmap(), font["hmtx"], font["head"].unitsPerEm
+        return {chr(cp): metrics[name][0] / units for cp, name in cmap.items() if cp < 0x2300}
+
+    medium, regular = advances("Medium"), advances("Regular")
+    # A value is never modelled narrower than it is, and the model is exact to 0.002 em.
+    for char in "0123456789$+−,. -%":
+        model = tab_pricing._CHAR_EM.get(char, tab_pricing._DIGIT_EM)
+        assert medium[char] <= model <= medium[char] + 0.002, char
+    # Labels: at most _LABEL_EM per character on average.
+    for label in CARD_LABELS:
+        assert sum(regular[c] for c in label) <= tab_pricing._LABEL_EM * len(label), label
 
 
 def _covered(code_point: int) -> bool:
@@ -401,3 +497,233 @@ def test_the_cmap_snapshot_matches_the_fonts():
             assert cmap == snapshot, name
         else:
             assert not {ord(c) for c in "ΔΓΘσνρ"} & cmap  # Plex Mono has no Greek
+
+
+# --- In Chromium --------------------------------------------------------------------------------------------------
+# The theme as a browser draws it: the running app (main.py on a free local port) and a few charts drawn by
+# plotly.js. These tests need Playwright and a Chromium it can launch (CHROMIUM_EXECUTABLE, Playwright's own, or any
+# revision Playwright has downloaded); without them they are skipped.
+
+
+def _launch_chromium(playwright):
+    """CHROMIUM_EXECUTABLE if set; else Playwright's own Chromium, or else the newest one it has downloaded."""
+    if executable := os.environ.get("CHROMIUM_EXECUTABLE"):
+        return playwright.chromium.launch(executable_path=executable)
+    root = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or Path.home() / ".cache" / "ms-playwright")
+    patterns = ("chromium-*/chrome-linux*/chrome", "chromium-*/chrome-win*/chrome.exe",
+                "chromium-*/chrome-mac*/Chromium.app/Contents/MacOS/Chromium")  # fmt: skip
+    for executable in [None, *(str(p) for pattern in patterns for p in sorted(root.glob(pattern), reverse=True))]:
+        try:
+            return playwright.chromium.launch(executable_path=executable)
+        except Exception:  # not installed, or not this Playwright's revision: try the next one
+            continue
+    return None
+
+
+@pytest.fixture(scope="module")
+def chromium():
+    sync_api = pytest.importorskip("playwright.sync_api")
+    with sync_api.sync_playwright() as playwright:
+        browser = _launch_chromium(playwright)
+        if browser is None:
+            pytest.skip("no Chromium that Playwright can launch")
+        yield browser
+        browser.close()
+
+
+@pytest.fixture(scope="module")
+def app_url(chromium):
+    """URL of the app (``streamlit run main.py``) on a free local port, stopped after the module's tests."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    options = {"server.port": port, "server.address": "127.0.0.1", "server.headless": "true",
+               "server.fileWatcherType": "none", "browser.gatherUsageStats": "false"}  # fmt: skip
+    command = [sys.executable, "-m", "streamlit", "run", str(ROOT / "main.py")]
+    command += [arg for key, value in options.items() for arg in (f"--{key}", str(value))]
+    server = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    url = f"http://127.0.0.1:{port}"
+    direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        deadline = time.monotonic() + 120
+        while True:
+            try:
+                direct.open(f"{url}/_stcore/health", timeout=2).close()
+                break
+            except OSError:
+                if server.poll() is not None or time.monotonic() > deadline:
+                    pytest.fail("the app did not start")
+                time.sleep(0.25)
+        yield url
+    finally:
+        server.terminate()
+        try:
+            server.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            server.kill()
+            server.wait()
+
+
+def _settle(page) -> None:
+    """Wait until the script run is over, the fonts have loaded and the charts have drawn."""
+    page.wait_for_function(
+        "() => !(document.querySelector('[data-testid=stStatusWidget]')?.innerText ?? '').toLowerCase()"
+        ".includes('running')",
+        timeout=120_000,
+    )
+    page.evaluate("document.fonts.ready.then(() => true)")
+    page.wait_for_timeout(1000)
+
+
+def _open(chromium, url: str, scheme: str, width: int):
+    page = chromium.new_page(viewport={"width": width, "height": 900}, color_scheme=scheme)
+    page.goto(url)
+    page.wait_for_selector("[data-testid=stMetricValue]", timeout=120_000)
+    _settle(page)
+    return page
+
+
+def _tab(page, name: str) -> None:
+    page.locator("[role=tab]").filter(has_text=name).click()
+    _settle(page)
+
+
+def _hex(css: str) -> str:
+    """``#RRGGBB`` of a computed ``rgb(r, g, b)`` colour."""
+    red, green, blue = (int(v) for v in re.findall(r"[\d.]+", css)[:3])
+    return f"#{red:02X}{green:02X}{blue:02X}"
+
+
+#: Card values (``stMetricValue``) cut off with an ellipsis, and the font size of every visible card value.
+_CARD_VALUES = """() => {
+  const values = [...document.querySelectorAll('[data-testid=stMetricValue]')]
+    .filter(e => e.getBoundingClientRect().width > 0);
+  const cut = values.filter(e => [e, ...e.querySelectorAll('*')]
+    .some(t => t.scrollWidth > t.clientWidth && getComputedStyle(t).overflow !== 'visible'));
+  return {
+    cut: cut.map(e => `${e.innerText} @ ${getComputedStyle(e).fontSize}`),
+    sizes: values.map(e => parseFloat(getComputedStyle(e).fontSize)),
+    plex: document.fonts.check('500 22.75px "IBM Plex Sans"'),
+  };
+}"""
+
+
+@pytest.mark.parametrize("width", [1440, 390, 360])
+def test_no_card_value_is_cut_off(chromium, app_url, width):
+    # IBM Plex digits are 0.6 em wide where the cards' model assumed Source Sans' 0.5 em, and on a phone the values
+    # grew to 36 px: at 390 and 360 px the price cards read '$10.45…' and '$105.1…', the IV cards '20.00…'.
+    page = _open(chromium, app_url, "dark", width)
+    try:
+        for tab in ("Pricing & Greeks", "Implied Volatility"):
+            _tab(page, tab)
+            values = page.evaluate(_CARD_VALUES)
+            assert values["plex"], "IBM Plex Sans did not load"
+            assert not values["cut"], (tab, values["cut"])
+            assert values["sizes"] and max(values["sizes"]) <= 22.75, (tab, values["sizes"])
+    finally:
+        page.close()
+
+
+#: Colour and background of every visible multiselect chip.
+_CHIPS = """() => [...document.querySelectorAll('[data-testid=stMultiSelect] [data-tag]')]
+  .filter(e => e.getBoundingClientRect().width > 0)
+  .map(e => [e.innerText, getComputedStyle(e).color, getComputedStyle(e).backgroundColor])"""
+
+
+@pytest.mark.parametrize("scheme", ["dark", "light"])
+def test_text_on_the_primary_colour_is_legible_in_the_app(chromium, app_url, scheme):
+    page = _open(chromium, app_url, scheme, 1440)
+    try:
+        _tab(page, "Volatility Surface")
+        chips = page.evaluate(_CHIPS)
+        assert chips  # the maturities of the smile chart
+        primary = _mode(scheme)["primaryColor"]
+        for text, color, background in chips:
+            assert _hex(background) == primary, text
+            assert contrast(_hex(color), _hex(background)) >= 4.5, (text, color, background)
+        _tab(page, "Implied Volatility")
+        step = page.locator("[data-testid=stMain] [data-testid=stNumberInputStepUp]:visible").first
+        step.hover()
+        page.wait_for_timeout(400)
+        color, background = step.evaluate("e => [getComputedStyle(e).color, getComputedStyle(e).backgroundColor]")
+        assert _hex(background) == primary
+        assert contrast(_hex(color), _hex(background)) >= 4.5, (color, background)
+    finally:
+        page.close()
+
+
+def _chart_figures() -> dict:
+    """Charts with a legend under the plot, as the app draws them, with long legend entries."""
+    rng = np.random.default_rng(7)
+    days = np.arange(0, 366)
+    moves = ("Spot −1σ (−18.1%)", "Spot −0.5σ (−9.5%)", "Spot unchanged", "Spot +0.5σ (+10.5%)", "Spot +1σ (+22.1%)")
+    series = {name: (i - 2) * 150 + days * 0.5 for i, name in enumerate(moves)}
+    spots = np.linspace(60.0, 170.0, 221)
+    curves = [(np.clip(spots - 100, -440, 560), "At expiry (365d)", theme.SEMANTIC["dark"]["call"], "solid"),
+              (spots - 100, "Today", theme.SEMANTIC["dark"]["put"], "dash"),
+              (spots - 99, "In 183 days", theme.SEMANTIC["dark"]["accent"], "dot")]  # fmt: skip
+    m = np.linspace(0.8, 1.2, 21)
+    slices = [(label, 0.2 + (m - 1) ** 2, 0.21 + (m - 1) ** 2) for label in ("29d", "1.07y", "2.00y")]
+    quotes = [(m[::4], 0.2 + (m[::4] - 1) ** 2, 0.2 + (m[::4] - 1) ** 2)] * 3
+    terminal = 100 * np.exp(rng.normal(0.03, 0.2, 20_000))
+    grid = np.linspace(40, 260, 200)
+    return {
+        "lines": charts.lines_chart(days, series, "Days from today", "P&L ($)", styles=charts.scenario_styles(5)),
+        "histogram": charts.histogram_chart(
+            terminal, "Underlying price at expiry", [(100.0, "strike", charts.NEUTRAL)], pdf=(grid, grid * 0 + 0.01)
+        ),
+        "payoff": charts.payoff_chart(spots, curves, 100.0, [100.0, 110.0], [100.0], (84.0, 126.0)),
+        "smile": charts.smile_chart(m, slices, "Moneyness K/S", quotes=quotes),
+    }
+
+
+#: Draw a figure with plotly.js and return the boxes of its legend, its x-axis title and tick labels, and itself.
+_DRAW = """async (spec) => {
+  const div = document.getElementById('chart');
+  Plotly.purge(div);
+  await Plotly.newPlot(div, spec.data, spec.layout, {displayModeBar: false});
+  const box = e => { const r = e.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; };
+  return {legend: box(div.querySelector('g.legend rect.bg')), figure: box(div),
+          axis: [...div.querySelectorAll('g.g-xtitle text, g.xtick text')].map(box).filter(b => b[2] > b[0])};
+}"""
+
+
+def _with_streamlit_theme(spec: dict) -> dict:
+    """What Streamlit's theme adds to a chart (1.65 and 1.66, at the 14 px base): axes that grow the margins for
+    their labels, 10.5 px text and tick labels, and 12.25 px axis titles 17.5 px (x) and 21 px (y) from them."""
+    layout = spec["layout"]
+    layout["font"] = {"family": "'IBM Plex Sans', sans-serif", "size": 10.5, **layout.get("font", {})}
+    for axis, standoff in (("xaxis", 17.5), ("yaxis", 21.0)):
+        layout.setdefault(axis, {})["automargin"] = True
+        layout[axis].setdefault("tickfont", {})["size"] = 10.5
+        title = layout[axis].setdefault("title", {})
+        title.setdefault("font", {})["size"] = 12.25
+        title["standoff"] = standoff
+    return spec
+
+
+@pytest.mark.parametrize("width", [360, 390, 1440])
+def test_legends_under_the_plot_clear_the_axis_title(chromium, width):
+    # At 360 px the charts were 360 px high and the legend sat 20% of the plot height under the plot: 'Days from
+    # today' was drawn through the time-decay legend, and the Monte Carlo histogram's legend touched its axis title.
+    import plotly
+
+    plotly_js = Path(plotly.__file__).parent / "package_data" / "plotly.min.js"
+    plex = base64.b64encode((STATIC_FOLDERS[1] / "fonts" / "IBMPlexSans-Regular.woff2").read_bytes()).decode()
+    page = chromium.new_page(viewport={"width": width, "height": 900})
+    try:
+        page.set_content(
+            "<!doctype html><style>@font-face { font-family: 'IBM Plex Sans'; "
+            f"src: url(data:font/woff2;base64,{plex}) format('woff2'); }} body {{ margin: 0 14px; }}</style>"
+            "<div id='chart'></div>"
+        )
+        page.add_script_tag(path=str(plotly_js))
+        page.evaluate("document.fonts.load('12.25px \"IBM Plex Sans\"')")
+        for name, fig in _chart_figures().items():
+            boxes = page.evaluate(_DRAW, _with_streamlit_theme(json.loads(fig.to_json())))
+            legend, figure = boxes["legend"], boxes["figure"]
+            assert boxes["axis"], name
+            assert legend[1] >= max(b[3] for b in boxes["axis"]), name  # wholly below the axis title and ticks
+            assert legend[3] <= figure[3] + 0.5, name  # and inside the chart
+    finally:
+        page.close()

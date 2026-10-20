@@ -71,6 +71,24 @@ SEMANTIC = {
 #: Opacity of the profit and loss areas under a P&L curve.
 FILL_OPACITY = 0.18
 
+#: Text and icons on a fill of the primary colour, in each mode. Streamlit draws them in white, which is 5.13:1 on
+#: the light theme's dark amber but only 2.16:1 on the dark theme's amber, so dark mode takes its background colour
+#: instead (8.90:1).
+ON_PRIMARY = {"dark": SEMANTIC["dark"]["surface"], "light": "#FFFFFF"}
+
+#: Where Streamlit (1.65 and 1.66) writes white on the primary colour in the widgets the app uses: the chips of a
+#: multiselect, and the step buttons of a number input while hovered or focused. (Primary buttons do the same; the
+#: app has none. Sliders and date and time inputs choose black or white for the primary colour themselves.)
+ON_PRIMARY_SELECTORS = (
+    "[data-testid='stMultiSelect'] [data-tag]",
+    "[data-testid='stNumberInput'] :is([data-testid='stNumberInputStepUp'], [data-testid='stNumberInputStepDown'])"
+    ":is(:hover, :focus):enabled",
+)
+
+#: The desk stylesheet (see :func:`apply_stylesheet`). ``light-dark()`` follows the ``color-scheme`` that Streamlit
+#: sets on the app for the theme it draws, so the rule switches with the theme at once, without waiting for a rerun.
+STYLESHEET = f"{', '.join(ON_PRIMARY_SELECTORS)} {{ color: light-dark({ON_PRIMARY['light']}, {ON_PRIMARY['dark']}); }}"
+
 
 def mode() -> str:
     """``"light"`` or ``"dark"``: the theme the viewer's browser reported for this script run.
@@ -101,3 +119,9 @@ def categorical(colors: dict[str, str] | None = None) -> tuple[str, ...]:
         if colors == SEMANTIC[kind]:
             return CATEGORICAL[kind]
     return CATEGORICAL[mode()]
+
+
+def apply_stylesheet() -> None:
+    """Add :data:`STYLESHEET` to the page. Call it on every run; Streamlit sends HTML that holds only a stylesheet
+    to the page without giving it any room in the layout."""
+    st.html(f"<style>{STYLESHEET}</style>")
