@@ -1,16 +1,125 @@
-[theme]
-base = "dark"
-primaryColor = "#FF4B4B"
+# Streamlit settings. Keep options_analyzer/ui/.streamlit/config.toml identical: the installed app reads that copy
+# (tests/test_packaging.py checks it). Every key here exists in Streamlit 1.65, the oldest supported release.
 
 [server]
 # Uploaded option-quote CSVs are small; cap uploads at 10 MB.
 maxUploadSize = 10
+# Serves the static/ folder next to the main script at app/static/: the self-hosted fonts below. The repository
+# root has a copy of options_analyzer/ui/static/fonts for `streamlit run main.py` (tests/test_theme.py checks it).
+enableStaticServing = true
 
 [browser]
 gatherUsageStats = false
 
 [client]
-# "auto" shows developer menu items only on localhost (or to the app's developer on Community Cloud).
-toolbarMode = "auto"
+# "viewer" hides the Deploy button and developer menu items for everyone; developers can start the app with
+# --client.toolbarMode developer to get them back.
+toolbarMode = "viewer"
 # Show users only the error type, not stack traces; run with --client.showErrorDetails full while debugging.
 showErrorDetails = "type"
+
+# ---------------------------------------------------------------------------------------------------------------
+# "Desk" theme. With both [theme.light] and [theme.dark] the app follows the viewer's light/dark preference, and the
+# settings menu switches between them. The colour tokens are mirrored in options_analyzer/ui/theme.py, and
+# tests/test_theme.py checks that both agree and that the palettes pass the colour-vision checks.
+
+# IBM Plex Sans and Mono (SIL Open Font License 1.1, static/fonts/LICENSE.txt), the complete character sets from
+# IBM's npm packages @ibm/plex-sans 1.1.0 and @ibm/plex-mono 2.5.0. Digits are tabular by default, so numbers line
+# up in tables (including st.dataframe, which draws on a canvas where CSS cannot change them), and the complete
+# Sans has every Greek letter and maths symbol the app shows. Plex Mono lacks Greek: it is only the code font.
+[[theme.fontFaces]]
+family = "IBM Plex Sans"
+url = "app/static/fonts/IBMPlexSans-Regular.woff2"
+weight = 400
+[[theme.fontFaces]]
+family = "IBM Plex Sans"
+url = "app/static/fonts/IBMPlexSans-Medium.woff2"
+weight = 500
+[[theme.fontFaces]]
+family = "IBM Plex Sans"
+url = "app/static/fonts/IBMPlexSans-SemiBold.woff2"
+weight = 600
+[[theme.fontFaces]]
+family = "IBM Plex Sans"
+url = "app/static/fonts/IBMPlexSans-Bold.woff2"
+weight = 700
+[[theme.fontFaces]]
+family = "IBM Plex Mono"
+url = "app/static/fonts/IBMPlexMono-Regular.woff2"
+weight = 400
+[[theme.fontFaces]]
+family = "IBM Plex Mono"
+url = "app/static/fonts/IBMPlexMono-Medium.woff2"
+weight = 500
+
+[theme]
+base = "dark"
+font = "'IBM Plex Sans', sans-serif"
+headingFont = "'IBM Plex Sans', sans-serif"
+codeFont = "'IBM Plex Mono', monospace"
+baseFontSize = 14
+headingFontSizes = ["1.5rem", "1.125rem", "1rem", "0.875rem", "0.8125rem", "0.75rem"]
+headingFontWeights = [600, 600, 600, 600, 600, 600]
+metricValueFontSize = "1.625rem"
+metricValueFontWeight = 500
+baseRadius = "0.25rem"
+buttonRadius = "0.25rem"
+showWidgetBorder = true
+showSidebarBorder = true
+linkUnderline = false
+
+# Dark (the default). Amber primary: the loss red is no longer the widget colour. Do not use primary buttons
+# (st.button(type="primary")): Streamlit puts white text on the primary colour, only 2.16:1 on this amber.
+[theme.dark]
+primaryColor = "#E8A33D"
+backgroundColor = "#0B0F16"
+secondaryBackgroundColor = "#141A24"
+textColor = "#E6EAF2"
+borderColor = "#232C3A"
+dataframeBorderColor = "#1C2430"
+dataframeHeaderBackgroundColor = "#111721"
+linkColor = "#6DA6EE"
+greenColor = "#26A69A"
+redColor = "#EF5350"
+blueColor = "#3987E5"
+orangeColor = "#D95926"
+yellowColor = "#E8A33D"
+violetColor = "#9085E9"
+grayColor = "#5B6577"
+# Exactly ten chart colours: with fewer, Streamlit (1.64 to 1.66 at least) leaves Plotly's colour placeholders
+# unreplaced and every Plotly chart falls back to Plotly's own d3 colours. Slot 9 is the muted grey of this mode.
+chartCategoricalColors = ["#3987E5", "#D95926", "#199E70", "#C98500", "#D55181", "#008300", "#9085E9", "#E66767", "#8B95A7", "#5B6577"]
+# Loss (red) to profit (teal) through the background colour; the poles are capped so that light cell labels keep
+# at least 4.5:1 contrast on every cell.
+chartDivergingColors = ["#B23E3B", "#8F3B3A", "#6D3638", "#4C2F34", "#2C2730", "#1D2B34", "#203C41", "#204F50", "#1E625E", "#17766D"]
+chartSequentialColors = ["#13243A", "#1C385C", "#244E81", "#2C64A8", "#357BD0", "#4C92E8", "#6DA6EE", "#8DBAF3", "#ADCEF7", "#CDE2FB"]
+
+[theme.dark.sidebar]
+backgroundColor = "#0E131B"
+secondaryBackgroundColor = "#161D28"
+
+# Light (daylight and print). The amber primary is darker than the dark mode's so that text in it keeps 4.5:1.
+[theme.light]
+primaryColor = "#9E5F00"
+backgroundColor = "#FCFCFD"
+secondaryBackgroundColor = "#F1F4F8"
+textColor = "#0E1726"
+borderColor = "#D5DBE3"
+dataframeBorderColor = "#E1E6EC"
+dataframeHeaderBackgroundColor = "#F5F7FA"
+linkColor = "#2061B1"
+greenColor = "#0B7F73"
+redColor = "#D32F2F"
+blueColor = "#2A78D6"
+orangeColor = "#EB6834"
+yellowColor = "#9E5F00"
+violetColor = "#6250D6"
+grayColor = "#5B6577"
+# The same hues as the dark set, stepped for the light background so that every line keeps at least 3:1 contrast.
+chartCategoricalColors = ["#2A78D6", "#EB6834", "#00A672", "#CB8100", "#DA6F98", "#008300", "#6250D6", "#E34948", "#5B6577", "#8892A4"]
+chartDivergingColors = ["#D32F2F", "#DF655C", "#E88F87", "#EEB7B2", "#EFDEDE", "#D8E4E5", "#ACCAC7", "#80B1AA", "#51988E", "#0B7F73"]
+chartSequentialColors = ["#E4EEFB", "#BCD4F5", "#94BAED", "#6CA0E5", "#4286DB", "#2770C9", "#2061B1", "#195299", "#134482", "#0D366B"]
+
+[theme.light.sidebar]
+backgroundColor = "#F5F7FA"
+secondaryBackgroundColor = "#EBEFF4"

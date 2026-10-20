@@ -1,8 +1,25 @@
-"""Number formatting for the user interface."""
+"""Number formatting for the user interface.
+
+The functions from :func:`signed` on are the desk number-format standard:
+
+* Signed numbers (P&L, Greeks, changes) carry an explicit sign, with the true minus sign U+2212 (as wide as a
+  digit in IBM Plex, so signed columns line up) and no sign at zero: never ``−0.00``.
+* Greeks keep at least three significant digits (:func:`greek`), so small second-order Greeks never read
+  ``0.000000``; dollar Greeks have one explicit definition each (:func:`dollar_delta` and the functions after it).
+* Dates read ``20-Oct-27 (365d)`` (:func:`expiry`), money in accounting style ``($1,234.56)`` where a column of
+  amounts needs it (:func:`accounting`), and position sizes are whole numbers (:func:`quantity`).
+
+Tables: numbers are right-aligned (:func:`right_aligned`), small static tables use
+``st.table(..., border="horizontal")`` and large or sortable ones ``st.dataframe(..., row_height=ROW_HEIGHT)`` with
+``st.column_config.NumberColumn`` formats.
+"""
 
 from __future__ import annotations
 
+import datetime as dt
 import math
+
+from .. import black_scholes as bs
 
 
 def money(value: float, decimals: int = 2, signed: bool = False) -> str:
@@ -79,3 +96,141 @@ def pct(value: float, decimals: int = 2, signed: bool = False) -> str:
 def md(text: str) -> str:
     """Escape dollar signs so Markdown does not render ``$a ... $b`` as LaTeX math."""
     return text.replace("$", r"\$")
+
+
+# --- Desk number-format standard ---------------------------------------------------------------------------------
+
+#: The minus sign (U+2212) of signed numbers.
+MINUS = "−"
+#: Row height (px) of large tables: ``st.dataframe(..., row_height=ROW_HEIGHT)``.
+ROW_HEIGHT = 28
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _missing(value) -> bool:
+    return value is None or math.isnan(value)
+
+
+def signed(value: float, decimals: int = 2, prefix: str = "", suffix: str = "") -> str:
+    """``+1,234.50`` or ``−1,234.50``: an explicit sign (U+2212 for minus), then ``prefix`` (``+$1,234.50``), the
+    number and ``suffix`` (``+2.50 vol pts``).
+
+    A value that rounds to zero at ``decimals`` has no sign (``0.00``, never ``−0.00``), so ``signed(x)`` and
+    ``signed(-x)`` always have the same length. Infinities read ``+∞`` and ``−∞``; NaN and ``None`` read ``–``.
+    """
+    if _missing(value):
+        return "–"
+    sign = "+" if value > 0 else MINUS
+    if math.isinf(value):
+        return f"{sign}∞"
+    text = f"{abs(value):,.{decimals}f}"
+    if text.strip("0.,") == "":
+        return f"{prefix}{text}{suffix}"
+    return f"{sign}{prefix}{text}{suffix}"
+
+
+def _significant(size: float, digits: int) -> str:
+    """A positive ``size`` with at least ``digits`` significant digits: fixed-point down to 1e-6, then
+    ``1.230e−7``."""
+    if size < 1e-6:
+        mantissa, exponent = f"{size:.{digits - 1}e}".split("e")
+        return f"{mantissa}e{MINUS if exponent.startswith('-') else ''}{int(exponent[1:])}"
+    decimals = max(0, digits - 1 - math.floor(math.log10(size)))
+    return f"{size:,.{decimals}f}"
+
+
+def greek(value: float, kind: str, digits: int = 4, unit: bool = True) -> str:
+    """A Greek in its display unit with at least ``digits`` significant digits (and never fewer than three).
+
+    ``value`` is in the model's raw units, as :func:`options_analyzer.black_scholes.greeks` returns it; it is
+    scaled by ``black_scholes.GREEKS[kind]`` (theta per calendar day, vega per vol point, ...), whose unit follows
+    the number when ``unit`` is true: ``greek(0.0123, "vanna")`` reads ``+0.0001230 Δ per 1 vol point``.
+    Zero reads ``0``.
+    """
+    info = bs.GREEKS[kind]
+    if _missing(value):
+        text = "–"
+    else:
+        scaled = value * info.scale
+        if scaled == 0:
+            text = "0"
+        elif math.isinf(scaled):
+            text = signed(scaled)
+        else:
+            text = ("+" if scaled > 0 else MINUS) + _significant(abs(scaled), max(3, digits))
+    return f"{text} {info.unit}" if unit else text
+
+
+def dollar_delta(delta: float, spot: float, units: float) -> float:
+    """$Δ, the dollar value of a position's delta ("delta dollars"): Δ · S · units."""
+    return delta * spot * units
+
+
+def gamma_1pct(gamma: float, spot: float, units: float) -> float:
+    """1% Γ, the change in a position's delta (in shares) for a 1% move in spot: Γ · S · 0.01 · units."""
+    return gamma * spot * 0.01 * units
+
+
+def dollar_gamma_1pct(gamma: float, spot: float, units: float) -> float:
+    """$Γ per 1%, the gamma P&L in dollars of a 1% move in spot: ½ · Γ · (0.01 · S)² · units."""
+    return 0.5 * gamma * (0.01 * spot) ** 2 * units
+
+
+def dollar_vega(vega: float, units: float) -> float:
+    """Vega in dollars per vol point (raw vega is per 1.00, i.e. 100 vol points): ν · 0.01 · units."""
+    return vega * 0.01 * units
+
+
+def dollar_theta(theta: float, units: float) -> float:
+    """Theta in dollars per calendar day (raw theta is per year): θ / 365 · units."""
+    return theta / 365.0 * units
+
+
+def dollar_rho(rho: float, units: float) -> float:
+    """Rho in dollars per 1% move in the rate (raw rho is per 1.00, i.e. 100%): ρ · 0.01 · units."""
+    return rho * 0.01 * units
+
+
+def date(day: dt.date) -> str:
+    """``20-Oct-27``: day, English month abbreviation (whatever the server's locale) and two-digit year."""
+    return f"{day.day:02d}-{_MONTHS[day.month - 1]}-{day.year % 100:02d}"
+
+
+def expiry(days: float, today: dt.date | None = None) -> str:
+    """The date ``days`` calendar days after ``today`` (default: the server's date) and the days left:
+    ``20-Oct-27 (365d)``."""
+    days = round(days)
+    return f"{date((today or dt.date.today()) + dt.timedelta(days=days))} ({days}d)"
+
+
+def accounting(value: float, decimals: int = 2, prefix: str = "$") -> str:
+    """Accounting style: ``$1,234.56``, and ``($1,234.56)`` for a negative amount (never ``($0.00)``);
+    ``Unlimited`` and ``(Unlimited)`` for infinities."""
+    if _missing(value):
+        return "–"
+    text = "Unlimited" if math.isinf(value) else f"{prefix}{abs(value):,.{decimals}f}"
+    rounds_to_zero = text[len(prefix) :].strip("0.,") == ""
+    return f"({text})" if value < 0 and not rounds_to_zero else text
+
+
+def quantity(value: float, sign: bool = True) -> str:
+    """A position size as a whole number with thousands separators: ``+1,000``, ``−5`` and ``0`` (``1,000``
+    without the plus sign when ``sign`` is false)."""
+    if _missing(value) or math.isinf(value):
+        return signed(value)
+    whole = round(value)
+    text = f"{abs(whole):,d}"
+    if whole < 0:
+        return MINUS + text
+    return f"+{text}" if sign and whole > 0 else text
+
+
+def right_aligned(frame, text_columns=()):
+    """A pandas Styler of ``frame`` for ``st.table`` with every column except ``text_columns`` right-aligned.
+
+    Use it for columns of formatted text (from :func:`signed` and the other formatters), which ``st.table``
+    left-aligns with an inline style (hence ``!important``). Numeric columns are right-aligned already; to show
+    them with a formatter, keep the numbers and pass it to ``frame.style.format`` instead.
+    """
+    text = [c for c in frame.columns if c not in set(text_columns)]
+    return frame.style.set_properties(subset=text, **{"text-align": "right !important"})
