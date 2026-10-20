@@ -2,7 +2,6 @@
 
 import base64
 import json
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -13,16 +12,7 @@ from options_analyzer import binomial, monte_carlo
 from options_analyzer import black_scholes as bs
 from options_analyzer.ui import charts, tab_pricing
 
-APP = str(Path(__file__).resolve().parents[1] / "main.py")
 EUROPEAN_NOTE = "Closed-form Black-Scholes-Merton values for European exercise"
-
-
-@pytest.fixture
-def app() -> AppTest:
-    at = AppTest.from_file(APP, default_timeout=120)
-    at.run()
-    assert not at.exception, at.exception
-    return at
 
 
 def _ok(at: AppTest) -> None:
@@ -96,8 +86,8 @@ def test_binomial_model_defaults_to_the_leisen_reimer_lattice(app):
     assert app.sidebar.slider(key="steps").value == 501
 
 
-def test_every_sidebar_model_setting_loads_from_the_url():
-    at = AppTest.from_file(APP, default_timeout=120)
+def test_every_sidebar_model_setting_loads_from_the_url(new_app):
+    at = new_app()
     for key, value in {
         "model": "Binomial tree",
         "tree": "Cox-Ross-Rubinstein",
@@ -111,7 +101,7 @@ def test_every_sidebar_model_setting_loads_from_the_url():
     assert at.sidebar.slider(key="steps").value == 1000
     assert at.sidebar.segmented_control(key="style").value == "American"
 
-    at = AppTest.from_file(APP, default_timeout=120)
+    at = new_app()
     for key, value in {
         "model": "Monte Carlo",
         "paths": "250,000",
@@ -264,10 +254,10 @@ def test_convergence_charts_show_call_and_put_up_to_the_selected_steps(app):
         assert any(a["text"] == f"Converged {reference:,.4f}" for a in spec["layout"]["annotations"])
 
 
-def test_converged_reference_stays_below_the_strike_for_extreme_volatility_and_expiry():
+def test_converged_reference_stays_below_the_strike_for_extreme_volatility_and_expiry(new_app):
     # At 400% volatility and ten years the 4,003-step reference tree rounded its bottom spots to zero: the put's
     # "Converged" line read 103.7119 (above the strike of 100) next to a put value of $96.2280.
-    at = AppTest.from_file(APP, default_timeout=120)
+    at = new_app()
     at.query_params.update({"vol": "400", "days": "3650", "model": "Binomial tree", "style": "American"})
     at.run()
     _ok(at)
@@ -278,10 +268,10 @@ def test_converged_reference_stays_below_the_strike_for_extreme_volatility_and_e
     assert reference == pytest.approx(put, abs=0.1)
 
 
-def test_converged_reference_of_a_put_with_a_negative_rate_is_not_capped_at_the_strike():
+def test_converged_reference_of_a_put_with_a_negative_rate_is_not_capped_at_the_strike(new_app):
     # With a negative rate the put is worth up to K e^(-rT), more than its strike: the "Converged" line read
     # 100.0000, 15.5 below both tree curves and the put card ($115.5045).
-    at = AppTest.from_file(APP, default_timeout=120)
+    at = new_app()
     at.query_params.update(
         {"spot": "50", "strike": "100", "days": "3650", "rate": "-5", "model": "Binomial tree", "style": "American"}
     )
@@ -292,10 +282,10 @@ def test_converged_reference_of_a_put_with_a_negative_rate_is_not_capped_at_the_
     assert "Converged 115.5045" in texts
 
 
-def test_no_exercise_boundary_is_drawn_when_early_exercise_is_never_optimal():
+def test_no_exercise_boundary_is_drawn_when_early_exercise_is_never_optimal(new_app):
     # At a zero rate without dividends neither option is ever exercised early (the premium card reads $0.0000), but
     # rounding noise drew a call boundary from about 148 down to 100 and a put boundary from about 67 up to 100.
-    at = AppTest.from_file(APP, default_timeout=120)
+    at = new_app()
     at.query_params.update({"rate": "0", "vol": "10", "model": "Binomial tree", "style": "American"})
     at.run()
     _ok(at)
@@ -304,11 +294,11 @@ def test_no_exercise_boundary_is_drawn_when_early_exercise_is_never_optimal():
     assert any("Early exercise is never optimal" in i.value for i in at.info)
 
 
-def test_exercise_boundaries_are_drawn_for_a_small_rate_equal_to_the_dividend_yield():
+def test_exercise_boundaries_are_drawn_for_a_small_rate_equal_to_the_dividend_yield(new_app):
     # A 0.01% rate and dividend yield over one day at 0.1% volatility: both options have an exercise region ending at
     # the strike, but gains below 1e-12 of the strike were not counted, so the chart vanished and the app said early
     # exercise was never optimal.
-    at = AppTest.from_file(APP, default_timeout=120)
+    at = new_app()
     at.query_params.update(
         {"days": "1", "vol": "0.1", "rate": "0.01", "div": "0.01", "model": "Binomial tree", "style": "American"}
     )
@@ -349,10 +339,10 @@ def test_monte_carlo_sample_paths_are_scenarios_behind_the_price(app):
 
 
 @pytest.mark.parametrize(("vol", "call", "put"), [("400", "$100.0000", "$60.6531"), ("300", "$99.9993", "$60.6524")])
-def test_monte_carlo_cards_stay_right_at_hundreds_of_percent_of_volatility_over_years(vol, call, put):
+def test_monte_carlo_cards_stay_right_at_hundreds_of_percent_of_volatility_over_years(vol, call, put, new_app):
     # Ten years at 400% volatility showed a call of $0.0000 and a put of -$39.3469; at 300% a call of $95.0341 with a
     # standard error of $0.0000 (the values are 100.0000 / 60.6531 and 99.9998 / 60.6529).
-    at = AppTest.from_file(APP, default_timeout=120)
+    at = new_app()
     at.query_params.update({"days": "3650", "vol": vol, "model": "Monte Carlo"})
     at.run()
     _ok(at)
@@ -365,10 +355,10 @@ def test_monte_carlo_cards_stay_right_at_hundreds_of_percent_of_volatility_over_
     assert any(tab_pricing.HEAVY_TAIL_NOTE in c.value for c in at.caption)
 
 
-def test_monte_carlo_call_without_control_variate_follows_from_parity_at_large_sigma_sqrt_t():
+def test_monte_carlo_call_without_control_variate_follows_from_parity_at_large_sigma_sqrt_t(new_app):
     # Four years at 250% volatility with the control variate off: the cards showed a call of $31.0160 with a standard
     # error of $16.1587 (value 98.8770) next to a correct put of $80.7879, breaking put-call parity by $68.
-    at = AppTest.from_file(APP, default_timeout=120)
+    at = new_app()
     at.query_params.update(
         {"days": "1460", "vol": "250", "model": "Monte Carlo", "seed": "103", "control_variate": "false"}
     )
@@ -382,9 +372,9 @@ def test_monte_carlo_call_without_control_variate_follows_from_parity_at_large_s
     assert any("from σ√T = 2 on the call follows from the put by parity" in c.value for c in at.caption)
 
 
-def test_monte_carlo_diagnostics_leave_undefined_cells_blank():
+def test_monte_carlo_diagnostics_leave_undefined_cells_blank(new_app):
     # Streamlit writes "None" in missing cells unless told otherwise, right above a caption saying they are blank.
-    at = AppTest.from_file(APP, default_timeout=120)
+    at = new_app()
     at.query_params.update({"model": "Monte Carlo", "strike": "300", "days": "30", "vol": "10", "paths": "10,000"})
     at.run()
     _ok(at)
@@ -447,10 +437,10 @@ def test_iv_tab_inverts_american_quotes_on_the_sidebar_tree(app):
     assert any("501-step Cox-Ross-Rubinstein tree" in c.value for c in app.caption)
 
 
-def test_iv_tab_accepts_an_american_put_worth_more_than_its_strike_under_a_negative_rate():
+def test_iv_tab_accepts_an_american_put_worth_more_than_its_strike_under_a_negative_rate(new_app):
     # With a negative rate the put is worth up to K e^(-rT): the tab used to cap it at the strike, showing the
     # bounds "$114.8721 <= price < $100.0000" and rejecting its own model value $115.5045 as a quote.
-    at = AppTest.from_file(APP, default_timeout=120)
+    at = new_app()
     at.query_params.update(
         {"spot": "50", "strike": "100", "days": "3650", "rate": "-5", "model": "Binomial tree", "style": "American"}
     )

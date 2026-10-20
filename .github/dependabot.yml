@@ -1,10 +1,25 @@
 version: 2
 updates:
+  # requirements.txt (runtime ranges), requirements-dev.txt (pinned dev tools) and requirements-oracle.txt (pinned
+  # test oracles). One pull request a month for the tools, a separate one for the oracles, whose new releases can
+  # move reference numbers.
   - package-ecosystem: pip
     directory: /
     schedule:
       interval: monthly
+    groups:
+      oracles:
+        patterns: ["quantlib", "lets-be-rational"]
+      dev-tools:
+        patterns: ["*"]
+    ignore:
+      # Hypothesis 6.169 and later need Python 3.11; drop this when the project drops Python 3.10.
+      - dependency-name: hypothesis
+        versions: [">=6.169"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]

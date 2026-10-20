@@ -1,0 +1,7 @@
+# Independent libraries the oracle tests (pytest -m oracle) compare the engines with; for testing only, never a
+# runtime dependency. Pinned so that a new release cannot move the reference numbers without a code change.
+-r requirements-dev.txt
+# QuantLib (BSD-3-Clause): BlackCalculator, the Leisen-Reimer tree and the finite-difference American engine.
+QuantLib==1.44
+# Let's Be Rational (MIT, Jaeckel's algorithm in pure Python); also importable as py_lets_be_rational.
+lets-be-rational==1.1.2

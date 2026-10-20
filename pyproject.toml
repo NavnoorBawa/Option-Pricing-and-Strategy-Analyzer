@@ -16,6 +16,8 @@ dependencies = [
     "numpy>=1.26",
     "pandas>=2.1",
     "scipy>=1.11",
+    # Windows has no system time-zone database for zoneinfo (expiry and settlement times in New York time).
+    "tzdata>=2022.7; sys_platform == 'win32'",
 ]
 keywords = ["options", "black-scholes", "greeks", "binomial", "monte-carlo", "value-at-risk", "local-volatility", "streamlit"]
 classifiers = [
@@ -28,8 +30,13 @@ classifiers = [
 [project.optional-dependencies]
 app = [
     "plotly>=5.24",
-    "streamlit>=1.64,<2",
+    # 1.65 adds st.tabs(bind=...) for links to a tab; it is also the last release that supports Python 3.10.
+    "streamlit>=1.65,<2",
     "xlsxwriter>=3.1",
+]
+# Optional live market data for local use only; the app and the tests never need it.
+data = [
+    "yfinance>=1.7",
 ]
 
 [project.scripts]
@@ -47,7 +54,8 @@ include = ["options_analyzer*"]
 
 [tool.setuptools.package-data]
 # Streamlit reads .streamlit/config.toml next to the main script, so the installed app keeps the repo's settings.
-"options_analyzer.ui" = [".streamlit/config.toml"]
+# static/ holds the files Streamlit serves (fonts with their licence), methodology/ the Methodology tab's text.
+"options_analyzer.ui" = [".streamlit/config.toml", "static/**/*", "methodology/*"]
 
 [tool.ruff]
 target-version = "py310"
@@ -63,8 +71,21 @@ ignore = ["RUF001", "RUF002", "RUF003", "C408"]
 "options_analyzer/ui/tab_methodology.py" = ["E501"]
 
 [tool.pytest.ini_options]
+minversion = "9.0"
 testpaths = ["tests"]
 # Import the package from the checkout (also for the plain `pytest` console script).
 pythonpath = ["."]
-addopts = "-ra"
+addopts = ["-ra"]
+# Fail on misspelt settings, unregistered markers, duplicate parametrize ids and xfail tests that pass.
+strict_config = true
+strict_markers = true
+strict_parametrization_ids = true
+strict_xfail = true
+log_level = "INFO"
 filterwarnings = ["error::RuntimeWarning"]
+markers = [
+    "oracle: cross-checks against an independent library (QuantLib, Let's Be Rational); needs requirements-oracle.txt",
+    "slow: takes more than about 10 seconds; leave out with -m 'not slow'",
+    "network: needs the internet; every other test runs with outbound connections blocked (tests/conftest.py)",
+    "e2e: drives the running app in Chromium with Playwright",
+]

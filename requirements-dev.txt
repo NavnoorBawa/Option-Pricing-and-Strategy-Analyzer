@@ -1,5 +1,10 @@
 # Development tools, pinned so that new releases cannot break CI without a code change (Dependabot bumps them).
+# This file is the single list of dev-tool pins: CI, the dev container and CONTRIBUTING.md all install from it.
 -r requirements.txt
+# Hypothesis 6.169 and later need Python 3.11; .github/dependabot.yml holds it below 6.169 while 3.10 is supported.
+hypothesis==6.168.5
 mpmath==1.4.1
 pytest==9.1.1
+pytest-cov==7.1.0
+pytest-xdist==3.8.0
 ruff==0.16.8
