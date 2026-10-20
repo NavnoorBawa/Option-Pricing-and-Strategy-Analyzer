@@ -41,7 +41,6 @@ import socket
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Generator, Iterator
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -52,13 +51,8 @@ if TYPE_CHECKING:
 # pytester runs a separate pytest session inside a test (tests/test_harness.py checks this file's guards with it).
 pytest_plugins = ["pytester"]
 
-ROOT = Path(__file__).resolve().parents[1]
-#: The repository's entry point, which is also the Streamlit Community Cloud entry point.
-APP_SCRIPT = ROOT / "main.py"
-#: Seconds that one script run may take. The slowest page (an American tree with 2,000 steps on a busy CI runner)
-#: needs a few seconds; the generous limit only stops a hung run.
-APP_TIMEOUT = 120
-
+from _apptest import make_app  # noqa: E402  (shared with the test modules)
+from _oracles import ORACLE_LIBRARIES  # noqa: E402
 
 # --------------------------------------------------------------------------------------------- AppTest fixtures
 
@@ -69,15 +63,7 @@ def new_app() -> Callable[..., AppTest]:
 
     Keyword arguments become URL query parameters (values are converted to text), exactly as in a shared link.
     """
-    from streamlit.testing.v1 import AppTest
-
-    def make(**query: object) -> AppTest:
-        at = AppTest.from_file(str(APP_SCRIPT), default_timeout=APP_TIMEOUT)
-        for name, value in query.items():
-            at.query_params[name] = str(value)
-        return at
-
-    return make
+    return make_app
 
 
 @pytest.fixture
@@ -272,10 +258,6 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> 
 
 
 # --------------------------------------------------------------------------------------------------- Oracle job
-
-#: The independent libraries the oracle tests compare against: distribution name (as pinned in
-#: requirements-oracle.txt or requirements-dev.txt) -> import name.
-ORACLE_LIBRARIES = {"QuantLib": "QuantLib", "lets-be-rational": "py_lets_be_rational", "mpmath": "mpmath"}
 
 
 def pytest_configure(config: pytest.Config) -> None:

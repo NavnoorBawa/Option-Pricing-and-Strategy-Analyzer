@@ -3,10 +3,10 @@
 import base64
 import json
 import re
-from pathlib import Path
 
 import numpy as np
 import pytest
+from _apptest import make_app
 from scipy.stats import lognorm, norm
 from streamlit.proto.WidgetStates_pb2 import WidgetState
 from streamlit.testing.v1 import AppTest
@@ -15,7 +15,6 @@ from options_analyzer import black_scholes as bs
 from options_analyzer import strategies as strat
 from options_analyzer.ui import charts, tab_risk, tab_strategy
 
-APP = str(Path(__file__).resolve().parents[1] / "main.py")
 NO_EDITS = {"edited_rows": {}, "added_rows": [], "deleted_rows": []}
 
 
@@ -25,9 +24,7 @@ def _ok(at: AppTest) -> None:
 
 
 def _app(**query) -> AppTest:
-    at = AppTest.from_file(APP, default_timeout=120)
-    for name, value in query.items():
-        at.query_params[name] = str(value)
+    at = make_app(**query)
     at.run()
     _ok(at)
     return at
@@ -946,7 +943,7 @@ def test_histogram_labels_of_close_marker_lines_go_to_opposite_sides():
 
 def test_pnl_heatmap_cells_have_no_negative_zero():
     fig = charts.pnl_heatmap(["a", "b"], ["x", "y"], [[-0.2, 0.3], [-150.0, 200.0]], "spot", "vol")
-    assert np.asarray(fig.data[0].text).tolist() == [["0", "0"], ["-150", "200"]]
+    assert np.asarray(fig.data[0].text).tolist() == [["0", "0"], ["−150", "+200"]]
     small = charts.pnl_heatmap(["a"], ["x"], [[-0.004]], "spot", "vol")
     assert np.asarray(small.data[0].text).tolist() == [["0.00"]]
 
@@ -954,13 +951,15 @@ def test_pnl_heatmap_cells_have_no_negative_zero():
 @pytest.mark.parametrize(
     ("value", "bound", "text"),
     [
-        (-4.414, 5.0, "-4.41"),
-        (-44.14, 50.0, "-44.1"),
-        (-4410.4, 5000.0, "-4,410"),
-        (-21571.5, 25000.0, "-21.6k"),
-        (-215715.2, 250000.0, "-216k"),
+        (-4.414, 5.0, "−4.41"),
+        (-44.14, 50.0, "−44.1"),
+        (-4410.4, 5000.0, "−4,410"),
+        (-21571.5, 25000.0, "−21.6k"),
+        (-215715.2, 250000.0, "−216k"),
         (0.2, 250000.0, "0"),
-        (-1234567.0, 2e6, "-1.23M"),
+        (-1234567.0, 2e6, "−1.23M"),
+        (21571.5, 25000.0, "+21.6k"),
+        (4.414, 5.0, "+4.41"),
     ],
 )
 def test_pnl_cell_text_stays_short(value, bound, text):
@@ -998,3 +997,10 @@ def test_payoff_range_keeps_the_strikes_readable():
     assert (100 - lo) / (hi - lo) > 0.2
     lo, hi = tab_strategy.payoff_range(100, [99.5, 100.5], 100.0, 0.005)
     assert lo < 99.5 and hi > 100.5 and hi - lo < 5
+
+
+def test_time_decay_scenarios_use_the_ordered_ramp_not_categorical_colours():
+    # The ordered spot scenarios (-1σ ... +1σ) were drawn in five unrelated categorical colours, all solid.
+    traces = _chart(_app(), "time_decay")["data"]
+    styles = [(trace["line"].get("color"), trace["line"].get("dash")) for trace in traces]
+    assert styles == charts.scenario_styles(len(traces))

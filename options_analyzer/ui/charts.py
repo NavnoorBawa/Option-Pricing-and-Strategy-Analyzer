@@ -250,7 +250,7 @@ def price_heatmap(spots, vols, values, title: str, colorscale=None, palette: dic
             x=[f"{s:,.{spot_dp}f}" for s in spots],
             y=[f"{v * 100:.{vol_dp}f}%" for v in vols],
             z=values,
-            text=np.vectorize(lambda v: f"{v:,.{value_dp}f}")(values),
+            text=_cell_text(values, lambda v: f"{v:,.{value_dp}f}"),
             texttemplate="%{text}",
             showscale=False,
             hovertemplate=f"Spot %{{x}}<br>Vol %{{y}}<br>Value %{{z:,.{value_dp + 2}f}}<extra></extra>",
@@ -281,7 +281,11 @@ def convergence_chart(
     if reference is not None:
         _hline(fig, reference, colors, f"{reference_label} {reference:,.4f}", annotation_position="bottom right")
     fig = apply_layout(fig, title, "Number of steps", "Option value ($)", palette=colors)
-    fig.update_xaxes(type="log")
+    # Labelled round step counts: Plotly's default log ticks print bare minor digits ("2 3 4 5") in small type.
+    steps = [s for s_values, _ in series.values() for s in np.atleast_1d(s_values)]
+    lo, hi = (min(steps), max(steps)) if steps else (1, 10)
+    ticks = [t for t in (10, 20, 50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000, 20_000) if lo <= t <= hi] or [lo, hi]
+    fig.update_xaxes(type="log", tickmode="array", tickvals=ticks, ticktext=[f"{t:,.0f}" for t in ticks])
     return fig
 
 
@@ -327,6 +331,12 @@ def paths_chart(
     fig = apply_layout(fig, None, "Days from today", "Underlying price", palette=colors)
     fig.update_layout(hovermode="closest")
     return fig
+
+
+def _cell_text(values, label) -> list[list[str]]:
+    """``label`` applied to every cell of a 2-D grid. A list comprehension rather than ``np.vectorize``, whose object
+    ufunc can report a floating-point flag that something else raised in the same thread as a RuntimeWarning."""
+    return [[label(float(v)) for v in row] for row in np.asarray(values, dtype=float)]
 
 
 def _plain(text: str) -> str:
@@ -492,12 +502,13 @@ def pnl_cell_text(value: float, bound: float) -> str:
     """A heatmap cell value, short enough to stay legible in a narrow cell.
 
     ``bound`` is the largest absolute value in the grid: cents below $10, then one decimal, whole dollars below
-    $10,000, and thousands (``-21.6k``, ``216k``) or millions (``-2.16M``) above.
+    $10,000, and thousands (``−21.6k``, ``+216k``) or millions (``−2.16M``) above, always with an explicit sign
+    (U+2212 for minus) except at zero.
     """
     if bound < 1e4:
-        return _plain(f"{value:,.{0 if bound >= 100 else (1 if bound >= 10 else 2)}f}")
+        return signed(value, 0 if bound >= 100 else (1 if bound >= 10 else 2))
     scale, suffix, decimals = (1e6, "M", 2) if bound >= 1e6 else (1e3, "k", 1 if bound < 1e5 else 0)
-    text = _plain(f"{value / scale:,.{decimals}f}")
+    text = signed(value / scale, decimals)
     return "0" if text.strip("0.,") == "" else text + suffix
 
 
@@ -529,7 +540,7 @@ def pnl_heatmap(
             zmax=bound,
             zmid=0.0,
             autocolorscale=True,
-            text=np.vectorize(lambda v: pnl_cell_text(v, bound))(z),
+            text=_cell_text(z, lambda v: pnl_cell_text(v, bound)),
             texttemplate="%{text}",
             colorbar=dict(title="P&L ($)"),
             showscale=colorbar,

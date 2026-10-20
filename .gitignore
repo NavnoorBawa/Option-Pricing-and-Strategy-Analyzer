@@ -11,3 +11,9 @@ build/
 dist/
 .DS_Store
 .streamlit/secrets.toml
+
+# pytest-cov output
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml

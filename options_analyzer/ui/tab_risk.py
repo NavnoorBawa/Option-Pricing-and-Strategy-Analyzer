@@ -140,7 +140,8 @@ def _time_decay(position: Position, front_days: float) -> None:
         (f"Spot {z:+g}σ ({shock_label(m)})" if z else "Spot unchanged"): grid[:, i]
         for i, (z, m) in enumerate(zip(zs, moves, strict=True))
     }
-    st.plotly_chart(charts.lines_chart(days, series, "Days from today", "P&L ($)"), key="time_decay")
+    fig = charts.lines_chart(days, series, "Days from today", "P&L ($)", styles=charts.scenario_styles(len(series)))
+    st.plotly_chart(fig, key="time_decay")
     theta = strat.position_greeks(position.strategy, position.market)["theta"] * position.units / 365
     st.caption(
         md(

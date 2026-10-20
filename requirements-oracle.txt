@@ -5,3 +5,6 @@
 QuantLib==1.44
 # Let's Be Rational (MIT, Jaeckel's algorithm in pure Python); also importable as py_lets_be_rational.
 lets-be-rational==1.1.2
+# Its numbers come from these two (normal CDF/inverse and erfcx; the rational-cubic interpolation), pinned likewise.
+cody-special==1.0.0
+piecewise-rational==1.0.0

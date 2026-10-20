@@ -289,3 +289,19 @@ def test_colour_names_resolve_in_the_current_mode(monkeypatch):
 def test_translucent():
     assert charts.translucent("#26A69A", 0.18) == "rgba(38,166,154,0.18)"
     assert charts.translucent("#000000", 1.0) == "rgba(0,0,0,1)"
+
+
+def test_convergence_chart_labels_round_step_counts_on_its_log_axis():
+    # Plotly's default log ticks printed bare minor digits ("2 3 4 5") in 7.9 px type between 10 and 100.
+    steps = np.array([10, 25, 63, 158, 398, 1_000, 2_000])
+    fig = charts.convergence_chart({"LR": (steps, np.full(steps.size, 10.45))}, None, "BSM")
+    axis = fig.layout.xaxis
+    assert axis.type == "log" and axis.tickmode == "array"
+    assert list(axis.tickvals) == [10, 20, 50, 100, 200, 500, 1_000, 2_000]
+    assert list(axis.ticktext) == ["10", "20", "50", "100", "200", "500", "1,000", "2,000"]
+
+
+def test_price_heatmaps_take_the_theme_ramp():
+    # The Pricing tab passed Plotly's light "Blues"/"Oranges", a pale block on the dark desk theme.
+    source = (Path(charts.__file__).with_name("tab_pricing.py")).read_text(encoding="utf-8")
+    assert '"Blues"' not in source and '"Oranges"' not in source

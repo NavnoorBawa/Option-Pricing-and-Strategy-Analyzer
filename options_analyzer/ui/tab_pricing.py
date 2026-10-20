@@ -345,9 +345,7 @@ def _heatmaps(inputs: Inputs) -> None:
     for kind in ("call", "put"):
         values = bs.price(grid_s, args[0], args[1], args[2], grid_v, inputs.dividend_yield, kind)
         st.plotly_chart(
-            charts.price_heatmap(
-                spots, vols, values, f"{kind.capitalize()} value ($)", "Blues" if kind == "call" else "Oranges"
-            ),
+            charts.price_heatmap(spots, vols, values, f"{kind.capitalize()} value ($)"),
             key=f"heatmap_{kind}",
         )
     if note := _european_note(inputs):

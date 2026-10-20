@@ -18,7 +18,7 @@ import urllib.request
 from pathlib import Path
 
 import pytest
-from conftest import ORACLE_LIBRARIES
+from _oracles import ORACLE_DEPENDENCIES, ORACLE_LIBRARIES
 
 from options_analyzer import black_scholes as bs
 
@@ -35,6 +35,15 @@ UNROUTABLE = "192.0.2.1"
 
 
 # --- Network guard (this test is not marked, so the guard is active) -----------------------------------------------
+
+
+#: tests/conftest.py and the helper modules it imports, which a separate pytest session needs next to it.
+_CONFTEST_FILES = ("conftest.py", "_apptest.py", "_oracles.py")
+
+
+def _copy_conftest(pytester: pytest.Pytester) -> None:
+    for name in _CONFTEST_FILES:
+        (pytester.path / name).write_text((ROOT / "tests" / name).read_text(encoding="utf-8"), encoding="utf-8")
 
 
 def _socket_call(kind: int, method: str, port: int) -> None:
@@ -147,7 +156,7 @@ def test_a_proxy_configured_before_the_session_cannot_fetch_for_unmarked_tests(p
         # pytester points HOME elsewhere; keep the user site-packages (where requests may live) visible.
         monkeypatch.setenv("PYTHONUSERBASE", site.getuserbase())
         pytester.makepyprojecttoml((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-        pytester.makeconftest((ROOT / "tests" / "conftest.py").read_text(encoding="utf-8"))
+        _copy_conftest(pytester)
         pytester.makepyfile(
             test_proxy=f"""
             import http.client
@@ -229,7 +238,7 @@ def test_a_proxy_configured_before_the_session_cannot_fetch_for_unmarked_tests(p
 def test_a_separate_session_fails_unmarked_network_tests_and_lets_marked_ones_through(pytester, monkeypatch):
     # The repository's own pytest settings and conftest, in a fresh interpreter (no guard inherited from this run).
     pytester.makepyprojecttoml((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    pytester.makeconftest((ROOT / "tests" / "conftest.py").read_text(encoding="utf-8"))
+    _copy_conftest(pytester)
     pytester.makepyfile(
         test_inner=f"""
         import socket
@@ -292,7 +301,7 @@ def test_misspelt_settings_are_rejected(pytester):
 # --- Hypothesis profiles -------------------------------------------------------------------------------------------
 
 
-def test_hypothesis_profiles():
+def test_hypothesis_profiles(request):
     hypothesis = pytest.importorskip("hypothesis")
     settings = hypothesis.settings
     dev, ci, nightly = (settings.get_profile(name) for name in ("dev", "ci", "nightly"))
@@ -300,7 +309,8 @@ def test_hypothesis_profiles():
     assert (ci.max_examples, ci.derandomize, ci.database, ci.deadline, ci.print_blob) == (300, True, None, None, True)
     assert hypothesis.HealthCheck.too_slow in ci.suppress_health_check
     assert (nightly.max_examples, nightly.derandomize, nightly.database) == (5000, False, None)
-    expected = os.environ.get("HYPOTHESIS_PROFILE") or ("ci" if os.environ.get("CI") else "dev")
+    chosen = request.config.getoption("hypothesis_profile", default=None)  # pytest --hypothesis-profile=<name>
+    expected = chosen or os.environ.get("HYPOTHESIS_PROFILE") or ("ci" if os.environ.get("CI") else "dev")
     active = settings.get_profile(expected)
     assert (settings.default.max_examples, settings.default.derandomize) == (active.max_examples, active.derandomize)
 
@@ -428,7 +438,9 @@ def test_the_oracle_job_checks_every_pinned_oracle_library():
     }
     dev_pins = {_distribution(line) for line in _requirements("requirements-dev.txt") if not line.startswith("-r ")}
     checked = {_distribution(name) for name in ORACLE_LIBRARIES}
-    assert oracle_pins <= checked, f"add to ORACLE_LIBRARIES in tests/conftest.py: {sorted(oracle_pins - checked)}"
+    unchecked = oracle_pins - checked - ORACLE_DEPENDENCIES
+    assert not unchecked, f"add to ORACLE_LIBRARIES (or ORACLE_DEPENDENCIES) in tests/_oracles.py: {sorted(unchecked)}"
+    assert oracle_pins >= ORACLE_DEPENDENCIES  # an oracle's own dependencies are pinned too
     assert checked <= oracle_pins | dev_pins
 
 
@@ -479,7 +491,7 @@ def _oracle_session(pytester: pytest.Pytester) -> None:
     # Stand-ins that import, found before any installed copy (pyproject.toml puts the session's directory first).
     pytester.makepyfile(**dict.fromkeys(ORACLE_LIBRARIES.values(), ""))
     files = {
-        "tests/conftest.py": (ROOT / "tests" / "conftest.py").read_text(encoding="utf-8"),
+        **{f"tests/{name}": (ROOT / "tests" / name).read_text(encoding="utf-8") for name in _CONFTEST_FILES},
         "tests/test_oracles.py": """
             import pytest
 
