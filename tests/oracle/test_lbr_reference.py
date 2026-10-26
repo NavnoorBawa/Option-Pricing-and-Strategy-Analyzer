@@ -10,8 +10,6 @@ least as accurate (judged against 30-digit mpmath).
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 import pytest
 
@@ -25,7 +23,7 @@ pytestmark = pytest.mark.oracle
 EPS = np.finfo(float).eps
 
 
-def _exact(x: float, s: float, theta: float):
+def _exact(x, s, theta: float):
     """b(x, s, θ), its normalised vega and the time value in units of b's last place, at 30 digits."""
     with mp.workdps(30):
         x, s = mp.mpf(x), mp.mpf(s)
@@ -60,30 +58,29 @@ def _py_implied(beta: float, x: float, theta: float) -> float:
 
 
 def _assert_agreement(ours, theirs, truth, cond):
-    """Agreement to the attainable accuracy, or else ours is the closer of the two to the true volatility.
+    """Ours within max(1e-14, 4·cond·ε) of the true volatility, and the two within max(2e-15, 8·cond·ε) of each other.
 
-    Each implementation is within about 2·cond·ε of the truth, so they may differ by twice that: a flat 1e-15 is not
-    attainable for two double-precision implementations once cond exceeds about 1.1, hence 4·cond·ε.
+    Each implementation's error reaches a few ε times cond, so they may differ by about twice that: a flat 1e-15 is
+    not attainable for two double-precision implementations once cond exceeds about 1.1. Returns the relative
+    differences.
     """
-    tolerance = np.maximum(1e-15, 4 * cond * EPS) * truth
-    agree = np.abs(ours - theirs) <= tolerance
-    closer = np.abs(ours - truth) <= np.abs(theirs - truth)
-    assert np.all(agree | closer), [(o, t, v) for o, t, v in zip(ours, theirs, truth, strict=True)][:3]
     assert np.all(np.abs(ours - truth) <= np.maximum(1e-14, 4 * cond * EPS) * truth)
-    return agree
+    difference = np.abs(ours - theirs) / truth
+    assert np.all(difference <= np.maximum(2e-15, 8 * cond * EPS)), np.max(difference / (cond * EPS))
+    return difference
 
 
 def test_implied_volatilities_agree():
     x, s, theta, beta, cond = _cases(3_000, seed=1520)
     ours = lbr.normalised_implied_volatility(beta, x, theta)
     theirs = np.array([_py_implied(*args) for args in zip(beta, x, theta, strict=True)])
-    agree = _assert_agreement(ours, theirs, s, cond)
+    difference = _assert_agreement(ours, theirs, s, cond)
     out_of_the_money = theta * x <= 0
-    assert np.mean(np.abs(ours - theirs)[out_of_the_money] <= 1e-15 * s[out_of_the_money]) >= 0.99  # measured 100 %
+    assert np.mean(difference[out_of_the_money] <= 1e-15) >= 0.99  # measured: all, at most 7.8e-16
     # In the money they part where 0.11 < |x| < 0.2: py_lets_be_rational subtracts the intrinsic value as
     # e^(x/2) - 1/e^(x/2), which revision 1520 replaced by 2·sinh(x/2) ("incurs a larger roundoff error"). Measured:
-    # 12 of 3,000 quotes, their error 4 to 7.5·cond·ε against at most 0.5·cond·ε here.
-    assert agree.mean() >= 0.99
+    # 12 of 3,000 quotes beyond 4·cond·ε apart, their error 4 to 7.5·cond·ε against at most 0.5·cond·ε here.
+    assert np.mean(difference <= np.maximum(1e-15, 4 * cond * EPS)) >= 0.99
 
 
 def test_price_level_implied_volatilities_agree():
@@ -95,17 +92,21 @@ def test_price_level_implied_volatilities_agree():
     for theta in (1.0, -1.0):
         rows = []
         for i in range(n):
-            b, vega, time_value_ulps = _exact(math.log(F / K[i]), sigma[i] * math.sqrt(T[i]), theta)
-            if b < 1e-300 or time_value_ulps < 1000:
-                continue
-            with mp.workdps(30):
+            with mp.workdps(30):  # the price of exactly these F, K, σ and T (not of a rounded ln(F/K) or σ√T)
+                x, s = mp.log(mp.mpf(F) / mp.mpf(K[i])), mp.mpf(sigma[i]) * mp.sqrt(mp.mpf(T[i]))
+                b, vega, time_value_ulps = _exact(x, s, theta)
                 price = float(b * mp.sqrt(mp.mpf(F) * mp.mpf(K[i])))
+                cond = float(1 + abs(b / (s * vega)))
+            if price < 1e-300 or time_value_ulps < 1000:
+                continue
             ours = lbr.implied_black_volatility(price, F, K[i], T[i], theta)
             theirs = plbr.implied_volatility_from_a_transformed_rational_guess(price, F, K[i], T[i], theta)
-            rows.append((ours, theirs, sigma[i], float(1 + abs(b / (sigma[i] * math.sqrt(T[i]) * vega)))))
+            rows.append((ours, theirs, sigma[i], cond))
         ours, theirs, truth, cond = (np.array(column) for column in zip(*rows, strict=True))
         assert len(rows) > 250
-        assert _assert_agreement(ours, theirs, truth, cond).all()  # measured: 599 quotes, all within 4·cond·ε
+        difference = _assert_agreement(ours, theirs, truth, cond)
+        # Measured: 97.6 to 99.3 % within 1e-15 and at most 2.4e-15 apart (NumPy 1.26/SciPy 1.11 to 2.4/1.17).
+        assert np.mean(difference <= 1e-15) >= 0.95
 
 
 def test_four_branch_initial_guesses_agree():

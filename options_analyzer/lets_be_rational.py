@@ -46,6 +46,8 @@ Differences from the reference implementation:
   back to a bracketing solver on flagged rows.
 * Prices below the intrinsic value give NaN and prices at or above the maximum (``F`` for a call, ``K`` for a put)
   give ``inf``, where the reference returns ``-DBL_MAX`` and ``DBL_MAX``.
+* :func:`black` and :func:`implied_black_volatility` take ``ln(F/K)`` from ``log1p`` near the money, where
+  ``log(F/K)`` has an absolute error of ``ε`` that near the forward costs the volatility up to ``1e-14``.
 """
 
 from __future__ import annotations
@@ -276,12 +278,12 @@ def _piecewise(x: Any, edges: Sequence[float], pieces: Sequence[Callable[[Any], 
 
 
 def _householder3_factor(nu: Any, h2: Any, h3: Any) -> Any:
-    """The step is ν times this, with ν = -g/g′, h₂ = g″/g′ and h₃ = g‴/g′ (fourth-order convergence)."""
+    """The step is ν times this, with ν = -g/g′ and h₂, h₃ the second and third derivatives of g over g′."""
     return (1 + 0.5 * h2 * nu) / (1 + nu * (h2 + h3 * nu * (1.0 / 6.0)))
 
 
 def _householder4_factor(nu: Any, h2: Any, h3: Any, h4: Any) -> Any:
-    """As :func:`_householder3_factor`, with h₄ = g⁗/g′ as well (fifth-order convergence)."""
+    """As :func:`_householder3_factor`, with h₄ the fourth derivative of g over g′ as well."""
     return (1 + nu * (h2 + nu * h3 * (1.0 / 6.0))) / (
         1 + nu * (1.5 * h2 + nu * (h2 * h2 * 0.25 + h3 * (1.0 / 3.0) + nu * h4 * (1.0 / 24.0)))
     )
@@ -924,6 +926,17 @@ def _arrays(*values: ArrayLike) -> list[np.ndarray]:
     return list(np.broadcast_arrays(*(np.asarray(v, dtype=float) for v in values)))
 
 
+def _log_ratio_s(F: float, K: float) -> float:
+    """``ln(F/K)`` to relative accuracy also near the money: within a factor of two ``F - K`` is exact."""
+    ratio = F / K
+    return math.log1p((F - K) / K) if 0.5 <= ratio <= 2 else math.log(ratio)
+
+
+def _log_ratio_v(F: np.ndarray, K: np.ndarray) -> np.ndarray:
+    ratio = F / K
+    return np.where((ratio >= 0.5) & (ratio <= 2), np.log1p((F - K) / K), np.log(ratio))
+
+
 def normalised_black(x: ArrayLike, s: ArrayLike, theta: ArrayLike = 1.0) -> float | np.ndarray:
     """Normalised Black price ``b(x, s, θ) = θ·[e^(x/2)·Φ(θ(x/s + s/2)) - e^(-x/2)·Φ(θ(x/s - s/2))]``.
 
@@ -1023,12 +1036,12 @@ def black(F: ArrayLike, K: ArrayLike, sigma: ArrayLike, T: ArrayLike, theta: Arr
         intrinsic = max(k - f if th < 0 else f - k, 0.0)
         if s <= 0:
             return intrinsic
-        return intrinsic + math.sqrt(f) * math.sqrt(k) * _normalised_black_otm_s(-abs(math.log(f / k)), s)
+        return intrinsic + math.sqrt(f) * math.sqrt(k) * _normalised_black_otm_s(-abs(_log_ratio_s(f, k)), s)
     fa, ka, va, tma, tha = _arrays(F, K, sigma, T, theta)
     with np.errstate(all="ignore"):
         sa = va * np.sqrt(tma)
         intrinsic_a = np.maximum(np.where(tha < 0, ka - fa, fa - ka), 0.0)
-        xa = -np.abs(np.log(fa / ka))
+        xa = -np.abs(_log_ratio_v(fa, ka))
         b = _normalised_black_v(xa.ravel(), sa.ravel(), np.ones(xa.size)).reshape(xa.shape)
         return np.where(ka == fa, fa * erf(_HALF_OVER_SQRT_TWO * sa), intrinsic_a + np.sqrt(fa) * np.sqrt(ka) * b)
 
@@ -1113,14 +1126,14 @@ def implied_black_volatility(
         else:
             intrinsic = k - f if th < 0 else f - k
             beta = (p - intrinsic if intrinsic > 0 else p) / (math.sqrt(f) * math.sqrt(k))
-            s, converged = _lets_be_rational_s(beta, -abs(math.log(f / k)))
+            s, converged = _lets_be_rational_s(beta, -abs(_log_ratio_s(f, k)))
         vol = s / math.sqrt(t) if t > 0 else math.nan
         return (vol, converged) if full_output else vol
     pa, fa, ka, ta, tha = _arrays(price, F, K, T, theta)
     with np.errstate(all="ignore"):
         intrinsic_a = np.where(tha < 0, ka - fa, fa - ka)
         beta_a = np.where(intrinsic_a > 0, pa - intrinsic_a, pa) / (np.sqrt(fa) * np.sqrt(ka))
-        sa, ca = _lets_be_rational_v(beta_a.ravel(), -np.abs(np.log(fa / ka)).ravel())
+        sa, ca = _lets_be_rational_v(beta_a.ravel(), -np.abs(_log_ratio_v(fa, ka)).ravel())
         sa = np.where(pa >= np.where(tha < 0, ka, fa), np.inf, sa.reshape(pa.shape))
         vol_a = np.where(ta > 0, sa / np.sqrt(ta), np.nan)
     ca = ca.reshape(pa.shape)
