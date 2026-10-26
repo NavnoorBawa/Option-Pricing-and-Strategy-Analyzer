@@ -1,0 +1,44 @@
+# Provenance: published-facts
+# Source: NYSE Group news release "NYSE Group Announces 2026, 2027 and 2028 Holiday and Early Closings Calendar" (2025-12-23)
+# URL: https://www.nyse.com/markets/hours-calendars
+# URL: https://s2.q4cdn.com/154085107/files/doc_news/NYSE-Group-Announces-2026-2027-and-2028-Holiday-and-Early-Closings-Calendar-2025.pdf
+# Retrieved: 2026-10-26
+# Notes: dates transcribed by hand. On the retrieval date the nyse.com page listed 2025 to 2027 (its 2026 and 2027
+# dates match the release); 2028 comes from the release, which NYSE Group (Intercontinental Exchange) publishes on
+# ir.theice.com and which links to the nyse.com page. New Year's Day 2028 falls on a Saturday and is not observed.
+# kind: holiday = closed all day; early_close = closes at 1:00 p.m. ET (1:15 p.m. for eligible options).
+date,kind,name
+2026-01-01,holiday,New Year's Day
+2026-01-19,holiday,"Martin Luther King, Jr. Day"
+2026-02-16,holiday,Washington's Birthday
+2026-04-03,holiday,Good Friday
+2026-05-25,holiday,Memorial Day
+2026-06-19,holiday,Juneteenth National Independence Day
+2026-07-03,holiday,Independence Day (observed)
+2026-09-07,holiday,Labor Day
+2026-11-26,holiday,Thanksgiving Day
+2026-11-27,early_close,Day after Thanksgiving
+2026-12-24,early_close,Christmas Eve
+2026-12-25,holiday,Christmas Day
+2027-01-01,holiday,New Year's Day
+2027-01-18,holiday,"Martin Luther King, Jr. Day"
+2027-02-15,holiday,Washington's Birthday
+2027-03-26,holiday,Good Friday
+2027-05-31,holiday,Memorial Day
+2027-06-18,holiday,Juneteenth National Independence Day (observed)
+2027-07-05,holiday,Independence Day (observed)
+2027-09-06,holiday,Labor Day
+2027-11-25,holiday,Thanksgiving Day
+2027-11-26,early_close,Day after Thanksgiving
+2027-12-24,holiday,Christmas Day (observed)
+2028-01-17,holiday,"Martin Luther King, Jr. Day"
+2028-02-21,holiday,Washington's Birthday
+2028-04-14,holiday,Good Friday
+2028-05-29,holiday,Memorial Day
+2028-06-19,holiday,Juneteenth National Independence Day
+2028-07-03,early_close,Day before Independence Day
+2028-07-04,holiday,Independence Day
+2028-09-04,holiday,Labor Day
+2028-11-23,holiday,Thanksgiving Day
+2028-11-24,early_close,Day after Thanksgiving
+2028-12-25,holiday,Christmas Day
