@@ -1,4 +1,4 @@
-"""Sidebar: market inputs and pricing-model configuration."""
+"""Sidebar: market inputs, with the pricing-model section from :mod:`.model_config`."""
 
 from __future__ import annotations
 
@@ -6,38 +6,8 @@ from dataclasses import dataclass
 
 import streamlit as st
 
-from ..binomial import METHODS
 from ..strategies import Market
-
-MODELS = {
-    "bsm": "Black-Scholes-Merton",
-    "binomial": "Binomial tree",
-    "monte_carlo": "Monte Carlo",
-}
-
-PATH_CHOICES = (10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000)
-
-
-@dataclass(frozen=True)
-class ModelConfig:
-    kind: str = "bsm"
-    tree_method: str = "lr"
-    steps: int = 501
-    american: bool = False
-    n_paths: int = 100_000
-    seed: int = 42
-    antithetic: bool = True
-    control_variate: bool = True
-
-    @property
-    def label(self) -> str:
-        if self.kind == "binomial":
-            style = "American" if self.american else "European"
-            return f"{METHODS[self.tree_method]} tree · {self.steps} steps · {style}"
-        if self.kind == "monte_carlo":
-            tricks = [n for n, on in (("antithetic", self.antithetic), ("control variate", self.control_variate)) if on]
-            return f"Monte Carlo · {self.n_paths:,} paths" + (f" · {' + '.join(tricks)}" if tricks else "")
-        return "Black-Scholes-Merton (closed form)"
+from .model_config import ModelConfig, model_sidebar  # code that imports ModelConfig from here keeps working
 
 
 @dataclass(frozen=True)
@@ -129,62 +99,7 @@ def sidebar() -> Inputs:
     )
     sb.caption(f"T = {days / 365:.4f} years")
 
-    sb.header("Pricing model")
-    kind = sb.radio(
-        "Model",
-        list(MODELS),
-        format_func=MODELS.get,
-        key="model",
-        bind="query-params",
-        label_visibility="collapsed",
-    )
-    default = ModelConfig()
-    config = ModelConfig(kind=kind)
-    if kind == "binomial":
-        method = sb.radio(
-            "Lattice",
-            list(METHODS),
-            index=list(METHODS).index(default.tree_method),
-            format_func=METHODS.get,
-            key="tree",
-            bind="query-params",
-            horizontal=True,
-            help="Leisen-Reimer converges smoothly and much faster; CRR is the classic tree.",
-        )
-        steps = sb.slider("Steps", 10, 2000, default.steps, step=1, key="steps", bind="query-params")
-        style = sb.segmented_control(
-            "Exercise", ["European", "American"], default="European", key="style", required=True, bind="query-params"
-        )
-        config = ModelConfig(kind=kind, tree_method=method, steps=int(steps), american=style == "American")
-    elif kind == "monte_carlo":
-        n_paths = sb.select_slider(
-            "Paths",
-            PATH_CHOICES,
-            value=default.n_paths,
-            format_func=lambda n: f"{n:,}",
-            key="paths",
-            bind="query-params",
-        )
-        seed = sb.number_input(
-            "Random seed",
-            min_value=0,
-            max_value=2**32 - 1,
-            value=default.seed,
-            step=1,
-            key="seed",
-            bind="query-params",
-            help="Fixed seed = reproducible prices that do not jitter between reruns.",
-        )
-        antithetic = sb.toggle("Antithetic variates", value=default.antithetic, key="antithetic", bind="query-params")
-        control = sb.toggle(
-            "Control variate (discounted spot)",
-            value=default.control_variate,
-            key="control_variate",
-            bind="query-params",
-        )
-        config = ModelConfig(
-            kind=kind, n_paths=int(n_paths), seed=int(seed), antithetic=antithetic, control_variate=control
-        )
+    config = model_sidebar()
 
     sb.divider()
     sb.markdown(
