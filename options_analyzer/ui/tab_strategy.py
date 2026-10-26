@@ -571,35 +571,53 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
         max_loss: Card = ("Max loss", "No loss", {"help": md(no_loss)})
     else:
         max_loss = ("Max loss", money_short(loss), {"help": _money_help(loss)})
-    card_row(
-        "strategy_cards",
-        ("strategy_cards_a", "strategy_cards_b"),
-        [
-            (
-                "Net premium",
-                money_short(abs(cost)),
-                {
-                    "delta": premium_label(cost),
-                    "delta_color": "off",
-                    "delta_arrow": "off",
-                    "help": _money_help(abs(cost)),
-                },
-            ),
-            max_profit,
-            max_loss,
-            (
-                "Probability of profit",
-                probability_text(
-                    metrics.probability_of_profit, sure=metrics.max_loss < 0, never=metrics.max_profit <= 0
-                ),
-                {
-                    "help": "At the front expiry, log-normal terminal price with the chosen drift and the sidebar "
-                    "volatility. Shown as >99.9% or <0.1% when it rounds to 100% or 0% but the position can still "
-                    "lose or profit."
-                },
-            ),
-        ],
-    )
+    summary: list[Card] = [
+        (
+            "Net premium",
+            money_short(abs(cost)),
+            {
+                "delta": premium_label(cost),
+                "delta_color": "off",
+                "delta_arrow": "off",
+                "help": _money_help(abs(cost)),
+            },
+        ),
+        max_profit,
+        max_loss,
+        (
+            "Probability of profit",
+            probability_text(metrics.probability_of_profit, sure=metrics.max_loss < 0, never=metrics.max_profit <= 0),
+            {
+                "help": "At the front expiry, log-normal terminal price with the chosen drift and the sidebar "
+                "volatility. Shown as >99.9% or <0.1% when it rounds to 100% or 0% but the position can still "
+                "lose or profit."
+            },
+        ),
+    ]
+    greeks = strat.position_greeks(strategy, market)
+    delta, gamma = greeks["delta"] * units, greeks["gamma"] * units
+    theta, vega = greeks["theta"] * units / 365, greeks["vega"] * units / 100
+    greek_cards: list[Card] = [
+        (
+            "Delta (shares)",
+            number_short(delta, 2),
+            {"help": _number_help(delta, 2, "Share-equivalent exposure: P&L change for a $1 move in the underlying.")},
+        ),
+        ("Gamma", number_short(gamma, 4), {"help": _number_help(gamma, 4, "Change in delta per $1 move.")}),
+        (
+            "Theta / day",
+            money_short(theta, signed=True),
+            {"help": _money_help(theta, "P&L from one calendar day passing, all else equal.", signed=True)},
+        ),
+        (
+            "Vega / vol pt",
+            money_short(vega, signed=True),
+            {"help": _money_help(vega, "P&L for a 1-point rise in every leg's implied volatility.", signed=True)},
+        ),
+    ]
+    # The summary and Greek rows sit one above the other: each is sized with the other's cards too, so the two
+    # wrap at the same widths and their cards line up.
+    card_row("strategy_cards", ("strategy_cards_a", "strategy_cards_b"), summary, size_with=greek_cards)
     be = metrics.breakevens
     st.markdown(
         md(f"**Breakeven{'s' if len(be) > 1 else ''} at expiry:** {breakeven_text(be, market.spot)}")
@@ -609,35 +627,7 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
         "it is not shown when the maximum loss rounds to $0.00.",
     )
 
-    greeks = strat.position_greeks(strategy, market)
-    delta, gamma = greeks["delta"] * units, greeks["gamma"] * units
-    theta, vega = greeks["theta"] * units / 365, greeks["vega"] * units / 100
-    card_row(
-        "greek_cards",
-        ("greek_cards_a", "greek_cards_b"),
-        [
-            (
-                "Delta (shares)",
-                number_short(delta, 2),
-                {
-                    "help": _number_help(
-                        delta, 2, "Share-equivalent exposure: P&L change for a $1 move in the underlying."
-                    )
-                },
-            ),
-            ("Gamma", number_short(gamma, 4), {"help": _number_help(gamma, 4, "Change in delta per $1 move.")}),
-            (
-                "Theta / day",
-                money_short(theta, signed=True),
-                {"help": _money_help(theta, "P&L from one calendar day passing, all else equal.", signed=True)},
-            ),
-            (
-                "Vega / vol pt",
-                money_short(vega, signed=True),
-                {"help": _money_help(vega, "P&L for a 1-point rise in every leg's implied volatility.", signed=True)},
-            ),
-        ],
-    )
+    card_row("greek_cards", ("greek_cards_a", "greek_cards_b"), greek_cards, size_with=summary)
 
     st.markdown(f"**Profit & loss** — front expiry in {front_days:.0f} days")
     last_day = round(front_days) - 1

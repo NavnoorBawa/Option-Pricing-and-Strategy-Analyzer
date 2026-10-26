@@ -2,6 +2,7 @@
 
 import base64
 import json
+import re
 
 import numpy as np
 import pytest
@@ -188,9 +189,10 @@ def test_price_cards_stay_two_by_two_on_a_phone(app, values, phone):
     assert "font-size: clamp(16px, calc((50cqw - 35px) / 5.19), 22.75px);" in style
     labels = ["Call value", "Put value", "Forward price", "Call ITM probability"]
     compact = components._cards_style(list(zip(labels, values, strict=True)), *tab_pricing.PRICE_CARDS)
-    pair = int(compact.split("@container")[1].split("flex-basis: ")[1].split("px")[0])
+    # The cards of a pair go one per line only on a row narrower than two compact cards and the gap.
+    stack = int(re.search(r"@container price-cards \(width < (\d+)px\) \{ [^@]*repeat\(1, ", compact).group(1))
     row = phone - 2 * 14  # the page's side margins on a phone
-    assert pair <= row  # two cards side by side
+    assert stack <= row  # two cards side by side
     em = max(components._value_em(v) for v in values)
     font = min(max(16.0, ((row - 14) / 2 - 28) / em), 22.75)  # the clamp() at this row width
     assert font * em <= (row - 14) / 2 - 28  # the widest value fits its card

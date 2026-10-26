@@ -21,11 +21,12 @@ import plotly.graph_objects as go
 import plotly.io as pio
 import streamlit as st
 
-from . import theme
+# As desk_theme, so that show() can take st.plotly_chart's theme argument under its own name.
+from . import theme as desk_theme
+from .format import signed
 
 if TYPE_CHECKING:
     from streamlit.delta_generator import DeltaGenerator
-from .format import signed
 
 #: Heights (px) of a primary chart and of a smaller, secondary one.
 HEIGHT, HEIGHT_SECONDARY = 360, 260
@@ -72,7 +73,7 @@ _ALIASES = {"CALL": "call", "PUT": "put", "PROFIT": "profit", "LOSS": "loss", "N
 def __getattr__(name: str) -> str:
     """``charts.CALL``, ``charts.LOSS`` and the other colour names: the token of the current light/dark mode."""
     if name in _ALIASES:
-        return theme.palette()[_ALIASES[name]]
+        return desk_theme.palette()[_ALIASES[name]]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -142,7 +143,7 @@ def style(fig: go.Figure, palette: dict[str, str] | None = None, height: int | N
     on the dark background and 5.73:1 on the light one, where the theme's own faded grey was 3.62:1 at 10.5 px.
     (Legends and chart titles keep the theme's text colours.)
     """
-    colors = palette or theme.palette()
+    colors = palette or desk_theme.palette()
     fig.update_layout(
         template=TEMPLATE,
         height=height or fig.layout.height or HEIGHT,
@@ -219,7 +220,7 @@ def scenario_styles(n: int, palette: dict[str, str] | None = None) -> list[tuple
     +1σ): falls in the put orange, rises in the call blue and the middle ("unchanged") in the muted grey, with the
     dash marking the size of the move (solid for the largest, then dashed, dotted, dash-dotted). Use it instead of
     the categorical colours where the order of the series means something."""
-    colors = palette or theme.palette()
+    colors = palette or desk_theme.palette()
     dashes = ("solid", "dash", "dot", "dashdot")
     half = (n - 1) / 2
     styles = []
@@ -245,7 +246,7 @@ def sensitivity_chart(
 ):
     """Call and put values or Greeks against one input. The call is the first trace and the put the second, so
     they take the theme's first two categorical colours (the call and put colours of the mode)."""
-    colors = palette or theme.palette()
+    colors = palette or desk_theme.palette()
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=x, y=call_y, name="Call", line=dict(width=LINE_WIDTH)))
     fig.add_trace(go.Scatter(x=x, y=put_y, name="Put", line=dict(width=LINE_WIDTH)))
@@ -319,7 +320,7 @@ def convergence_chart(
 ):
     """Tree value against the number of steps (log scale, so the first steps are not squeezed together);
     ``series`` maps a name to ``(steps, values)``."""
-    colors = palette or theme.palette()
+    colors = palette or desk_theme.palette()
     fig = go.Figure()
     for name, (steps, values) in series.items():
         fig.add_trace(go.Scatter(x=steps, y=values, name=name, mode="lines", line=dict(width=LINE_WIDTH)))
@@ -337,7 +338,7 @@ def convergence_chart(
 def exercise_boundary_chart(boundaries: dict, strike: float, palette: dict[str, str] | None = None):
     """Critical spot price over time; ``boundaries`` maps names starting with "Call" or "Put" to ``(days, spots)``.
     The colours follow the option type (a put boundary drawn alone is still the put colour)."""
-    colors = palette or theme.palette()
+    colors = palette or desk_theme.palette()
     fig = go.Figure()
     for name, (days, spots) in boundaries.items():
         color = colors["call"] if name.lower().startswith("call") else colors["put"]
@@ -354,7 +355,7 @@ def paths_chart(
     mean_label: str = "Risk-neutral mean (forward)",
     palette: dict[str, str] | None = None,
 ):
-    colors = palette or theme.palette()
+    colors = palette or desk_theme.palette()
     fig = go.Figure()
     for path in paths:
         fig.add_trace(
@@ -409,7 +410,7 @@ def histogram_chart(
     bars rather than piled into the end bins, and a note above the chart says how many there are and how far they go.
     Densities are relative to the whole sample, so the bars integrate to the share of outcomes shown.
     """
-    colors = palette or theme.palette()
+    colors = palette or desk_theme.palette()
     values = np.asarray(values, dtype=float)
     lo, hi = np.percentile(values, [0.05, 99.95])
     marks = [float(x) for x, _, _ in lines if np.isfinite(x)]
@@ -486,7 +487,7 @@ def payoff_chart(
     The ±1σ band is named in the legend rather than annotated, so its label cannot collide with the spot label.
     The breakeven hover shows ``breakeven_decimals`` decimals, like the breakevens written under the cards.
     """
-    colors = palette or theme.palette()
+    colors = palette or desk_theme.palette()
     fig = go.Figure()
     if band is not None:
         fig.add_vrect(x0=band[0], x1=band[1], fillcolor=colors["muted"], opacity=0.10, line_width=0)
@@ -509,7 +510,7 @@ def payoff_chart(
                 fill="tozeroy",
                 mode="none",
                 # A translucent fill colour: Plotly does not apply a trace's opacity to a fill without lines.
-                fillcolor=translucent(colors[role], theme.FILL_OPACITY),
+                fillcolor=translucent(colors[role], desk_theme.FILL_OPACITY),
                 showlegend=False,
                 hoverinfo="skip",
             )
@@ -612,7 +613,7 @@ def lines_chart(
 ):
     """One line per series. ``styles`` gives each series a ``(colour, dash)``, such as :func:`scenario_styles`
     for ordered scenarios; without it the series take the theme's categorical colours in order."""
-    colors = palette or theme.palette()
+    colors = palette or desk_theme.palette()
     fig = go.Figure()
     for i, (name, y) in enumerate(series.items()):
         line: dict[str, object] = dict(width=LINE_WIDTH)
@@ -631,7 +632,7 @@ def lines_chart(
 
 def bar_chart(names, values, x_title: str, palette: dict[str, str] | None = None):
     """Horizontal P&L bars in the profit or loss colour, each labelled with its signed amount."""
-    colors = palette or theme.palette()
+    colors = palette or desk_theme.palette()
     fig = go.Figure(
         go.Bar(
             x=values,
@@ -656,7 +657,7 @@ def surface_3d(moneyness, maturities, z, title: str, colorscale: str, palette: d
     # (a phone column is 328 px or more; the Volatility Surface tab wraps the two charts before they get
     # narrower). A margin does not help: the scene is clipped at its own domain, so a margin only moves the cut.
     # The axis and colour-bar text is in the muted colour, as in style().
-    text = dict(color=(palette or theme.palette())["muted"])
+    text = dict(color=(palette or desk_theme.palette())["muted"])
     fig = go.Figure(
         go.Surface(
             x=moneyness,
@@ -709,8 +710,8 @@ def smile_chart(
     ``quotes`` (aligned with ``slices``) adds the market quotes as markers:
     ``(moneyness, quoted implied vol, fitted implied vol)`` or ``None`` for a slice without quotes.
     """
-    colors = palette or theme.palette()
-    series = theme.categorical(colors)
+    colors = palette or desk_theme.palette()
+    series = desk_theme.categorical(colors)
     fig = go.Figure()
     for i, (label, implied, local) in enumerate(slices):
         color = series[i % len(series)]
