@@ -5,7 +5,8 @@ One row above the price cards, ``st.container(horizontal=True, key="desk_header"
 * the identity block: the "Options Analytics" brand and the contract ticker in IBM Plex Mono
   (:func:`ticker`, ``S 100.00 · K 100.00 · 26-Oct-27 (365d) · σ 20.00% · r 5.00% · q 0.00% · F 105.13``);
 * one action group on the right: the pricing-model badge (:func:`model_badge`), a Share popover with the link to
-  this exact view (:func:`share_link`) and a Methodology button.
+  this exact view (:func:`share_link`) and a Methodology button (or Alt+Shift+M), with which the app opens the
+  Methodology in a drawer on the right, over the open tab (:func:`.tab_methodology.drawer`).
 
 How the row wraps is set in ``static/desk.css``. The ticker wraps between its items, never inside one, in lines
 of balanced length. Where the ticker's two lines fit beside the brand, they start one under the other (a hanging
@@ -45,6 +46,8 @@ SHARE_NOTE = (
     "template, strike width, contracts, shares per contract and commission. Edited legs, uploaded quotes and the "
     "other settings of a tab stay in this session."
 )
+#: The keyboard shortcut of the Methodology button (Streamlit shows Option for Alt on a Mac).
+METHODOLOGY_SHORTCUT = "Alt+Shift+M"
 #: Short names of the binomial lattices for the badge.
 _LATTICE = {"crr": "CRR", "lr": "LR"}
 #: The ticker's items are joined by a no-break space, a middle dot and a space: a line can end after the dot only.
@@ -222,7 +225,8 @@ def render(inputs: Inputs, *, on_methodology: Callable[[], None]) -> DeltaGenera
     inputs : Inputs
         The inputs of the values on screen: the ticker shows them and the badge names their model.
     on_methodology : callable
-        Called (with no arguments) when the Methodology button is clicked, before the next run.
+        Called (with no arguments) when the Methodology button is clicked, before the next run: the app's
+        callback asks that run to open the Methodology drawer (:func:`.tab_methodology.drawer`).
 
     Returns
     -------
@@ -264,7 +268,9 @@ def render(inputs: Inputs, *, on_methodology: Callable[[], None]) -> DeltaGenera
         key="desk_methodology",
         icon=":material/menu_book:",
         on_click=on_methodology,
-        help="Models, conventions and limitations",
+        help=f"Models, conventions, validation and references, beside this tab. Shortcut: {METHODOLOGY_SHORTCUT} "
+        "(Option+Shift+M on a Mac).",
+        shortcut=METHODOLOGY_SHORTCUT,
     )
     return share
 

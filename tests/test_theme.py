@@ -22,7 +22,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from options_analyzer.ui import charts, theme
+from options_analyzer.ui import charts, tab_methodology, theme
 
 try:
     import tomllib
@@ -279,7 +279,7 @@ DESK_TESTIDS = {
 #: Attributes other than data-testid: a multiselect's chips have no test id of their own.
 DESK_ATTRIBUTES = {"data-tag"}
 #: HTML elements and pseudo-classes a selector may name after its hook.
-DESK_ELEMENTS = {"p", "strong", "code", "button", "div"}
+DESK_ELEMENTS = {"p", "strong", "code", "button", "div", "h3", "kbd"}
 DESK_PSEUDO_CLASSES = {"is", "has", "hover", "focus", "enabled"}
 
 
@@ -730,8 +730,17 @@ TAB_READY = {
     "Risk": ".st-key-var_cards",
     "Surface": ".st-key-surface_cards",
     "IV": ".st-key-iv_cards",
-    "Methodology": "[data-testid=stMarkdown]",
+    "Methodology": ".st-key-methodology",
 }
+
+
+#: Counts the script runs that start from now on in window.__runs.
+_COUNT_RUNS = """() => {
+  window.__runs = 0;
+  const app = document.querySelector('[data-test-script-state]');
+  new MutationObserver(() => { if (app.getAttribute('data-test-script-state') === 'running') window.__runs++; })
+    .observe(app, {attributes: true, attributeFilter: ['data-test-script-state']});
+}"""
 
 
 def _settle(page) -> None:
@@ -1284,7 +1293,7 @@ def test_the_header_wraps_cleanly_on_a_laptop(chromium, app_url, inputs):
 
 @pytest.mark.e2e
 @pytest.mark.slow
-def test_the_share_link_reopens_this_view_and_the_methodology_button_opens_its_tab(chromium, app_url):
+def test_the_share_link_reopens_this_view(chromium, app_url):
     page = _open(chromium, f"{app_url}/?tab=Risk", "dark", 1440)
     try:
         page.locator("[data-testid=stSidebar] [data-testid=stNumberInputStepUp]").first.click()
@@ -1302,10 +1311,119 @@ def test_the_share_link_reopens_this_view_and_the_methodology_button_opens_its_t
             assert "S 101.00 · K 100.00 · " in ticker.replace("\xa0", " ")
         finally:
             other.close()
+    finally:
+        page.close()
+
+
+def _formulas(markdown: str) -> int:
+    """The formulas of a Markdown text: its pairs of $$ (display maths) and of $ (inline), but no literal \\$."""
+    text = markdown.replace(r"\$", "")
+    return text.count("$$") // 2 + text.replace("$$", "").count("$") // 2
+
+
+#: The formulas of the Methodology, which KaTeX must all render.
+FORMULAS = sum(_formulas(section.body) for section in tab_methodology.sections())
+#: The Methodology tab: its height, the maths that KaTeX rendered and any $$ left as text, the ids on the page
+#: that are not unique, and its sections.
+_METHODOLOGY = """() => {
+  const main = document.querySelector('[data-testid=stMain]');
+  const ids = [...document.querySelectorAll('[id]')].map(e => e.id);
+  return {
+    height: Math.max(document.documentElement.scrollHeight, main.scrollHeight),
+    katex: document.querySelectorAll('.st-key-methodology .katex').length,
+    errors: document.querySelectorAll('.katex-error').length,
+    raw: (document.body.textContent.match(/\\$\\$/g) || []).length,
+    duplicates: ids.filter((id, i) => ids.indexOf(id) !== i),
+    sections: [...document.querySelectorAll('.st-key-methodology details')]
+      .map(d => [d.querySelector('summary').innerText.split('\\n').pop().trim(), d.open]),
+  };
+}"""
+
+
+@pytest.mark.e2e
+@pytest.mark.slow
+@pytest.mark.parametrize(("width", "height", "limit"), [(1440, 900, 1500), (390, 844, 2500)])
+def test_the_methodology_renders_all_its_maths_and_fits_collapsed(chromium, app_url, width, height, limit):
+    # DK-6 acceptance: no raw '$$' in the page (every formula rendered: KaTeX draws them in the collapsed sections
+    # too, and keeps their TeX without the dollars), and with its sections collapsed the page is at most 1,500 px tall
+    # at 1440 px and 2,500 px at 390 px (the single long page was 4,201 and 8,337 px; this one, 915 and 1,070 px).
+    page = chromium.new_page(viewport={"width": width, "height": height})
+    try:
+        page.goto(f"{app_url}/?tab=Methodology")
+        page.locator(f"[role=tabpanel] {TAB_READY['Methodology']}").wait_for(state="visible", timeout=120_000)
+        _settle(page)
+        found = page.evaluate(_METHODOLOGY)
+        assert found["sections"] == [[s.title, False] for s in tab_methodology.sections()]
+        assert found["katex"] == FORMULAS > 0 and found["errors"] == 0 and found["raw"] == 0, found
+        assert found["duplicates"] == [], found
+        assert found["height"] <= limit, found
+        # A link of the contents scrolls its section into view, without a script run: to the top of the page, or
+        # as far as the page goes. On a 500 px screen, so that the collapsed page is surely taller than the screen.
+        page.set_viewport_size({"width": width, "height": 500})
+        page.wait_for_timeout(500)
+        page.locator(".st-key-methodology a", has_text="Validation").click()
+        page.wait_for_function("() => location.hash === '#validation'", timeout=30_000)
+        page.wait_for_timeout(500)
+        top, scrolled, at_end = page.evaluate("""() => {
+          const main = document.querySelector('[data-testid=stMain]');
+          return [document.getElementById('validation').getBoundingClientRect().top, main.scrollTop,
+                  main.scrollTop + main.clientHeight >= main.scrollHeight - 2];
+        }""")
+        assert 0 <= top < 500 - 40 and (top < 8 or at_end) and scrolled > 0, (top, scrolled, at_end)
+        assert not page.evaluate(f"() => {_RUNNING}")
+    finally:
+        page.close()
+
+
+#: The drawer: its box in the viewport, its sections (label, open), the selected tab, the link, and any raw $$.
+_DRAWER = """() => {
+  const d = document.querySelector('[role=dialog]');
+  if (!d) return null;
+  const r = d.getBoundingClientRect();
+  return {
+    box: [r.left, r.top, r.right, r.bottom].map(Math.round), viewport: [innerWidth, innerHeight],
+    sections: [...d.querySelectorAll('details')]
+      .map(x => [x.querySelector('summary').innerText.split('\\n').pop().trim(), x.open]),
+    tab: document.querySelector('[role=tab][aria-selected=true]').innerText, search: location.search,
+    raw: (d.textContent.match(/\\$\\$/g) || []).length,
+  };
+}"""
+
+
+@pytest.mark.e2e
+@pytest.mark.slow
+@pytest.mark.parametrize(("width", "height"), [(1440, 900), (390, 844)])
+def test_the_methodology_drawer_opens_on_the_right_over_the_open_tab(chromium, app_url, width, height):
+    # DK-6 acceptance: the drawer is anchored right at full viewport height, and starts with the open tab's section,
+    # open (UI spec 3.6). On a laptop it leaves the tab in view beside it; closing it leaves the tab as it was.
+    page = chromium.new_page(viewport={"width": width, "height": height})
+    try:
+        page.goto(f"{app_url}/?tab=Risk")
+        page.locator(f"[role=tabpanel] {TAB_READY['Risk']}").first.wait_for(state="visible", timeout=120_000)
+        _settle(page)
         page.get_by_role("button", name="Methodology").click()
-        page.wait_for_function("() => location.search.includes('tab=Methodology')", timeout=60_000)
-        page.locator(f"[role=tabpanel] {TAB_READY['Methodology']}").first.wait_for(state="visible", timeout=60_000)
-        assert page.locator("[role=tab][aria-selected=true]").inner_text() == "Methodology"
+        page.locator("[role=dialog] .st-key-methodology_drawer").wait_for(state="visible", timeout=60_000)
+        _settle(page)
+        found = page.evaluate(_DRAWER)
+        left, top, right, bottom = found["box"]
+        assert (right, top, bottom) == (width, 0, height), found
+        assert left >= (width - 760 if width > 760 else 0), found  # at most 750 px wide, plus its border
+        titles = [s.title for s in tab_methodology.sections()]
+        assert found["sections"] == [["Risk", True], *([title, False] for title in titles if title != "Risk")]
+        assert found["raw"] == 0 and found["tab"] == "Risk" and found["search"] == "?tab=Risk", found
+        # Escape closes it without a script run: the tab stays as it was.
+        page.evaluate(_COUNT_RUNS)
+        page.keyboard.press("Escape")
+        page.locator("[role=dialog]").wait_for(state="detached", timeout=30_000)
+        page.wait_for_timeout(1000)
+        assert page.evaluate("() => window.__runs") == 0
+        assert page.locator("[role=tab][aria-selected=true]").inner_text() == "Risk"
+        assert page.locator(f"[role=tabpanel] {TAB_READY['Risk']}").first.is_visible()
+        # Alt+Shift+M opens it again (UI spec 2.4), as the button does.
+        page.keyboard.press("Alt+Shift+M")
+        page.locator("[role=dialog] .st-key-methodology_drawer").wait_for(state="visible", timeout=60_000)
+        _settle(page)
+        assert page.evaluate(_DRAWER)["sections"][0] == ["Risk", True]
     finally:
         page.close()
 

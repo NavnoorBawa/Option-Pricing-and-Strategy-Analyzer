@@ -30,6 +30,8 @@ TAB_ALIASES = {
 }
 #: Session-state keys: the link was read (on the session's first run), and its notes, shown once.
 _LINK_READ, _LINK_NOTES = "link_read", "link_notes"
+#: Session-state key: the header's Methodology button was clicked, so this run opens the Methodology drawer.
+_DRAWER = "methodology_drawer"
 
 
 def _shown(value: str) -> str:
@@ -88,8 +90,8 @@ def _read_link() -> None:
 
 
 def _open_methodology() -> None:
-    """Open the Methodology tab (the header's Methodology button)."""
-    st.session_state["tab"] = TABS[-1]
+    """Ask the next run to open the Methodology drawer (the header's Methodology button)."""
+    st.session_state[_DRAWER] = True
 
 
 def run() -> None:
@@ -124,6 +126,7 @@ def run() -> None:
         inputs = replace(inputs, model=replace(inputs.model, kind="bsm"))
         prices = tab_pricing.compute_prices(inputs)
     share = header.render(inputs, on_methodology=_open_methodology)
+    drawer = st.session_state.pop(_DRAWER, False)
     for note in st.session_state.pop(_LINK_NOTES, ()):
         st.warning(note, icon=":material/link_off:")
     if fallback:
@@ -135,7 +138,8 @@ def run() -> None:
     # size, commission), which are drawn on every run: they are bound to the URL, and Streamlit drops the URL
     # parameter of a widget it does not draw, so a link to any tab keeps the position. The binding to the URL alone
     # would rerun on a click as well; on_change says so explicitly.
-    pricing, strategy, risk, surface, iv, methodology = st.tabs(TABS, key="tab", on_change="rerun", bind="query-params")
+    tabs = st.tabs(TABS, key="tab", on_change="rerun", bind="query-params")
+    pricing, strategy, risk, surface, iv, methodology = tabs
     with strategy:
         tab_strategy.controls(inputs)
     # With the Strategy tab closed, its position is built without drawing anything (no analysis: 5-10 ms), whichever
@@ -163,3 +167,6 @@ def run() -> None:
             tab_methodology.render()
     # Last, once every widget bound to the URL has written its value there.
     header.fill_share(share)
+    # The Methodology drawer, over the open tab (which stays as it was), starting with that tab's section.
+    if drawer:
+        tab_methodology.drawer(next(label for label, tab in zip(TABS, tabs, strict=True) if tab.open))
