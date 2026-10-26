@@ -125,20 +125,25 @@ def run() -> None:
     # Only the open tab runs: opening a tab reruns the app, and the closed tabs stay empty (their widgets keep their
     # values with persist_state). The exception is the Strategy tab's controls (template, strike width, position
     # size, commission), which are drawn on every run: they are bound to the URL, and Streamlit drops the URL
-    # parameter of a widget it does not draw, so a link to any tab keeps the position. The Risk tab analyses that
-    # position (tab_strategy.build_position). The binding to the URL alone would rerun on a click as well; on_change
-    # says so explicitly.
+    # parameter of a widget it does not draw, so a link to any tab keeps the position. The binding to the URL alone
+    # would rerun on a click as well; on_change says so explicitly.
     pricing, strategy, risk, surface, iv, methodology = st.tabs(TABS, key="tab", on_change="rerun", bind="query-params")
+    with strategy:
+        tab_strategy.controls(inputs)
+    # With the Strategy tab closed, its position is built without drawing anything (no analysis: 10-20 ms), whichever
+    # tab is open, and before that tab runs. The legs editor commits a cell when it loses the focus, so an edit can
+    # arrive with the click on another tab, and Streamlit drops the state of the editor at the end of a run that does
+    # not draw it: build_position keeps that edit in the session. The Risk tab analyses the position.
+    position = None if strategy.open else tab_strategy.build_position(inputs)
     if pricing.open:
         with pricing:
             tab_pricing.render(inputs, prices)
-    with strategy:
-        tab_strategy.controls(inputs)
-        if strategy.open:
+    if strategy.open:
+        with strategy:
             tab_strategy.render(inputs)
     if risk.open:
         with risk:
-            tab_risk.render(tab_strategy.build_position(inputs))
+            tab_risk.render(position)
     if surface.open:
         with surface:
             tab_surface.render(inputs)

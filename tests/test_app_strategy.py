@@ -401,16 +401,33 @@ def test_leg_edits_survive_a_visit_to_the_risk_tab():
     assert edited in _position(at)  # and again
 
 
-def test_an_edit_sent_with_the_click_on_the_risk_tab_reaches_it():
+@pytest.mark.parametrize("strike_change", [False, True], ids=["straight back", "after a strike change"])
+@pytest.mark.parametrize("tab", [tab for tab in TABS if tab != "Strategy"])
+def test_an_edit_sent_with_the_click_on_another_tab_is_kept(tab, strike_change):
     # The legs editor commits a cell edit when it loses the focus, as it does when the user clicks another tab, so
-    # the edit can arrive with the run that opens the Risk tab, where the editor is not drawn to apply it.
+    # the edit arrives with the run that opens that tab, where the editor is not drawn to apply it, and Streamlit
+    # drops the editor's state at the end of that run. Every tab keeps it, not only the Risk tab that analyses it;
+    # once kept, the edited legs stay as they are when the sidebar strike changes (unedited legs would follow it).
     at = _app()
     edit = {**NO_EDITS, "edited_rows": {"0": {"Quantity": 3}}}
-    _open(at, "Risk", WidgetState(id=_editor_id(at), string_value=json.dumps(edit)))
-    assert "**Bull Call Spread (modified)** — Long 3 × 100 Call, Short 1 × 110 Call" in _analysed(at)
+    _open(at, tab, WidgetState(id=_editor_id(at), string_value=json.dumps(edit)))
+    assert _editor_id(at) is None
+    modified = "**Bull Call Spread (modified)** — Long 3 × 100 Call, Short 1 × 110 Call"
+    if tab == "Risk":
+        assert modified in _analysed(at)
+    if strike_change:
+        at.sidebar.number_input(key="strike").set_value(105.0).run()
+        _ok(at)
     _open(at, "Strategy")
     shown = next(d.value for d in at.dataframe if "legs::" in d.proto.id)
-    assert shown["Quantity"].tolist() == [3.0, -1.0]
+    assert shown["Quantity"].tolist() == [3.0, -1.0] and shown["Strike"].tolist() == [100.0, 110.0]
+    # Net premium: 3 x 100 call - 1 x 110 call at their Black-Scholes-Merton values (one year, 5 %, 20 %), for 100
+    # shares; the card shows whole dollars from $1,000 and the exact amount in its help.
+    call = {strike: bs.price(100.0, strike, 1.0, 0.05, 0.2, 0.0, "call") for strike in (100.0, 110.0)}
+    premium = _metric(at, "Net premium")
+    assert premium.value == f"${100 * (3 * call[100.0] - call[110.0]):,.0f}" == "$2,531"
+    assert f"${100 * (3 * call[100.0] - call[110.0]):,.2f}" in premium.help
+    assert modified in _position(at)
 
 
 @pytest.mark.parametrize(

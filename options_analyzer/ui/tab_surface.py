@@ -202,7 +202,7 @@ def _quote_controls(inputs: Inputs) -> vs.VolSurface | None:
         if isinstance(message, vs.QuoteWarning):  # a unit was guessed: the surface may be read wrongly
             st.warning(message)
         else:
-            st.caption(f"ℹ️ {message}")
+            st.caption(f":material/info: {message}")
     if error:
         st.error(f"Could not build a surface from this file: {error}")
     return surface

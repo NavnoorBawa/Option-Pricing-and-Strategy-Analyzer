@@ -470,9 +470,10 @@ def build_position(inputs: Inputs) -> Position | None:
 
     It reads the controls' values and the legs from the session state, as :func:`render` would show them: legs that
     match the template follow it, edited legs are kept, and an edit sent together with the switch to another tab is
-    applied (the editor is not drawn to apply it). The app draws the controls earlier in the same run
-    (:func:`controls`); without them, each control's URL parameter is read where it is valid, and its default
-    otherwise.
+    applied and kept in the session (the editor is not drawn to apply it, so Streamlit drops the editor's state at
+    the end of the run). The app therefore calls it on every run in which this tab is closed, whichever tab is open.
+    The app draws the controls earlier in the same run (:func:`controls`); without them, each control's URL
+    parameter is read where it is valid, and its default otherwise.
 
     Parameters
     ----------

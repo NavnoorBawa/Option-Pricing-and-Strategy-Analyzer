@@ -85,9 +85,19 @@ ON_PRIMARY_SELECTORS = (
     ":is(:hover, :focus):enabled",
 )
 
-#: The desk stylesheet (see :func:`apply_stylesheet`). ``light-dark()`` follows the ``color-scheme`` that Streamlit
-#: sets on the app for the theme it draws, so the rule switches with the theme at once, without waiting for a rerun.
-STYLESHEET = f"{', '.join(ON_PRIMARY_SELECTORS)} {{ color: light-dark({ON_PRIMARY['light']}, {ON_PRIMARY['dark']}); }}"
+#: Text on the primary colour. ``light-dark()`` follows the ``color-scheme`` that Streamlit sets on the app for the
+#: theme it draws, so the rule switches with the theme at once, without waiting for a rerun.
+ON_PRIMARY_RULE = (
+    f"{', '.join(ON_PRIMARY_SELECTORS)} {{ color: light-dark({ON_PRIMARY['light']}, {ON_PRIMARY['dark']}); }}"
+)
+
+#: The name of the quotes file that the Surface tab keeps (its row has the key ``quotes_kept``) is a code span in a
+#: caption, so that Markdown shows it as typed. Streamlit draws inline code at 0.75 em, which in a caption is 9.2 px
+#: against the 12.25 px of the words around it: the one piece of the user's data in the row was the hardest to read.
+KEPT_FILE_RULE = ".st-key-quotes_kept code { font-size: inherit; }"
+
+#: The desk stylesheet (see :func:`apply_stylesheet`).
+STYLESHEET = f"{ON_PRIMARY_RULE} {KEPT_FILE_RULE}"
 
 
 def mode() -> str:

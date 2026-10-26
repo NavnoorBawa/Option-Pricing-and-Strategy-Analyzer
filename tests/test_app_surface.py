@@ -399,7 +399,7 @@ def test_parse_messages_stay_visible_when_the_fit_fails_numerically(app, monkeyp
     _upload(app, vol_surface.sample_quotes(100, 0.05, 0.0, seed=17))  # a file no other test has cached
     assert not app.exception
     assert any("Singular matrix" in e.value for e in app.error)
-    assert any("Read strike from 'Strike'" in c.value for c in app.caption)
+    assert any(c.value.startswith(":material/info: Read strike from 'Strike'") for c in app.caption)
 
 
 def test_the_smile_charts_atm_label_sits_inside_the_top_of_the_plot():

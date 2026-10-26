@@ -246,7 +246,8 @@ def test_text_on_the_primary_colour_is_legible():
         assert contrast(theme.ON_PRIMARY[kind], _mode(kind)["primaryColor"]) >= 4.5, kind
     assert theme.ON_PRIMARY["dark"] == _mode("dark")["backgroundColor"]
     assert theme.ON_PRIMARY["light"] == "#FFFFFF"  # Streamlit's own colour, kept where it is legible
-    rule = re.fullmatch(r"(.+) \{ color: light-dark\((#[0-9A-F]{6}), (#[0-9A-F]{6})\); \}", theme.STYLESHEET)
+    rule = re.fullmatch(r"(.+) \{ color: light-dark\((#[0-9A-F]{6}), (#[0-9A-F]{6})\); \}", theme.ON_PRIMARY_RULE)
+    assert theme.ON_PRIMARY_RULE in theme.STYLESHEET
     assert rule and rule[1] == ", ".join(theme.ON_PRIMARY_SELECTORS)
     assert (rule[2], rule[3]) == (theme.ON_PRIMARY["light"], theme.ON_PRIMARY["dark"])
     # Every widget the app uses that Streamlit fills with the primary colour and writes white on is covered.
@@ -821,6 +822,76 @@ def test_a_hand_typed_link_opens_the_tab_and_template_it_names(chromium, app_url
         note = page.locator("[data-testid=stAlertContentWarning]")
         assert "a strategy named Iron Condr, which is not one of the templates" in note.inner_text()
         assert note.locator("code").inner_text() == "Iron Condr" and not note.locator("a").count()
+    finally:
+        page.close()
+
+
+def _net_premium(page) -> str:
+    card = page.locator("[data-testid=stMetric]").filter(has_text="Net premium")
+    return card.locator("[data-testid=stMetricValue]").inner_text()
+
+
+@pytest.mark.e2e
+@pytest.mark.slow
+@pytest.mark.parametrize("tab", ["Pricing", "Risk"])
+def test_a_leg_edit_is_kept_when_another_tab_is_clicked_before_enter(chromium, app_url, tab):
+    # The legs editor commits a cell when it loses the focus: a value typed into a cell and left by clicking another
+    # tab arrives with the run that opens that tab, where the editor is not drawn. Clicking Pricing lost it.
+    page = _open(chromium, f"{app_url}/?tab=Strategy", "light", 1440)
+    try:
+        assert _net_premium(page) == "$441.05"  # long the 100 call, short the 110 call, for 100 shares
+        grid = page.locator("[data-testid=stMain] [data-testid=stDataFrame]").first
+        box = grid.bounding_box()
+        # The grid draws on a canvas: click the first row's Type cell (the header and each row are 35 px high),
+        # step to Quantity and type into it, which opens the cell's editor (an input over the grid) a moment later.
+        page.mouse.click(box["x"] + 40, box["y"] + 35 + 17)
+        page.keyboard.press("ArrowRight")
+        page.keyboard.type("3")
+        page.wait_for_function(
+            "() => document.activeElement?.matches('input.gdg-input') && document.activeElement.value === '3'"
+        )
+        _tab(page, tab)
+        if tab == "Risk":
+            assert "Long 3 × 100 Call, Short 1 × 110 Call" in page.get_by_text("Analysing").inner_text()
+        _tab(page, "Strategy")
+        assert _net_premium(page) == "$2,531"  # 3 x $10.4506 - $6.0401, for 100 shares
+    finally:
+        page.close()
+
+
+#: Font of the kept quotes file's name (a code span) and of the words of its caption, in the row under the uploader.
+_KEPT_FILE = """() => {
+  const row = document.querySelector('.st-key-quotes_kept');
+  const code = getComputedStyle(row.querySelector('code')), words = getComputedStyle(row.querySelector('p'));
+  return {name: row.querySelector('code').innerText, size: parseFloat(code.fontSize), family: code.fontFamily,
+          wordSize: parseFloat(words.fontSize)};
+}"""
+
+
+@pytest.mark.e2e
+@pytest.mark.slow
+@pytest.mark.parametrize("scheme", ["dark", "light"])
+def test_the_kept_quotes_file_is_named_at_the_size_of_its_caption(chromium, app_url, tmp_path, scheme):
+    # Streamlit draws inline code at 0.75 em: in the caption that names the kept file, the name was 9.2 px.
+    from options_analyzer import vol_surface
+
+    quotes = tmp_path / "quotes.csv"
+    quotes.write_text(vol_surface.sample_quotes().to_csv(index=False), encoding="utf-8")
+    page = _open(chromium, f"{app_url}/?tab=Surface", scheme, 1440)
+    try:
+        page.get_by_text("Market quotes (CSV)", exact=True).click()
+        _settle(page)
+        page.locator("[data-testid=stFileUploader] input[type=file]").set_input_files(quotes)
+        fitted = page.locator("[data-testid=stMetric]").filter(has_text="Calendar arbitrage")  # a card of the fit
+        fitted.wait_for(state="visible", timeout=120_000)
+        _settle(page)
+        _tab(page, "IV")
+        _tab(page, "Surface")
+        page.locator(".st-key-quotes_kept code").wait_for(state="visible", timeout=60_000)
+        kept = page.evaluate(_KEPT_FILE)
+        assert kept["name"] == "quotes.csv"
+        assert kept["wordSize"] == pytest.approx(12.25, abs=0.01)  # a caption: 0.875 of the 14 px base size
+        assert kept["size"] == kept["wordSize"] and kept["family"].startswith('"IBM Plex Mono"'), kept
     finally:
         page.close()
 
