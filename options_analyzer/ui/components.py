@@ -7,12 +7,13 @@ Sans and groups them, so that the row wraps whole groups, the cards of a line ha
 values one baseline, and no value is ever cut off.
 
 :func:`current_key` serves the widgets that keep their values while their tab is closed but whose keys change on
-purpose.
+purpose, and :func:`link_match` reads the names in a hand-typed link.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import re
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -248,3 +249,45 @@ def current_key(family: str, key: str) -> str:
     for other in [k for k in st.session_state if k.startswith(family) and k != key]:
         del st.session_state[other]
     return key
+
+
+def _plain(text: str) -> str:
+    """``text`` in lower case, with each run of characters other than letters and digits read as one space."""
+    return " ".join(re.findall(r"[^\W_]+", text.casefold()))
+
+
+def link_match(value: str, names: Iterable[str], *, aliases: Mapping[str, str] | None = None) -> str | None:
+    """Return the name in ``names`` that a hand-typed link value stands for, or None.
+
+    A widget bound to the URL accepts only its option, verbatim: ``?tab=risk`` or ``?strategy=iron-condor`` would
+    be dropped. Here ``value`` is matched without case and with each run of characters other than letters and
+    digits read as one space, first against ``names`` and then against the keys of ``aliases``.
+
+    Parameters
+    ----------
+    value : str
+        The value in the link, as ``st.query_params`` gives it (``+`` and ``%20`` already read as spaces).
+    names : iterable of str
+        The options, such as a widget's labels.
+    aliases : mapping of str to str, optional
+        Other names a link may use, each mapped to the name of ``names`` it stands for.
+
+    Returns
+    -------
+    str or None
+        The matching name, as written in ``names`` (or the alias's target), or None when nothing matches.
+
+    Examples
+    --------
+    >>> link_match("iron-condor", ["Iron Butterfly", "Iron Condor"])
+    'Iron Condor'
+    >>> link_match("Vol+Surface", ["Pricing", "Surface"], aliases={"vol surface": "Surface"})
+    'Surface'
+    >>> link_match("XYZ", ["Pricing", "Surface"]) is None
+    True
+    """
+    wanted = _plain(value)
+    if not wanted:
+        return None
+    candidates = [(name, name) for name in names] + list((aliases or {}).items())
+    return next((name for spelling, name in candidates if _plain(spelling) == wanted), None)

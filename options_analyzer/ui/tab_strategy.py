@@ -1,10 +1,12 @@
-"""Strategy Builder tab: templates, editable legs, payoff chart and analytics."""
+"""Strategy tab: templates, editable legs, payoff chart and analytics."""
 
 from __future__ import annotations
 
 import copy
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -13,11 +15,18 @@ import streamlit as st
 from .. import black_scholes as bs
 from .. import strategies as strat
 from . import cache, charts
-from .components import Card, card_row, current_key
+from .components import Card, card_row, current_key, link_match
 from .format import md, money, money_short, number, number_short, shown_decimals
 from .inputs import Inputs
 
 CUSTOM = "Custom"
+#: The controls' defaults: the first template of this category (a Bull Call Spread), one contract of 100 shares.
+DEFAULT_CATEGORY = "Vertical spread"
+DEFAULT_MULTIPLIER = 100
+#: The ranges (smallest, largest) of the position-size inputs: contracts, shares per contract and commission ($).
+CONTRACTS = (1, 100_000)
+MULTIPLIER = (1, 10_000)
+COMMISSION = (0.0, 100.0)
 LEG_COLUMNS = ["Type", "Quantity", "Strike", "Days", "IV (%)", "Premium"]
 NUMERIC_LEG_COLUMNS = LEG_COLUMNS[1:]
 
@@ -147,13 +156,62 @@ def _width(inputs: Inputs, width_pct: float | None) -> float:
     return round_width(inputs.strike * float(width_pct) / 100.0)
 
 
+def _names(category: str) -> list[str]:
+    """The templates of ``category``, in the order of the Strategy menu."""
+    return [t.name for t in strat.TEMPLATES.values() if t.category == category]
+
+
+def _strategy_key(category: str) -> str:
+    """The key (and URL parameter) of the Strategy menu of ``category``: each category has its own menu."""
+    return f"strategy_{category}"
+
+
+def link_selection(name: str) -> dict[str, str] | None:
+    """The URL parameters that select strategy ``name`` in the Category and Strategy menus.
+
+    This reads the short form of a link, ``?strategy=Iron+Condor``: the app replaces it with these parameters
+    before the menus read the URL, since each menu reads its own parameter.
+
+    Parameters
+    ----------
+    name : str
+        A template's name or ``Custom``, matched without case or punctuation (``iron-condor``).
+
+    Returns
+    -------
+    dict of str to str or None
+        The category's parameter and, for a template, its menu's parameter; None when ``name`` is neither a template
+        nor ``Custom``.
+
+    Examples
+    --------
+    >>> link_selection("iron condor")
+    {'strategy_category': 'Range-bound', 'strategy_Range-bound': 'Iron Condor'}
+    >>> link_selection("Custom")
+    {'strategy_category': 'Custom'}
+    >>> link_selection("Iron Condr") is None
+    True
+    """
+    found = link_match(name, [*strat.TEMPLATES, CUSTOM])
+    if found is None:
+        return None
+    if found == CUSTOM:
+        return {"strategy_category": CUSTOM}
+    category = strat.TEMPLATES[found].category
+    return {"strategy_category": category, _strategy_key(category): found}
+
+
+#: The URL parameters of the Category and Strategy menus.
+SELECTION_PARAMS = ("strategy_category", *map(_strategy_key, strat.TEMPLATE_CATEGORIES))
+
+
 def _selector(inputs: Inputs):
     c1, c2, c3 = st.columns([1.1, 1.4, 1])
     categories = [*strat.TEMPLATE_CATEGORIES, CUSTOM]
     category = c1.selectbox(
         "Category",
         categories,
-        index=categories.index("Vertical spread"),
+        index=categories.index(DEFAULT_CATEGORY),
         key="strategy_category",
         bind="query-params",
     )
@@ -162,8 +220,9 @@ def _selector(inputs: Inputs):
         c2.selectbox("Strategy", [CUSTOM], key="strategy_custom", disabled=True)
         template = None
     else:
-        names = [t.name for t in strat.TEMPLATES.values() if t.category == category]
-        name = c2.selectbox("Strategy", names, key=f"strategy_{category}", bind="query-params", persist_state="session")
+        name = c2.selectbox(
+            "Strategy", _names(category), key=_strategy_key(category), bind="query-params", persist_state="session"
+        )
         template = strat.TEMPLATES[name]
     uses_width = template is not None and template.uses_width
     automatic = auto_width(inputs.strike, inputs.volatility, inputs.expiry)
@@ -273,12 +332,20 @@ def controls(inputs: Inputs) -> None:
         )
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.number_input("Contracts", min_value=1, max_value=100_000, value=1, step=1, key="contracts", bind="query-params")
+    c1.number_input(
+        "Contracts",
+        min_value=CONTRACTS[0],
+        max_value=CONTRACTS[1],
+        value=1,
+        step=1,
+        key="contracts",
+        bind="query-params",
+    )
     c2.number_input(
         "Shares per contract",
-        min_value=1,
-        max_value=10_000,
-        value=100,
+        min_value=MULTIPLIER[0],
+        max_value=MULTIPLIER[1],
+        value=DEFAULT_MULTIPLIER,
         step=1,
         key="multiplier",
         bind="query-params",
@@ -286,8 +353,8 @@ def controls(inputs: Inputs) -> None:
     )
     c3.number_input(
         "Commission per contract ($)",
-        min_value=0.0,
-        max_value=100.0,
+        min_value=COMMISSION[0],
+        max_value=COMMISSION[1],
         value=0.0,
         step=0.05,
         format="%.2f",
@@ -327,24 +394,49 @@ class _Choice:
     commission: float
 
 
+def _control(key: str, default: Any, parse: Callable[[str], Any], valid: Callable[[Any], bool]) -> Any:
+    """A control's value in this run: its session state once :func:`controls` has drawn it; otherwise (a caller
+    of :func:`build_position` that draws no controls) its URL parameter, read as the control reads it, when that
+    is valid; otherwise the control's default."""
+    if key in st.session_state:
+        return st.session_state[key]
+    try:
+        value = parse(st.query_params[key])
+    except (KeyError, ValueError, OverflowError):
+        return default
+    return value if valid(value) else default
+
+
+def _within(bounds: tuple[float, float]) -> Callable[[float], bool]:
+    return lambda value: bounds[0] <= value <= bounds[1]
+
+
+def _whole(text: str) -> int:
+    """A whole number from a URL value, as a whole-number input reads it (2.5 is 2)."""
+    return int(float(text))
+
+
 def _choice(inputs: Inputs) -> _Choice:
-    """The controls' values, from the session state (:func:`controls` draws them earlier in the same run).
+    """The controls' values, from the session state (:func:`controls` draws them earlier in the same run) or, when
+    the controls are not drawn, from the URL and the controls' defaults.
 
     Raises ``ValueError`` when the template cannot be built at the sidebar inputs.
     """
-    state = st.session_state
-    category = state["strategy_category"]
+    categories = [*strat.TEMPLATE_CATEGORIES, CUSTOM]
+    category = _control("strategy_category", DEFAULT_CATEGORY, str, categories.__contains__)
     if category == CUSTOM:
         name, template = CUSTOM, None
         base = strat.Strategy(CUSTOM, (strat.Leg("call", 1, inputs.strike),))
     else:
-        name = state[f"strategy_{category}"]
+        names = _names(category)
+        name = _control(_strategy_key(category), names[0], str, names.__contains__)
         template = strat.TEMPLATES[name]
-        width = _width(inputs, state["strategy_width_pct"])
-        base = strat.build_template(name, inputs.strike, width, inputs.expiry)
-    return _Choice(
-        name, template, base, int(state["contracts"]), float(state["multiplier"]), float(state["commission"])
-    )
+        width_pct = _control("strategy_width_pct", None, float, _within((MIN_WIDTH_PCT, MAX_WIDTH_PCT)))
+        base = strat.build_template(name, inputs.strike, _width(inputs, width_pct), inputs.expiry)
+    contracts = _control("contracts", CONTRACTS[0], _whole, _within(CONTRACTS))
+    multiplier = _control("multiplier", DEFAULT_MULTIPLIER, _whole, _within(MULTIPLIER))
+    commission = _control("commission", 0.0, float, _within(COMMISSION))
+    return _Choice(name, template, base, int(contracts), float(multiplier), float(commission))
 
 
 def _position(inputs: Inputs, choice: _Choice, legs: list[strat.Leg]) -> Position:
@@ -376,9 +468,11 @@ def _apply_edits(frame: pd.DataFrame, edits: dict) -> pd.DataFrame:
 def build_position(inputs: Inputs) -> Position | None:
     """The tab's position, built without drawing anything: the Risk tab analyses it while this tab is closed.
 
-    It reads the controls' values (drawn earlier in the same run by :func:`controls`) and the legs from the session
-    state, as :func:`render` would show them: legs that match the template follow it, edited legs are kept, and an
-    edit sent together with the switch to another tab is applied (the editor is not drawn to apply it).
+    It reads the controls' values and the legs from the session state, as :func:`render` would show them: legs that
+    match the template follow it, edited legs are kept, and an edit sent together with the switch to another tab is
+    applied (the editor is not drawn to apply it). The app draws the controls earlier in the same run
+    (:func:`controls`); without them, each control's URL parameter is read where it is valid, and its default
+    otherwise.
 
     Parameters
     ----------
@@ -404,6 +498,17 @@ def build_position(inputs: Inputs) -> Position | None:
     ... ''').run()
     >>> page.number_input(key="contracts").set_value(5).run().markdown[0].value
     '**Bull Call Spread** — Long 1 × 100 Call, Short 1 × 110 Call · 5 × 100 multiplier'
+
+    Without the controls, from a link:
+
+    >>> page = AppTest.from_string('''
+    ... import streamlit as st
+    ... from options_analyzer.ui import inputs, tab_strategy
+    ... st.write(tab_strategy.build_position(inputs.sidebar()).describe())
+    ... ''')
+    >>> page.query_params.update(strategy_category="Volatility", contracts="2")
+    >>> page.run().markdown[0].value
+    '**Long Straddle** — Long 1 × 100 Call, Long 1 × 100 Put · 2 × 100 multiplier'
     """
     try:
         choice = _choice(inputs)

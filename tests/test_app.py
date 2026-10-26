@@ -1,6 +1,7 @@
 """End-to-end smoke tests of the Streamlit app with streamlit.testing (headless)."""
 
 import json
+import re
 
 import pytest
 from streamlit.proto.WidgetStates_pb2 import WidgetState
@@ -73,7 +74,7 @@ def test_var_models(new_app):
 
 
 def test_volatility_surface_upload(new_app):
-    app = new_app(tab="Vol surface").run()
+    app = new_app(tab="Surface").run()
     app.segmented_control(key="surface_source").set_value("Market quotes (CSV)").run()
     csv = vol_surface.sample_quotes().to_csv(index=False).encode()
     app.file_uploader(key="quotes_file").upload("quotes.csv", csv, "text/csv").run()
@@ -147,7 +148,7 @@ TAB_CHARTS = {
     "Pricing": {"sensitivity_chart", "heatmap_call", "heatmap_put"},
     "Strategy": {"payoff_chart"},
     "Risk": {"risk_heatmap", "date_heatmap", "time_decay", "greek_profiles", "stress_chart", "var_hist"},
-    "Vol surface": {"surf_iv", "surf_lv", "smiles", "term_structure"},
+    "Surface": {"surf_iv", "surf_lv", "smiles", "term_structure"},
     "IV": {"iv_curve"},
     "Methodology": set(),
 }  # fmt: skip
@@ -205,6 +206,69 @@ def test_a_link_to_a_tab_runs_that_tab_only(new_app, tab):
     _ok(at)
     _assert_only_open(at, tab)
     assert at.query_params.get("tab") == (None if tab == TABS[0] else tab)  # the first tab needs no parameter
+
+
+def test_the_tab_labels_need_no_encoding_in_a_link():
+    assert all(re.fullmatch("[A-Za-z]+", tab) for tab in TABS)
+
+
+@pytest.mark.parametrize(
+    ("asked", "tab"),
+    [
+        ("risk", "Risk"), ("RISK", "Risk"), (" Risk ", "Risk"), ("strategy", "Strategy"), ("surface", "Surface"),
+        ("vol-surface", "Surface"), ("Vol surface", "Surface"), ("volatility_surface", "Surface"), ("iv", "IV"),
+        ("Implied Volatility", "IV"), ("methodology", "Methodology"), ("Risk & Scenarios", "Risk"),
+        ("strategy-builder", "Strategy"), ("pricing", "Pricing"), ("Pricing", "Pricing"),
+    ],
+)  # fmt: skip
+def test_a_link_names_a_tab_without_case_or_punctuation(new_app, asked, tab):
+    # A hand-typed link: the tab's label in any case and spacing, or its longer name (TAB_ALIASES). The link is
+    # rewritten to the label, so that a copy of it is the app's own.
+    at = new_app(tab=asked).run()
+    _ok(at)
+    _assert_only_open(at, tab)
+    assert at.query_params == ({} if tab == TABS[0] else {"tab": tab})
+    assert not at.warning
+
+
+@pytest.mark.parametrize("asked", ["XYZ", "Risk2", "[Risk](http://example.com)", "", "  "])
+def test_a_link_to_a_tab_that_does_not_exist_opens_the_first_with_a_note(new_app, asked):
+    at = new_app(tab=asked).run()
+    _ok(at)
+    _assert_only_open(at, TABS[0])
+    assert at.query_params == {}
+    # An empty value asks for nothing. Any other is quoted as typed, in a code span: never a link.
+    expected = f"This link asks for a tab named `{asked}`, which does not exist, so the Pricing tab is open."
+    assert [w.value for w in at.warning] == ([expected] if asked.strip() else [])
+    _open(at, "Risk")  # the note is shown once
+    assert not at.warning
+
+
+@pytest.mark.parametrize(("asked", "tab"), [(["Risk", "IV"], "IV"), (["IV", "Risk"], "Risk"), (["Risk", "nope"], None)])
+def test_a_repeated_tab_parameter_gives_its_last_value(new_app, asked, tab):
+    # As st.query_params reads a repeated parameter; the link keeps one.
+    at = new_app()
+    at.query_params["tab"] = asked
+    at.run()
+    _ok(at)
+    _assert_only_open(at, tab or TABS[0])
+    assert at.query_params == ({"tab": tab} if tab else {})
+
+
+def test_a_link_is_read_once_per_session(new_app, monkeypatch):
+    # The rewrite reruns the app once, before any widget or tab is drawn; a link the app wrote itself needs none.
+    from options_analyzer.ui import app as app_module
+
+    runs = []
+    real = app_module.sidebar
+    monkeypatch.setattr(app_module, "sidebar", lambda: runs.append(1) or real())
+    at = new_app(tab="Risk").run()
+    assert len(runs) == 1
+    at = new_app(tab="risk", strategy="Iron Condor").run()
+    assert len(runs) == 2  # the first run stopped before the sidebar
+    _open(at, "IV")
+    assert len(runs) == 3 and at.query_params == {"tab": "IV", "strategy_category": "Range-bound",
+                                                  "strategy_Range-bound": "Iron Condor"}  # fmt: skip
 
 
 def test_switching_tabs_runs_each_tab_in_turn(app):
@@ -336,31 +400,44 @@ def test_risk_settings_survive_a_visit_to_another_tab(new_app):
 
 
 def test_uploaded_quotes_survive_a_visit_to_another_tab(new_app):
-    at = new_app(tab="Vol surface").run()
+    at = new_app(tab="Surface").run()
     at.segmented_control(key="surface_source").set_value("Market quotes (CSV)").run()
     csv = vol_surface.sample_quotes().to_csv(index=False).encode()
     at.file_uploader(key="quotes_file").upload("quotes.csv", csv, "text/csv").run()
     _ok(at)
     before = {m.label: m.value for m in at.metric}
     assert before["Calendar arbitrage"] == "0"
-    _away_and_back(at, "Vol surface", "IV")
-    # The uploader on screen is new and empty; the surface is still the one of the uploaded file.
+    _away_and_back(at, "Surface", "IV")
+    # The uploader on screen is new and empty; the surface is still the one of the uploaded file, which is named
+    # under the uploader with a button that removes it.
     assert {m.label: m.value for m in at.metric} == before
-    assert any("Showing quotes.csv, uploaded earlier in this session" in c.value for c in at.caption)
-    # Removing the file (the uploader's x) is kept too.
+    kept = f":material/description: `quotes.csv` · {len(csv) / 1000:.1f}KB · uploaded earlier in this session"
+    assert any(c.value.startswith(kept) for c in at.caption)
+    at.button(key="quotes_remove").click().run()
+    _ok(at)
+    assert not any(m.label == "Calendar arbitrage" for m in at.metric)
+    assert any("Upload a quotes file" in i.value for i in at.info)
+    assert not any("uploaded earlier" in c.value for c in at.caption)
+    assert "quotes_remove" not in {b.key for b in at.button}
+    _away_and_back(at, "Surface", "IV")  # the removal is kept
+    assert not any(m.label == "Calendar arbitrage" for m in at.metric)
+    # Removing a file with the uploader's own x is kept too.
     at.file_uploader(key="quotes_file").upload("other.csv", csv, "text/csv").run()
+    assert {m.label: m.value for m in at.metric} == before
+    assert not any("uploaded earlier" in c.value for c in at.caption)  # the uploader shows this one itself
     at.file_uploader(key="quotes_file").clear().run()
     assert not any(m.label == "Calendar arbitrage" for m in at.metric)
+    _away_and_back(at, "Surface", "IV")
     assert any("Upload a quotes file" in i.value for i in at.info)
 
 
 def test_surface_and_iv_settings_survive_a_visit_to_another_tab(new_app):
-    at = new_app(tab="Vol surface").run()
+    at = new_app(tab="Surface").run()
     at.number_input(key="ssvi_long").set_value(30.0)
     at.slider(key="ssvi_rho").set_value(-0.3)
     at.selectbox(key="surface_colors").set_value("Cividis").run()
     _ok(at)
-    _away_and_back(at, "Vol surface")
+    _away_and_back(at, "Surface")
     assert at.number_input(key="ssvi_long").value == 30.0 and at.slider(key="ssvi_rho").value == -0.3
     assert at.selectbox(key="surface_colors").value == "Cividis"
 

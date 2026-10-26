@@ -1,8 +1,9 @@
-"""Strategy Builder and Risk & Scenarios tabs: app behaviour (streamlit.testing) and their display helpers."""
+"""Strategy and Risk tabs: app behaviour (streamlit.testing) and their display helpers."""
 
 import base64
 import json
 import re
+import urllib.parse
 
 import numpy as np
 import pytest
@@ -284,6 +285,103 @@ def test_a_link_to_the_risk_tab_analyses_the_linked_template():
     var = risk.value_at_risk(strategy, strat.Market(100, 0.05, 0.2, 1.0), config, 200)
     assert _metric(at, "VaR 99.0%").value == tab_strategy.money_short(var.var)
     assert _metric(at, "Expected Shortfall 99.0%").value == tab_strategy.money_short(var.expected_shortfall)
+
+
+CONDOR = "**Iron Condor** — Long 1 × 80 Put, Short 1 × 90 Put, Short 1 × 110 Call, Long 1 × 120 Call"
+
+
+def test_the_short_link_to_a_template_analyses_it_on_the_risk_tab():
+    # The link of the acceptance criterion, exactly: AppTest sends its query parameters URL-encoded, as a browser does.
+    query = {"tab": "Risk", "strategy": "Iron Condor"}
+    assert urllib.parse.urlencode(query) == "tab=Risk&strategy=Iron+Condor"
+    at = _app(**query)
+    assert _analysed(at) == f"Analysing {CONDOR} · 1 × 100 multiplier"
+    assert _editor_id(at) is None and _chart(at, "var_hist")
+    _assert_heatmap_of(at, 100, [("put", 1, 80), ("put", -1, 90), ("call", -1, 110), ("call", 1, 120)])
+    # The link now holds the parameters the Strategy tab's menus are bound to, so a copy of it reopens the same view.
+    assert at.query_params == {"tab": "Risk", **CONDOR_LINK}
+    assert not at.warning
+    _open(at, "Strategy")
+    assert at.selectbox(key="strategy_category").value == "Range-bound"
+    assert at.selectbox(key="strategy_Range-bound").value == "Iron Condor"
+
+
+@pytest.mark.parametrize(
+    ("name", "query", "analysed"),
+    [
+        ("iron-condor", {}, f"{CONDOR} · 1 × 100 multiplier"),
+        ("JADE LIZARD", {"contracts": 3}, "**Jade Lizard** — Short 1 × 90 Put, Short 1 × 110 Call, Long 1 × 120 Call"),
+        ("custom", {}, "**Custom** — Long 1 × 100 Call · 1 × 100 multiplier"),
+        # The short form wins over the two-parameter form, which it replaces.
+        (
+            "Iron Condor",
+            {"strategy_category": "Vertical spread", "strategy_Vertical spread": "Bear Put Spread"},
+            CONDOR,
+        ),
+    ],
+)
+def test_the_short_link_names_a_template_without_case_or_punctuation(name, query, analysed):
+    at = _app("Risk", strategy=name, **query)
+    assert analysed in _analysed(at)
+    assert "strategy" not in at.query_params and "strategy_Vertical spread" not in at.query_params
+    assert not at.warning
+
+
+@pytest.mark.parametrize(
+    ("name", "notes"),
+    [
+        ("Iron Condr", ["This link asks for a strategy named `Iron Condr`, which is not one of the templates, so it "
+                        "was ignored."]),
+        ("", []),  # asks for nothing
+    ],
+)  # fmt: skip
+def test_a_short_link_to_a_strategy_that_is_not_a_template_is_ignored_with_a_note(name, notes):
+    at = _app("Risk", strategy=name)
+    assert (
+        _analysed(at) == "Analysing **Bull Call Spread** — Long 1 × 100 Call, Short 1 × 110 Call · 1 × 100 multiplier"
+    )
+    assert at.query_params == {"tab": "Risk"}
+    assert [w.value for w in at.warning] == notes
+    at.number_input(key="contracts").set_value(2).run()  # the note is shown once
+    assert not at.warning
+
+
+#: A script that builds the position without drawing the Strategy tab's controls, as another page or a report would.
+WITHOUT_CONTROLS = """
+import streamlit as st
+from options_analyzer.ui import inputs, tab_strategy
+st.session_state["position"] = tab_strategy.build_position(inputs.sidebar())
+"""
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        {},
+        {**CONDOR_LINK, "contracts": "2", "multiplier": "50", "commission": "0.65", "strategy_width_pct": "5"},
+        {"strategy_category": "Custom", "contracts": "2.5"},
+        {"strategy_category": "Time spread", "strike": "120", "days": "200"},
+        # Values the controls would not take: each is replaced by the control's default.
+        {"strategy_category": "Range-bound", "strategy_Range-bound": "Bull Call Spread", "contracts": "0"},
+        {"strategy_category": "range-bound", "multiplier": "x", "commission": "-1", "strategy_width_pct": "50"},
+        {"strategy_width_pct": "nan", "contracts": "1e9", "commission": "inf"},
+    ],
+    ids=["defaults", "condor", "custom", "calendar", "out of range", "invalid", "not finite"],
+)
+def test_build_position_reads_a_link_as_the_controls_do(monkeypatch, query):
+    # Without controls() in the run, build_position reads the controls' URL parameters itself; the position must be
+    # the one the app builds (with the controls drawn) for the same link.
+    analysed = []
+    real = tab_risk.render
+    monkeypatch.setattr(tab_risk, "render", lambda position: analysed.append(position) or real(position))
+    _app("Risk", **query)
+    page = AppTest.from_string(WITHOUT_CONTROLS)
+    page.query_params.update(query)
+    page.run()
+    assert not page.exception, [e.value for e in page.exception]
+    assert not page.main.children  # nothing drawn in the main area
+    assert page.session_state["position"] == analysed[-1]
+    assert analysed[-1] is not None
 
 
 def test_leg_edits_survive_a_visit_to_the_risk_tab():

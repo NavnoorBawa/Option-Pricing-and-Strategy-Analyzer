@@ -1,4 +1,4 @@
-"""Risk & Scenarios tab: scenario grids, time decay, stress tests and VaR/ES.
+"""Risk tab: scenario grids, time decay, stress tests and VaR/ES.
 
 Everything here analyses the position built in the Strategy tab and
 re-prices it leg by leg, so the numbers are consistent across the app.

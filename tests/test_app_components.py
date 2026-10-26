@@ -62,7 +62,7 @@ def _styles(at: AppTest | list[AppTest]) -> list[str]:
 
 
 #: The tabs with card rows (only the open tab runs; the price cards sit above the tabs, on every page).
-CARD_TABS = ("Strategy", "Risk", "Vol surface", "IV")
+CARD_TABS = ("Strategy", "Risk", "Surface", "IV")
 
 
 def _app_states(new_app) -> dict[str, list[AppTest]]:
@@ -73,7 +73,7 @@ def _app_states(new_app) -> dict[str, list[AppTest]]:
     def pages(**query) -> list[AppTest]:
         return [new_app(tab=tab, **query).run() for tab in CARD_TABS]
 
-    quotes = new_app(tab="Vol surface").run()
+    quotes = new_app(tab="Surface").run()
     quotes.segmented_control(key="surface_source").set_value("Market quotes (CSV)").run()
     csv = vol_surface.sample_quotes().to_csv(index=False).encode()
     quotes.file_uploader(key="quotes_file").upload("quotes.csv", csv, "text/csv").run()
@@ -88,7 +88,7 @@ def _app_states(new_app) -> dict[str, list[AppTest]]:
         strategy_Volatility="Short Straddle",
     )
     default = pages()
-    with_quotes = [quotes if tab == "Vol surface" else page for tab, page in zip(CARD_TABS, default, strict=True)]
+    with_quotes = [quotes if tab == "Surface" else page for tab, page in zip(CARD_TABS, default, strict=True)]
     states = {"default": default, "quotes": with_quotes, "large": pages(contracts=100000), "limits": limits}
     for page in (page for state in states.values() for page in state):
         _ok(page)

@@ -1,4 +1,4 @@
-"""Streamlit tests of the price cards, the Pricing & Greeks tab and the Implied Volatility tab."""
+"""Streamlit tests of the price cards, the Pricing tab and the IV tab."""
 
 import base64
 import json
@@ -232,7 +232,7 @@ def test_card_width_estimate_covers_the_delta_line(delta, measured):
     assert measured <= components._card_width("Implied volatility", "20.000%", delta=delta) <= measured + 20
 
 
-# --- Pricing & Greeks tab --------------------------------------------------------------------------------------
+# --- Pricing tab -------------------------------------------------------------------------------------------------
 
 
 def test_european_only_views_say_so_when_another_model_is_selected(app):
@@ -408,7 +408,7 @@ def test_greek_names_get_a_column_wide_enough_for_the_longest(app):
     assert json.loads(table.proto.columns)["Greek"]["width"] == "medium"
 
 
-# --- Implied Volatility tab --------------------------------------------------------------------------------------
+# --- IV tab ------------------------------------------------------------------------------------------------------
 
 
 def test_iv_exercise_style_follows_the_sidebar_unless_chosen_in_the_tab(iv_app):

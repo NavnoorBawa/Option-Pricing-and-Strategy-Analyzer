@@ -241,7 +241,7 @@ WHITE_ON_PRIMARY = {"multiselect": "stMultiSelect", "number_input": "stNumberInp
 
 def test_text_on_the_primary_colour_is_legible():
     # Streamlit also writes white on the primary colour in multiselect chips and in a number input's step buttons
-    # while they are hovered: the dark Volatility Surface tab showed its maturities ('29d', '1.07y') at 2.16:1.
+    # while they are hovered: the dark Surface tab showed its maturities ('29d', '1.07y') at 2.16:1.
     for kind in theme.MODES:
         assert contrast(theme.ON_PRIMARY[kind], _mode(kind)["primaryColor"]) >= 4.5, kind
     assert theme.ON_PRIMARY["dark"] == _mode("dark")["backgroundColor"]
@@ -426,7 +426,7 @@ def test_both_static_folders_are_identical():
         assert (STATIC_FOLDERS[0] / path).read_bytes() == (STATIC_FOLDERS[1] / path).read_bytes(), path
 
 
-#: Labels of the headline cards (Pricing and Implied Volatility tabs), whose widths ui/components.py estimates. (The
+#: Labels of the headline cards (Pricing and IV tabs), whose widths ui/components.py estimates. (The
 #: other card rows are checked as whole rows in tests/test_app_components.py.)
 CARD_LABELS = (
     "Call value", "Put value", "Forward price", "Call ITM probability", "Exercise premium", "Tree error vs BSM",
@@ -581,7 +581,7 @@ TAB_READY = {
     "Pricing": ".st-key-sensitivity_chart",
     "Strategy": ".st-key-strategy_cards",
     "Risk": ".st-key-var_cards",
-    "Vol surface": ".st-key-surface_cards",
+    "Surface": ".st-key-surface_cards",
     "IV": ".st-key-iv_cards",
     "Methodology": "[data-testid=stMarkdown]",
 }
@@ -636,7 +636,7 @@ CARD_ROW_TABS = {
     "greek_cards": "Strategy",
     "expectation_cards": "Strategy",
     "var_cards": "Risk",
-    "surface_cards": "Vol surface",
+    "surface_cards": "Surface",
     "iv_cards": "IV",
 }
 
@@ -750,7 +750,7 @@ def test_card_rows_line_up(chromium, app_url, width, query, three_up):
 
 #: A chart that each tab draws (the key given to charts.show), and the number of charts it draws, at the default URL.
 TAB_CHART = {"Pricing": ("sensitivity_chart", 3), "Strategy": ("payoff_chart", 1), "Risk": ("var_hist", 6),
-             "Vol surface": ("surf_iv", 4), "IV": ("iv_curve", 1), "Methodology": (None, 0)}  # fmt: skip
+             "Surface": ("surf_iv", 4), "IV": ("iv_curve", 1), "Methodology": (None, 0)}  # fmt: skip
 
 
 def _query(page) -> dict[str, list[str]]:
@@ -770,7 +770,8 @@ def test_a_click_on_a_tab_runs_that_tab_and_puts_it_in_the_link(chromium, app_ur
             _tab(page, tab)
             key, count = TAB_CHART[tab]
             assert page.locator("[data-testid=stPlotlyChart]").count() == count, tab
-            assert key is None or page.locator(f".st-key-{key} [data-testid=stPlotlyChart]").is_visible(), tab
+            if key is not None:  # Plotly draws a chart some time after the run (on a busy machine, seconds)
+                page.locator(f".st-key-{key} [data-testid=stPlotlyChart]").wait_for(state="visible", timeout=60_000)
             assert _query(page).get("tab") == (None if tab == TABS[0] else [tab])
             assert not page.locator("[data-testid=stException]").count(), tab
         _tab(page, "Strategy")
@@ -784,11 +785,42 @@ def test_a_click_on_a_tab_runs_that_tab_and_puts_it_in_the_link(chromium, app_ur
         assert analysed in page.get_by_text("Analysing").inner_text()
         link = _open(chromium, page.url, "light", 1440)
         try:
-            assert link.locator(".st-key-var_hist [data-testid=stPlotlyChart]").is_visible()
+            link.locator(".st-key-var_hist [data-testid=stPlotlyChart]").wait_for(state="visible", timeout=60_000)
             assert link.locator("[role=tab][aria-selected=true]").inner_text().strip() == "Risk"
             assert analysed in link.get_by_text("Analysing").inner_text()
         finally:
             link.close()
+    finally:
+        page.close()
+
+
+@pytest.mark.e2e
+@pytest.mark.slow
+def test_a_hand_typed_link_opens_the_tab_and_template_it_names(chromium, app_url):
+    # Streamlit reads a bound parameter verbatim and drops any other value; the app rewrites such a link before any
+    # widget reads it, in one step: the address bar then shows the app's own link, one history entry later.
+    plain = _open(chromium, f"{app_url}/?tab=Risk", "light", 1440)
+    entries = plain.evaluate("history.length")
+    plain.close()
+    page = _open(chromium, f"{app_url}/?tab=risk&strategy=Iron+Condor", "light", 1440)
+    try:
+        page.locator(".st-key-var_hist [data-testid=stPlotlyChart]").wait_for(state="visible", timeout=120_000)
+        assert page.locator("[role=tab][aria-selected=true]").inner_text().strip() == "Risk"
+        condor = "Iron Condor — Long 1 × 80 Put, Short 1 × 90 Put, Short 1 × 110 Call, Long 1 × 120 Call"
+        assert condor in page.get_by_text("Analysing").inner_text()
+        assert _query(page) == {"tab": ["Risk"], "strategy_category": ["Range-bound"],
+                                "strategy_Range-bound": ["Iron Condor"]}  # fmt: skip
+        assert page.evaluate("history.length") == entries + 1
+        assert not page.locator("[data-testid=stAlertContentWarning]").count()
+    finally:
+        page.close()
+    page = _open(chromium, f"{app_url}/?tab=Risk&tab=IV&strategy=Iron+Condr", "light", 1440)
+    try:
+        assert page.locator("[role=tab][aria-selected=true]").inner_text().strip() == "IV"
+        assert _query(page) == {"tab": ["IV"]}
+        note = page.locator("[data-testid=stAlertContentWarning]")
+        assert "a strategy named Iron Condr, which is not one of the templates" in note.inner_text()
+        assert note.locator("code").inner_text() == "Iron Condr" and not note.locator("a").count()
     finally:
         page.close()
 
@@ -804,7 +836,7 @@ _CHIPS = """() => [...document.querySelectorAll('[data-testid=stMultiSelect] [da
 def test_text_on_the_primary_colour_is_legible_in_the_app(chromium, app_url, scheme):
     page = _open(chromium, app_url, scheme, 1440)
     try:
-        _tab(page, "Vol surface")
+        _tab(page, "Surface")
         chips = page.evaluate(_CHIPS)
         assert chips  # the maturities of the smile chart
         primary = _mode(scheme)["primaryColor"]

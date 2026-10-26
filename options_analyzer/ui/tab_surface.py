@@ -1,4 +1,4 @@
-"""Volatility Surface tab: SSVI or market quotes -> implied and local volatility."""
+"""Surface tab: SSVI or market quotes -> implied and local volatility surfaces."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ import streamlit as st
 from .. import vol_surface as vs
 from . import cache, charts
 from .components import card_row, current_key
+from .format import md_code
 from .inputs import Inputs
 
 SSVI = "Parametric (SSVI)"
@@ -119,6 +120,31 @@ def _keep_upload() -> None:
     st.session_state["quotes_upload"] = st.session_state["quotes_file"]
 
 
+def _remove_upload() -> None:
+    st.session_state["quotes_upload"] = None
+
+
+def _size(n_bytes: int) -> str:
+    """A file size as st.file_uploader shows it (outside Windows): one decimal in the first decimal unit that
+    keeps the number at most 500, as ``400.0B``, ``2.0KB`` or ``1.4MB``."""
+    size, units = float(n_bytes), ["B", "KB", "MB", "GB"]
+    while size > 500 and len(units) > 1:
+        size /= 1000
+        units.pop(0)
+    return f"{size:.1f}{units[0]}"
+
+
+def _kept_file(container, kept) -> None:
+    """The quotes file kept from an earlier visit to the tab, under the uploader (which no longer shows it), with a
+    button that removes it as the uploader's own × would."""
+    row = container.container(horizontal=True, vertical_alignment="center", gap="small", key="quotes_kept")
+    row.caption(
+        f":material/description: {md_code(kept.name)} · {_size(kept.size)} · uploaded earlier in this "
+        "session and used below; upload another file to replace it."
+    )
+    row.button("Remove file", key="quotes_remove", icon=":material/close:", type="tertiary", on_click=_remove_upload)
+
+
 def _quote_controls(inputs: Inputs) -> vs.VolSurface | None:
     c1, c2 = st.columns([2, 1])
     upload = c1.file_uploader(
@@ -154,7 +180,7 @@ def _quote_controls(inputs: Inputs) -> vs.VolSurface | None:
     kept = st.session_state.get("quotes_upload")
     if upload is None and kept is not None:
         upload = kept
-        c1.caption(f"Showing {kept.name}, uploaded earlier in this session. Upload another file to replace it.")
+        _kept_file(c1, kept)
     if upload is None:
         st.info("Upload a quotes file, or download a sample to see the expected format. " + context)
         return None

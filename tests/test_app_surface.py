@@ -1,4 +1,4 @@
-"""Volatility Surface tab, end to end with streamlit.testing (headless)."""
+"""Surface tab, end to end with streamlit.testing (headless)."""
 
 import io
 import json
@@ -20,8 +20,8 @@ def _ok(at: AppTest) -> None:
 
 @pytest.fixture
 def app(new_app) -> AppTest:
-    """The app with the Vol surface tab open (only the open tab runs)."""
-    at = new_app(tab="Vol surface").run()
+    """The app with the Surface tab open (only the open tab runs)."""
+    at = new_app(tab="Surface").run()
     _ok(at)
     return at
 
@@ -438,3 +438,12 @@ def test_the_3d_surfaces_wrap_instead_of_squeezing_into_narrow_columns(app):
     # Centred: left-aligned, the pair filled only the left half of the row at 1,920 px.
     assert block.flex_container.justify == block.flex_container.JUSTIFY_CENTER
     assert 2 * tab_surface.SURFACE_CHART_WIDTH + 16 <= 804  # side by side in the main column at 1,280 px
+
+
+@pytest.mark.parametrize(
+    ("n_bytes", "shown"),
+    [(0, "0.0B"), (500, "500.0B"), (501, "0.5KB"), (1971, "2.0KB"), (500_000, "500.0KB"), (1_400_000, "1.4MB")],
+)
+def test_the_kept_file_size_reads_as_the_uploader_shows_it(n_bytes, shown):
+    # Streamlit's uploader (outside Windows) moves to the next decimal unit above 500 and shows one decimal.
+    assert tab_surface._size(n_bytes) == shown

@@ -1,4 +1,4 @@
-"""Pricing & Greeks tab and the headline price cards."""
+"""Pricing tab and the headline price cards."""
 
 from __future__ import annotations
 

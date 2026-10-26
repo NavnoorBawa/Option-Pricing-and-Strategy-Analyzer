@@ -29,7 +29,7 @@ TABS = {
     "pricing": ("Pricing", "sensitivity_chart"),
     "strategy": ("Strategy", "payoff_chart"),
     "risk": ("Risk", "var_hist"),
-    "surface": ("Vol surface", "surf_iv"),
+    "surface": ("Surface", "surf_iv"),
     "iv": ("IV", "iv_curve"),
 }
 

@@ -654,7 +654,7 @@ def surface_3d(moneyness, maturities, z, title: str, colorscale: str, palette: d
     # A cube-shaped scene (Plotly's automatic aspect stretches some surfaces out of view) and a colour bar under
     # the plot. Plotly sizes a 3-D scene by the plot's height, not its width, so the camera distance fixes the
     # scene at about 270 px across: every axis, tick label and title stays inside a chart at least that wide
-    # (a phone column is 328 px or more; the Volatility Surface tab wraps the two charts before they get
+    # (a phone column is 328 px or more; the Surface tab wraps the two charts before they get
     # narrower). A margin does not help: the scene is clipped at its own domain, so a margin only moves the cut.
     # The axis and colour-bar text is in the muted colour, as in style().
     text = dict(color=(palette or desk_theme.palette())["muted"])

@@ -1,4 +1,4 @@
-"""Implied Volatility tab: invert a market price with a robust bracketed solver."""
+"""IV tab: invert a market price to its implied volatility with a robust bracketed solver."""
 
 from __future__ import annotations
 

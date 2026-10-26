@@ -193,3 +193,31 @@ def test_legacy_formats_are_unchanged():
     assert fmt.money(-1234.5) == "-$1,234.50" and fmt.money(12.0, signed=True) == "+$12.00"
     assert fmt.number(-0.004, 2) == "0.00" and fmt.pct(0.1234) == "12.34%"
     assert fmt.money_short(-2_345_678.9, True) == "-$2.35M"
+
+
+@pytest.mark.parametrize(
+    ("text", "markdown"),
+    [
+        ("quotes.csv", "`quotes.csv`"),
+        ("http://example.com/x", "`http://example.com/x`"),
+        ("a `b` c", "``a `b` c``"),
+        ("`a`", "`` `a` ``"),
+        ("a ``` b", "````a ``` b````"),
+        ("two\n\nlines\tand  spaces ", "`two lines and spaces`"),
+    ],
+)
+def test_md_code_quotes_text_as_one_code_span(text, markdown):
+    assert fmt.md_code(text) == markdown
+
+
+def test_md_code_spans_render_as_the_text_typed():
+    # CommonMark: a code span's content is the text between its fences, less one leading and trailing space when both
+    # are there; inside it nothing is a link, emphasis or math.
+    for text in ("[a](http://b.c) *y* $x$", "www.example.com", "`a` b", "a ``` b", ":material/home:"):
+        span = fmt.md_code(text)
+        fence = re.match("`+", span).group()
+        inner = span[len(fence) : -len(fence)]
+        if inner.startswith(" ") and inner.endswith(" ") and inner.strip():
+            inner = inner[1:-1]
+        assert inner == text
+        assert fence not in inner  # no run of backticks in the text closes the span early
