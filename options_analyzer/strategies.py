@@ -26,13 +26,16 @@ Conventions
 
 from __future__ import annotations
 
+import math
+import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import pairwise
+from typing import Any
 
 import numpy as np
 from scipy.optimize import brentq
-from scipy.special import ndtr
+from scipy.special import ndtr, ndtri
 
 from . import black_scholes as bs
 
@@ -40,6 +43,7 @@ __all__ = [
     "TEMPLATES",
     "Leg",
     "Market",
+    "PositionRisk",
     "Strategy",
     "StrategyMetrics",
     "StrategyTemplate",
@@ -52,7 +56,9 @@ __all__ = [
     "leg_table",
     "pnl",
     "position_greeks",
+    "position_risk",
     "position_value",
+    "strike_for_delta",
     "strike_text",
     "unbounded_loss_from_dividends",
 ]
@@ -60,9 +66,41 @@ __all__ = [
 LEG_KINDS = ("call", "put", "stock")
 
 
+def _require_finite(owner: str, *, optional: tuple[str, ...] = (), **values: Any) -> None:
+    """Raise ``ValueError`` naming the first field that is NaN, infinite or not a number.
+
+    The fields named in ``optional`` may also be ``None`` (meaning "use the market default").
+    """
+    for name, value in values.items():
+        if value is None and name in optional:
+            continue
+        try:
+            finite = math.isfinite(value)
+        except TypeError:
+            raise ValueError(f"{owner} {name} must be a number, got {value!r}") from None
+        if not finite:
+            raise ValueError(f"{owner} {name} must be a finite number, got {value!r}")
+
+
+def _number(name: str, value: Any) -> float:
+    """``value`` as a float; ``ValueError`` naming the argument ``name`` unless it is a single finite number."""
+    if np.ndim(value) != 0:
+        raise ValueError(f"{name} must be a single number, got {value!r}")
+    try:
+        finite = math.isfinite(value)
+    except TypeError:  # a string, None, ...
+        raise ValueError(f"{name} must be a number, got {value!r}") from None
+    if not finite:
+        raise ValueError(f"{name} must be a finite number, got {value!r}")
+    return float(value)
+
+
 @dataclass(frozen=True)
 class Market:
-    """Market state. ``expiry`` is the default time to expiry (years) for legs."""
+    """Market state. ``expiry`` is the default time to expiry (years) for legs.
+
+    Every field must be a finite number: NaN or infinity raises ``ValueError`` naming the field.
+    """
 
     spot: float
     rate: float
@@ -71,6 +109,14 @@ class Market:
     dividend_yield: float = 0.0
 
     def __post_init__(self):
+        _require_finite(
+            "market",
+            spot=self.spot,
+            rate=self.rate,
+            volatility=self.volatility,
+            expiry=self.expiry,
+            dividend_yield=self.dividend_yield,
+        )
         if not self.spot > 0:
             raise ValueError("spot must be positive")
         if not self.volatility > 0:
@@ -81,10 +127,16 @@ class Market:
 
 @dataclass(frozen=True)
 class Leg:
+    """One leg of a strategy: a call, a put or shares.
+
+    Every numeric field must be finite (NaN or infinity raises ``ValueError`` naming the field). ``expiry`` is any
+    positive number of years, so fractional days work down to a same-day (0DTE) option, e.g. ``2 / 24 / 365``.
+    """
+
     kind: str
     quantity: float
     strike: float = 0.0
-    #: Time to expiry in years; ``None`` uses :attr:`Market.expiry`.
+    #: Time to expiry in years (fractions of a day allowed); ``None`` uses :attr:`Market.expiry`.
     expiry: float | None = None
     #: Implied volatility of this leg; ``None`` uses :attr:`Market.volatility`.
     volatility: float | None = None
@@ -96,6 +148,15 @@ class Leg:
         if kind not in LEG_KINDS:
             raise ValueError(f"leg kind must be one of {LEG_KINDS}, got {self.kind!r}")
         object.__setattr__(self, "kind", kind)
+        _require_finite(
+            "leg",
+            optional=("expiry", "volatility", "premium"),
+            quantity=self.quantity,
+            strike=self.strike,
+            expiry=self.expiry,
+            volatility=self.volatility,
+            premium=self.premium,
+        )
         if kind != "stock" and not self.strike > 0:
             raise ValueError("option legs need a positive strike")
         if self.expiry is not None and not self.expiry > 0:
@@ -139,6 +200,7 @@ class Strategy:
     fees: float = 0.0
 
     def __post_init__(self):
+        _require_finite("strategy", fees=self.fees)
         legs = tuple(self.legs)
         if not legs:
             raise ValueError("a strategy needs at least one leg")
@@ -277,16 +339,24 @@ def pnl(strategy: Strategy, market: Market, spot=None, t=0.0, carry: bool = Fals
     at the market volatility and there are no fees; any premium override, leg
     IV different from the market volatility or fee shows up as the edge.
     """
-    cost = entry_cost(strategy, market)
+    cost: float | np.ndarray = entry_cost(strategy, market)
     if carry:
         cost = cost * np.exp(market.rate * np.asarray(t, dtype=float))
     return position_value(strategy, market, spot, t, **shocks) - cost
 
 
-def position_greeks(strategy: Strategy, market: Market, spot=None, t: float = 0.0) -> dict:
-    """First-order Greeks of the whole position (per unit, raw model units)."""
-    spot = market.spot if spot is None else spot
-    totals = dict.fromkeys(("delta", "gamma", "theta", "vega", "rho"), 0.0)
+_FIRST_ORDER = ("delta", "gamma", "theta", "vega", "rho")
+#: Cross and second-order Greeks reported by :func:`position_risk` (``vomma`` is the volga of :mod:`black_scholes`).
+_SECOND_ORDER = ("vanna", "vomma", "charm", "veta")
+
+
+def _greek_totals(strategy: Strategy, market: Market, spot, t, names: tuple[str, ...]) -> dict:
+    """Sum of ``quantity x`` each leg's raw Black-Scholes-Merton Greeks in ``names`` (see :mod:`black_scholes`).
+
+    A share has delta 1 and no curvature; its theta and rho are those of the dividends it has accrued,
+    ``S0 (e^{rt} - e^{(r-q)t})`` (d/dt of it, and its sensitivity to r).
+    """
+    totals = dict.fromkeys(names, 0.0)
     r, q = market.rate, market.dividend_yield
     for leg in strategy.legs:
         if leg.kind == "stock":
@@ -302,6 +372,158 @@ def position_greeks(strategy: Strategy, market: Market, spot=None, t: float = 0.
         for name in totals:
             totals[name] = totals[name] + leg.quantity * g[name]
     return totals
+
+
+def position_greeks(strategy: Strategy, market: Market, spot=None, t: float = 0.0) -> dict:
+    """First-order Greeks of the whole position (per unit, raw model units)."""
+    spot = market.spot if spot is None else spot
+    return _greek_totals(strategy, market, spot, t, _FIRST_ORDER)
+
+
+@dataclass(frozen=True)
+class PositionRisk:
+    """Risk of a whole position at one spot and date, in desk units.
+
+    Every field but ``spot`` is for the position as given (per unit of :class:`Leg` quantity) times the
+    ``multiplier`` passed to :func:`position_risk`, so with ``multiplier = contracts x 100`` the dollar fields are
+    the book's dollars and delta and gamma are in shares. The time-decay fields (theta, charm, veta) are changes
+    per calendar day of elapsed time; a vol point is 0.01 of implied volatility on every leg; rho is per 1%
+    (100 bp) rise in the risk-free rate.
+
+    Attributes
+    ----------
+    spot : float
+        Spot price the risk is measured at ($ per share).
+    value : float
+        Model value of the position ($).
+    delta : float
+        Delta in shares, dV/dS.
+    dollar_delta : float
+        Dollar delta ($), delta x spot: the P&L of a 1% rise is about ``0.01 * dollar_delta``.
+    gamma : float
+        Gamma in shares per $1 of spot, d2V/dS2.
+    gamma_1pct : float
+        Change in delta (shares) for a 1% rise in spot, gamma x spot x 0.01.
+    dollar_gamma_1pct : float
+        Convexity P&L ($) of a 1% move either way, gamma x (0.01 spot)^2 / 2.
+    vega : float
+        $ per vol point.
+    theta : float
+        $ per calendar day.
+    rho : float
+        $ per 1% rise in the rate.
+    vanna : float
+        Change in delta (shares) per vol point, d2V/dSdsigma x 0.01.
+    volga : float
+        Change in vega ($ per vol point) per vol point, d2V/dsigma2 x 1e-4.
+    charm : float
+        Change in delta (shares) per calendar day, d(delta)/dt / 365.
+    veta : float
+        Change in vega ($ per vol point) per calendar day, d(vega)/dt x 0.01 / 365.
+    """
+
+    spot: float
+    value: float
+    delta: float
+    dollar_delta: float
+    gamma: float
+    gamma_1pct: float
+    dollar_gamma_1pct: float
+    vega: float
+    theta: float
+    rho: float
+    vanna: float
+    volga: float
+    charm: float
+    veta: float
+
+
+def position_risk(
+    strategy: Strategy,
+    market: Market,
+    spot: float | None = None,
+    t: float = 0.0,
+    *,
+    multiplier: float = 1.0,
+) -> PositionRisk:
+    """Dollar and second-order Greeks of the whole position at ``spot`` after ``t`` years.
+
+    Each option leg is valued with Black-Scholes-Merton at its own implied volatility and remaining time to
+    expiry, exactly as :func:`position_value` does, so every Greek here is the derivative of that function (an
+    expired leg keeps only its intrinsic delta). Shares have delta 1, no gamma, vega or cross Greeks, and the
+    theta and rho of the dividends they accrue. :func:`position_greeks` returns the same first-order Greeks in
+    raw model units.
+
+    Parameters
+    ----------
+    strategy, market : Strategy, Market
+        The position and the market it is valued in.
+    spot : float, optional
+        Spot price ($ per share), finite and non-negative; defaults to ``market.spot``.
+    t : float, default 0.0
+        Elapsed time in years, finite and non-negative (legs then have ``expiry - t`` left; a leg past its expiry
+        is worth its intrinsic value).
+    multiplier : float, default 1.0
+        Scale of every field, e.g. contracts x shares per contract; finite (a negative multiplier reverses the
+        position).
+
+    Returns
+    -------
+    PositionRisk
+        See :class:`PositionRisk` for the units of each field.
+
+    Raises
+    ------
+    ValueError
+        Naming the argument, if ``spot``, ``t`` or ``multiplier`` is not a single finite number, or if ``spot`` or
+        ``t`` is negative.
+
+    Examples
+    --------
+    A 1-year at-the-money call on one share:
+
+    >>> risk = position_risk(Strategy("call", (Leg("call", 1, 100),)), Market(100, 0.05, 0.20, 1.0))
+    >>> round(risk.delta, 4), round(risk.dollar_delta, 2), round(risk.gamma_1pct, 4)
+    (0.6368, 63.68, 0.0188)
+    >>> round(risk.vega, 4), round(risk.theta, 4)
+    (0.3752, -0.0176)
+
+    Shares have a delta equal to their quantity and no gamma or vega:
+
+    >>> shares = position_risk(Strategy("stock", (Leg("stock", 250),)), Market(100, 0.05, 0.20, 1.0))
+    >>> shares.delta, shares.gamma, shares.vega
+    (250.0, 0.0, 0.0)
+    """
+    spot = float(market.spot) if spot is None else _number("spot", spot)
+    t, m = _number("t", t), _number("multiplier", multiplier)
+    if spot < 0:
+        raise ValueError(f"spot must be a non-negative price, got {spot:g}")
+    if t < 0:
+        raise ValueError(f"t must be a non-negative number of years elapsed, got {t:g}")
+    raw = _greek_totals(strategy, market, spot, t, _FIRST_ORDER + _SECOND_ORDER)
+    gamma = m * float(raw["gamma"])
+    delta = m * float(raw["delta"])
+    move = 0.01 * spot  # a 1% move ($ per share)
+
+    def scaled(name: str) -> float:
+        return m * float(raw[name]) * bs.GREEKS[name].scale
+
+    return PositionRisk(
+        spot=spot,
+        value=m * float(position_value(strategy, market, spot, t)),
+        delta=delta,
+        dollar_delta=delta * spot,
+        gamma=gamma,
+        gamma_1pct=gamma * spot * 0.01,
+        dollar_gamma_1pct=0.5 * gamma * move * move,  # not move**2, which raises OverflowError for a huge spot
+        vega=scaled("vega"),
+        theta=scaled("theta"),
+        rho=scaled("rho"),
+        vanna=scaled("vanna"),
+        volga=scaled("vomma"),
+        charm=scaled("charm"),
+        veta=scaled("veta"),
+    )
 
 
 def leg_table(strategy: Strategy, market: Market) -> list[dict]:
@@ -632,7 +854,8 @@ def analyze(strategy: Strategy, market: Market, drift: float | None = None, carr
 
     i_max, i_min = int(np.argmax(values)), int(np.argmin(values))
     max_profit, max_loss = float(values[i_max]), float(-values[i_min])
-    max_profit_spot, max_loss_spot = float(grid[i_max]), float(grid[i_min])
+    max_profit_spot: float | None = float(grid[i_max])
+    max_loss_spot: float | None = float(grid[i_min])
     if slope > slope_tol:
         max_profit, max_profit_spot = np.inf, None
     elif slope < -slope_tol:
@@ -977,15 +1200,189 @@ TEMPLATES: dict[str, StrategyTemplate] = {
 TEMPLATE_CATEGORIES = tuple(dict.fromkeys(t.category for t in TEMPLATES.values()))
 
 
-def build_template(name: str, strike: float, width: float, expiry: float | None = None) -> Strategy:
+def strike_for_delta(target: float, market: Market, expiry: float, volatility: float, option_type: str) -> float:
+    """Strike at which a European option's Black-Scholes-Merton delta equals ``target``.
+
+    The delta is the spot delta of :func:`black_scholes.greeks`, ``e^{-qT} N(d1)`` for a call and
+    ``-e^{-qT} N(-d1)`` for a put, so a "16-delta put" is ``target=-0.16``. The strike is exact (closed form
+    through the inverse normal CDF), not rounded to a listed strike.
+
+    Parameters
+    ----------
+    target : float
+        Delta per share: in ``(0, e^{-qT})`` for a call, in ``(-e^{-qT}, 0)`` for a put.
+    market : Market
+        Spot, rate and dividend yield.
+    expiry : float
+        Time to expiry in years (fractions of a day allowed).
+    volatility : float
+        Implied volatility of the option (decimal, 0.18 = 18%).
+    option_type : str
+        ``"call"`` or ``"put"``.
+
+    Returns
+    -------
+    float
+        The strike ($ per share).
+
+    Raises
+    ------
+    ValueError
+        If an input is not finite, ``expiry`` or ``volatility`` is not positive, ``target`` is not an attainable
+        delta of that option type, or the strike is out of floating-point range (the strike grows like
+        ``e^{v^2 / 2}`` in ``v = volatility * sqrt(expiry)``, so this happens from ``v`` of about 30).
+
+    Examples
+    --------
+    The 16-delta put and call of a 45-day option at 18% volatility:
+
+    >>> market = Market(100, 0.04, 0.18, 45 / 365)
+    >>> put = strike_for_delta(-0.16, market, 45 / 365, 0.18, "put")
+    >>> call = strike_for_delta(0.16, market, 45 / 365, 0.18, "call")
+    >>> round(put, 4), round(call, 4)
+    (94.5612, 107.2273)
+    >>> round(bs.greeks(100, put, 45 / 365, 0.04, 0.18, 0.0, "put")["delta"], 12)
+    -0.16
+    """
+    phi = bs.option_sign(option_type)
+    _require_finite("strike_for_delta", target=target, expiry=expiry, volatility=volatility)
+    if not expiry > 0:
+        raise ValueError("expiry must be positive")
+    if not volatility > 0:
+        raise ValueError("volatility must be positive")
+    try:
+        df_q = math.exp(-market.dividend_yield * expiry)
+    except OverflowError:
+        raise ValueError("the dividend discount factor e^{-qT} is out of floating-point range") from None
+    side = "call" if phi > 0 else "put"
+    if not 0.0 < phi * target < df_q:
+        bounds = f"(0, {df_q:.6g})" if phi > 0 else f"({-df_q:.6g}, 0)"
+        raise ValueError(f"a {side} delta must lie in {bounds}, got {target:g}")
+    d1 = phi * float(ndtri(phi * target / df_q))
+    v = volatility * math.sqrt(expiry)
+    exponent = -d1 * v + (market.rate - market.dividend_yield) * expiry + 0.5 * v * v
+    try:
+        strike = market.spot * math.exp(exponent)
+    except OverflowError:
+        strike = math.inf
+    if not sys.float_info.min <= strike <= sys.float_info.max:
+        raise ValueError(
+            f"the strike of a {target:g}-delta {side}, spot x e^{exponent:.4g}, is out of floating-point range"
+        )
+    return strike
+
+
+#: Centre strike of the probe build used to read each template leg's strike offset (a whole multiple of the width).
+_PROBE_STRIKE = 1000.0
+
+
+def _check_deltas(deltas: Any) -> tuple[float, ...]:
+    """``deltas`` (one number or a sequence) as a tuple of floats in (0, 1); ``ValueError`` naming them otherwise."""
+    try:
+        raw = np.asarray(deltas)
+        numeric = raw.dtype.kind in "biuf" and raw.ndim <= 1  # not strings, None, nested sequences, ...
+    except ValueError:  # a ragged sequence
+        numeric = False
+    if not numeric:
+        raise ValueError(f"deltas must be numbers, got {deltas!r}")
+    values = tuple(float(d) for d in np.atleast_1d(raw))
+    if any(not 0.0 < d < 1.0 for d in values):  # NaN fails too
+        raise ValueError(f"deltas are absolute values in (0, 1), got {values}")
+    return values
+
+
+def _delta_strikes(
+    template: StrategyTemplate, strike: float, expiry: float, deltas: tuple[float, ...], market: Market
+) -> tuple:
+    """Template legs with each strike ``K + n w`` replaced by the strike of the ``deltas[|n| - 1]`` option.
+
+    Strikes above the centre (n > 0) are those of out-of-the-money calls with delta ``deltas[n - 1]``, strikes
+    below it (n < 0) those of out-of-the-money puts with delta ``-deltas[-n - 1]``, each at the leg's own expiry and
+    the market volatility; legs at the centre (n = 0) keep ``strike``. ``deltas`` were checked by the caller.
+    """
+    probe = template.build(_PROBE_STRIKE, 1.0, expiry)
+    offsets = [round(leg.strike - _PROBE_STRIKE) if leg.is_option else 0 for leg in probe]
+    needed = max((abs(n) for n in offsets), default=0)
+    if needed == 0:
+        return template.build(strike, 1.0, expiry)
+    if len(deltas) < needed:
+        raise ValueError(
+            f"{template.name} needs {needed} deltas (one per strike step out from the centre), got {len(deltas)}"
+        )
+    if any(a <= b for a, b in pairwise(deltas[:needed])):
+        raise ValueError(f"deltas must decrease away from the centre (wings further out), got {deltas[:needed]}")
+    legs = []
+    for leg, n in zip(probe, offsets, strict=True):
+        if leg.is_option:
+            if n == 0:
+                k = strike
+            else:
+                kind = "call" if n > 0 else "put"
+                target = float(deltas[abs(n) - 1]) * (1.0 if n > 0 else -1.0)
+                k = strike_for_delta(target, market, _leg_expiry(leg, market), market.volatility, kind)
+            leg = replace(leg, strike=k)
+        legs.append(leg)
+    by_offset = sorted({(n, leg.strike) for n, leg in zip(offsets, legs, strict=True) if leg.is_option})
+    for (n0, k0), (n1, k1) in pairwise(by_offset):
+        if n1 > n0 and not k1 > k0:
+            cents = [strike_text(round(k, 2)) for k in (k0, k1, strike)]
+            raise ValueError(
+                f"the delta strikes {cents[0]} and {cents[1]} are out of order around the centre strike {cents[2]}: "
+                "choose a centre strike between the put and call strikes"
+            )
+    return tuple(legs)
+
+
+def build_template(
+    name: str,
+    strike: float,
+    width: float,
+    expiry: float | None = None,
+    *,
+    strikes_by: str = "width",
+    deltas: float | Sequence[float] | None = None,
+    market: Market | None = None,
+) -> Strategy:
     """Instantiate a template around ``strike`` with strike spacing ``width``.
 
     ``expiry`` (years) is required by time spreads, whose legs carry their own
     expiries (``expiry`` and ``2 * expiry``); other templates leave leg
     expiries to the market default.
+
+    With ``strikes_by="delta"`` the strikes ``K +/- n w`` of the template are placed by delta instead, the way desks
+    pick them (short strikes around 16 to 30 delta, not a fixed distance from spot): the strike n steps above the
+    centre is that of the call whose delta is ``deltas[n - 1]``, the strike n steps below that of the put whose
+    delta is ``-deltas[n - 1]``, each at the leg's expiry and ``market.volatility`` (see :func:`strike_for_delta`).
+    ``deltas`` are absolute values that decrease outwards, e.g. ``(0.16, 0.05)`` for an iron condor with 16-delta
+    shorts and 5-delta wings; ``width`` is then unused and legs at the centre (straddles, calendars, single
+    options) stay at ``strike``. ``market`` is required in this mode and unused in the default ``"width"`` mode,
+    where passing ``deltas`` raises ``ValueError`` (the strikes would silently be spaced by ``width``).
+
+    Examples
+    --------
+    >>> [leg.strike for leg in build_template("Iron Condor", 100, 5).legs]
+    [90, 95, 105, 110]
+    >>> market = Market(100, 0.04, 0.18, 45 / 365)
+    >>> condor = build_template("Iron Condor", 100, 0, strikes_by="delta", deltas=(0.16, 0.05), market=market)
+    >>> [round(leg.strike, 2) for leg in condor.legs]
+    [90.75, 94.56, 107.23, 111.73]
     """
     template = TEMPLATES[name]
-    if template.uses_width:
+    if strikes_by not in ("width", "delta"):
+        raise ValueError(f"strikes_by must be 'width' or 'delta', got {strikes_by!r}")
+    checked: tuple[float, ...] = ()
+    if strikes_by == "delta":
+        if market is None:
+            raise ValueError("strikes_by='delta' needs the market (spot, rate, dividend yield and volatility)")
+        if template.uses_width and deltas is None:
+            raise ValueError(f"strikes_by='delta' needs the deltas of {name}'s strikes, e.g. deltas=(0.16, 0.05)")
+        if not _number("strike", strike) > 0:
+            raise ValueError(f"strike must be positive, got {strike:g}")
+        if deltas is not None:  # checked even where the template has no strikes away from the centre
+            checked = _check_deltas(deltas)
+    elif deltas is not None:
+        raise ValueError(f"deltas are only used with strikes_by='delta', got deltas={deltas!r} with strikes_by='width'")
+    elif template.uses_width:
         if not width > 0:
             raise ValueError("strike width must be positive")
         lowest = strike - template.lowest_offset * width
@@ -998,4 +1395,8 @@ def build_template(name: str, strike: float, width: float, expiry: float | None 
             raise ValueError(f"{name} needs the front-month expiry (years)")
     elif expiry is None:
         expiry = 1.0  # unused: these legs take the market expiry
-    return Strategy(name, template.build(strike, width, expiry), template.description)
+    if strikes_by == "delta" and market is not None:
+        legs = _delta_strikes(template, strike, expiry, checked, market)
+    else:
+        legs = template.build(strike, width, expiry)
+    return Strategy(name, legs, template.description)

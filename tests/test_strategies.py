@@ -1,3 +1,6 @@
+import re
+import sys
+
 import mpmath as mp
 import numpy as np
 import pytest
@@ -369,3 +372,339 @@ def test_tiny_breakeven_or_zero_edge_is_not_placed_at_zero(name, rate):
     m = S.analyze(S.build_template(name, 100, 10, market.expiry), market)
     assert m.probability_of_profit < 1e-6
     assert 0 < m.breakevens[0] < 1e-10
+
+
+# --- RK-9: strikes by delta, finite inputs, same-day expiries -------------------------------------------------------
+
+CONDOR_MARKET = S.Market(100, 0.045, 0.18, 45 / 365, 0.013)
+
+
+def test_iron_condor_with_16_delta_shorts():
+    # RK-9 acceptance (1): an iron condor at 45 days and 18% vol with 16-delta shorts has a short put delta of
+    # -0.16 and a short call delta of +0.16 (each within 1e-6) at the leg vols; the 5-delta wings likewise.
+    market = CONDOR_MARKET
+    condor = S.build_template("Iron Condor", 100, 0, strikes_by="delta", deltas=(0.16, 0.05), market=market)
+    deltas = {}
+    for leg in condor.legs:
+        vol = market.volatility if leg.volatility is None else leg.volatility
+        expiry = market.expiry if leg.expiry is None else leg.expiry
+        g = bs.greeks(market.spot, leg.strike, expiry, market.rate, vol, market.dividend_yield, leg.kind)
+        deltas[(leg.kind, leg.quantity)] = g["delta"]
+    assert deltas[("put", -1)] == pytest.approx(-0.16, abs=1e-6)
+    assert deltas[("call", -1)] == pytest.approx(0.16, abs=1e-6)
+    assert deltas[("put", 1)] == pytest.approx(-0.05, abs=1e-6)
+    assert deltas[("call", 1)] == pytest.approx(0.05, abs=1e-6)
+    strikes = [leg.strike for leg in condor.legs]
+    assert strikes == sorted(strikes)  # long put < short put < short call < long call
+    assert [(leg.kind, leg.quantity) for leg in condor.legs] == [("put", 1), ("put", -1), ("call", -1), ("call", 1)]
+
+
+@pytest.mark.parametrize("kind", ["call", "put"])
+@pytest.mark.parametrize("days", [120 / 1440, 1, 7, 45, 365, 1825])
+@pytest.mark.parametrize(("vol", "q", "r"), [(0.05, 0.0, 0.05), (0.2, 0.03, -0.01), (0.8, 0.03, 0.05)])
+def test_strike_for_delta_round_trip(kind, days, vol, q, r):
+    # The returned strike reproduces the target spot delta of black_scholes.greeks to 1e-12 (measured 1e-13).
+    expiry = days / 365
+    market = S.Market(100, r, vol, expiry, q)
+    sign = 1 if kind == "call" else -1
+    for d in (0.01, 0.05, 0.10, 0.16, 0.25, 0.40, 0.50, 0.60, 0.75, 0.90):
+        target = sign * d * np.exp(-q * expiry)
+        strike = S.strike_for_delta(target, market, expiry, vol, kind)
+        assert bs.greeks(100, strike, expiry, r, vol, q, kind)["delta"] == pytest.approx(target, abs=1e-12)
+
+
+@pytest.mark.oracle
+def test_strike_for_delta_matches_quantlib():
+    # Independent oracle: QuantLib's BlackDeltaCalculator.strikeFromDelta with spot delta. QuantLib's inverse
+    # normal CDF is accurate to about 1e-9, which bounds the agreement (measured 3.3e-9).
+    ql = pytest.importorskip("QuantLib")
+    for days, vol, q, r in [(1, 0.2, 0.0, 0.05), (45, 0.18, 0.013, 0.045), (365, 0.35, 0.03, -0.01), (1825, 0.8, 0, 0)]:
+        expiry = days / 365
+        market = S.Market(100, r, vol, expiry, q)
+        for kind, ql_kind, sign in (("call", ql.Option.Call, 1), ("put", ql.Option.Put, -1)):
+            for d in (0.05, 0.16, 0.25, 0.5, 0.75):
+                target = sign * d * np.exp(-q * expiry)
+                calc = ql.BlackDeltaCalculator(
+                    ql_kind, ql.DeltaVolQuote.Spot, 100.0, np.exp(-r * expiry), np.exp(-q * expiry), vol * expiry**0.5
+                )
+                expected = calc.strikeFromDelta(float(target))
+                assert S.strike_for_delta(target, market, expiry, vol, kind) == pytest.approx(expected, rel=1e-8)
+
+
+def test_strike_for_delta_rejects_unattainable_deltas():
+    market = S.Market(100, 0.05, 0.2, 1.0, 0.03)
+    with pytest.raises(ValueError, match=r"call delta must lie in \(0, 0.97"):
+        S.strike_for_delta(0.98, market, 1.0, 0.2, "call")  # above e^{-qT} = 0.9704
+    with pytest.raises(ValueError, match="put delta"):
+        S.strike_for_delta(0.16, market, 1.0, 0.2, "put")  # a put's delta is negative
+    with pytest.raises(ValueError, match="call delta"):
+        S.strike_for_delta(0.0, market, 1.0, 0.2, "call")
+    with pytest.raises(ValueError, match="target"):
+        S.strike_for_delta(float("nan"), market, 1.0, 0.2, "call")
+    with pytest.raises(ValueError, match="expiry"):
+        S.strike_for_delta(0.25, market, 0.0, 0.2, "call")
+    with pytest.raises(ValueError, match="volatility"):
+        S.strike_for_delta(0.25, market, 1.0, -0.2, "call")
+    with pytest.raises(ValueError, match="option_type"):
+        S.strike_for_delta(0.25, market, 1.0, 0.2, "stock")
+
+
+def test_strike_for_delta_out_of_floating_point_range():
+    # The strike is spot x e^{-d1 v + (r - q) T + v^2 / 2} with v = sigma sqrt(T); it used to raise OverflowError.
+    market = S.Market(100, 0.05, 0.2, 1.0)
+    for target, kind in ((0.5, "call"), (-0.5, "put")):  # v = 10 sqrt(30) = 54.8: e^1502
+        with pytest.raises(ValueError, match=r"strike of a .*-delta .* e\^1502, is out of floating-point range"):
+            S.strike_for_delta(target, market, 30.0, 10.0, kind)
+    # Below the smallest normal float: a 1e-300-delta put (d1 = 37) with v = 37 and a carry of -50.
+    with pytest.raises(ValueError, match=r"e\^-736.2, is out of floating-point range"):
+        S.strike_for_delta(-1e-300, S.Market(100, -0.5, 0.2, 1.0), 100.0, 3.7, "put")
+    with pytest.raises(ValueError, match="dividend discount factor"):
+        S.strike_for_delta(0.5, S.Market(100, 0.05, 0.2, 1.0, -100.0), 10.0, 0.2, "call")
+
+
+def test_strike_for_delta_gives_a_strike_or_a_value_error():
+    # Property over a deliberately wide domain (rates and yields of +/-100%, 100 years, 2000% vol): any finite
+    # inputs give a positive finite strike or a ValueError, never an OverflowError.
+    hypothesis = pytest.importorskip("hypothesis")
+    st = hypothesis.strategies
+
+    @hypothesis.given(
+        target=st.floats(-1.0, 1.0),
+        rate=st.floats(-1.0, 1.0),
+        q=st.floats(-1.0, 1.0),
+        expiry=st.floats(1e-9, 100.0),
+        vol=st.floats(1e-4, 20.0),
+        kind=st.sampled_from(["call", "put"]),
+    )
+    def check(target, rate, q, expiry, vol, kind):
+        try:
+            strike = S.strike_for_delta(target, S.Market(100, rate, 0.2, 1.0, q), expiry, vol, kind)
+        except ValueError:
+            return
+        assert sys.float_info.min <= strike <= sys.float_info.max
+
+    check()
+
+
+def test_strike_for_delta_round_trip_property():
+    # Property over desk inputs (one minute to ten years, 1% to 300% vol, deltas from 1e-4 to 1 - 1e-4 of e^{-qT}):
+    # the strike's delta is the target. The tolerance includes the delta's conditioning: a strike rounded to a float
+    # moves it by up to phi(d1) eps / v, with v = sigma sqrt(T) (1e-10 at one minute and 1% vol).
+    hypothesis = pytest.importorskip("hypothesis")
+    st = hypothesis.strategies
+
+    @hypothesis.given(
+        fraction=st.floats(1e-4, 1 - 1e-4),
+        rate=st.floats(-0.1, 0.2),
+        q=st.floats(-0.1, 0.2),
+        expiry=st.floats(1 / 525_600, 10.0),
+        vol=st.floats(0.01, 3.0),
+        kind=st.sampled_from(["call", "put"]),
+    )
+    def check(fraction, rate, q, expiry, vol, kind):
+        target = (1 if kind == "call" else -1) * fraction * np.exp(-q * expiry)
+        strike = S.strike_for_delta(target, S.Market(100, rate, 0.2, 1.0, q), expiry, vol, kind)
+        delta = bs.greeks(100, strike, expiry, rate, vol, q, kind)["delta"]
+        assert delta == pytest.approx(target, abs=1e-12 + 1e-15 / (vol * expiry**0.5))
+
+    check()
+
+
+def _width_offsets(name: str) -> list[int]:
+    """Each leg's strike offset from the centre in strike steps, read from the width-mode build."""
+    legs = S.build_template(name, 100, 5, 30 / 365).legs
+    return [round((leg.strike - 100) / 5) if leg.is_option else 0 for leg in legs]
+
+
+@pytest.mark.parametrize("name", [name for name, t in S.TEMPLATES.items() if t.uses_width])
+def test_delta_strikes_for_every_template_with_a_width(name):
+    # Strikes n steps above the centre are the calls with delta deltas[n-1], n steps below the puts with delta
+    # -deltas[n-1], at each leg's own expiry (a diagonal's legs differ); legs at the centre keep the strike.
+    market = S.Market(100, 0.04, 0.22, 30 / 365, 0.01)
+    deltas = (0.30, 0.10)
+    by_delta = S.build_template(name, 101, 0, 30 / 365, strikes_by="delta", deltas=deltas, market=market)
+    by_width = S.build_template(name, 100, 5, 30 / 365)
+    for leg, width_leg, n in zip(by_delta.legs, by_width.legs, _width_offsets(name), strict=True):
+        assert (leg.kind, leg.quantity, leg.expiry, leg.volatility) == (
+            width_leg.kind,
+            width_leg.quantity,
+            width_leg.expiry,
+            width_leg.volatility,
+        )
+        if not leg.is_option:
+            continue
+        expiry = market.expiry if leg.expiry is None else leg.expiry
+        if n == 0:
+            assert leg.strike == 101
+            continue
+        kind = "call" if n > 0 else "put"
+        delta = bs.greeks(100, leg.strike, expiry, 0.04, 0.22, 0.01, kind)["delta"]
+        assert delta == pytest.approx(np.sign(n) * deltas[abs(n) - 1], abs=1e-12)
+
+
+@pytest.mark.parametrize("name", [name for name, t in S.TEMPLATES.items() if not t.uses_width])
+def test_delta_mode_leaves_templates_without_a_width_unchanged(name):
+    by_delta = S.build_template(name, 97, 0, 0.1, strikes_by="delta", market=CONDOR_MARKET)
+    assert by_delta == S.build_template(name, 97, 5, 0.1)
+
+
+def test_delta_mode_errors():
+    market = CONDOR_MARKET
+    with pytest.raises(ValueError, match="needs the market"):
+        S.build_template("Iron Condor", 100, 0, strikes_by="delta", deltas=(0.16, 0.05))
+    with pytest.raises(ValueError, match="needs the deltas"):
+        S.build_template("Iron Condor", 100, 0, strikes_by="delta", market=market)
+    with pytest.raises(ValueError, match="needs 2 deltas"):
+        S.build_template("Iron Condor", 100, 0, strikes_by="delta", deltas=0.16, market=market)
+    with pytest.raises(ValueError, match="decrease"):
+        S.build_template("Iron Condor", 100, 0, strikes_by="delta", deltas=(0.10, 0.16), market=market)
+    with pytest.raises(ValueError, match=r"\(0, 1\)"):
+        S.build_template("Short Strangle", 100, 0, strikes_by="delta", deltas=1.2, market=market)
+    with pytest.raises(ValueError, match="out of order"):
+        # A 25-delta call sits near 103: below a centre strike of 110, the bull spread would be inverted.
+        S.build_template("Bull Call Spread", 110, 0, strikes_by="delta", deltas=0.25, market=market)
+    with pytest.raises(ValueError, match="strikes_by"):
+        S.build_template("Iron Condor", 100, 5, strikes_by="moneyness")
+    # The out-of-order strikes are given in cents (the 25-delta call strike is 104.96869671...).
+    with pytest.raises(ValueError, match=re.escape("the delta strikes 120 and 104.97 are out of order")):
+        S.build_template("Bull Call Spread", 120, 0, strikes_by="delta", deltas=0.25, market=market)
+    # A single delta works where one step is enough.
+    strangle = S.build_template("Short Strangle", 100, 0, strikes_by="delta", deltas=0.16, market=market)
+    assert [round(leg.strike, 4) for leg in strangle.legs] == [
+        round(S.strike_for_delta(-0.16, market, market.expiry, 0.18, "put"), 4),
+        round(S.strike_for_delta(0.16, market, market.expiry, 0.18, "call"), 4),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("name", "kwargs", "message"),
+    [
+        ("Iron Condor", {"deltas": ("a", 0.1)}, "deltas must be numbers, got ('a', 0.1)"),
+        ("Iron Condor", {"deltas": (0.16, None)}, "deltas must be numbers, got (0.16, None)"),
+        ("Iron Condor", {"deltas": "0.16"}, "deltas must be numbers, got '0.16'"),
+        ("Iron Condor", {"deltas": [[0.16, 0.05]]}, "deltas must be numbers, got [[0.16, 0.05]]"),
+        ("Iron Condor", {"deltas": [0.16, [0.05, 0.01]]}, "deltas must be numbers"),
+        ("Iron Condor", {"deltas": (0.16, float("nan"))}, "deltas are absolute values in (0, 1), got (0.16, nan)"),
+        ("Iron Condor", {"deltas": np.array([0.16, 0.0])}, "deltas are absolute values in (0, 1), got (0.16, 0.0)"),
+        ("Iron Condor", {"deltas": (0.16,)}, "needs 2 deltas (one per strike step out from the centre), got 1"),
+        # Centre-only templates need no deltas, but deltas that are given are still checked.
+        ("Long Straddle", {"deltas": ("a",)}, "deltas must be numbers"),
+        ("Bull Call Spread", {"deltas": 0.25, "strike": float("nan")}, "strike must be a finite number, got nan"),
+        ("Iron Condor", {"deltas": (0.16, 0.05), "strike": -100.0}, "strike must be positive, got -100"),
+    ],
+)
+def test_delta_mode_names_the_bad_argument(name, kwargs, message):
+    arguments = {"strike": 100.0, "width": 0.0, "strikes_by": "delta", "market": CONDOR_MARKET, **kwargs}
+    with pytest.raises(ValueError, match=re.escape(message)):
+        S.build_template(name, **arguments)
+
+
+def test_deltas_without_delta_mode_are_rejected():
+    # Deltas used to be ignored silently in the default width mode, which spaced the strikes by width instead.
+    message = "deltas are only used with strikes_by='delta', got deltas=(0.16, 0.05) with strikes_by='width'"
+    with pytest.raises(ValueError, match=re.escape(message)):
+        S.build_template("Iron Condor", 100, 5, deltas=(0.16, 0.05), market=CONDOR_MARKET)
+    with pytest.raises(ValueError, match="only used with strikes_by='delta'"):
+        S.build_template("Long Straddle", 100, 5, strikes_by="width", deltas=0.16)
+    # The market alone is harmless in width mode (a caller may pass it whichever mode is chosen) and is unused.
+    by_width = S.build_template("Iron Condor", 100, 5, market=CONDOR_MARKET)
+    assert by_width == S.build_template("Iron Condor", 100, 5)
+
+
+def test_delta_mode_accepts_numpy_deltas():
+    market = CONDOR_MARKET
+    plain = S.build_template("Iron Condor", 100, 0, strikes_by="delta", deltas=(0.16, 0.05), market=market)
+    array = np.array([0.16, 0.05])
+    assert S.build_template("Iron Condor", 100, 0, strikes_by="delta", deltas=array, market=market) == plain
+    single = S.build_template("Short Strangle", 100, 0, strikes_by="delta", deltas=np.float64(0.16), market=market)
+    assert single == S.build_template("Short Strangle", 100, 0, strikes_by="delta", deltas=[0.16], market=market)
+
+
+_MARKET_FIELDS = ("spot", "rate", "volatility", "expiry", "dividend_yield")
+_LEG_FIELDS = ("quantity", "strike", "expiry", "volatility", "premium")
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "-inf"])
+@pytest.mark.parametrize("field", _MARKET_FIELDS)
+def test_market_rejects_non_finite_fields(field, bad):
+    # RK-9 acceptance (2): NaN or inf in each Market field raises ValueError naming the field.
+    values = {"spot": 100.0, "rate": 0.05, "volatility": 0.2, "expiry": 1.0, "dividend_yield": 0.01, field: bad}
+    with pytest.raises(ValueError, match=rf"market {field} must be a finite number"):
+        S.Market(**values)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "-inf"])
+@pytest.mark.parametrize("field", _LEG_FIELDS)
+@pytest.mark.parametrize("kind", ["call", "stock"])
+def test_leg_rejects_non_finite_fields(kind, field, bad):
+    # RK-9 acceptance (2): NaN or inf in each Leg field raises ValueError naming the field (today quantity=inf,
+    # for one, was accepted).
+    values = {"kind": kind, "quantity": 1.0, "strike": 100.0, "expiry": 0.5, "volatility": 0.2, "premium": 3.0}
+    values[field] = bad
+    with pytest.raises(ValueError, match=rf"leg {field} must be a finite number"):
+        S.Leg(**values)
+
+
+def test_non_numbers_and_fees_are_rejected_by_name():
+    with pytest.raises(ValueError, match="market rate must be a number"):
+        S.Market(100, "5%", 0.2, 1.0)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="leg strike must be a number"):
+        S.Leg("put", 1, None)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="strategy fees must be a finite number"):
+        S.Strategy("x", (S.Leg("call", 1, 100),), fees=float("nan"))
+    # Finite values, and None for the optional leg fields, are still accepted as before.
+    leg = S.Leg("call", -3, 105.5, None, None, None)
+    assert (leg.expiry, leg.volatility, leg.premium) == (None, None, None)
+    assert S.Market(100, -0.01, 0.2, 1e-6, -0.02).rate == -0.01
+
+
+TWO_HOURS = 120 / 525_600
+
+
+@pytest.mark.parametrize("spot", [100.0, 5000.0])
+def test_a_position_two_hours_from_expiry_analyses_without_warnings(spot):
+    # RK-9 acceptance (3): a leg 2 hours from expiry (T = 120 / 525,600 years) analyses without warnings, alone and
+    # next to a 30-day leg. (pytest also turns any RuntimeWarning into an error for every test.)
+    import warnings
+
+    from options_analyzer import scenarios as sc
+
+    market = S.Market(spot, 0.045, 0.15, 30 / 365, 0.013)
+    k = [spot * f for f in (0.99, 0.996, 1.004, 1.01)]
+    condor = S.Strategy(
+        "0DTE condor",
+        (
+            S.Leg("put", 1, k[0], TWO_HOURS),
+            S.Leg("put", -1, k[1], TWO_HOURS),
+            S.Leg("call", -1, k[2], TWO_HOURS),
+            S.Leg("call", 1, k[3], TWO_HOURS),
+        ),
+    )
+    calendar = S.Strategy("0DTE vs 30d", (S.Leg("call", -1, spot, TWO_HOURS), S.Leg("call", 1, spot)))
+    for strategy in (condor, calendar):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            metrics = S.analyze(strategy, market)
+            labels = S.leg_labels(strategy, market)
+            S.leg_table(strategy, market)
+            risk = S.position_risk(strategy, market)
+            sc.greek_ladder(strategy, market)
+            sc.greek_ladder(strategy, market, roll_days=1)
+            for axis in ("delta", "moneyness"):
+                sc.vega_buckets(strategy, market, strike_axis=axis)
+            sc.weighted_vega(strategy, market)
+            sc.weighted_vega(strategy, market, scheme="sqrt_time")
+            sc.scenario_cube(
+                strategy, market, np.linspace(-0.02, 0.02, 9), [-0.5, 0, 0.5], [0, 1 / 24, 1], vol_mode="1m"
+            )
+            sc.run_stress_tests(strategy, market, sc.HISTORICAL_SCENARIOS, include_elapsed_time=True)
+        assert metrics.horizon == TWO_HOURS
+        assert 0 < metrics.probability_of_profit < 1
+        for be in metrics.breakevens:
+            assert float(S.pnl(strategy, market, be, metrics.horizon)) == pytest.approx(0.0, abs=1e-9 * spot)
+        assert "(0.1d)" in labels[0]
+        assert np.isfinite(risk.gamma) and risk.gamma != 0
+    # The short-dated option is worth what Black-Scholes-Merton gives at that T (about S sigma sqrt(T) / sqrt(2 pi)).
+    atm = float(S.position_value(S.Strategy("atm", (S.Leg("call", 1, spot, TWO_HOURS),)), market))
+    assert atm == pytest.approx(bs.price(spot, spot, TWO_HOURS, 0.045, 0.15, 0.013), rel=1e-15)
+    assert atm == pytest.approx(spot * 0.15 * np.sqrt(TWO_HOURS) / np.sqrt(2 * np.pi), rel=1e-2)

@@ -1,3 +1,6 @@
+import re
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -91,3 +94,212 @@ def test_pnl_grid_accepts_a_single_day_and_rejects_ambiguous_shapes():
     assert sc.pnl_grid(calendar, market, np.array([0.0, 0.1]), days=5).shape == (1, 2)
     with pytest.raises(ValueError, match="single number"):
         sc.pnl_grid(calendar, market, np.array([0.0]), np.array([0.0]), days=np.array([5]))
+
+
+# --- RK-1: scenario cube and pnl_grid volatility modes -------------------------------------------------------------
+
+SPOT_MOVES = np.linspace(-0.2, 0.2, 9)
+VOL_SHOCKS = np.array([-0.3, -0.1, 0.0, 0.1, 0.5])
+DAYS = np.array([0, 1, 7.5, 30])
+
+
+def _multi_expiry_book() -> S.Strategy:
+    return S.Strategy(
+        "book",
+        (
+            S.Leg("call", -2, 100, 10 / 365, 0.22),
+            S.Leg("put", 1, 95, 30 / 365),
+            S.Leg("call", 1, 105, 180 / 365, 0.18),
+            S.Leg("put", -1, 90, 2.0, 0.25),
+            S.Leg("stock", 0.5),
+        ),
+    )
+
+
+@pytest.mark.parametrize("vol_mode", sc.VOL_MODES)
+def test_scenario_cube_slices_are_pnl_grids(vol_mode):
+    # RK-1 acceptance (6): scenario_cube[0, zero-vol index, :] equals today's pnl_grid; every day's slice is the
+    # volatility x spot grid of that day.
+    strategy = _multi_expiry_book()
+    cube = sc.scenario_cube(strategy, MARKET, SPOT_MOVES, VOL_SHOCKS, DAYS, vol_mode=vol_mode, multiplier=100)
+    assert cube.shape == (len(DAYS), len(VOL_SHOCKS), len(SPOT_MOVES))
+    zero = int(np.flatnonzero(VOL_SHOCKS == 0)[0])
+    today = sc.pnl_grid(strategy, MARKET, SPOT_MOVES, days=0, multiplier=100)
+    assert cube[0, zero] == pytest.approx(today[0], rel=1e-12, abs=1e-10)
+    for d, day in enumerate(DAYS):
+        grid = sc.pnl_grid(strategy, MARKET, SPOT_MOVES, VOL_SHOCKS, float(day), 100, vol_mode=vol_mode)
+        assert cube[d] == pytest.approx(grid, rel=1e-12, abs=1e-10)
+
+
+def test_one_month_mode_equals_relative_on_a_single_30_day_expiry():
+    # RK-1 acceptance (6): the damping weight min(1, (tau / 1M)^-decay) is 1 for a 30-day leg, and stays 1 as the
+    # leg ages (a shorter tenor's shock is never amplified).
+    market = S.Market(100, 0.05, 0.2, 30 / 365, 0.01)
+    strategy = S.build_template("Iron Condor", 100, 5)
+    one_month = sc.scenario_cube(strategy, market, SPOT_MOVES, VOL_SHOCKS, DAYS, vol_mode="1m")
+    relative = sc.scenario_cube(strategy, market, SPOT_MOVES, VOL_SHOCKS, DAYS, vol_mode="relative")
+    assert one_month == pytest.approx(relative, rel=1e-12, abs=1e-12)
+
+
+def _repriced(strategy: S.Strategy, market: S.Market, spot_change: float, vols: list[float]) -> float:
+    """P&L with each option leg's IV set explicitly, independently of the vol_mode code path."""
+    legs = tuple(
+        replace(leg, volatility=vol) if leg.is_option else leg for leg, vol in zip(strategy.legs, vols, strict=True)
+    )
+    shocked = float(S.position_value(S.Strategy("shocked", legs), market, market.spot * (1 + spot_change)))
+    return shocked - float(S.position_value(strategy, market))
+
+
+@pytest.mark.parametrize(("vol_mode", "shock"), [("relative", 0.3), ("absolute", 0.04), ("1m", 0.5), ("1m", -0.25)])
+def test_vol_modes_move_each_leg_as_documented(vol_mode, shock):
+    strategy = _multi_expiry_book()
+    vols = []
+    for leg in strategy.legs:
+        sigma = MARKET.volatility if leg.volatility is None else leg.volatility
+        tau = MARKET.expiry if leg.expiry is None else leg.expiry
+        if vol_mode == "relative":
+            vols.append(sigma * (1 + shock))
+        elif vol_mode == "absolute":
+            vols.append(sigma + shock)
+        else:
+            vols.append(sigma * (1 + shock * min(1.0, (tau / (30 / 365)) ** -sc.DEFAULT_VOL_TENOR_DECAY)))
+    cube = sc.scenario_cube(strategy, MARKET, [0.05], [shock], vol_mode=vol_mode)
+    assert cube[0, 0, 0] == pytest.approx(_repriced(strategy, MARKET, 0.05, vols), rel=1e-12, abs=1e-12)
+
+
+def test_one_month_shocks_move_long_dated_legs_less():
+    market = S.Market(100, 0.05, 0.2, 2.0)
+    straddle = S.build_template("Long Straddle", 100, 10)
+    damped = sc.pnl_grid(straddle, market, [0.0], [1.0], vol_mode="1m")[0, 0]
+    literal = sc.pnl_grid(straddle, market, [0.0], [1.0])[0, 0]
+    assert 0 < damped < literal
+    # The same damping as a one-month stress scenario.
+    stress = sc.StressScenario("2x 1M vol", 0.0, 2.0, 0.0, one_month_vol_shock=True)
+    assert damped == pytest.approx(sc.run_stress_tests(straddle, market, [stress])[0]["P&L"], rel=1e-12)
+
+
+def test_pnl_grid_default_is_the_relative_mode():
+    strategy = _multi_expiry_book()
+    default = sc.pnl_grid(strategy, MARKET, SPOT_MOVES, VOL_SHOCKS, 3, 100)
+    assert np.array_equal(default, sc.pnl_grid(strategy, MARKET, SPOT_MOVES, VOL_SHOCKS, 3, 100, vol_mode="relative"))
+
+
+def test_stock_only_grids_fill_every_row():
+    # A share does not depend on implied vol; the grid used to come back with a single row.
+    shares = S.Strategy("shares", (S.Leg("stock", 10),))
+    grid = sc.pnl_grid(shares, MARKET, SPOT_MOVES, VOL_SHOCKS)
+    assert grid.shape == (len(VOL_SHOCKS), len(SPOT_MOVES))
+    assert grid == pytest.approx(np.broadcast_to(10 * 100 * SPOT_MOVES, grid.shape), abs=1e-12)
+    cube = sc.scenario_cube(shares, MARKET, SPOT_MOVES, VOL_SHOCKS, DAYS)
+    assert cube.shape == (len(DAYS), len(VOL_SHOCKS), len(SPOT_MOVES))
+    assert cube[0] == pytest.approx(grid, abs=1e-12)
+
+
+def test_scenario_cube_rejects_unknown_modes_and_shapes():
+    strategy = S.build_template("Long Call", 100, 10)
+    with pytest.raises(ValueError, match="vol_mode"):
+        sc.scenario_cube(strategy, MARKET, SPOT_MOVES, VOL_SHOCKS, vol_mode="log")
+    with pytest.raises(ValueError, match="vol_mode"):
+        sc.pnl_grid(strategy, MARKET, SPOT_MOVES, VOL_SHOCKS, vol_mode="1M")
+    with pytest.raises(ValueError, match="one-dimensional"):
+        sc.scenario_cube(strategy, MARKET, np.zeros((2, 2)), VOL_SHOCKS)
+
+
+_DAYS_RULE = "days must be finite and non-negative"
+_SPOT_RULE = "spot_changes must be finite and at least -1"
+
+
+@pytest.mark.parametrize(
+    ("args", "kwargs", "message"),
+    [
+        (([0.0], [0.0], [-10]), {}, f"{_DAYS_RULE} (calendar days elapsed), got -10"),
+        (([0.0], [0.0], [0, np.nan]), {}, f"{_DAYS_RULE} (calendar days elapsed), got nan"),
+        (([0.0], [0.0], np.inf), {}, f"{_DAYS_RULE} (calendar days elapsed), got inf"),
+        (([0.0, np.inf], [0.0]), {}, f"{_SPOT_RULE} (a -100% move takes spot to zero), got inf"),
+        (([-1.5], [0.0]), {}, f"{_SPOT_RULE} (a -100% move takes spot to zero), got -1.5"),
+        (([0.0], [0.0, np.nan]), {}, "vol_shocks must be finite, got nan"),
+        ((["0.1"], [0.0]), {}, "spot_changes must be numbers, got ['0.1']"),
+        (([0.0], [0.0, None]), {}, "vol_shocks must be numbers, got [0.0, None]"),
+        (([0.0], [0.0], [[1, 2], [3]]), {}, "days must be numbers"),
+        (([0.0], [0.1]), {"vol_mode": "1m", "vol_tenor_decay": np.nan}, "vol_tenor_decay must be a finite number"),
+    ],
+)
+def test_scenario_cube_rejects_invalid_axes_by_name(args, kwargs, message):
+    # Negative days used to return the P&L of time running backwards, and NaN days failed inside black_scholes
+    # without naming the argument.
+    strategy = S.build_template("Long Straddle", 100, 5)
+    with pytest.raises(ValueError, match=re.escape(message)):
+        sc.scenario_cube(strategy, MARKET, *args, **kwargs)
+
+
+def test_pnl_grid_rejects_invalid_arguments_by_name():
+    strategy = S.build_template("Long Straddle", 100, 5)
+    # vol_mode is checked whether or not there are vol_changes (it used to be ignored without them).
+    with pytest.raises(ValueError, match="vol_mode"):
+        sc.pnl_grid(strategy, MARKET, [0.0, 0.1], vol_mode="bogus")
+    with pytest.raises(ValueError, match=_DAYS_RULE):
+        sc.pnl_grid(strategy, MARKET, [0.0, 0.1], days=[0, -1])
+    with pytest.raises(ValueError, match=_DAYS_RULE):
+        sc.pnl_grid(strategy, MARKET, [0.0, 0.1], [0.0], days=np.nan)
+    with pytest.raises(ValueError, match="vol_changes must be finite"):
+        sc.pnl_grid(strategy, MARKET, [0.0, 0.1], [np.inf])
+    with pytest.raises(ValueError, match=_SPOT_RULE):
+        sc.pnl_grid(strategy, MARKET, [np.nan])
+
+
+def test_a_minus_100_percent_move_is_valued_at_zero_spot():
+    # The boundary itself is valid: at zero spot a straddle is worth its discounted strike (the put's intrinsic).
+    strategy = S.build_template("Long Straddle", 100, 5)
+    base = float(S.position_value(strategy, MARKET))
+    expected = 100 * np.exp(-MARKET.rate * MARKET.expiry) - base
+    assert sc.pnl_grid(strategy, MARKET, [-1.0])[0, 0] == pytest.approx(expected, rel=1e-14)
+    assert sc.scenario_cube(strategy, MARKET, [-1.0], [0.0])[0, 0, 0] == pytest.approx(expected, rel=1e-14)
+
+
+_CONDOR = S.build_template("Iron Condor", 100, 5)
+#: Every scenario function that takes a dollar multiplier, called on an iron condor.
+_WITH_MULTIPLIER = {
+    "pnl_grid": lambda m: sc.pnl_grid(_CONDOR, MARKET, SPOT_MOVES, VOL_SHOCKS, multiplier=m),
+    "pnl_grid by date": lambda m: sc.pnl_grid(_CONDOR, MARKET, SPOT_MOVES, days=DAYS, multiplier=m),
+    "scenario_cube": lambda m: sc.scenario_cube(_CONDOR, MARKET, SPOT_MOVES, VOL_SHOCKS, DAYS, multiplier=m),
+    "greek_ladder": lambda m: sc.greek_ladder(_CONDOR, MARKET, multiplier=m),
+    "vega_buckets": lambda m: sc.vega_buckets(_CONDOR, MARKET, multiplier=m),
+    "weighted_vega": lambda m: sc.weighted_vega(_CONDOR, MARKET, multiplier=m),
+    "run_stress_tests": lambda m: sc.run_stress_tests(_CONDOR, MARKET, sc.HYPOTHETICAL_SCENARIOS, multiplier=m),
+}
+
+
+@pytest.mark.parametrize(
+    ("bad", "message"),
+    [
+        (np.nan, "multiplier must be a finite number, got nan"),
+        (np.inf, "multiplier must be a finite number, got inf"),
+        (-np.inf, "multiplier must be a finite number, got -inf"),
+        ("100", "multiplier must be a number, got '100'"),
+        (None, "multiplier must be a number, got None"),
+        (np.array([100.0, 200.0]), "multiplier must be a single number"),
+    ],
+    ids=["nan", "inf", "-inf", "string", "None", "array"],
+)
+@pytest.mark.parametrize("function", list(_WITH_MULTIPLIER))
+def test_multiplier_must_be_a_finite_number(function, bad, message):
+    # A NaN or infinite multiplier used to give an all-NaN table (and a RuntimeWarning in vega_buckets).
+    with pytest.raises(ValueError, match=re.escape(message)):
+        _WITH_MULTIPLIER[function](bad)
+
+
+@pytest.mark.parametrize("function", list(_WITH_MULTIPLIER))
+def test_multiplier_accepts_numpy_and_negative_numbers(function):
+    # Validation keeps every finite number: numpy scalars, integers and a negative multiplier (the reversed position).
+    def as_array(value):
+        if isinstance(value, list):  # run_stress_tests
+            return np.array([row["P&L"] for row in value])
+        return np.asarray(value.to_numpy() if hasattr(value, "to_numpy") else value, dtype=float)
+
+    call = _WITH_MULTIPLIER[function]
+    one = as_array(call(1.0))
+    assert np.array_equal(as_array(call(np.float64(250.0))), as_array(call(250)))
+    reversed_ = as_array(call(-1))
+    if function == "greek_ladder":  # the shock, spot_change and spot columns do not scale
+        one, reversed_ = one[:, 3:], reversed_[:, 3:]
+    assert np.array_equal(reversed_, -one)
