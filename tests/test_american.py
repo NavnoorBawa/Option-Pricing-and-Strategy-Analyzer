@@ -17,7 +17,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from hypothesis import assume, given
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from options_analyzer import american as am
@@ -45,15 +45,17 @@ def grid() -> dict[str, np.ndarray]:
 
 
 def _grid_prices(grid: dict[str, np.ndarray], scheme: str) -> np.ndarray:
-    return am.price(
-        grid["spot"],
-        grid["strike"],
-        grid["maturity"],
-        grid["rate"],
-        grid["volatility"],
-        grid["dividend_yield"],
-        option_type="put",
-        scheme=scheme,
+    return np.asarray(
+        am.price(
+            grid["spot"],
+            grid["strike"],
+            grid["maturity"],
+            grid["rate"],
+            grid["volatility"],
+            grid["dividend_yield"],
+            option_type="put",
+            scheme=scheme,
+        )
     )
 
 
@@ -220,9 +222,10 @@ def test_the_value_is_monotone_in_volatility_expiry_and_strike(scheme):
 
 
 # Largest rise of a put's boundary (fall of a call's) with time to expiry, relative to the boundary: the ripple of
-# the Chebyshev interpolant between nodes, largest just before expiry at high volatility. Measured over r in
-# [0, 0.3], q in [-0.05, 0.12], T in [1/52, 20] and sigma in [0.05, 1.5]: fast 2.1e-2 (sigma = 1.5; 8e-6 up to
-# sigma = 0.2), accurate 3.0e-5 and high 4.1e-6.
+# the Chebyshev interpolant between nodes, largest just before expiry at high volatility. The plan asks for a
+# boundary that never rises; no scheme meets that exactly. Measured over r in [0, 0.3], q in [-0.05, 0.12], T in
+# [1/52, 20] and sigma in [0.05, 1.5]: fast 2.1e-2 (sigma = 1.5), accurate 3.0e-5 and high 3.9e-6; over r up to
+# 10 %, q up to 10 %, T up to 10 years and sigma up to 60 %: fast 8.1e-3, accurate 9.1e-8 and high 6.8e-9.
 BOUNDARY_RIPPLE = {"fast": 2.5e-2, "accurate": 5e-5, "high": 6e-6}
 #: Boundaries that do not converge in that set (r = 0 with q < 0 converges slowest): the engine rejects them.
 NOT_CONVERGED = {"fast": {(0.0, -0.05, 5.0, 1.5), (0.0, -0.05, 20.0, 1.5)}, "accurate": set(), "high": set()}
@@ -419,19 +422,234 @@ def test_schemes_by_name_or_object():
     assert sorted(am.SCHEMES) == ["accurate", "fast", "high"]
 
 
-def test_no_runtime_warning_at_extreme_inputs():
-    """pytest turns RuntimeWarning into an error: tiny and huge volatilities, expiries and rates stay quiet."""
-    for args in (
-        (100.0, 100.0, 1e-6, 0.05, 0.2, 0.0),
-        (100.0, 100.0, 1.0, 0.05, 1e-6, 0.0),
-        (100.0, 100.0, 1.0, 0.05, 8.0, 0.0),
-        (100.0, 100.0, 100.0, 0.05, 0.2, 0.02),
-        (100.0, 100.0, 1.0, 1e-9, 0.2, 0.05),
-        (100.0, 100.0, 1.0, 0.8, 0.2, 0.0),
-        (1e-6, 100.0, 1.0, 0.05, 0.2, 0.0),
-        (1e6, 100.0, 1.0, 0.05, 0.2, 0.0),
-    ):
-        for kind in ("call", "put"):
-            for scheme in am.SCHEMES:
-                value = am.price(*args, option_type=kind, scheme=scheme)
-                assert np.isfinite(value) and value >= 0.0
+def _within_simple_bounds(value: float, S: float, K: float, T: float, r: float, q: float, kind: str) -> bool:
+    """At least the intrinsic value; a put at most K max(1, e^{-rT}), a call at most S max(1, e^{-qT})."""
+    intrinsic = max(bs.option_sign(kind) * (S - K), 0.0)
+    cap = K * max(1.0, math.exp(-r * T)) if kind == "put" else S * max(1.0, math.exp(-q * T))
+    return intrinsic <= value <= cap * (1 + 1e-15)
+
+
+# Valid inputs at the edges of the double range: subnormal and tiny volatilities, expiries down to the smallest
+# double, rate and dividend-yield horizons r T and |q| T beyond 709 (where e^{rT} overflows), huge volatilities.
+EXTREMES = [
+    (100.0, 100.0, 1e-6, 0.05, 0.2, 0.0),
+    (100.0, 100.0, 1.0, 0.05, 1e-6, 0.0),
+    (100.0, 100.0, 1.0, 0.05, 8.0, 0.0),
+    (100.0, 100.0, 100.0, 0.05, 0.2, 0.02),
+    (100.0, 100.0, 1.0, 1e-9, 0.2, 0.05),
+    (100.0, 100.0, 1.0, 0.8, 0.2, 0.0),
+    (1e-6, 100.0, 1.0, 0.05, 0.2, 0.0),
+    (1e6, 100.0, 1.0, 0.05, 0.2, 0.0),
+    *((90.0, 100.0, 1.0, 0.05, sigma, 0.02) for sigma in (1e-80, 1e-170, 1e-200, 1e-320, 5e-324)),
+    *((90.0, 100.0, 20.0, 0.05, sigma, 0.10) for sigma in (1e-80, 1e-200, 5e-324)),
+    *((100.0, 100.0, T, 0.05, 0.2, 0.0) for T in (1e-150, 1e-200, 1e-300, 5e-324)),
+    (100.0, 100.0, 1e-20, 0.05, 200.0, 0.0),
+    (100.0, 100.0, 1e5, 0.05, 0.2, 0.0),
+    (100.0, 100.0, 1e5, 0.05, 1e-10, 0.0),
+    (90.0, 100.0, 100.0, 8.0, 0.2, 0.0),
+    (100.0, 100.0, 100.0, 0.05, 0.2, 8.0),
+    (90.0, 100.0, 1e4, 0.0, 8.0, -0.03),
+    (90.0, 100.0, 100.0, -0.01, 50.0, -0.02),
+]
+
+
+@pytest.mark.parametrize("args", EXTREMES)
+def test_no_runtime_warning_at_extreme_inputs(args):
+    """pytest turns RuntimeWarning into an error: every scheme stays quiet, finite and within the simple bounds."""
+    S, K, T, r, _, q = args
+    for kind in ("call", "put"):
+        put_r = q if kind == "call" else r
+        if put_r < 0 and -put_r * T > 700:
+            continue  # the value itself, K e^{|r| T} (a call: S e^{|q| T}), overflows
+        for scheme in am.SCHEMES:
+            value = am.price(*args, option_type=kind, scheme=scheme)
+            assert np.isfinite(value) and _within_simple_bounds(value, S, K, T, r, q, kind), (kind, scheme, value)
+
+
+def test_a_dividend_yield_of_minus_800_percent_over_a_century():
+    """The stock grows at 805 % a year: a put is worth its intrinsic value or nothing; its symmetric call is the
+    K e^{qT} that overflows, so only the put is valued."""
+    for S, expected in ((90.0, 10.0), (110.0, 0.0)):
+        assert am.price(S, 100.0, 100.0, 0.05, 0.2, -8.0, option_type="put") == pytest.approx(expected, abs=1e-12)
+
+
+def test_degenerate_inputs_take_their_limits():
+    # sigma -> 0: the zero-volatility value. With r > q a put in the money is exercised at once (black_scholes
+    # gives the European 6.905 at sigma = 1e-80); with q > r it waits for t* = 11.76 years.
+    zero_vol_wait = am.price(90.0, 100.0, 20.0, 0.05, 0.0, 0.10, option_type="put")
+    assert zero_vol_wait == pytest.approx(27.777777777777, abs=1e-9)
+    for sigma in (1e-9, 1e-80, 1e-200, 5e-324):
+        assert am.price(90.0, 100.0, 1.0, 0.05, sigma, 0.02, option_type="put") == 10.0
+        assert am.price(90.0, 100.0, 20.0, 0.05, sigma, 0.10, option_type="put") == zero_vol_wait
+        assert am.price_details(90.0, 100.0, 1.0, 0.05, sigma, 0.02, option_type="put").method == "exact"
+    assert bs.price(90.0, 100.0, 1.0, 0.05, 1e-80, 0.02, "put") == pytest.approx(6.905061852463433, rel=1e-15)
+    # T -> 0: max(European, intrinsic), the premium being below 1e-16 of the strike.
+    for T in (1e-150, 1e-300, 5e-324):
+        assert am.price(100.0, 100.0, T, 0.05, 0.2, option_type="put") == pytest.approx(0.0, abs=1e-12)
+        assert am.price(90.0, 100.0, T, 0.05, 0.2, option_type="put") == 10.0
+        assert am.price(110.0, 100.0, T, 0.05, 0.2, 0.03, option_type="call") == 10.0
+    # The exact branch and the engine agree across the total-volatility threshold (1e-8), within 4e-9 S.
+    for args in ((100.0, 100.0, 1.0, 0.05, 0.02), (100.0, 100.0, 1.0, 0.05, 0.0), (90.0, 100.0, 20.0, 0.05, 0.10)):
+        S, K, T, r, q = args
+        below = am.price_details(S, K, T, r, 0.999e-8 / math.sqrt(T), q, option_type="put")
+        above = am.price_details(S, K, T, r, 1.001e-8 / math.sqrt(T), q, option_type="put")
+        assert (below.method, above.method) == ("exact", "alo")
+        assert abs(below.value - above.value) <= 4e-9 * S
+    # Bounds that meet need no tree: a double-boundary put at 5,000 % volatility is worth K e^{-rT}.
+    details = am.price_details(90.0, 100.0, 100.0, -0.01, 50.0, -0.02, option_type="put")
+    assert details.method == "exact" and details.value == pytest.approx(100.0 * math.e, rel=1e-14)
+    # At zero total volatility the boundary is X = K min(1, r / q) at every time to expiry.
+    _, b = am.exercise_boundary(100.0, 20.0, 0.05, 1e-12, 0.10, option_type="put")
+    assert np.all(b == 50.0)
+
+
+# ----------------------------------------------------------------------------------- long expiries, hand-over
+
+#: The perpetual put (Merton 1973) at r = 5 %, q = 0, sigma = 20 %: S* = 71.43, worth 12.320033 at S = K = 100.
+PERPETUAL = binomial._perpetual_put(100.0, 100.0, 0.05, 0.0, 0.2)
+
+
+def test_long_expiries_approach_the_perpetual_put():
+    """Every scheme reaches the perpetual value from below; "fast" and "accurate" hand over to "high" (before the
+    hand-over "fast" gave 13.5713 at 1,000 years, 6.5480 at 3,000 and 25.6631 at 10,000)."""
+    assert pytest.approx(12.320032867762633, rel=1e-15) == PERPETUAL
+    for scheme in am.SCHEMES:
+        values = [am.price(100.0, 100.0, T, 0.05, 0.2, option_type="put", scheme=scheme) for T in (30, 100, 1e3, 1e4)]
+        assert np.all(np.diff(values) >= 0) and values[-1] <= PERPETUAL * (1 + 1e-15)
+        # QdFp strict at 30 years: 12.20212273175 (measured errors: fast 2.8e-3, accurate 3.0e-5, high 3.9e-7)
+        assert abs(values[0] - 12.20212273175) <= {"fast": 4e-3, "accurate": 5e-5, "high": 1e-6}[scheme]
+        for T in (1e3, 1e4, 1e5):
+            details = am.price_details(100.0, 100.0, T, 0.05, 0.2, option_type="put", scheme=scheme)
+            assert details.scheme == "high" and abs(details.value - PERPETUAL) <= 1e-6
+
+
+def test_fast_and_accurate_hand_over_beyond_their_domain():
+    """The stiffness max(T c^2 / sigma^2, T max(|r|, |q|)) picks the scheme; a custom scheme is used as given."""
+    cases = {  # (T, r, q, sigma): the scheme that "fast" ends with
+        (0.5, 0.05, 0.02, 0.25): "fast",  # stiffness 0.025
+        (30.0, 0.05, 0.0, 0.2): "fast",  # 1.9
+        (10.0, 0.05, 0.02, 0.05): "accurate",  # 10 from the drift (0.5 from the rate)
+        (5.0, 0.25, 0.0, 0.02): "high",  # 781
+        (100.0, 0.05, 0.0, 0.2): "accurate",  # 6.25
+    }
+    for (T, r, q, sigma), expected in cases.items():
+        assert am.price_details(100.0, 100.0, T, r, sigma, q, option_type="put", scheme="fast").scheme == expected
+        assert am.price_details(100.0, 100.0, T, r, sigma, q, option_type="put", scheme="high").scheme == "high"
+    # The low-volatility put of the review: "fast" was 0.01800, 39 % below QdFp strict (0.029418589).
+    value = am.price(100.0, 100.0, 5.0, 0.25, 0.02, option_type="put", scheme="fast")
+    assert value == pytest.approx(0.029418589, abs=1e-8)
+    mine = am.Scheme("mine", l=8, m=3, n=7, p=24)
+    assert am.price_details(100.0, 100.0, 5.0, 0.25, 0.02, option_type="put", scheme=mine).scheme == "mine"
+
+
+@settings(max_examples=200, deadline=None)
+@given(
+    S=spots,
+    K=spots,
+    T=st.floats(1.0, 30.0),
+    r=st.one_of(st.just(0.0), st.floats(1e-8, 0.25)),  # binomial._perpetual_put overflows at subnormal rates
+    q=st.one_of(st.just(0.0), st.floats(-0.05, -1e-8), st.floats(1e-8, 0.25)),
+    sigma=st.floats(0.02, 1.5),
+    kind=st.sampled_from(["call", "put"]),
+    scheme=st.sampled_from(sorted(am.SCHEMES)),
+)
+def test_long_dated_values_lie_within_the_tree_modules_bounds(S, K, T, r, q, sigma, kind, scheme):
+    """binomial._american_bounds (European and intrinsic below; the strike and the perpetual put above) is an
+    independent implementation of the bounds: before the bounds were applied, "fast" crossed the upper one in
+    94 of a random sweep by up to 7.3e-2, "accurate" in 89 by 5.1e-4 and "high" in 44 by 1.25e-5."""
+    assume(am.exercise_regime(r, q, option_type=kind) != "double")
+    value = am.price(S, K, T, r, sigma, q, option_type=kind, scheme=scheme)
+    european = bs.price(S, K, T, r, sigma, q, kind)
+    lower, upper = binomial._american_bounds(S, K, T, r, sigma, q, bs.option_sign(kind), european)
+    assert lower - 1e-12 * max(1.0, upper) <= value <= upper + 1e-12 * max(1.0, upper)
+
+
+@pytest.mark.parametrize("scheme", sorted(am.SCHEMES))
+def test_long_dated_values_rise_with_expiry(scheme):
+    """Along +-10 % lines in T through 150 random options with expiries of 1 to 30 years. Measured: no step down
+    larger than 7.5e-9 (a 13 % put near its perpetual value, where V changes by 1e-9 a year and the error of
+    "high" is 1.5e-7); before the hand-over "fast" fell by 1.1e-4 (a call, T = 14.3, q = 13.7 %)."""
+    rng = np.random.default_rng(23)
+    line = np.linspace(0.9, 1.1, 11)
+    for _ in range(150):
+        kind = str(rng.choice(["call", "put"]))
+        K, T, sigma = 100 * math.exp(rng.uniform(-0.6, 0.6)), rng.uniform(1.0, 30.0), rng.uniform(0.05, 0.8)
+        r, q = rng.uniform(0.0, 0.15), rng.uniform(-0.03, 0.15)
+        if am.exercise_regime(r, q, option_type=kind) == "double":
+            continue
+        values = am.price(100.0, K, T * line, r, sigma, q, option_type=kind, scheme=scheme)
+        assert np.diff(values).min() >= -2e-8 * max(1.0, float(values.max())), (kind, K, T, r, q, sigma)
+
+
+# ------------------------------------------------------------------------------------------- fixed-point form
+
+
+def test_the_fixed_point_form_can_be_fixed_across_the_switch():
+    """At |r - q| = 1e-3 the automatic choice changes form and the value jumps by the change of discretisation
+    error (fast 3.9e-4 here); with the form fixed the change is what the slope predicts (3e-10 over 2e-12)."""
+    q_cdf, q_density = 0.05 - 1e-3 - 1e-12, 0.05 - 1e-3 + 1e-12
+    jump = {"fast": (2e-4, 5e-4), "accurate": (5e-7, 2e-6), "high": (5e-10, 5e-9)}
+    for scheme, (least, most) in jump.items():
+        auto = [
+            am.price(110.0, 100.0, 10.0, 0.05, 0.3, q, option_type="put", scheme=scheme) for q in (q_cdf, q_density)
+        ]
+        assert least <= abs(auto[1] - auto[0]) <= most
+        for form in ("cdf", "density"):
+            fixed = [
+                am.price(110.0, 100.0, 10.0, 0.05, 0.3, q, option_type="put", scheme=scheme, fixed_point=form)
+                for q in (q_cdf, q_density)
+            ]
+            assert abs(fixed[1] - fixed[0]) <= 1e-9
+            details = am.price_details(110.0, 100.0, 10.0, 0.05, 0.3, q_cdf, option_type="put", fixed_point=form)
+            assert details.fixed_point == form
+    assert am.price_details(110.0, 100.0, 10.0, 0.05, 0.3, q_cdf, option_type="put").fixed_point == "cdf"
+    assert am.price_details(110.0, 100.0, 10.0, 0.05, 0.3, q_density, option_type="put").fixed_point == "density"
+    with pytest.raises(ValueError, match="fixed_point"):
+        am.price(100.0, 100.0, 1.0, 0.05, 0.2, option_type="put", fixed_point="newton")
+
+
+#: RMSE against qdfp_strict with each form forced on the whole grid (|r - q| up to 0.1). Measured: cdf as the
+#: automatic choice (3.7e-5, 1.7e-7, 1.8e-9); density 5.7e-6, 2.8e-7 and 1.9e-7, max 2.6e-4, 1.7e-5 and 1.3e-5.
+FORCED_FORM_RMSE = {"fast": (1e-4, 1e-5), "accurate": (5e-7, 5e-7), "high": (1e-8, 5e-7)}
+
+
+@pytest.mark.parametrize("scheme", sorted(FORCED_FORM_RMSE))
+def test_either_form_converges_on_the_grid(grid, scheme):
+    for form, bound in zip(("cdf", "density"), FORCED_FORM_RMSE[scheme], strict=True):
+        values = am.price(
+            grid["spot"],
+            100.0,
+            grid["maturity"],
+            grid["rate"],
+            grid["volatility"],
+            grid["dividend_yield"],
+            option_type="put",
+            scheme=scheme,
+            fixed_point=form,
+        )
+        assert np.sqrt(np.mean((values - grid["qdfp_strict"]) ** 2)) <= bound, form
+
+
+# ------------------------------------------------------------------------------------------------- batches
+
+
+def test_batches_are_grouped_by_one_sort():
+    """Options sharing (T, r, sigma, q) share a boundary, whatever their order in the batch; grouping 400,000 rows
+    into 4,000 groups takes one sort (11 ms measured; the earlier one scan per group took about 1.6 s)."""
+    rng = np.random.default_rng(3)
+    T = rng.choice([0.25, 0.5, 1.0], size=60)
+    sigma = rng.choice([0.2, 0.3], size=60)
+    S = rng.uniform(70.0, 130.0, size=60)
+    values = am.price(S, 100.0, T, 0.05, sigma, 0.02, option_type="put", scheme="fast")
+    for i in range(60):
+        expected = am.price(
+            float(S[i]), 100.0, float(T[i]), 0.05, float(sigma[i]), 0.02, option_type="put", scheme="fast"
+        )
+        assert values[i] == pytest.approx(expected, rel=1e-14)
+    keys = (np.repeat(np.arange(2000.0), 200), np.zeros(400_000), np.tile(np.arange(2.0), 200_000), np.ones(400_000))
+    start = time.perf_counter()
+    groups = am._groups(*keys)
+    seconds = time.perf_counter() - start
+    assert len(groups) == 4000 and sum(rows.size for _, rows in groups) == 400_000
+    assert all(np.all(keys[0][rows] == key[0]) and np.all(keys[2][rows] == key[2]) for key, rows in groups)
+    assert seconds <= 0.5

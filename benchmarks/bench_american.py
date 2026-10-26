@@ -89,10 +89,10 @@ def quantlib(grid: dict[str, np.ndarray], sample: np.ndarray) -> None:
     for name, scheme in schemes.items():
         errors, times = [], []
         for i in sample:
-            args = (float(grid["spot"][i]), 100.0, round(float(grid["maturity"][i]) * 12), float(grid["rate"][i]))
-            args += (float(grid["dividend_yield"][i]), float(grid["volatility"][i]))
+            spot, months, r = float(grid["spot"][i]), round(float(grid["maturity"][i]) * 12), float(grid["rate"][i])
+            q, sigma = float(grid["dividend_yield"][i]), float(grid["volatility"][i])
             start = time.perf_counter()
-            value = reference.qdfp_put(*args, scheme)
+            value = reference.qdfp_put(spot, 100.0, months, r, q, sigma, scheme)
             times.append(time.perf_counter() - start)
             errors.append(value - float(grid["qdfp_strict"][i]))
         rmse = float(np.sqrt(np.mean(np.square(errors))))

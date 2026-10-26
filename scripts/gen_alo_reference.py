@@ -149,10 +149,10 @@ def check(count: int, seed: int = 0) -> float:
     worst = 0.0
     for i in rows:
         months = round(float(data["maturity"][i]) * 12)
-        args = (float(data["spot"][i]), float(data["strike"]), months, float(data["rate"][i]))
-        args += (float(data["dividend_yield"][i]), float(data["volatility"][i]))
+        spot, strike, r = float(data["spot"][i]), float(data["strike"]), float(data["rate"][i])
+        q, sigma = float(data["dividend_yield"][i]), float(data["volatility"][i])
         for column, scheme in engines.items():
-            worst = max(worst, abs(qdfp_put(*args, scheme) - float(data[column][i])))
+            worst = max(worst, abs(qdfp_put(spot, strike, months, r, q, sigma, scheme) - float(data[column][i])))
     return worst
 
 

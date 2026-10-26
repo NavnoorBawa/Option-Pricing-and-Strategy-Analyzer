@@ -70,9 +70,9 @@ def test_the_fixture_matches_quantlib():
             assert generator.qdfp_put(*args, engines[column]) == pytest.approx(float(data[column][i]), abs=1e-12)
 
 
-def _random_options(count: int, seed: int):
+def _random_options(count: int, seed: int) -> list[tuple[str, float, float, int, float, float, float]]:
     rng = np.random.default_rng(seed)
-    cases = []
+    cases: list[tuple[str, float, float, int, float, float, float]] = []
     while len(cases) < count:
         kind = str(rng.choice(["call", "put"]))
         K = float(100 * math.exp(rng.uniform(-1.0, 1.0)))
@@ -85,9 +85,10 @@ def _random_options(count: int, seed: int):
     return cases
 
 
-# Largest |ours - QdFp strict| / max(1, value) over these 80 options, measured: fast 2.0e-4, accurate 2.7e-6 and
-# high 7.1e-9 (the worst case is a 6.4-year put with r = 17 %, q = 0); the long expiries need the most iterations.
-WIDE_TOLERANCE = {"fast": 5e-4, "accurate": 5e-6, "high": 2e-8}
+# Largest |ours - QdFp strict| / max(1, value) over these 80 options, measured: fast 5.0e-5, accurate 9.4e-7 and
+# high 3.1e-9 (a 3.5-year put with r = 6.2 %, q = -0.5 %). Before "fast" and "accurate" handed stiff options over
+# they were 2.0e-4 and 2.7e-6 (a 6.4-year put with r = 17 %, q = 0).
+WIDE_TOLERANCE = {"fast": 1.5e-4, "accurate": 2e-6, "high": 1e-8}
 
 
 def test_calls_and_puts_far_outside_the_grid():
@@ -99,6 +100,53 @@ def test_calls_and_puts_far_outside_the_grid():
             worst[scheme] = max(worst[scheme], abs(ours - reference) / max(1.0, reference))
     for scheme, tolerance in WIDE_TOLERANCE.items():
         assert worst[scheme] <= tolerance, (scheme, worst[scheme])
+
+
+def _converged_strict(kind: str, S: float, K: float, days: int, r: float, q: float, sigma: float) -> float:
+    """QdFp with 40 iterations, 129 nodes and tanh-sinh to 1e-13, confirmed by the strict settings to 1e-8."""
+
+    def stricter(process):
+        return ql.QdFpAmericanEngine(process, ql.QdFpTanhSinhIterationScheme(40, 128, 1e-13))
+
+    value = _option(kind, S, K, days, r, q, sigma, stricter).NPV()
+    assert value == pytest.approx(_option(kind, S, K, days, r, q, sigma, _strict).NPV(), abs=1e-8 * max(1, value))
+    return value
+
+
+# Largest |ours - QdFp strict| / max(1, value) over 40 options at volatilities of 1 % to 6 %, rates up to 30 % and
+# expiries up to 30 years, measured: fast 2.1e-5, accurate 3.7e-8, high 3.7e-9. Before the hand-over "fast" was 39 %
+# low on a 5-year put with r = 25 % and sigma = 2 %.
+LOW_VOLATILITY_TOLERANCE = {"fast": 1e-4, "accurate": 2e-7, "high": 2e-8}
+
+
+def test_low_volatilities_and_long_expiries():
+    rng = np.random.default_rng(4)
+    worst = dict.fromkeys(am.SCHEMES, 0.0)
+    count = 0
+    while count < 40:
+        kind = str(rng.choice(["call", "put"]))
+        K = float(100 * math.exp(rng.uniform(-0.5, 0.5)))
+        days = round(365 * float(rng.choice([rng.uniform(0.1, 5.0), rng.uniform(5.0, 30.0)])))
+        sigma = float(10 ** rng.uniform(math.log10(0.01), math.log10(0.06)))
+        r, q = float(rng.uniform(0.0, 0.3)), float(rng.choice([rng.uniform(-0.1, 0.3), 0.0]))
+        if am.exercise_regime(r, q, option_type=kind) == "double":
+            continue
+        count += 1
+        reference = _option(kind, 100.0, K, days, r, q, sigma, _strict).NPV()
+        for scheme in am.SCHEMES:
+            ours = am.price(100.0, K, days / 365, r, sigma, q, option_type=kind, scheme=scheme)
+            worst[scheme] = max(worst[scheme], abs(ours - reference) / max(1.0, reference))
+    for scheme, tolerance in LOW_VOLATILITY_TOLERANCE.items():
+        assert worst[scheme] <= tolerance, (scheme, worst[scheme])
+    # The cases of the review, against QdFp at settings stricter than the strict ones.
+    for kind, S, K, days, r, q, sigma, tolerance in (
+        ("put", 100.0, 100.0, 1825, 0.25, 0.0, 0.02, 1e-8),  # "fast" hands over to "high"
+        ("put", 100.0, 100.0, 36500, 0.05, 0.0, 0.2, 1e-4),  # 100 years: "fast" hands over to "accurate"
+        ("put", 90.0, 100.0, 7300, 0.05, 0.10, 0.01, 1e-8),  # q > r at 1 %: the exercise date is inside
+    ):
+        reference = _converged_strict(kind, S, K, days, r, q, sigma)
+        ours = am.price(S, K, days / 365, r, sigma, q, option_type=kind, scheme="fast")
+        assert abs(ours - reference) <= tolerance, (kind, S, K, days, r, q, sigma, ours, reference)
 
 
 @pytest.mark.parametrize(
