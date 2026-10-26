@@ -12,15 +12,23 @@ allows, and how the project uses it. The terms were read on 2026-10-26; the quot
    terms they accepted with that source. The adapters (`options_analyzer.market_data.read_chain`) read the file in
    memory for that session; the project never redistributes it.
 3. **No server-side fetching or scraping.** The app and the package fetch no quotes, index levels or price histories
-   from third-party servers. Public-domain reference data (US Treasury yields) may be bundled with a citation.
-4. **Fixtures say where they come from.** Every file in `tests/fixtures/` starts with a provenance header (below). Option
-   chains and price histories in the repository are fabricated or synthetic; none is a copy of real third-party data.
+   from third-party servers. Public-domain reference data (US Treasury yields) may be bundled with a citation, in
+   `options_analyzer/data/`.
+4. **Data files say where they come from.** Every file in `tests/fixtures/` and in `options_analyzer/data/` starts with
+   a provenance header (below). Option chains and price histories in the repository are fabricated or synthetic; none
+   is a copy of real third-party data.
 5. **Local-only extras stay off the default path.** The optional `data` extra (yfinance) is for a user's own machine.
    No module that the app or the package imports by default may fetch from Cboe or Yahoo.
 
-`tests/test_data_policy.py` enforces rules 3 to 5: no `cdn.cboe.com` or `finance.yahoo.com` URL and no `yfinance`
-import anywhere in the package or the entry point, no opt-in module on the default import path, the default app
-running with the network unreachable through a dead proxy, and the provenance header of every fixture.
+`tests/test_data_policy.py` enforces rules 3 to 5:
+
+- no `cdn.cboe.com` or `finance.yahoo.com` URL and no `yfinance` import anywhere in the package or the entry point;
+- no opt-in module on the default import path;
+- no look-up of, connection to or datagram for another machine while every default module is imported (an audit hook
+  sees every socket call) or while the app renders every tab with the proxies pointed at a dead port (each attempt is
+  recorded before the test suite's network guard blocks it, so a client that ignores the proxy settings, a host built
+  at run time and an error the code swallows are all caught);
+- the provenance header of every fixture and package data file, and data files nowhere else.
 
 ## Sources
 
@@ -38,7 +46,8 @@ running with the network unreachable through a dead proxy, and the provenance he
 
 ## Provenance header for `tests/fixtures`
 
-Every fixture begins with comment lines (`#`). The first one names its provenance:
+Every fixture, and every data file the package ships, begins with comment lines (`#`). The first one names its
+provenance:
 
 ```text
 # Provenance: fabricated | synthetic | published-facts | public-domain
@@ -53,8 +62,16 @@ Every fixture begins with comment lines (`#`). The first one names its provenanc
 - `published-facts`: facts transcribed from a public source, such as exchange holiday dates.
 - `public-domain`: data in the public domain, such as US Government yields.
 
-Option quotes, prices and index histories must be `fabricated` or `synthetic`. Data files belong in `tests/fixtures/`
-only; `.gitignore` keeps local data and caches out of the repository.
+Option quotes, prices and index histories must be `fabricated` or `synthetic`: the check reads the words of each
+file's header row (bid, ask, mid, price, close, last, IV, strike and the like, in any naming style) and refuses them
+under the other two provenances. Data files live in two folders only:
+
+- `tests/fixtures/`, for test data of any provenance;
+- `options_analyzer/data/`, for reference data the package ships, which must be `public-domain` with its source, URL
+  and retrieval date (the planned Treasury curve of roadmap item DT-3). Market quotes, index levels and price histories
+  are never shipped.
+
+`.gitignore` keeps locally downloaded data and caches out of the repository.
 
 ## Bundled assets other than data
 
