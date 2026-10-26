@@ -1,3 +1,5 @@
+## Pricing engines
+
 ### Black–Scholes–Merton
 
 $$C = S e^{-qT} N(d_1) - K e^{-rT} N(d_2), \qquad P = K e^{-rT} N(-d_2) - S e^{-qT} N(-d_1)$$
@@ -39,15 +41,3 @@ the control variate on (the residuals are then constant). Calls and puts share
 draws and a fixed seed makes results reproducible. The sample-path chart draws the first 60 of these
 scenarios, each filled in from today to its sampled $S_T$ with a Brownian bridge (exact for GBM given the
 end point).
-
-### Implied volatility
-Quotes outside the no-arbitrage bounds
-$\max(S e^{-qT} - K e^{-rT}, 0) \le C < S e^{-qT}$ (and the put analogue) are rejected, because no
-volatility can produce them. Otherwise the quote is converted to its out-of-the-money equivalent through
-put–call parity and solved with Brent's method, which always converges on a bracketed root. American quotes
-must be at least the exercise value and the European lower bound, and below the most exercise can be worth:
-$K\max(1, e^{-rT})$ for a put (more than the strike when the rate is negative) and $S\max(1, e^{-qT})$ for a
-call. They are inverted on the sidebar's binomial tree when that model is selected (so the
-headline American price gives back the sidebar volatility), otherwise on a 501-step Leisen–Reimer tree; a
-quote equal to the option's zero-volatility value (for example the value of exercising now) does not
-identify a volatility and is reported as such.
