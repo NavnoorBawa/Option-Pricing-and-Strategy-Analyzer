@@ -223,6 +223,42 @@ def dollar_rho(rho: float, units: float) -> float:
     return rho * 0.01 * units
 
 
+def level(value: float) -> str:
+    """A price level (spot, strike, forward): ``5,812.37``, ``0.0420`` or ``0.00004087``.
+
+    Two decimals with thousands separators from 1, four decimals from 0.01 and four significant digits below, so
+    that a small level (a forward that a high dividend yield pulls down) never reads ``0.0000``. A negative level
+    takes the minus sign U+2212; NaN and ``None`` read ``–``.
+
+    Parameters
+    ----------
+    value : float
+        The level, in currency units.
+
+    Returns
+    -------
+    str
+        The level as shown, without a currency sign.
+
+    Examples
+    --------
+    >>> level(5812.374), level(0.042), level(4.0866e-5)
+    ('5,812.37', '0.0420', '0.00004087')
+    """
+    if _missing(value):
+        return "–"
+    size = abs(value)
+    if math.isinf(size):
+        text = "∞"
+    elif round(size, 2) >= 1:
+        text = f"{size:,.2f}"
+    elif round(size, 4) >= 0.01 or size == 0:
+        text = f"{size:.4f}"
+    else:
+        text = _significant(size, 4)
+    return MINUS + text if value < 0 else text
+
+
 def date(day: dt.date) -> str:
     """``20-Oct-27``: day, English month abbreviation (whatever the server's locale) and two-digit year."""
     return f"{day.day:02d}-{_MONTHS[day.month - 1]}-{day.year % 100:02d}"

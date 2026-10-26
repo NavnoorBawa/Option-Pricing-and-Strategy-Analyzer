@@ -7,7 +7,7 @@ from dataclasses import replace
 import streamlit as st
 
 from .. import __version__
-from . import tab_iv, tab_methodology, tab_pricing, tab_risk, tab_strategy, tab_surface
+from . import header, tab_iv, tab_methodology, tab_pricing, tab_risk, tab_strategy, tab_surface, theme
 from .components import link_match
 from .format import md_code
 from .inputs import sidebar
@@ -87,39 +87,45 @@ def _read_link() -> None:
         st.rerun()
 
 
+def _open_methodology() -> None:
+    """Open the Methodology tab (the header's Methodology button)."""
+    st.session_state["tab"] = TABS[-1]
+
+
 def run() -> None:
+    """One script run of the app: the page settings, stylesheet and logo, the sidebar, the header strip, the price
+    cards and the open tab."""
     st.set_page_config(
-        page_title="Options Pricing & Strategy Analyzer",
-        page_icon="📈",
+        page_title="Options Analytics",
+        page_icon=":material/candlestick_chart:",
         layout="wide",
         # Open on desktops; on phones the sidebar would cover the whole page, so it starts collapsed there.
         initial_sidebar_state="auto",
         menu_items={
             "Get help": REPO_URL,
             "Report a bug": f"{REPO_URL}/issues",
-            "About": f"Options Pricing & Strategy Analyzer v{__version__} by Navnoor Bawa. "
+            "About": f"Options Analytics v{__version__} (Option-Pricing-and-Strategy-Analyzer) by Navnoor Bawa. "
             "Educational tool, not investment advice.",
         },
     )
+    theme.apply_stylesheet()
+    header.logo()
     _read_link()
     inputs = sidebar()
 
-    st.title("Options Pricing & Strategy Analyzer")
-    st.caption(
-        "Black-Scholes-Merton, binomial and Monte Carlo pricing · Greeks to third order · multi-leg strategies · "
-        "stress tests and VaR/ES · implied and local volatility surfaces"
-    )
-    for note in st.session_state.pop(_LINK_NOTES, ()):
-        st.warning(note, icon=":material/link_off:")
-
+    # The prices come first, so that the header's badge names the model of the values on screen.
+    fallback = None
     try:
         prices = tab_pricing.compute_prices(inputs)
     except ValueError as exc:
-        st.warning(
-            f"{inputs.model.label}: {exc} Showing Black-Scholes-Merton values instead.", icon=":material/warning:"
-        )
+        fallback = f"{inputs.model.label}: {exc} Showing Black-Scholes-Merton values instead."
         inputs = replace(inputs, model=replace(inputs.model, kind="bsm"))
         prices = tab_pricing.compute_prices(inputs)
+    share = header.render(inputs, on_methodology=_open_methodology)
+    for note in st.session_state.pop(_LINK_NOTES, ()):
+        st.warning(note, icon=":material/link_off:")
+    if fallback:
+        st.warning(fallback, icon=":material/warning:")
     tab_pricing.render_price_cards(inputs, prices)
 
     # Only the open tab runs: opening a tab reruns the app, and the closed tabs stay empty (their widgets keep their
@@ -153,3 +159,5 @@ def run() -> None:
     if methodology.open:
         with methodology:
             tab_methodology.render()
+    # Last, once every widget bound to the URL has written its value there.
+    header.fill_share(share)

@@ -246,10 +246,10 @@ def test_text_on_the_primary_colour_is_legible():
         assert contrast(theme.ON_PRIMARY[kind], _mode(kind)["primaryColor"]) >= 4.5, kind
     assert theme.ON_PRIMARY["dark"] == _mode("dark")["backgroundColor"]
     assert theme.ON_PRIMARY["light"] == "#FFFFFF"  # Streamlit's own colour, kept where it is legible
-    rule = re.fullmatch(r"(.+) \{ color: light-dark\((#[0-9A-F]{6}), (#[0-9A-F]{6})\); \}", theme.ON_PRIMARY_RULE)
-    assert theme.ON_PRIMARY_RULE in theme.STYLESHEET
-    assert rule and rule[1] == ", ".join(theme.ON_PRIMARY_SELECTORS)
-    assert (rule[2], rule[3]) == (theme.ON_PRIMARY["light"], theme.ON_PRIMARY["dark"])
+    # The desk stylesheet's rule: the selectors of ON_PRIMARY_SELECTORS, the colours of ON_PRIMARY.
+    [(selectors, declarations)] = [rule for rule in _desk_rules() if "light-dark(" in rule[1]]
+    assert _selectors(selectors) == list(theme.ON_PRIMARY_SELECTORS)
+    assert declarations == f"color: light-dark({theme.ON_PRIMARY['light']}, {theme.ON_PRIMARY['dark']});"
     # Every widget the app uses that Streamlit fills with the primary colour and writes white on is covered.
     source = "\n".join(p.read_text("utf-8") for p in (ROOT / "options_analyzer").rglob("*.py"))
     for widget, testid in WHITE_ON_PRIMARY.items():
@@ -257,11 +257,100 @@ def test_text_on_the_primary_colour_is_legible():
             assert testid and any(testid in selector for selector in theme.ON_PRIMARY_SELECTORS), widget
 
 
-def test_apply_stylesheet_sends_style_only_html(monkeypatch):
+def test_apply_stylesheet_sends_the_desk_stylesheet(monkeypatch):
+    # st.html of a .css file sends it in a <style> element, which takes no room in the layout.
     sent = []
     monkeypatch.setattr(theme.st, "html", sent.append)
     theme.apply_stylesheet()
-    assert sent == [f"<style>{theme.STYLESHEET}</style>"]
+    assert sent == [theme.STYLESHEET]
+    assert theme.STYLESHEET == UI / "static" / "desk.css" and theme.STYLESHEET.suffix == ".css"
+
+
+# --- The desk stylesheet (ui/static/desk.css) ----------------------------------------------------------------------
+
+#: The data-testid values the desk stylesheet may select: Streamlit's test ids of the page container and its main
+#: block, and of the elements the stylesheet styles. (No "section[data-testid=...]" or emotion class: those change
+#: between Streamlit releases.)
+DESK_TESTIDS = {
+    "stMainBlockContainer", "stVerticalBlock", "stMetric", "stMetricLabel", "stMetricValue", "stMultiSelect",
+    "stNumberInput", "stNumberInputStepUp", "stNumberInputStepDown",
+}  # fmt: skip
+#: Attributes other than data-testid: a multiselect's chips have no test id of their own.
+DESK_ATTRIBUTES = {"data-tag"}
+#: HTML elements and pseudo-classes a selector may name after its hook.
+DESK_ELEMENTS = {"p", "strong", "code", "button", "div"}
+DESK_PSEUDO_CLASSES = {"is", "has", "hover", "focus", "enabled"}
+
+
+def _css_rules(css: str) -> list[tuple[str, str]]:
+    """``(selector list, declarations)`` of every style rule of ``css``, with the rules inside at-rules (such as
+    ``@container``), each with its whitespace collapsed."""
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
+    rules, start = [], 0
+    while (brace := css.find("{", start)) >= 0:
+        depth, end = 1, brace + 1
+        while depth:
+            depth += {"{": 1, "}": -1}.get(css[end], 0)
+            end += 1
+        prelude, body = " ".join(css[start:brace].split()), css[brace + 1 : end - 1]
+        rules += _css_rules(body) if prelude.startswith("@") else [(prelude, " ".join(body.split()))]
+        start = end
+    return rules
+
+
+def _selectors(prelude: str) -> list[str]:
+    """The selectors of a selector list (split at the commas outside parentheses)."""
+    parts, depth, current = [], 0, ""
+    for char in prelude:
+        depth += {"(": 1, ")": -1}.get(char, 0)
+        if char == "," and depth == 0:
+            parts.append(current.strip())
+            current = ""
+        else:
+            current += char
+    return [*parts, current.strip()]
+
+
+def _desk_rules() -> list[tuple[str, str]]:
+    return _css_rules(theme.STYLESHEET.read_text(encoding="utf-8"))
+
+
+def test_the_desk_stylesheet_selects_only_stable_hooks():
+    # Streamlit's emotion classes and the section/div structure change between releases; the class of a keyed element
+    # (.st-key-KEY) and a short list of test ids do not.
+    css = theme.STYLESHEET.read_text(encoding="utf-8")
+    assert "section[data-testid" not in css
+    selectors = [selector for prelude, _ in _desk_rules() for selector in _selectors(prelude)]
+    assert len(selectors) >= 15
+    for selector in selectors:
+        classes = re.findall(r"\.([\w-]+)", selector)
+        attributes = [a.split("=") for a in re.findall(r"\[([^\]]+)\]", selector)]
+        assert all(c.startswith("st-key-") for c in classes), selector
+        for name, *value in attributes:
+            if name == "data-testid":
+                assert value and value[0].strip("'\"") in DESK_TESTIDS, selector
+            else:
+                assert name in DESK_ATTRIBUTES and not value, selector
+        assert classes or any(name == "data-testid" for name, *_ in attributes), f"{selector} has no hook"
+        assert "#" not in selector, selector
+        assert set(re.findall(r":+([\w-]+)", selector)) <= DESK_PSEUDO_CLASSES, selector
+        elements = re.sub(r"\[[^\]]*\]|\.[\w-]+|:+[\w-]+|[(),>+~*]", " ", selector).split()
+        assert set(elements) <= DESK_ELEMENTS, selector
+
+
+def test_the_desk_stylesheet_names_only_keys_the_app_uses():
+    # A rule for a key the app no longer has would style nothing, silently.
+    source = "\n".join(p.read_text("utf-8") for p in (ROOT / "options_analyzer" / "ui").rglob("*.py"))
+    keys = {k for prelude, _ in _desk_rules() for k in re.findall(r"\.st-key-([\w-]+)", prelude)}
+    assert keys >= {"desk_header", "desk_identity", "desk_actions", "quotes_kept"}
+    for key in keys:
+        assert f'key="{key}"' in source, key
+
+
+def test_the_desk_stylesheet_survives_the_html_sanitiser():
+    # Streamlit cleans st.html with DOMPurify, which drops a <style> element whose text holds anything that reads as
+    # a tag: one "<key>" in a comment removed the whole stylesheet from the page.
+    assert not re.search(r"<[\w/!?]", theme.STYLESHEET.read_text(encoding="utf-8"))
 
 
 # --- Palettes pass the colour-vision checks -----------------------------------------------------------------------
@@ -402,21 +491,34 @@ def test_the_entry_points_share_one_script_and_find_the_fonts_next_to_them():
 
 
 def test_every_run_loads_the_stylesheet_before_the_app(monkeypatch):
-    from options_analyzer.ui import streamlit_app
+    # One entry point: streamlit_app.main runs app.run, which adds the stylesheet before it draws anything.
+    from options_analyzer.ui import app, streamlit_app
 
     calls = []
-    monkeypatch.setattr(theme, "apply_stylesheet", lambda: calls.append("stylesheet"))
     monkeypatch.setattr(streamlit_app, "run", lambda: calls.append("app"))
     streamlit_app.main()
-    assert calls == ["stylesheet", "app"]
+    assert calls == ["app"]
+    calls.clear()
+    monkeypatch.undo()
+    real_sidebar = app.sidebar
+    monkeypatch.setattr(theme, "apply_stylesheet", lambda: calls.append("stylesheet"))
+    monkeypatch.setattr(app, "sidebar", lambda: calls.append("sidebar") or real_sidebar())
+    from streamlit.testing.v1 import AppTest
+
+    AppTest.from_file(str(ROOT / "main.py"), default_timeout=120).run()
+    assert calls == ["stylesheet", "sidebar"]
 
 
-def test_the_page_carries_the_stylesheet():
+def test_the_page_carries_the_stylesheet_once():
+    # The whole desk stylesheet in one <style>, first on the page; the only other style elements are the card rows'
+    # own sizes.
     from streamlit.testing.v1 import AppTest
 
     at = AppTest.from_file(str(ROOT / "main.py"), default_timeout=120).run()
     assert not at.exception, at.exception
-    assert at.get("html")[0].proto.body == f"<style>{theme.STYLESHEET}</style>"
+    bodies = [h.proto.body for h in at.get("html")]
+    assert bodies[0] == f"<style>{theme.STYLESHEET.read_text(encoding='utf-8')}</style>"
+    assert all(re.match(r"<style>\.st-key-\w+_cards \{ container:", b) for b in bodies[1:]), bodies[1:]
 
 
 def test_both_static_folders_are_identical():
@@ -435,16 +537,45 @@ CARD_LABELS = (
 )  # fmt: skip
 
 
+def _declarations(selector: str) -> dict[str, str]:
+    """The declarations of the desk stylesheet's rule for ``selector``."""
+    [body] = [body for prelude, body in _desk_rules() if prelude == selector]
+    return dict(d.strip().split(": ", 1) for d in body.split(";") if d.strip())
+
+
 def test_the_card_width_model_uses_the_theme_font_sizes():
     # The cards' sizes come from a model of their text in the theme's font: with values modelled at Streamlit's
-    # default 36 px in Source Sans, the Plex values on a phone grew to 36 px and were cut to '$10.45…'.
+    # default 36 px in Source Sans, the Plex values on a phone grew to 36 px and were cut to '$10.45…'. The labels
+    # are the desk stylesheet's small capitals, the deltas Streamlit's small text.
     from options_analyzer.ui import components
 
     base = THEME["baseFontSize"]
     value_px = base * float(THEME["metricValueFontSize"].removesuffix("rem"))
-    small_px = base * 0.875  # Streamlit's small text: the card labels and deltas
-    assert (components._VALUE_PX, components._LABEL_PX) == (value_px, small_px) == (22.75, 12.25)
+    label = _declarations("[data-testid='stMetricLabel'] p")
+    label_px = base * float(label["font-size"].removesuffix("rem"))
+    tracking = float(label["letter-spacing"].removesuffix("em"))
+    assert label["text-transform"] == "uppercase"
+    model = (components._VALUE_PX, components._LABEL_PX, components._DELTA_PX)
+    assert model == (value_px, label_px, base * 0.875) == (22.75, 10.08, 12.25)
+    assert components._LABEL_TRACKING_EM == tracking == 0.06
     assert THEME["metricValueFontWeight"] == 500  # the value widths are those of Plex Sans Medium
+
+
+def test_card_values_have_tabular_digits_and_a_slashed_zero():
+    pytest.importorskip("brotli")  # WOFF2 decompression
+    ttlib = pytest.importorskip("fontTools.ttLib")
+    assert _declarations("[data-testid='stMetricValue']") == {"font-variant-numeric": "tabular-nums slashed-zero"}
+    # Plex's slashed zero is as wide as its zero, so the value widths of ui/components.py still hold.
+    font = ttlib.TTFont(STATIC_FOLDERS[1] / "fonts" / "IBMPlexSans-Medium.woff2")
+    gsub, widths = font["GSUB"].table, font["hmtx"]
+    lookups = {i for f in gsub.FeatureList.FeatureRecord if f.FeatureTag == "zero" for i in f.Feature.LookupListIndex}
+    swaps = {
+        source: target
+        for index in lookups
+        for table in gsub.LookupList.Lookup[index].SubTable
+        for source, target in table.mapping.items()
+    }
+    assert swaps["zero"] != "zero" and widths[swaps["zero"]][0] == widths["zero"][0]
 
 
 def test_the_card_width_model_matches_plex_sans():
@@ -468,9 +599,15 @@ def test_the_card_width_model_matches_plex_sans():
     for value in ("Unlimited", "No profit", "No loss", "Too large", "–", ">99.9%", "<0.1%", "30 × 41"):
         model = components._value_em(value) - components._VALUE_SPARE_EM
         assert model >= sum(medium[c] for c in value) - 1e-9, value
-    # Labels: at most _LABEL_EM per character on average.
+    # Labels: the capitals, digits and signs of Plex Sans Regular, exactly; any other character as the widest.
+    for char, model in components._LABEL_CHAR_EM.items():
+        assert regular[char] == model, char
+    assert max(components._LABEL_CHAR_EM.values()) == components._LABEL_CHAR_EM["%"] == 0.927
     for label in CARD_LABELS:
-        assert sum(regular[c] for c in label) <= components._LABEL_EM * len(label), label
+        assert set(label.upper()) <= set(components._LABEL_CHAR_EM), label
+    # Deltas: at most _DELTA_EM per character on average.
+    for delta in ("+0.00 vol pts vs sidebar", "debit (paid)", "credit (received)"):
+        assert sum(regular[c] for c in delta) <= components._DELTA_EM * len(delta), delta
 
 
 def _covered(code_point: int) -> bool:
@@ -921,6 +1058,149 @@ def test_text_on_the_primary_colour_is_legible_in_the_app(chromium, app_url, sch
         color, background = step.evaluate("e => [getComputedStyle(e).color, getComputedStyle(e).backgroundColor]")
         assert _hex(background) == primary
         assert contrast(_hex(color), _hex(background)) >= 4.5, (color, background)
+    finally:
+        page.close()
+
+
+#: The desk shell's layout: boxes (page coordinates, px) of the header strip, its two blocks and the first card, the
+#: tab bar and the open tab's panel; the vertical centres of the action group's items; the tab labels that are cut
+#: off or scrolled out of the tab bar; and how far the tab bar and the page scroll sideways.
+_SHELL = """() => {
+  const box = e => { if (!e) return null; const r = e.getBoundingClientRect();
+    return {top: r.top + scrollY, bottom: r.bottom + scrollY, left: r.left, right: r.right, height: r.height}; };
+  const q = s => document.querySelector(s);
+  const list = q('[data-testid=stMain] [role=tablist]');
+  const panel = [...document.querySelectorAll('[data-testid=stMain] [role=tabpanel]')].find(p => p.offsetParent);
+  const cut = t => { const p = t.querySelector('p') || t, end = list.getBoundingClientRect().right + 0.5;
+    return p.scrollWidth > p.clientWidth + 0.5 || t.getBoundingClientRect().right > end; };
+  const header = q('.st-key-desk_header');
+  return {header: box(header), identity: box(q('.st-key-desk_identity')), actions: box(q('.st-key-desk_actions')),
+    kpi: box(q('[data-testid=stMain] [data-testid=stMetric]')), tabs: box(list), panel: box(panel),
+    centres: [...document.querySelectorAll('.st-key-desk_actions > *')].map(e => {
+      const r = e.getBoundingClientRect(); return r.top + r.height / 2; }),
+    cut: [...list.querySelectorAll('[role=tab]')].filter(cut).map(t => t.innerText),
+    tabScroll: list.scrollWidth - list.clientWidth, headerScroll: header.scrollWidth - header.clientWidth,
+    pageScroll: document.documentElement.scrollWidth - document.documentElement.clientWidth};
+}"""
+
+
+def _shell(page) -> dict:
+    page.evaluate("document.fonts.ready.then(() => true)")
+    return page.evaluate(_SHELL)
+
+
+@pytest.mark.e2e
+@pytest.mark.slow
+@pytest.mark.parametrize("scheme", ["dark", "light"])
+def test_the_desk_shell_on_a_laptop(chromium, app_url, scheme):
+    # The 44 px title and the feature caption under it pushed the price cards to 225 px and the tabs to 386 px.
+    # One header strip under 40 px now holds the identity and the actions on one line.
+    page = _open(chromium, app_url, scheme, 1440)
+    try:
+        shell = _shell(page)
+        assert shell["header"]["height"] < 40
+        assert shell["kpi"]["top"] < 200
+        assert shell["tabs"]["top"] <= 260
+        assert max(shell["centres"]) - min(shell["centres"]) < 2  # the action group on one line
+        assert abs(shell["actions"]["right"] - shell["header"]["right"]) < 1  # on the right
+        assert shell["identity"]["height"] < 24  # the brand and the ticker on one line
+        assert not shell["cut"] and shell["tabScroll"] <= 0 and shell["pageScroll"] <= 0
+    finally:
+        page.close()
+
+
+@pytest.mark.e2e
+@pytest.mark.slow
+def test_the_desk_shell_on_a_phone(chromium, app_url):
+    # On a 390 x 844 phone the tabs started 518 px down (and about 620 px before the card rows wrapped in pairs).
+    # The plan's target, 330 px, needs the two lines of the price cards' caption gone as well; the caption stays,
+    # and the tab content starts at about 377 px.
+    page = chromium.new_page(viewport={"width": 390, "height": 844}, color_scheme="dark")
+    try:
+        page.goto(app_url)
+        page.wait_for_selector("[data-testid=stMetricValue]", timeout=120_000)
+        _settle(page)
+        shell = _shell(page)
+        assert shell["panel"]["top"] <= 380
+        assert not shell["cut"] and shell["tabScroll"] <= 0  # every tab label whole, none scrolled away
+        assert shell["pageScroll"] <= 0 and shell["headerScroll"] <= 0
+        assert shell["identity"]["height"] < 40  # the brand and the ticker in two lines
+        assert max(shell["centres"]) - min(shell["centres"]) < 2
+    finally:
+        page.close()
+
+
+#: Long inputs that made the header wrap badly at 1,280 to 1,440 px: an index level with a 2,000-step American tree,
+#: and a five-digit level with a million Monte Carlo paths.
+LONG_INPUTS = {
+    "tree": {"spot": "5812.37", "strike": "5800", "model": "Binomial tree", "steps": "2000", "style": "American"},
+    "paths": {"spot": "45123.5", "strike": "45000", "model": "Monte Carlo", "paths": "1,000,000"},
+}
+
+
+@pytest.mark.e2e
+@pytest.mark.slow
+@pytest.mark.parametrize("inputs", LONG_INPUTS)
+def test_the_header_wraps_cleanly_with_long_inputs(chromium, app_url, inputs):
+    # With the sidebar open: from 1,280 px the actions keep the top right and the ticker wraps beside them, between
+    # its items; at 1,024 px the action group moves, whole, under the ticker on the right.
+    page = _open(chromium, f"{app_url}/?{urllib.parse.urlencode(LONG_INPUTS[inputs])}", "dark", 1440)
+    try:
+        for width in (1440, 1366, 1280, 1024):
+            page.set_viewport_size({"width": width, "height": 900})
+            page.wait_for_timeout(300)
+            shell = _shell(page)
+            assert max(shell["centres"]) - min(shell["centres"]) < 2, width  # the group never splits
+            assert abs(shell["actions"]["right"] - shell["header"]["right"]) < 1, width
+            assert shell["headerScroll"] <= 0 and shell["pageScroll"] <= 0, width
+            assert shell["identity"]["height"] < 40, width  # the ticker in two lines at most
+            if width >= 1280:
+                assert shell["header"]["height"] < 40, width  # one row
+                assert shell["actions"]["top"] < shell["identity"]["bottom"], width
+            else:
+                assert shell["actions"]["top"] >= shell["identity"]["bottom"] - 1, width  # under the ticker
+                assert shell["header"]["height"] < 80, width
+        # The ticker's items never break inside: each line of the ticker starts with an item's letter.
+        lines = page.evaluate("""() => {
+          const p = document.querySelector('.st-key-desk_identity p'), range = document.createRange(), starts = [];
+          const text = p.firstChild.nextSibling;  // the text after the brand
+          for (let i = 0; i < text.length; i++) {
+            range.setStart(text, i); range.setEnd(text, i + 1);
+            const r = range.getClientRects()[0];
+            const last = starts[starts.length - 1];
+            if (r && (!last || r.top > last.top + 2)) starts.push({top: r.top, char: text.data[i]});
+          }
+          return starts.map(s => s.char);
+        }""")
+        assert set(lines) <= set(" SKσrqF0123456789"), lines
+    finally:
+        page.close()
+
+
+@pytest.mark.e2e
+@pytest.mark.slow
+def test_the_share_link_reopens_this_view_and_the_methodology_button_opens_its_tab(chromium, app_url):
+    page = _open(chromium, f"{app_url}/?tab=Risk", "dark", 1440)
+    try:
+        page.locator("[data-testid=stSidebar] [data-testid=stNumberInputStepUp]").first.click()
+        page.wait_for_function("() => location.search.includes('spot=101')", timeout=60_000)
+        _settle(page)
+        page.get_by_role("button", name="Share").click()
+        link = page.locator("[data-testid=stPopoverBody] code").inner_text(timeout=30_000).strip()
+        assert link == page.url == f"{app_url}/?spot=101&tab=Risk"
+        page.keyboard.press("Escape")
+        other = chromium.new_page(viewport={"width": 1440, "height": 900})
+        try:
+            other.goto(link)
+            other.wait_for_selector("[role=tabpanel] .st-key-var_cards", timeout=120_000)
+            ticker = other.locator(".st-key-desk_identity p").inner_text()
+            assert "S 101.00 · K 100.00 · " in ticker.replace("\xa0", " ")
+        finally:
+            other.close()
+        page.get_by_role("button", name="Methodology").click()
+        page.wait_for_function("() => location.search.includes('tab=Methodology')", timeout=60_000)
+        page.locator(f"[role=tabpanel] {TAB_READY['Methodology']}").first.wait_for(state="visible", timeout=60_000)
+        assert page.locator("[role=tab][aria-selected=true]").inner_text() == "Methodology"
     finally:
         page.close()
 

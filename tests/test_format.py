@@ -154,6 +154,39 @@ def test_dollar_greeks_of_a_long_call():
     assert fmt.dollar_rho(g["rho"], units) == pytest.approx(532.33, abs=0.01)
 
 
+# --- levels -------------------------------------------------------------------------------------------------------
+
+
+def _check_level(value: float) -> None:
+    text = fmt.level(value)
+    shown = float(text.replace(",", "").replace(MINUS, "-"))
+    size = abs(value)
+    if round(size, 2) >= 1:  # two decimals with separators
+        assert re.fullmatch(r"\d{1,3}(,\d{3})*\.\d{2}", text), text
+        assert abs(shown - size) <= 0.005 * (1 + 1e-12), (value, text)
+    elif round(size, 4) >= 0.01:  # four decimals
+        assert re.fullmatch(r"0\.\d{4}", text), text
+        assert abs(shown - size) <= 0.00005 * (1 + 1e-9), (value, text)
+    else:  # four significant digits: never 0.0000
+        digits = re.sub(r"e.*|[^0-9]", "", text).lstrip("0")
+        assert len(digits) >= 4, text
+        assert shown == pytest.approx(size, rel=5e-4), (value, text)
+
+
+def test_level_over_a_wide_sample():
+    for value in _sample():
+        if 0 < value < 1e15:
+            _check_level(value)
+
+
+def test_level_examples():
+    assert [fmt.level(v) for v in (5812.374, 45123.5, 1.0, 0.996, 0.99, 0.042, 0.01, 4.0866e-5, 1.23e-7)] == [
+        "5,812.37", "45,123.50", "1.00", "1.00", "0.9900", "0.0420", "0.0100", "0.00004087", f"1.230e{MINUS}7",
+    ]  # fmt: skip
+    assert fmt.level(0.0) == "0.0000" and fmt.level(-3.2) == f"{MINUS}3.20"
+    assert fmt.level(float("nan")) == fmt.level(None) == "–" and fmt.level(math.inf) == "∞"
+
+
 # --- dates, accounting, quantities --------------------------------------------------------------------------------
 
 

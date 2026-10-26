@@ -9,7 +9,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from options_analyzer import vol_surface
-from options_analyzer.ui import components
+from options_analyzer.ui import components, theme
 
 FONTS = Path(components.__file__).with_name("static") / "fonts"
 #: Width (px) of the row on the narrowest phone the cards are checked at: 360 px less the page's side margins.
@@ -175,20 +175,29 @@ def test_three_cards_go_two_and_one_with_the_third_card_as_wide_as_the_others():
 
 
 def test_a_label_on_two_lines_breaks_at_the_best_space():
-    # The longest line of the best two-line break, in characters: "Expected Shortfall" | "99.0%" is 18, "Expected" |
-    # "Shortfall 99.0%" 15; and one word per line, the longest word.
-    label_px = components._LABEL_PX * components._LABEL_EM
+    # The longest line of the best two-line break: "EXPECTED" | "SHORTFALL 99.0%" (not "EXPECTED SHORTFALL" |
+    # "99.0%"), "EXPECTED P&L" | "AT EXPIRY"; and one word per line, the longest word.
     chrome = components._HELP_ICON_PX + components._CARD_CHROME_PX
-    for label, lines, characters in [
-        ("Expected Shortfall 99.0%", 1, 24),
-        ("Expected Shortfall 99.0%", 2, 15),
-        ("Expected Shortfall 99.0%", None, 9),
-        ("Expected P&L at expiry", 2, 12),
-        ("Gamma", 2, 5),
-        ("Gamma", None, 5),
+    for label, lines, longest in [
+        ("Expected Shortfall 99.0%", 1, "Expected Shortfall 99.0%"),
+        ("Expected Shortfall 99.0%", 2, "Shortfall 99.0%"),
+        ("Expected Shortfall 99.0%", None, "Shortfall"),
+        ("Expected P&L at expiry", 2, "Expected P&L"),
+        ("Gamma", 2, "Gamma"),
+        ("Gamma", None, "Gamma"),
     ]:
         width = components._card_width(label, "1", 16, lines)
-        assert width == pytest.approx(label_px * characters + chrome), (label, lines)
+        assert width == pytest.approx(components._label_px(longest) + chrome), (label, lines)
+
+
+def test_labels_are_modelled_in_spaced_capitals():
+    # The labels are capitals at 0.72rem with 0.06 em after each character (static/desk.css): "GAMMA" is 5 x (0.707
+    # + 0.06) em plus the M's extra width, wider than "Gamma" in lower case at the old 12.25 px.
+    em = sum(components._LABEL_CHAR_EM[c] + components._LABEL_TRACKING_EM for c in "GAMMA")
+    assert components._label_px("Gamma") == pytest.approx(components._LABEL_PX * em)
+    assert components._label_px("gamma") == components._label_px("GAMMA")
+    # A character outside the table counts as the widest in it, "%".
+    assert components._label_px("Σ") == pytest.approx(components._LABEL_PX * (0.927 + 0.06))
 
 
 def test_the_cards_of_a_line_share_their_label_value_and_delta_rows():
@@ -211,12 +220,13 @@ def test_the_cards_of_a_line_share_their_label_value_and_delta_rows():
 
 def test_the_cards_of_a_line_are_as_tall_as_the_tallest():
     # At full size a card with a delta line ("debit (paid)") was 23 px taller than the cards next to it. The groups
-    # now stretch to their line, the cards to their group and the bordered box to its card, at every size (in a
-    # compact row the subgrid makes them equal too).
+    # now stretch to their line, the cards to their group and the bordered box to its card (by the desk
+    # stylesheet, for every card row), at every size (in a compact row the subgrid makes them equal too).
     style = components._cards_style(FOUR, "row", ("row_a", "row_b"))
     full_size = style.split("@container ")[0]
     assert ".st-key-row, .st-key-row_a, .st-key-row_b { align-items: stretch; }" in full_size
-    assert ".st-key-row [data-testid='stMetric'] { height: 100%; }" in full_size
+    desk = re.sub(r"\s+", " ", theme.STYLESHEET.read_text(encoding="utf-8"))
+    assert "[data-testid='stMetric'] { height: 100%; }" in desk
 
 
 def test_rows_sized_with_each_other_get_the_same_sizes():
@@ -326,15 +336,17 @@ def test_the_four_card_rows_stay_two_by_two_on_a_phone(states):
 @pytest.mark.parametrize(
     ("phone", "expected"),
     # Cards per line of the three-card rows at the default URL on common phone widths (360 px Android, 375 and 390
-    # px iPhone, 412 and 430 px large phones). The expected-P&L cards go 3 across from a 400 px row (phones of 428
-    # px and up), where each card has room for its value at full size and "Expected P&L at expiry" on two lines;
-    # the VaR cards need a 457 px row ("Expected" over "Shortfall 99.0%"), so they go 2 + 1 on every phone.
+    # px iPhone, 412, 430 and 440 px large phones). The expected-P&L cards go 3 across from a 409 px row (phones of
+    # 437 px and up), where each card has room for its value at full size and "EXPECTED P&L" over "AT EXPIRY" in
+    # the labels' small capitals; the VaR cards need a 460 px row ("EXPECTED" over "SHORTFALL 99.0%"), so they go
+    # 2 + 1 on every phone.
     [
         (360, {"expectation_cards": 2, "var_cards": 2}),
         (375, {"expectation_cards": 2, "var_cards": 2}),
         (390, {"expectation_cards": 2, "var_cards": 2}),
         (412, {"expectation_cards": 2, "var_cards": 2}),
-        (430, {"expectation_cards": 3, "var_cards": 2}),
+        (430, {"expectation_cards": 2, "var_cards": 2}),
+        (440, {"expectation_cards": 3, "var_cards": 2}),
     ],
 )
 def test_the_three_card_rows_on_a_phone(states, phone, expected):
@@ -346,7 +358,7 @@ def test_the_three_card_rows_on_a_phone(states, phone, expected):
         assert _layout(style, row) == (per_line, 22.75), key
 
 
-@pytest.mark.parametrize("phone", [360, 375, 390, 412, 430])
+@pytest.mark.parametrize("phone", [360, 375, 390, 412, 430, 440])
 def test_every_card_value_of_a_phone_screen_has_one_size(states, phone):
     # Every row of every tab at the default URL shows its values at the theme's full size on a phone, so the type
     # does not change from row to row on one screen (no query applies: full size). On a 320 px phone the price
@@ -379,18 +391,27 @@ def _advances(weight: str) -> dict[str, float]:
 
 def test_the_card_width_model_covers_every_card_row_in_plex_sans(states):
     # Every card of a row is based on the row's widest card in the model. It must not be narrower than the widest
-    # card's real text (Plex Sans advance widths): the value in Medium at 22.75 px and the label (plus its help
-    # icon) and delta in Regular at 12.25 px on one line, or on two (a line of three cards on a phone), and the value
-    # at 16 px with the label one word per line (a pair on a phone). And no value is modelled narrower than it is,
-    # as the compact rows size their values from the model: "$46.62M" was modelled 0.11 em too narrow ("M" is 0.814
-    # em wide), so on a 390 px phone it ran 2.6 px into its card's padding.
+    # card's real text (Plex Sans advance widths): the value in Medium at 22.75 px, the label in Regular capitals at
+    # 10.08 px with its letter-spacing (plus its help icon) and the delta in Regular at 12.25 px, on one line or on
+    # two (a line of three cards on a phone), and the value at 16 px with the label one word per line (a pair on a
+    # phone). And no value is modelled narrower than it is, as the compact rows size their values from the model:
+    # "$46.62M" was modelled 0.11 em too narrow ("M" is 0.814 em wide), so on a 390 px phone it ran 2.6 px into its
+    # card's padding.
     medium, regular = _advances("Medium"), _advances("Regular")
+    tracking = components._LABEL_TRACKING_EM * components._LABEL_PX
 
     def text(chars: str, table: dict[str, float], px: float) -> float:
         return sum(table[c] for c in chars) * px
 
+    def label(line: str) -> float:
+        """A label line in small capitals: each character followed by its letter-spacing."""
+        return text(line.upper(), regular, components._LABEL_PX) + tracking * len(line)
+
+    def delta(line: str) -> float:
+        return text(line, regular, components._DELTA_PX)
+
     def real(metric, value_px: float, lines: int | None) -> float:
-        def wrapped(chars: str) -> float:
+        def wrapped(chars: str, width) -> float:
             """Width of the longest line of ``chars`` at its best break onto ``lines`` lines."""
             words = chars.split()
             if not words:
@@ -401,12 +422,11 @@ def test_the_card_width_model_covers_every_card_row_in_plex_sans(states):
                 breaks = [[" ".join(words[:i]), " ".join(words[i:])] for i in range(1, len(words))]
             else:
                 breaks = [[chars]]
-            return min(max(text(line, regular, components._LABEL_PX) for line in parts) for parts in breaks)
+            return min(max(width(line) for line in parts) for parts in breaks)
 
-        label = wrapped(metric.label) + components._HELP_ICON_PX
-        return (
-            max(text(metric.value, medium, value_px), label, wrapped(metric.proto.delta)) + components._CARD_CHROME_PX
-        )
+        label_px = wrapped(metric.label, label) + components._HELP_ICON_PX
+        value_width = text(metric.value, medium, value_px)
+        return max(value_width, label_px, wrapped(metric.proto.delta, delta)) + components._CARD_CHROME_PX
 
     for at in states.values():
         for row, groups in _card_rows(at).items():
@@ -417,7 +437,8 @@ def test_the_card_width_model_covers_every_card_row_in_plex_sans(states):
                 (components._MIN_VALUE_PX, None),
             ):
                 model = max(components._card_width(m.label, m.value, value_px, lines, m.proto.delta) for m in metrics)
-                assert model >= max(real(m, value_px, lines) for m in metrics), (row, value_px, lines)
+                # (the label widths are modelled exactly: the font's widths are whole 1/1000 em)
+                assert model >= max(real(m, value_px, lines) for m in metrics) - 1e-9, (row, value_px, lines)
             for m in metrics:
                 modelled = components._value_em(m.value) - components._VALUE_SPARE_EM
                 assert modelled >= text(m.value, medium, 1) - 1e-9, m.value  # (the widths are whole 1/1000 em)

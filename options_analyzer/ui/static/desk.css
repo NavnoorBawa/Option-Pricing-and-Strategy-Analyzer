@@ -1,0 +1,121 @@
+/* The desk stylesheet: all of the app's own CSS but the per-row sizes of the card rows (ui/components.py).
+   ui/theme.py apply_stylesheet() adds it to the page once per script run, with st.html.
+
+   Selectors use stable hooks only: the class that Streamlit gives an element with a key (.st-key-KEY) and the
+   data-testid values listed in tests/test_theme.py, which checks every selector here against that list.
+   No angle bracket opening a tag may appear in this file, not even in a comment: the browser's HTML sanitiser
+   would then drop the whole stylesheet. */
+
+/* --- Page ---------------------------------------------------------------------------------------------------- */
+
+/* Start the content just under Streamlit's toolbar band (3.75rem) instead of 6rem down. */
+[data-testid='stMainBlockContainer'] {
+  padding-top: 4rem;
+}
+
+/* A little less room between the page's own rows (header strip, price cards, their caption, the tabs) than
+   Streamlit's 1rem. The tabs' content keeps its own spacing. */
+[data-testid='stMainBlockContainer'] > [data-testid='stVerticalBlock'] {
+  gap: 0.75rem;
+}
+
+/* --- Header strip (ui/header.py) ----------------------------------------------------------------------------- */
+
+/* Two items: the identity block (brand and ticker in one paragraph) and the action group. Streamlit wraps each in
+   a layout box, which is the flex item. The identity block takes the room the actions leave and wraps the ticker
+   between its items; below 16rem for it, the action group moves under it as a whole, on the right. */
+.st-key-desk_header {
+  container-type: inline-size;
+  row-gap: 0.25rem;
+}
+
+.st-key-desk_header > :has(> .st-key-desk_identity) {
+  flex: 1 1 0 !important;
+  min-width: min(100%, 16rem);
+}
+
+.st-key-desk_header > :has(> .st-key-desk_actions) {
+  flex: 0 1 auto !important;
+  max-width: 100%;
+  margin-left: auto;
+}
+
+/* The group wraps only on a row narrower than itself (a phone under 340px), rather than run off the screen. */
+.st-key-desk_actions {
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+/* Plex Mono has no Greek: σ comes from Plex Sans. The size follows the strip's width down to 0.72rem (the card
+   labels' size), so that a 390px phone needs two lines for the brand and the ticker. */
+.st-key-desk_identity p {
+  font-family: 'IBM Plex Mono', 'IBM Plex Sans', monospace;
+  font-size: clamp(0.72rem, 2.8cqi, 0.8125rem);
+  font-variant-numeric: tabular-nums slashed-zero;
+}
+
+/* The brand, in small capitals (Plex has no small-caps glyphs: capitals at a small size, spaced out). */
+.st-key-desk_identity strong {
+  margin-right: 0.75rem;
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* Compact buttons, a little shorter than the default 2.5rem. */
+.st-key-desk_actions button {
+  min-height: 2rem;
+  padding: 0 0.625rem;
+}
+
+/* --- Metric cards ------------------------------------------------------------------------------------------- */
+
+/* Dense cards: 0.625rem above and below the text instead of 13px. The sides keep Streamlit's padding, which the
+   card width model in ui/components.py counts. */
+[data-testid='stMetric'] > div {
+  padding-block: 0.625rem;
+}
+
+/* Every card as tall as its line (the card rows stretch their cards to the line). */
+[data-testid='stMetric'] {
+  height: 100%;
+}
+
+/* Labels in small capitals: 0.72rem capitals, spaced out (ui/components.py models their width from these
+   values). The label row is as tall as its text or help icon, not Streamlit's 1.5rem. */
+[data-testid='stMetricLabel'] {
+  min-height: 0;
+  line-height: 1.4;
+}
+
+[data-testid='stMetricLabel'] p {
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* Digits are tabular in Plex already; the slashed zero tells 0 from O in figures such as $10.0500. */
+[data-testid='stMetricValue'] {
+  font-variant-numeric: tabular-nums slashed-zero;
+}
+
+/* --- Text on the primary colour (ui/theme.py ON_PRIMARY) ------------------------------------------------------ */
+
+/* Streamlit writes white on the primary colour in the chips of a multiselect and the step buttons of a number input
+   while hovered or focused: 2.16:1 on the dark theme's amber. light-dark() follows the color-scheme that Streamlit
+   sets for the theme it draws, so the rule switches with the theme at once. */
+[data-testid='stMultiSelect'] [data-tag],
+[data-testid='stNumberInput'] :is([data-testid='stNumberInputStepUp'], [data-testid='stNumberInputStepDown']):is(:hover, :focus):enabled {
+  color: light-dark(#FFFFFF, #0B0F16);
+}
+
+/* --- Surface tab --------------------------------------------------------------------------------------------- */
+
+/* The name of the kept quotes file is a code span in a caption, which Streamlit draws at 0.75em (9.2 px against
+   the caption's 12.25 px): the one piece of the user's data in the row was the hardest to read. */
+.st-key-quotes_kept code {
+  font-size: inherit;
+}

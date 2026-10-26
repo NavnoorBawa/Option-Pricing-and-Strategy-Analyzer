@@ -20,13 +20,25 @@ import numpy as np
 import streamlit as st
 
 #: Card text in the theme's IBM Plex Sans: values in Medium at 22.75 px (the theme's metricValueFontSize, 1.625rem
-#: of its 14 px base), labels (and deltas) in Regular at 12.25 px. Digits (tabular), "$", "+" and "−" are 0.6 em
-#: wide in Plex Sans Medium; the other characters of amounts and percentages are listed, with the "M", "B", "T" and
-#: "e" of the shortened amounts ("$46.62M", "$1.2e+15"). The words a card can show instead ("Unlimited", "No
-#: profit") are modelled at 0.6 em a character, wider than they are. Labels average at most 0.517 em per character.
-_VALUE_PX, _LABEL_PX, _LABEL_EM = 22.75, 12.25, 0.517
+#: of its 14 px base) and deltas in Regular at 12.25 px. Digits (tabular), "$", "+" and "−" are 0.6 em wide in Plex
+#: Sans Medium; the other characters of amounts and percentages are listed, with the "M", "B", "T" and "e" of the
+#: shortened amounts ("$46.62M", "$1.2e+15"). The words a card can show instead ("Unlimited", "No profit") are
+#: modelled at 0.6 em a character, wider than they are. Deltas average at most 0.517 em per character.
+_VALUE_PX, _DELTA_PX, _DELTA_EM = 22.75, 12.25, 0.517
 _DIGIT_EM = 0.6
 _CHAR_EM = {",": 0.29, ".": 0.29, " ": 0.236, "-": 0.401, "%": 0.947, "M": 0.814, "B": 0.659, "T": 0.577, "e": 0.556}
+#: Labels, as static/desk.css sets them: Regular capitals at 0.72rem (10.08 px), each character followed by 0.06 em
+#: of letter-spacing. The advance widths (em) of the capitals, digits and signs of Plex Sans Regular; any other
+#: character counts as the widest of them, "%".
+_LABEL_PX, _LABEL_TRACKING_EM = 10.08, 0.06
+_LABEL_CHAR_EM = {
+    **dict.fromkeys("0123456789+×−", 0.6),
+    "A": 0.641, "B": 0.653, "C": 0.621, "D": 0.671, "E": 0.583, "F": 0.559, "G": 0.695, "H": 0.707, "I": 0.4,
+    "J": 0.51, "K": 0.634, "L": 0.501, "M": 0.812, "N": 0.707, "O": 0.708, "P": 0.606, "Q": 0.708, "R": 0.64,
+    "S": 0.581, "T": 0.572, "U": 0.678, "V": 0.609, "W": 0.891, "X": 0.613, "Y": 0.593, "Z": 0.58,
+    " ": 0.236, ".": 0.272, ",": 0.272, ":": 0.292, "(": 0.335, ")": 0.335, "/": 0.383, "-": 0.399, "&": 0.694,
+    "%": 0.927,
+}  # fmt: skip
 #: Room to spare on every value (about 2 px on a desktop), for browsers that round the glyph widths differently.
 _VALUE_SPARE_EM = 0.1
 #: Card padding and border, the label's help icon and its margin, and the gap between cards (gap="small").
@@ -45,24 +57,34 @@ def _value_em(value: str) -> float:
     return sum(_CHAR_EM.get(c, _DIGIT_EM) for c in value) + _VALUE_SPARE_EM
 
 
+def _label_px(text: str) -> float:
+    """Width in px of a card label on one line, in capitals with their letter-spacing."""
+    widest = max(_LABEL_CHAR_EM.values())
+    return _LABEL_PX * sum(_LABEL_CHAR_EM.get(c, widest) + _LABEL_TRACKING_EM for c in text.upper())
+
+
+def _delta_px(text: str) -> float:
+    """Width in px of a card delta (the small line under the value) on one line."""
+    return _DELTA_PX * _DELTA_EM * len(text)
+
+
 def _card_width(
     label: str, value: str, value_px: float = _VALUE_PX, label_lines: int | None = 1, delta: str = ""
 ) -> float:
     """Width in px a card needs to show its value on one line, at ``value_px``, and its label and delta (the small
     line under the value, if any) on at most ``label_lines`` lines each: 1 or 2, or None for one word per line."""
 
-    def characters(text: str) -> int:
-        """Characters on the longest line of ``text`` wrapped at spaces onto ``label_lines`` lines."""
+    def longest(text: str, width) -> float:
+        """Width of the longest line of ``text`` wrapped at spaces onto ``label_lines`` lines, at the best break."""
         words = text.split()
         if label_lines is None:
-            return max(map(len, words), default=0)
+            return max(map(width, words), default=0.0)
         if label_lines == 2 and len(words) > 1:
-            return min(max(len(" ".join(words[:i])), len(" ".join(words[i:]))) for i in range(1, len(words)))
-        return len(text)
+            return min(max(width(" ".join(words[:i])), width(" ".join(words[i:]))) for i in range(1, len(words)))
+        return width(text)
 
-    label_px = _LABEL_PX * _LABEL_EM * characters(label) + _HELP_ICON_PX
-    delta_px = _LABEL_PX * _LABEL_EM * characters(delta)
-    return max(value_px * _value_em(value), label_px, delta_px) + _CARD_CHROME_PX
+    label_px = longest(label, _label_px) + _HELP_ICON_PX
+    return max(value_px * _value_em(value), label_px, longest(delta, _delta_px)) + _CARD_CHROME_PX
 
 
 def _texts(card: Card) -> tuple[str, str, str]:
@@ -138,10 +160,10 @@ def _cards_style(
         f"{row} {{ container: {name} / inline-size; }}",
         f"{group_items} {{ flex: 1 1 {group}px !important; }}",
         f"{each_card} {{ flex: 1 1 {card}px !important; }}",
-        # Every card as tall as its line: the groups stretch to the line (a row of four on one line), the cards to
-        # their group, and the bordered box to its card (as Streamlit's own style has it too).
+        # Every card as tall as its line: the groups stretch to the line (a row of four on one line) and the cards to
+        # their group; the bordered box fills its card by the desk stylesheet (static/desk.css), as Streamlit's own
+        # style has it too.
         f"{row}, {', '.join(groups)} {{ align-items: stretch; }}",
-        f"{row} [data-testid='stMetric'] {{ height: 100%; }}",
         f"@container {name} (width < {group}px) {{ "
         f"{group_items} {{ flex-basis: 100% !important; }} "
         f"{', '.join(groups)} {{ display: grid !important; row-gap: 0 !important; }} "
@@ -168,7 +190,7 @@ def card_row(key: str, group_keys: Sequence[str], cards: Sequence[Card], *, size
     cards no longer fit side by side even so (seven-digit prices). Three cards in one group go 3 across while each
     card has room for its value at full size (22.75 px) and its label on two lines at most, then 2 + 1 with the
     third card as wide as the others, then one per line: the default expected-P&L cards of the Strategy tab go 3
-    across on a row of 400 px and up (phones 428 px wide and up), and 2 + 1 on 360 to 414 px phones. Every card of
+    across on a row of 409 px and up (phones 437 px wide and up), and 2 + 1 on 360 to 430 px phones. Every card of
     a line has the same width (that of the widest card's text, from a model of the theme's IBM Plex Sans) and
     height, and their values sit on one baseline. The stylesheet that sets these sizes is scoped to the row's key.
 
