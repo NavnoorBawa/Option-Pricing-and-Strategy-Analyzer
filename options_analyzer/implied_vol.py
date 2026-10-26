@@ -11,8 +11,8 @@ The European solver
 3. inverts the normalised out-of-the-money price with Peter Jäckel's "Let's Be
    Rational" (:mod:`options_analyzer.lets_be_rational`), which reaches machine
    precision in two Householder steps, and falls back to Brent's method on a
-   bracket (guaranteed to converge once a bracket exists) for any quote where
-   those steps do not report convergence.
+   bracket of the same normalised price (guaranteed to converge once a bracket
+   exists) for any quote where those steps do not report convergence.
 
 :func:`implied_volatility_batch` does the same for arrays of quotes in one
 vectorised pass, with NaN and a reason for each rejected quote.
@@ -60,6 +60,7 @@ REJECTION_REASONS = {
     "at_or_above_upper_bound": "the price is at or above the no-arbitrage upper bound",
     "above_max_vol": f"the implied volatility exceeds {MAX_VOL:.0%}",
     "below_tree_floor": "the price is below the value at the lowest volatility the binomial tree can represent",
+    "invalid": "the quote cannot be inverted (the default code, where no specific one applies)",
 }
 _ABOVE_MAX_VOL = f"implied volatility exceeds {MAX_VOL:.0%}; check the quote and inputs"
 
@@ -173,14 +174,15 @@ def implied_volatility(
     otm_price = price if otm_phi == phi else price - phi * _forward_intrinsic(fwd_s, pv_k, x)
     if otm_price <= 0.0:
         return 0.0  # no time value: the quote sits exactly on the lower bound
+    # The undiscounted out-of-the-money price over √(FK); with time value left, both forwards are positive here.
+    beta = otm_price / (math.sqrt(fwd_s) * math.sqrt(pv_k))
     try:
-        beta = otm_price / (math.sqrt(fwd_s) * math.sqrt(pv_k))  # undiscounted price over √(FK)
         s, converged = lbr._lets_be_rational_s(beta, -abs(x))
-    except (ArithmeticError, ValueError):  # forwards that under- or overflow
+    except (ArithmeticError, ValueError):  # math over- or underflows on extreme inputs
         converged = False
     if converged:
         return _accept(s / math.sqrt(T))
-    return _brent_implied_volatility(otm_price, S, K, T, r, q, "put" if otm_phi < 0 else "call", tol)
+    return _brent_implied_volatility(beta, -abs(x), T, tol)
 
 
 def _log_moneyness(S: float, K: float, T: float, r: float, q: float) -> float:
@@ -189,9 +191,9 @@ def _log_moneyness(S: float, K: float, T: float, r: float, q: float) -> float:
     Out of the money with ``σ√T`` small, the volatility's relative error equals that of ``ln(F/K)``, so
     ``ln(S e^(-qT)/(K e^(-rT)))``, whose rounding is about ``ε`` absolute, would cost about ``ε/|ln(F/K)|`` (1e-13
     at 0.2 % from the forward). Within a factor of two ``S - K`` is exact, and ``log1p`` keeps the relative accuracy.
+    Where ``S/K`` under- or overflows, ``ln S - ln K``.
     """
-    ratio = S / K
-    return (math.log1p((S - K) / K) if 0.5 <= ratio <= 2 else math.log(ratio)) + (r - q) * T
+    return lbr._log_ratio_s(S, K) + (r - q) * T
 
 
 def _forward_intrinsic(fwd_s: float, pv_k: float, x: float) -> float:
@@ -209,11 +211,16 @@ def _accept(vol: float) -> float:
     return vol if vol >= _VOL_FLOOR else 0.0  # zero to machine precision
 
 
-def _brent_implied_volatility(otm_price, S, K, T, r, q, otm_type: str, tol: float) -> float:
-    """The bracketing solver: Brent's method on the out-of-the-money price."""
+def _brent_implied_volatility(beta: float, x: float, T: float, tol: float) -> float:
+    """The bracketing solver: Brent's method on ``b(x, σ√T) = β``, the normalised out-of-the-money price (``x ≤ 0``).
+
+    :func:`lets_be_rational.normalised_black` stays accurate in relative terms far out of the money, where
+    ``bs.price`` cancels, and is defined (without warnings) wherever ``β`` and ``x`` are.
+    """
+    sqrt_t = math.sqrt(T)
 
     def objective(vol: float) -> float:
-        return bs.price(S, K, T, r, vol, q, otm_type) - otm_price
+        return float(lbr.normalised_black(x, vol * sqrt_t)) - beta
 
     hi = _upper_bracket(objective)
     if objective(_VOL_FLOOR) > 0.0:
@@ -252,7 +259,8 @@ def _option_signs(option_type: ArrayLike) -> np.ndarray:
     if kinds.ndim == 0:
         return np.asarray(float(bs.option_sign(kinds.item())))
     unique, inverse = np.unique(kinds.astype(str), return_inverse=True)
-    return np.array([bs.option_sign(kind) for kind in unique], dtype=float)[inverse].reshape(kinds.shape)
+    signs = [bs.option_sign(str(kind)) for kind in unique]  # str: the error shows 'xyz', not np.str_('xyz')
+    return np.array(signs, dtype=float)[inverse].reshape(kinds.shape)
 
 
 def _libm(function, values: np.ndarray) -> np.ndarray:
@@ -262,6 +270,27 @@ def _libm(function, values: np.ndarray) -> np.ndarray:
     bound, or without time value, be judged differently by the batch than by :func:`implied_volatility`.
     """
     return np.fromiter(map(function, values.tolist()), dtype=float, count=values.size)
+
+
+def _log_ratio_libm(S: np.ndarray, K: np.ndarray) -> np.ndarray:
+    """``lets_be_rational._log_ratio_s`` on arrays, with the same libm calls, hence the same bits."""
+    ratio = S / K
+    near = (ratio >= 0.5) & (ratio <= 2)
+    far = ~near & (ratio > 0) & (ratio < np.inf)
+    extreme = ~near & ~far  # S/K under- or overflows
+    out = np.empty_like(ratio)
+    out[near] = _libm(math.log1p, (S[near] - K[near]) / K[near])
+    out[far] = _libm(math.log, ratio[far])
+    out[extreme] = _libm(math.log, S[extreme]) - _libm(math.log, K[extreme])
+    return out
+
+
+# implied_volatility_batch hands a quote to implied_volatility when its normalised out-of-the-money price is within
+# _NEAR_MAXIMUM (relative) of the maximum e^(-|x|/2), or its volatility above _NEAR_MAX_VOL·MAX_VOL. The margins
+# are far wider than the few ulps by which NumPy's exp differs from libm's (and the cond·ε by which the two paths'
+# volatilities differ there), and such quotes are rare: none of the 10,000 in benchmarks/bench_iv.py.
+_NEAR_MAXIMUM = 1e-12
+_NEAR_MAX_VOL = 0.99
 
 
 def implied_volatility_batch(
@@ -278,8 +307,12 @@ def implied_volatility_batch(
     """Black-Scholes-Merton implied volatilities of many quotes at once.
 
     The inputs broadcast against each other. Each quote gets the volatility (and the checks and error) of
-    :func:`implied_volatility`, computed in one vectorised Let's Be Rational pass; the rare quote where the
-    Householder steps do not report convergence is solved by :func:`implied_volatility` itself.
+    :func:`implied_volatility`, computed in one vectorised Let's Be Rational pass. The bound checks repeat the scalar
+    path's arithmetic exactly. :func:`implied_volatility` itself solves the rare quote whose outcome the vectorised
+    pass could judge differently: where the Householder steps do not report convergence (the Brent fallback), the
+    out-of-the-money price is within ``1e-12`` (relative) of its maximum, or the volatility is within 1 % of
+    ``MAX_VOL``. Near those edges a last-bit difference between NumPy's ``exp`` and the C library's, which the
+    scalar path uses, would decide between a volatility and "exceeds 2000%".
 
     Parameters
     ----------
@@ -342,12 +375,7 @@ def implied_volatility_batch(
         keep = ~below & ~above
         rows, p, s_, k_, t_, r_, q_, ph = (a[keep] for a in (rows, p, s_, k_, t_, r_, q_, ph))
         fwd_s, pv_k = fwd_s[keep], pv_k[keep]
-        ratio = s_ / k_  # as _log_moneyness
-        near = (ratio >= 0.5) & (ratio <= 2)
-        x = np.empty_like(ratio)
-        x[near] = _libm(math.log1p, (s_[near] - k_[near]) / k_[near])
-        x[~near] = _libm(math.log, ratio[~near])
-        x += (r_ - q_) * t_
+        x = _log_ratio_libm(s_, k_) + (r_ - q_) * t_  # as _log_moneyness
         intrinsic = fwd_s - pv_k  # as _forward_intrinsic
         small = np.abs(x) < 1
         intrinsic[small] = pv_k[small] * _libm(math.expm1, x[small])
@@ -355,16 +383,16 @@ def implied_volatility_batch(
         otm_price = np.where(otm_phi == ph, p, p - ph * intrinsic)
         vol[rows] = 0.0  # no time value; overwritten below where there is some
         live = otm_price > 0
-        rows, t_ = rows[live], t_[live]
+        rows, t_, ax = rows[live], t_[live], np.abs(x[live])
         beta = otm_price[live] / (np.sqrt(fwd_s[live]) * np.sqrt(pv_k[live]))
-        s, converged = lbr._lets_be_rational_v(beta, -np.abs(x[live]))
+        s, converged = lbr._lets_be_rational_v(beta, -ax)
         sigma = s / np.sqrt(t_)
-        accepted = converged & (sigma <= MAX_VOL)
-        vol[rows[accepted]] = np.where(sigma[accepted] >= _VOL_FLOOR, sigma[accepted], 0.0)
-        vol[rows[converged & ~accepted]] = np.nan
-        code[rows[converged & ~accepted]] = _CODES.index("above_max_vol")
+        # implied_volatility decides the rows whose outcome it could see differently (see the docstring).
+        scalar = ~converged | (beta >= (1 - _NEAR_MAXIMUM) * np.exp(-0.5 * ax)) | ~(sigma <= _NEAR_MAX_VOL * MAX_VOL)
+        solved = ~scalar
+        vol[rows[solved]] = np.where(sigma[solved] >= _VOL_FLOOR, sigma[solved], 0.0)
 
-    for i in rows[~converged].tolist():  # the scalar path, with its Brent fallback
+    for i in rows[scalar].tolist():  # the scalar path, with its Brent fallback
         try:
             vol[i] = implied_volatility(price[i], S[i], K[i], T[i], r[i], q[i], "call" if phi[i] > 0 else "put")
         except ImpliedVolError as error:
@@ -377,15 +405,13 @@ def implied_volatility_batch(
         return vol_shaped
     message = np.full(price.size, "", dtype=object)
     for i in np.flatnonzero(code).tolist():
-        if i in messages:
+        if i in messages:  # from implied_volatility itself
             message[i] = messages[i]
             continue
-        try:  # the same checks on the same floats as implied_volatility, hence the same message
+        try:  # a bound check: the same checks on the same floats as implied_volatility, hence the same message
             _check_european_quote(price[i], S[i], K[i], T[i], r[i], q[i], int(phi[i]))
         except ImpliedVolError as error:
             message[i] = str(error)
-        else:
-            message[i] = _ABOVE_MAX_VOL
     reason = np.asarray(_CODES, dtype=object)[code]
     return ImpliedVolBatch(vol_shaped, reason.reshape(shape), message.reshape(shape))
 

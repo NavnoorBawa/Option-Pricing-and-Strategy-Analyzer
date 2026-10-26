@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+from scipy.optimize import brentq
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -61,12 +62,25 @@ def whole(function, repeats: int) -> float:
 
 
 def legacy_brent(price, S, K, T, r, q, kind):
-    """The solver implied_volatility used before Let's Be Rational: Brent's method on the out-of-the-money price."""
+    """The solver implied_volatility used before Let's Be Rational: Brent's method on the out-of-the-money price.
+
+    A copy of its numerical part (after the bound checks, which have not changed), so that the timing stays
+    comparable however the package's own Brent fallback evolves.
+    """
     phi = bs.option_sign(kind)
     fwd_s, pv_k = iv._discounted(S, K, T, r, q)
     otm_type = "put" if fwd_s >= pv_k else "call"
     otm_price = price if bs.option_sign(otm_type) == phi else price - phi * (fwd_s - pv_k)
-    return iv._brent_implied_volatility(otm_price, S, K, T, r, q, otm_type, 1e-12)
+    if otm_price <= 0.0:
+        return 0.0
+
+    def objective(vol: float) -> float:
+        return bs.price(S, K, T, r, vol, q, otm_type) - otm_price
+
+    hi = iv._upper_bracket(objective)
+    if objective(1e-12) > 0.0:
+        return 0.0
+    return float(brentq(objective, 1e-12, hi, xtol=1e-12, rtol=4 * np.finfo(float).eps, maxiter=500))
 
 
 def main() -> None:

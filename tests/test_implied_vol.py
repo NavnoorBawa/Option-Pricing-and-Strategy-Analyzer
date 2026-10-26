@@ -292,6 +292,14 @@ def test_brent_takes_over_where_lets_be_rational_reports_no_convergence(monkeypa
     monkeypatch.setattr(lets_be_rational, "_lets_be_rational_s", not_converged)
     assert implied_volatility(price, 100, 110, 0.5, 0.03, 0.01, "put") == pytest.approx(expected, abs=1e-12)
     assert calls  # the fast path was tried first
+    # Brent runs on the normalised price, which keeps its relative accuracy where bs.price cancels: one-day
+    # options a few strikes out of the money at low volatility, where bs.price is off by up to 7.6e-11. Measured:
+    # at most 2.5e-14 here, against 1.9e-13 for Brent on bs.price; both are within tol = 1e-12.
+    for K, sigma, kind in ((104.0, 0.1, "call"), (98.0, 0.05, "put"), (101.0, 0.02, "call")):
+        exact, _, _ = _exact_quote(100.0, K, 1 / 365, 0.03, 0.01, sigma, kind)
+        assert implied_volatility(float(exact), 100, K, 1 / 365, 0.03, 0.01, kind) == pytest.approx(
+            sigma, rel=1e-13, abs=0
+        )
     with pytest.raises(ImpliedVolError, match="exceeds 2000%") as error:  # the fallback keeps the volatility cap
         implied_volatility(99.9999, 100, 100, 0.01, 0, 0, "call")
     assert error.value.reason == "above_max_vol"
@@ -335,6 +343,9 @@ def test_errors_carry_a_reason_code_and_survive_pickling():
     with pytest.raises(ImpliedVolError) as error:
         implied_volatility_american(5.0, 100, 90, 1, 0.05, 0, "call")
     assert error.value.reason == "below_lower_bound"
+    default = ImpliedVolError("no specific reason")  # the default code is a documented one too
+    assert default.reason == "invalid" and default.reason in REJECTION_REASONS
+    assert pickle.loads(pickle.dumps(default)).reason == "invalid"
 
 
 def _rejected_quotes():
@@ -420,8 +431,11 @@ def test_batch_broadcasts_and_keeps_shapes():
     assert scalar.shape == () and float(scalar) == pytest.approx(0.2, rel=1e-14)
     empty = implied_volatility_batch([], 100, 100, 1, 0.05, return_reasons=True)
     assert empty.vol.shape == empty.reason.shape == empty.message.shape == (0,)
-    with pytest.raises(ValueError, match="option_type"):
-        implied_volatility_batch([5.0], 100, 100, 1, 0.05, 0.0, ["straddle"])
+    with pytest.raises(ValueError, match="option_type") as scalar_error:
+        implied_volatility(5.0, 100, 100, 1, 0.05, 0.0, "straddle")
+    with pytest.raises(ValueError, match="option_type") as batch_error:
+        implied_volatility_batch([5.0, 5.0], 100, 100, 1, 0.05, 0.0, ["call", "straddle"])
+    assert str(batch_error.value) == str(scalar_error.value) == "option_type must be 'call' or 'put', got 'straddle'"
 
 
 def test_batch_zero_time_value():
@@ -442,6 +456,78 @@ def test_batch_raises_no_warnings_on_extreme_inputs():
         implied_volatility_batch(prices, spots, 100, expiries, rates, return_reasons=True)
         implied_volatility_batch(5.0, 100, 100, 1, 800.0)  # e^(-rT) underflows
         implied_volatility_batch(5.0, 100, 100, 1, -800.0)  # e^(-rT) overflows
+        # S/K under- or overflows (finite, positive S and K): a row of its own, not a ValueError for the batch.
+        quotes = [1e-210, 0.0, 5e-324, 1e-210, 10.0]
+        spots, strikes = [1e-200, 5e-324, 5e-324, 1e200, 100], [1e200, 1e300, 1e300, 1e-200, 100]
+        kinds = ["call", "call", "put", "put", "call"]
+        result = implied_volatility_batch(quotes, spots, strikes, 1.0, 0.0, 0.0, kinds, return_reasons=True)
+    assert result.reason.tolist() == ["above_max_vol", "", "below_lower_bound", "above_max_vol", ""]
+    np.testing.assert_array_equal(result.vol[:4], [np.nan, 0.0, np.nan, np.nan])
+    for i, quote in enumerate(quotes):  # the scalar path raises the same ImpliedVolError (or solves the same)
+        try:
+            assert implied_volatility(quote, spots[i], strikes[i], 1.0, 0.0, 0.0, kinds[i]) == result.vol[i]
+        except ImpliedVolError as error:
+            assert (error.reason, str(error)) == (result.reason[i], result.message[i])
+
+
+def test_strike_ratios_beyond_double_precision():
+    # ln(S/K) = ln S - ln K where S/K under- or overflows. With √(FK) = 1, ln(F/K) = ∓921 and σ√T = 40 the quote is
+    # b(∓921, 40) = 1.144e-203, which the Householder steps solve (σ = 10 at T = 16), as does the batch; at T = 1 the
+    # volatility, 40, is above the cap. Before, math.log(0) raised a bare ValueError (on both paths).
+    mp = pytest.importorskip("mpmath")
+    with mp.workdps(60):
+        x = mp.log(mp.mpf(1e-200)) - mp.log(mp.mpf(1e200))
+        quote = float(
+            mp.exp(x / 2) * mp.erfc((-x / 40 - 20) / mp.sqrt(2)) / 2
+            - mp.exp(-x / 2) * mp.erfc((-x / 40 + 20) / mp.sqrt(2)) / 2
+        )
+    cases = [
+        (1e-200, 1e200, 16.0, "call"),
+        (1e200, 1e-200, 16.0, "put"),
+    ]  # out of the money: the quote is all time value
+    for S, K, T, kind in cases:
+        assert implied_volatility(quote, S, K, T, 0.0, 0.0, kind) == pytest.approx(10.0, rel=1e-13, abs=0)
+        with pytest.raises(ImpliedVolError, match="exceeds 2000%"):
+            implied_volatility(quote, S, K, 1.0, 0.0, 0.0, kind)
+    S, K, T, kind = (np.array(column) for column in zip(*cases, strict=True))
+    np.testing.assert_allclose(implied_volatility_batch(quote, S, K, T, 0.0, 0.0, kind), 10.0, rtol=1e-13)
+
+
+def test_batch_agrees_with_the_scalar_path_next_to_the_upper_bound():
+    # Quotes one, two and three ulps below the upper bound, where Let's Be Rational's maximum b_max = e^(-|x|/2)
+    # decides between a volatility and "exceeds 2000%" and NumPy's exp can differ from libm's in the last bit.
+    # Before the batch handed these quotes to implied_volatility, 32 of 20,000 got a different answer.
+    rng = np.random.default_rng(1)
+    n = 3_000
+    T = 10 ** rng.uniform(-3, 1, n)
+    K = 100 * np.exp(rng.uniform(-3, 3, n))
+    r, q = rng.uniform(-0.05, 0.1, n), rng.uniform(0, 0.08, n)
+    kind = np.where(rng.random(n) < 0.5, "call", "put")
+    prices = np.array([no_arbitrage_bounds(100.0, *args)[1] for args in zip(K, T, r, q, kind, strict=True)])
+    ulps = np.repeat([1, 2, 3], n // 3)
+    for step in range(3):
+        prices = np.where(ulps > step, np.nextafter(prices, -np.inf), prices)
+    # One that used to differ: solved by implied_volatility (9.67), "exceeds 2000%" in the batch.
+    case = (77.29860108934649, 100.0, 91.9566381557159, 2.938453621776211, 0.05909274252020007, 0.03955456019107547)
+    prices, S = np.append(prices, case[0]), np.append(np.full(n, 100.0), case[1])
+    K, T, r, q, kind = (
+        np.append(K, case[2]),
+        np.append(T, case[3]),
+        np.append(r, case[4]),
+        np.append(q, case[5]),
+        np.append(kind, "put"),
+    )
+    result = implied_volatility_batch(prices, S, K, T, r, q, kind, return_reasons=True)
+    expected = np.full(n + 1, np.nan)
+    for i in range(n + 1):
+        try:
+            expected[i], reason, message = implied_volatility(prices[i], S[i], K[i], T[i], r[i], q[i], kind[i]), "", ""
+        except ImpliedVolError as error:
+            reason, message = error.reason, str(error)
+        assert result.reason[i] == reason and result.message[i] == message, i
+    np.testing.assert_array_equal(result.vol, expected)  # implied_volatility's own numbers
+    assert result.vol[-1] == pytest.approx(9.6749, abs=1e-4)
+    assert 0.1 < np.mean(np.isnan(expected)) < 0.9  # both outcomes occur (measured: 72 % are above the cap)
 
 
 def test_batch_is_vectorised():
