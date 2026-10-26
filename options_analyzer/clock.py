@@ -6,7 +6,8 @@ Conventions
   supplies the time-zone database). A naive datetime is read as New York wall-clock time.
 * A time to expiry is counted in minutes of New York wall-clock time and divided by 525,600, the minutes in a
   365-day year: Cboe's convention for the VIX (every calendar day has 1,440 minutes, so a change to or from
-  daylight saving time neither adds nor removes an hour).
+  daylight saving time neither adds nor removes an hour). Times are counted exactly, in whole microseconds, and
+  rounded to a float once.
 * PM-settled options settle at the close, 16:00 ET (13:00 on NYSE early-close days); AM-settled options (the SPX,
   NDX and RUT monthlies, and VIX) settle at the open, 09:30 ET, on a value computed from that morning's opening
   prices. An expiry that falls on a weekend or an NYSE holiday settles on the trading day before it.
@@ -24,6 +25,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from fractions import Fraction
 from functools import lru_cache
 from typing import Literal
 from zoneinfo import ZoneInfo
@@ -50,6 +52,8 @@ __all__ = [
 NEW_YORK = ZoneInfo("America/New_York")
 MINUTES_PER_YEAR = 525_600  # 365 x 1,440
 MINUTES_PER_DAY = 1_440
+_MICROSECOND = timedelta(microseconds=1)
+_MICROSECONDS_PER_YEAR = MINUTES_PER_YEAR * 60_000_000
 MARKET_OPEN = time(9, 30)
 MARKET_CLOSE = time(16, 0)
 EARLY_CLOSE = time(13, 0)
@@ -119,11 +123,17 @@ def _wall_clock(moment: datetime) -> datetime:
     return to_new_york(moment).replace(tzinfo=None)
 
 
+def _microseconds(start: datetime, end: datetime) -> int:
+    """Whole microseconds of wall-clock time from ``start`` to ``end`` (both wall-clock times), exactly."""
+    return (end - start) // _MICROSECOND
+
+
 def year_fraction(start: datetime, end: datetime) -> float:
     """Time from ``start`` to ``end`` in years: New York wall-clock minutes divided by 525,600.
 
     Cboe's convention for the VIX: every calendar day counts 1,440 minutes, also across a change to or from
-    daylight saving time. Negative when ``end`` is before ``start``.
+    daylight saving time. Negative when ``end`` is before ``start``. The time is counted in whole microseconds and
+    divided once, so the result is the correctly rounded value of the exact quotient.
 
     Parameters
     ----------
@@ -142,7 +152,7 @@ def year_fraction(start: datetime, end: datetime) -> float:
     >>> year_fraction(datetime(2026, 11, 2, 10, 0), datetime(2026, 11, 2, 16, 0)) == 360 / 525_600
     True
     """
-    return (_wall_clock(end) - _wall_clock(start)) / timedelta(minutes=1) / MINUTES_PER_YEAR
+    return _microseconds(_wall_clock(start), _wall_clock(end)) / _MICROSECONDS_PER_YEAR
 
 
 # ---------------------------------------------------------------------------
@@ -496,58 +506,135 @@ class VarianceClock:
             events.append((_event_time(when), _non_negative("an event's expected absolute move", move)))
         object.__setattr__(self, "events", tuple(sorted(events)))
 
+    def _exact_mean_weight(self) -> Fraction:
+        """:attr:`mean_weight` as an exact fraction of the two weights (which are binary fractions)."""
+        weekend = WEEKEND_DAYS_PER_YEAR * Fraction(self.weekend_weight)
+        holiday = HOLIDAYS_PER_YEAR * Fraction(self.holiday_weight)
+        return (TRADING_DAYS_PER_YEAR + weekend + holiday) / 365
+
     @property
     def mean_weight(self) -> float:
         """Mean weight of a calendar day in a year of 252 trading days, 104 weekend days and 9 holidays."""
-        total = TRADING_DAYS_PER_YEAR + WEEKEND_DAYS_PER_YEAR * self.weekend_weight
-        return (total + HOLIDAYS_PER_YEAR * self.holiday_weight) / 365.0
+        return float(self._exact_mean_weight())
 
     def variance_time(self, start: datetime, end: datetime) -> float:
         """Variance time from ``start`` to ``end`` in years (negative when ``end`` is before ``start``).
 
-        Calendar time (:func:`year_fraction`) minus the variance that weekend and holiday minutes do not carry,
-        divided by :attr:`mean_weight`; events are not included (see :meth:`total_variance`). Additive:
-        ``variance_time(a, c) == variance_time(a, b) + variance_time(b, c)`` to rounding.
+        The minutes of each kind of day between the two moments (trading days, weekend days, holidays), each times
+        its weight, divided by 525,600 and by :attr:`mean_weight`; events are not included (see
+        :meth:`total_variance`).
+
+        The minutes are counted exactly, in whole microseconds, and the weighted sum is formed and divided in exact
+        rational arithmetic, so the result is the correctly rounded value of an exactly additive quantity. Over
+        consecutive intervals, ``variance_time(a, c)`` therefore equals ``variance_time(a, b) + variance_time(b, c)``
+        to within four units of 2**-53 (about 4.4e-16) times the largest of the three in size: a relative, not an
+        absolute, tolerance, as no float sum of numbers of a few years can be exact to 1e-15 absolute.
+
+        Parameters
+        ----------
+        start, end : datetime
+            The two moments (naive ones are New York wall-clock time; see :func:`to_new_york`).
+
+        Returns
+        -------
+        float
+            Years of variance time.
 
         Raises
         ------
         ValueError
             If the interval reaches outside the years 2000 to 2100 of the NYSE calendar.
+
+        Examples
+        --------
+        Thanksgiving (26 November 2026) at half a trading day's variance: the 48 hours from the Wednesday close to
+        the Friday close are a third of Wednesday, all of Thursday at 0.5 and two thirds of Friday, 1.5 days of
+        variance, which :attr:`mean_weight` (360.5 / 365) scales so that a year still counts as one:
+
+        >>> clock = VarianceClock(holiday_weight=0.5)
+        >>> tau = clock.variance_time(datetime(2026, 11, 25, 16, 0), datetime(2026, 11, 27, 16, 0))
+        >>> tau == 1.5 / 365 / clock.mean_weight, round(tau * 365, 6)
+        (True, 1.518724)
         """
         a, b = _wall_clock(start), _wall_clock(end)
         if b < a:
             return -self.variance_time(b, a)
-        minutes = (b - a) / timedelta(minutes=1)
-        weekend = holiday = 0.0
+        weekend = holiday = 0  # microseconds
         day = a.date()
         while day <= b.date():
             midnight = datetime.combine(day, time())
-            overlap = (min(b, midnight + timedelta(days=1)) - max(a, midnight)) / timedelta(minutes=1)
+            overlap = _microseconds(max(a, midnight), min(b, midnight + timedelta(days=1)))
             if overlap > 0:
                 if day.weekday() >= 5:
                     weekend += overlap
                 elif not is_trading_day(day):
                     holiday += overlap
             day += timedelta(days=1)
-        quiet = (1.0 - self.weekend_weight) * weekend + (1.0 - self.holiday_weight) * holiday
-        return (minutes - quiet) / MINUTES_PER_YEAR / self.mean_weight
+        trading = _microseconds(a, b) - weekend - holiday
+        weighted = trading + Fraction(self.weekend_weight) * weekend + Fraction(self.holiday_weight) * holiday
+        return float(weighted / (_MICROSECONDS_PER_YEAR * self._exact_mean_weight()))
 
     def event_variance(self, start: datetime, end: datetime) -> float:
         """Total variance of the events after ``start`` and up to ``end``: the sum of ``(pi/2) move**2``.
 
         Negative when ``end`` is before ``start`` (the events after ``end`` and up to ``start``), so that it adds
         up over consecutive intervals like :meth:`variance_time`.
+
+        Parameters
+        ----------
+        start, end : datetime
+            The two moments (naive ones are New York wall-clock time). An event exactly at ``end`` is included, one
+            exactly at ``start`` is not.
+
+        Returns
+        -------
+        float
+            Total variance (decimal squared: 0.01 is a standard deviation of 10%).
+
+        Examples
+        --------
+        An earnings release with an expected absolute move of 5%, before the open on 29 October 2026 (an event given
+        as a date is at that day's 09:30 ET open):
+
+        >>> clock = VarianceClock(events=[(date(2026, 10, 29), 0.05)])
+        >>> round(clock.event_variance(datetime(2026, 10, 26, 10, 0), datetime(2026, 10, 30, 16, 0)), 6)
+        0.003927
+        >>> clock.event_variance(datetime(2026, 10, 29, 9, 30), datetime(2026, 10, 30, 16, 0))  # at the start: out
+        0.0
         """
         a, b = _wall_clock(start), _wall_clock(end)
         sign = 1.0
         if b < a:
             a, b, sign = b, a, -1.0
-        return sign * sum(0.5 * math.pi * move * move for when, move in self.events if a < when <= b)
+        return sign * math.fsum(0.5 * math.pi * move * move for when, move in self.events if a < when <= b)
 
     def total_variance(self, sigma: float, start: datetime, end: datetime) -> float:
         """``sigma**2 * variance_time(start, end) + event_variance(start, end)``.
 
-        ``sigma`` is the volatility per year of variance time (decimal).
+        Parameters
+        ----------
+        sigma : float
+            Volatility per year of variance time (decimal, non-negative).
+        start, end : datetime
+            The two moments (naive ones are New York wall-clock time).
+
+        Returns
+        -------
+        float
+            Total variance of the log-return from ``start`` to ``end`` (decimal squared).
+
+        Examples
+        --------
+        Twenty percent a year over the 30 calendar days to the 20 November 2026 close (22 trading days and 8
+        weekend days, at a quarter of a trading day each: 24 / 287 years of variance time), plus an event with an
+        expected absolute move of 4% on 4 November:
+
+        >>> clock = VarianceClock(weekend_weight=0.25, events=[(date(2026, 11, 4), 0.04)])
+        >>> start, end = datetime(2026, 10, 21, 16, 0), datetime(2026, 11, 20, 16, 0)
+        >>> diffusion = 0.2**2 * clock.variance_time(start, end)
+        >>> total = clock.total_variance(0.2, start, end)
+        >>> round(diffusion, 6), round(total - diffusion, 6)  # (pi/2) 0.04**2 = 0.002513
+        (0.003345, 0.002513)
         """
         sigma = _non_negative("sigma", sigma)
         return sigma * sigma * self.variance_time(start, end) + self.event_variance(start, end)
@@ -557,10 +644,29 @@ class VarianceClock:
 
         Use it with a time to expiry from :func:`year_fraction` (or :func:`time_to_expiry`) in Black-Scholes.
 
+        Parameters
+        ----------
+        sigma : float
+            Volatility per year of variance time (decimal, non-negative).
+        start, end : datetime
+            The two moments, ``end`` after ``start``.
+
+        Returns
+        -------
+        float
+            Volatility per calendar year (decimal).
+
         Raises
         ------
         ValueError
             If ``end`` is not after ``start``.
+
+        Examples
+        --------
+        With unit weights and no events the clock is calendar time, so the effective volatility is ``sigma``:
+
+        >>> VarianceClock().effective_vol(0.2, datetime(2026, 10, 26, 10, 0), datetime(2026, 11, 20, 16, 0))
+        0.2
         """
         years = year_fraction(start, end)
         if not years > 0:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import math
 from datetime import date, datetime, timedelta, timezone
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -185,8 +186,23 @@ def test_with_unit_weights_the_variance_clock_is_calendar_time():
     check()
 
 
+def _assert_adds_up(whole: float, first: float, second: float) -> None:
+    """``whole == first + second`` to 1e-15 relative to the largest of the three in size.
+
+    The plan's 1e-15 is relative: one unit in the last place of a variance time of four years is 8.9e-16, so no float
+    sum of such numbers is exact to 1e-15 absolute. Each value is the correctly rounded value of an exactly additive
+    quantity, which bounds the error by 4 x 2**-53 (4.4e-16) of the largest; 1e-15 leaves a margin over that bound.
+    """
+    scale = max(abs(whole), abs(first), abs(second))
+    assert abs(whole - (first + second)) <= 1e-15 * scale, (whole, first, second)
+
+
 def test_variance_time_adds_up_over_consecutive_intervals():
-    """Acceptance (5): variance_time(t0, t2) = variance_time(t0, t1) + variance_time(t1, t2) to 1e-15."""
+    """Acceptance (5): variance_time(t0, t2) = variance_time(t0, t1) + variance_time(t1, t2) to 1e-15 (relative).
+
+    Deterministic whatever the Hypothesis profile or seed: the tolerance is above the provable rounding bound. The
+    examples are draws that failed an absolute 1e-15 before the minutes were counted exactly.
+    """
     hypothesis = pytest.importorskip("hypothesis")
     st = hypothesis.strategies
 
@@ -196,17 +212,42 @@ def test_variance_time_adds_up_over_consecutive_intervals():
         st.floats(0.0, 2.0),
         st.integers(0, 59),
     )
+    @hypothesis.example([0, 201, 2_100_960], 0.0, 1.2441050931918338, 18)
+    @hypothesis.example([0, _SPAN, 1], 0.0, 0.0, 59)  # pieces of four years that nearly cancel
+    @hypothesis.example([_SPAN, 0, _SPAN // 2], 2.0, 2.0, 0)
     def check(minutes, weekend, holiday, seconds):
         t0, t1, t2 = (_moment(m) + timedelta(seconds=seconds) for m in minutes)  # in any order
-        variance_clock = clock.VarianceClock(weekend, holiday, [(date(2026, 4, 30), 0.04)])
-        whole = variance_clock.variance_time(t0, t2)
-        assert whole == pytest.approx(
-            variance_clock.variance_time(t0, t1) + variance_clock.variance_time(t1, t2), abs=1e-15
+        variance_clock = clock.VarianceClock(weekend, holiday, [(date(2026, 4, 30), 0.04), (date(2027, 1, 28), 0.3)])
+        _assert_adds_up(
+            variance_clock.variance_time(t0, t2),
+            variance_clock.variance_time(t0, t1),
+            variance_clock.variance_time(t1, t2),
         )
-        events = variance_clock.event_variance(t0, t1) + variance_clock.event_variance(t1, t2)
-        assert variance_clock.event_variance(t0, t2) == pytest.approx(events, abs=1e-15)
+        _assert_adds_up(
+            variance_clock.event_variance(t0, t2),
+            variance_clock.event_variance(t0, t1),
+            variance_clock.event_variance(t1, t2),
+        )
 
     check()
+
+
+def test_variance_time_is_counted_exactly():
+    """The weighted time is formed in exact arithmetic and rounded once: equal to a count of days by hand, in
+    fractions, rounded once, over the four-year interval of the first failing draw."""
+    weekend, holiday = 0.1, 1.2441050931918338
+    variance_clock = clock.VarianceClock(weekend, holiday)
+    start, end = datetime(2025, 1, 1, 0, 0, 18), datetime(2028, 12, 30, 0, 0, 18)
+    inner = [start.date() + timedelta(days=i) for i in range(1, (end.date() - start.date()).days)]
+    weekends = sum(day.weekday() >= 5 for day in inner)
+    holidays = sum(day.weekday() < 5 and not clock.is_trading_day(day) for day in inner)
+    trading = len(inner) - weekends - holidays
+    # The first day, 1 January 2025, is a holiday from 00:00:18; the last, Saturday 30 December 2028, ends at 00:00:18.
+    edge = Fraction(18, 86_400)
+    days = trading + Fraction(weekend) * (weekends + edge) + Fraction(holiday) * (holidays + 1 - edge)
+    mean = (252 + 104 * Fraction(weekend) + 9 * Fraction(holiday)) / 365
+    assert variance_clock.variance_time(start, end) == float(days / 365 / mean)
+    assert variance_clock.mean_weight == float(mean)
 
 
 def test_total_variance_is_diffusion_plus_events():
