@@ -16,7 +16,7 @@
 * McDonald, R. L. and Schroder, M. D. (1998). A parity result for American options. *Journal of Computational
   Finance* 1(3), 5–13. [doi:10.21314/JCF.1998.010](https://doi.org/10.21314/JCF.1998.010)
 * Brent, R. P. (1973). *Algorithms for Minimization without Derivatives*. Prentice-Hall; Dover reprint, 2002.
-  [maths-people.anu.edu.au/~brent/pub/pub011.html](https://maths-people.anu.edu.au/~brent/pub/pub011.html)
+  [maths-people.anu.edu.au](https://maths-people.anu.edu.au/~brent/pub/pub011.html)
 * Glasserman, P. (2003). *Monte Carlo Methods in Financial Engineering*. Springer.
   [doi:10.1007/978-0-387-21617-1](https://doi.org/10.1007/978-0-387-21617-1)
 

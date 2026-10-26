@@ -1,6 +1,6 @@
 ## Implied vol
 
-Quotes outside the no-arbitrage bounds $\max(S e^{-qT} - K e^{-rT}, 0) \le C < S e^{-qT}$ (and the put analogue)
+Quotes outside the no-arbitrage bounds ${\max(S e^{-qT} - K e^{-rT}, 0) \le C < S e^{-qT}}$ (and the put analogue)
 are rejected, because no volatility can produce them. Otherwise the quote is converted to its out-of-the-money
 equivalent through put–call parity and solved with Brent's method, which always converges on a bracketed root.
 

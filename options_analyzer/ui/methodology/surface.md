@@ -1,13 +1,19 @@
 ## Surface
 
 ### Local volatility
-Surfaces are handled as total implied variance $w(y,T) = \sigma_{\text{BS}}^2 T$ in forward log-moneyness
-$y = \ln(K/F_T)$, and local variance follows Gatheral's form of Dupire's equation
+Surfaces are handled as total implied variance ${w(y,T) = \sigma_{\text{BS}}^2 T}$ in forward log-moneyness
+${y = \ln(K/F_T)}$, and local variance follows Gatheral's form of Dupire's equation
 
-$$\sigma_{\text{loc}}^2 = \frac{\partial_T w}{1 - \frac{y}{w}\partial_y w + \frac14\left(-\frac14 - \frac1w + \frac{y^2}{w^2}\right)(\partial_y w)^2 + \frac12 \partial_{yy} w}.$$
+$$
+\begin{aligned}
+\sigma_{\text{loc}}^2 &= \frac{\partial_T w}{g}, \\
+g &= 1 - \frac{y}{w}\,\partial_y w \\
+  &+ \frac14\left(-\frac14 - \frac1w + \frac{y^2}{w^2}\right)(\partial_y w)^2 + \frac12\,\partial_{yy} w.
+\end{aligned}
+$$
 
-The numerator and denominator are exactly the calendar and butterfly no-arbitrage conditions; where either
-fails local volatility is undefined and is reported rather than patched.
+The numerator and $g$ are exactly the calendar and butterfly no-arbitrage conditions; where either fails
+local volatility is undefined and is reported rather than patched.
 
 $\partial_y w$ and $\partial_{yy} w$ are analytic; $\partial_T w$ at fixed $y$ comes from secants between
 neighbouring maturities evaluated at the same $y$ — their Fritsch–Butland weighted harmonic mean inside, the
@@ -19,15 +25,17 @@ Implied vol is shown only inside each maturity's quoted strikes, and local vol o
 maturities are quoted near the same forward moneyness.
 
 ### SSVI and SVI fits
-The parametric surface is SSVI (Gatheral & Jacquier, 2014), arbitrage-free when $\eta(1+|\rho|) \le 2$. Uploaded
+The parametric surface is SSVI (Gatheral & Jacquier, 2014), arbitrage-free when ${\eta(1+|\rho|) \le 2}$. Uploaded
 quotes (implied vols, or option prices inverted with Black–Scholes–Merton; where a Type column gives both a call
 and a put at one strike, the out-of-the-money one is used) are fitted per maturity with Gatheral's raw SVI smile
 
-$$w(y) = a + b\left(\rho\,(y-m) + \sqrt{(y-m)^2 + s^2}\right)$$
+$$
+w(y) = a + b\left(\rho\,(y-m) + \sqrt{(y-m)^2 + s^2}\right)
+$$
 
-by least squares on implied vols, with $b \ge 0$, $|\rho| < 1$, $s > 0$, a non-negative minimum variance and
-Lee's wing bound $b(1+|\rho|) \le 2$. The search starts from Zeliade's quasi-explicit fits: for fixed $m$ and
-$s$ the smile is linear in $a$, $bs$ and $\rho bs$, solved on a grid of $(m, s)$ with $|\rho| < 1$ imposed, so
+by least squares on implied vols, with ${b \ge 0}$, ${|\rho| < 1}$, ${s > 0}$, a non-negative minimum variance and
+Lee's wing bound ${b(1+|\rho|) \le 2}$. The search starts from Zeliade's quasi-explicit fits: for fixed $m$ and
+$s$ the smile is linear in $a$, $bs$ and $\rho bs$, solved on a grid of $(m, s)$ with ${|\rho| < 1}$ imposed, so
 steep, nearly linear equity skews are followed too. SSVI slices are exactly SVI, so noise-free SSVI quotes are
 recovered.
 
