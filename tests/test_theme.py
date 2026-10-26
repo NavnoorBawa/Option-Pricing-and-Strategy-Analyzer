@@ -425,7 +425,8 @@ def test_both_static_folders_are_identical():
         assert (STATIC_FOLDERS[0] / path).read_bytes() == (STATIC_FOLDERS[1] / path).read_bytes(), path
 
 
-#: Labels of the headline cards (Pricing and Implied Volatility tabs), whose widths tab_pricing estimates.
+#: Labels of the headline cards (Pricing and Implied Volatility tabs), whose widths ui/components.py estimates. (The
+#: other card rows are checked as whole rows in tests/test_app_components.py.)
 CARD_LABELS = (
     "Call value", "Put value", "Forward price", "Call ITM probability", "Exercise premium", "Tree error vs BSM",
     "Std. error", "Implied volatility", "Model check", "Vega at IV", "Time value",
@@ -435,19 +436,19 @@ CARD_LABELS = (
 def test_the_card_width_model_uses_the_theme_font_sizes():
     # The cards' sizes come from a model of their text in the theme's font: with values modelled at Streamlit's
     # default 36 px in Source Sans, the Plex values on a phone grew to 36 px and were cut to '$10.45…'.
-    from options_analyzer.ui import tab_pricing
+    from options_analyzer.ui import components
 
     base = THEME["baseFontSize"]
     value_px = base * float(THEME["metricValueFontSize"].removesuffix("rem"))
     small_px = base * 0.875  # Streamlit's small text: the card labels and deltas
-    assert (tab_pricing._VALUE_PX, tab_pricing._LABEL_PX) == (value_px, small_px) == (22.75, 12.25)
+    assert (components._VALUE_PX, components._LABEL_PX) == (value_px, small_px) == (22.75, 12.25)
     assert THEME["metricValueFontWeight"] == 500  # the value widths are those of Plex Sans Medium
 
 
 def test_the_card_width_model_matches_plex_sans():
     pytest.importorskip("brotli")  # WOFF2 decompression
     ttlib = pytest.importorskip("fontTools.ttLib")
-    from options_analyzer.ui import tab_pricing
+    from options_analyzer.ui import components
 
     def advances(weight: str) -> dict[str, float]:
         font = ttlib.TTFont(STATIC_FOLDERS[1] / "fonts" / f"IBMPlexSans-{weight}.woff2")
@@ -457,11 +458,11 @@ def test_the_card_width_model_matches_plex_sans():
     medium, regular = advances("Medium"), advances("Regular")
     # A value is never modelled narrower than it is, and the model is exact to 0.002 em.
     for char in "0123456789$+−,. -%":
-        model = tab_pricing._CHAR_EM.get(char, tab_pricing._DIGIT_EM)
+        model = components._CHAR_EM.get(char, components._DIGIT_EM)
         assert medium[char] <= model <= medium[char] + 0.002, char
     # Labels: at most _LABEL_EM per character on average.
     for label in CARD_LABELS:
-        assert sum(regular[c] for c in label) <= tab_pricing._LABEL_EM * len(label), label
+        assert sum(regular[c] for c in label) <= components._LABEL_EM * len(label), label
 
 
 def _covered(code_point: int) -> bool:

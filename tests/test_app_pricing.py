@@ -10,7 +10,7 @@ from streamlit.testing.v1 import AppTest
 
 from options_analyzer import binomial, monte_carlo
 from options_analyzer import black_scholes as bs
-from options_analyzer.ui import charts, tab_pricing
+from options_analyzer.ui import charts, components, tab_pricing
 
 EUROPEAN_NOTE = "Closed-form Black-Scholes-Merton values for European exercise"
 
@@ -159,7 +159,7 @@ def test_price_cards_wrap_in_pairs_of_equal_width(app):
     # across the whole row) at 1,024 px with the sidebar open, and at 1,400 px with seven-digit prices.
     assert [m.label for m in _block(app, "price_cards_prices").metric] == ["Call value", "Put value"]
     assert [m.label for m in _block(app, "price_cards_model").metric] == ["Forward price", "Call ITM probability"]
-    card = int(np.ceil(max(tab_pricing._card_width(m.label, m.value) for m in app.metric[:4])))
+    card = int(np.ceil(max(components._card_width(m.label, m.value) for m in app.metric[:4])))
     style = _price_card_style(app)
     cards_rule = f".st-key-price_cards_prices > *, .st-key-price_cards_model > * {{ flex: 1 1 {card}px !important; }}"
     assert cards_rule in style
@@ -187,11 +187,11 @@ def test_price_cards_stay_two_by_two_on_a_phone(app, values, phone):
     # 5.19 em: "$105.1271" and a tenth of an em to spare
     assert "font-size: clamp(16px, calc((50cqw - 35px) / 5.19), 22.75px);" in style
     labels = ["Call value", "Put value", "Forward price", "Call ITM probability"]
-    compact = tab_pricing._cards_style(list(zip(labels, values, strict=True)))
+    compact = components._cards_style(list(zip(labels, values, strict=True)), *tab_pricing.PRICE_CARDS)
     pair = int(compact.split("@container")[1].split("flex-basis: ")[1].split("px")[0])
     row = phone - 2 * 14  # the page's side margins on a phone
     assert pair <= row  # two cards side by side
-    em = max(tab_pricing._value_em(v) for v in values)
+    em = max(components._value_em(v) for v in values)
     font = min(max(16.0, ((row - 14) / 2 - 28) / em), 22.75)  # the clamp() at this row width
     assert font * em <= (row - 14) / 2 - 28  # the widest value fits its card
 
@@ -210,7 +210,7 @@ def test_price_cards_stay_two_by_two_on_a_phone(app, values, phone):
 )
 def test_card_width_estimate_covers_the_rendered_card(label, value, measured):
     # Never narrower than the card (its value would be cut), and not so wide that the row wraps much too early.
-    assert measured <= tab_pricing._card_width(label, value) <= measured + 20
+    assert measured <= components._card_width(label, value) <= measured + 20
 
 
 @pytest.mark.parametrize(
@@ -219,7 +219,7 @@ def test_card_width_estimate_covers_the_rendered_card(label, value, measured):
     [("+0.00 vol pts vs sidebar", 169.3), ("-12.34 vol pts vs sidebar", 174.2), ("+123.45 vol pts vs sidebar", 184.0)],
 )
 def test_card_width_estimate_covers_the_delta_line(delta, measured):
-    assert measured <= tab_pricing._card_width("Implied volatility", "20.000%", delta=delta) <= measured + 20
+    assert measured <= components._card_width("Implied volatility", "20.000%", delta=delta) <= measured + 20
 
 
 # --- Pricing & Greeks tab --------------------------------------------------------------------------------------
@@ -476,7 +476,7 @@ def test_iv_cards_wrap_in_pairs_like_the_price_cards(app):
     style = next(h.proto.body for h in app.get("html") if ".st-key-iv_cards " in h.proto.body)
     assert ".st-key-iv_cards { container: iv-cards / inline-size; }" in style
     cards = [m for m in app.metric if m.label in ("Implied volatility", "Model check", "Vega at IV", "Time value")]
-    card = int(np.ceil(max(tab_pricing._card_width(m.label, m.value, delta=m.proto.delta) for m in cards)))
+    card = int(np.ceil(max(components._card_width(m.label, m.value, delta=m.proto.delta) for m in cards)))
     assert f".st-key-iv_cards_solution > *, .st-key-iv_cards_option > * {{ flex: 1 1 {card}px !important; }}" in style
     # On a phone the delta line wraps with the labels instead of being cut off.
     assert (

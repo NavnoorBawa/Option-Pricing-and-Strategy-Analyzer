@@ -13,6 +13,7 @@ import streamlit as st
 from .. import black_scholes as bs
 from .. import strategies as strat
 from . import cache, charts
+from .components import Card, card_row
 from .format import md, money, money_short, number, number_short, shown_decimals
 from .inputs import Inputs
 
@@ -559,41 +560,45 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
     front_days = metrics.horizon * 365
 
     cost = metrics.entry_cost * units
-    c = st.columns(4)
-    c[0].metric(
-        "Net premium",
-        money_short(abs(cost)),
-        premium_label(cost),
-        delta_color="off",
-        delta_arrow="off",
-        border=True,
-        help=_money_help(abs(cost)),
-    )
     profit, loss = metrics.max_profit * units, metrics.max_loss * units
     if metrics.max_profit < 0:
-        c[1].metric(
-            "Max profit",
-            "No profit",
-            border=True,
-            help=md(f"No profit is possible: the position loses at least {money(-profit)} at the front expiry."),
-        )
+        no_profit = f"No profit is possible: the position loses at least {money(-profit)} at the front expiry."
+        max_profit: Card = ("Max profit", "No profit", {"help": md(no_profit)})
     else:
-        c[1].metric("Max profit", money_short(profit), border=True, help=_money_help(profit))
+        max_profit = ("Max profit", money_short(profit), {"help": _money_help(profit)})
     if metrics.max_loss < 0:
-        c[2].metric(
-            "Max loss",
-            "No loss",
-            border=True,
-            help=md(f"The position cannot lose: it makes at least {money(-loss)} at the front expiry."),
-        )
+        no_loss = f"The position cannot lose: it makes at least {money(-loss)} at the front expiry."
+        max_loss: Card = ("Max loss", "No loss", {"help": md(no_loss)})
     else:
-        c[2].metric("Max loss", money_short(loss), border=True, help=_money_help(loss))
-    c[3].metric(
-        "Probability of profit",
-        probability_text(metrics.probability_of_profit, sure=metrics.max_loss < 0, never=metrics.max_profit <= 0),
-        border=True,
-        help="At the front expiry, log-normal terminal price with the chosen drift and the sidebar volatility. "
-        "Shown as >99.9% or <0.1% when it rounds to 100% or 0% but the position can still lose or profit.",
+        max_loss = ("Max loss", money_short(loss), {"help": _money_help(loss)})
+    card_row(
+        "strategy_cards",
+        ("strategy_cards_a", "strategy_cards_b"),
+        [
+            (
+                "Net premium",
+                money_short(abs(cost)),
+                {
+                    "delta": premium_label(cost),
+                    "delta_color": "off",
+                    "delta_arrow": "off",
+                    "help": _money_help(abs(cost)),
+                },
+            ),
+            max_profit,
+            max_loss,
+            (
+                "Probability of profit",
+                probability_text(
+                    metrics.probability_of_profit, sure=metrics.max_loss < 0, never=metrics.max_profit <= 0
+                ),
+                {
+                    "help": "At the front expiry, log-normal terminal price with the chosen drift and the sidebar "
+                    "volatility. Shown as >99.9% or <0.1% when it rounds to 100% or 0% but the position can still "
+                    "lose or profit."
+                },
+            ),
+        ],
     )
     be = metrics.breakevens
     st.markdown(
@@ -606,28 +611,32 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
 
     greeks = strat.position_greeks(strategy, market)
     delta, gamma = greeks["delta"] * units, greeks["gamma"] * units
-    c = st.columns(4)
-    c[0].metric(
-        "Delta (shares)",
-        number_short(delta, 2),
-        border=True,
-        help=_number_help(delta, 2, "Share-equivalent exposure: P&L change for a $1 move in the underlying."),
-    )
-    c[1].metric(
-        "Gamma", number_short(gamma, 4), border=True, help=_number_help(gamma, 4, "Change in delta per $1 move.")
-    )
     theta, vega = greeks["theta"] * units / 365, greeks["vega"] * units / 100
-    c[2].metric(
-        "Theta / day",
-        money_short(theta, signed=True),
-        border=True,
-        help=_money_help(theta, "P&L from one calendar day passing, all else equal.", signed=True),
-    )
-    c[3].metric(
-        "Vega / vol pt",
-        money_short(vega, signed=True),
-        border=True,
-        help=_money_help(vega, "P&L for a 1-point rise in every leg's implied volatility.", signed=True),
+    card_row(
+        "greek_cards",
+        ("greek_cards_a", "greek_cards_b"),
+        [
+            (
+                "Delta (shares)",
+                number_short(delta, 2),
+                {
+                    "help": _number_help(
+                        delta, 2, "Share-equivalent exposure: P&L change for a $1 move in the underlying."
+                    )
+                },
+            ),
+            ("Gamma", number_short(gamma, 4), {"help": _number_help(gamma, 4, "Change in delta per $1 move.")}),
+            (
+                "Theta / day",
+                money_short(theta, signed=True),
+                {"help": _money_help(theta, "P&L from one calendar day passing, all else equal.", signed=True)},
+            ),
+            (
+                "Vega / vol pt",
+                money_short(vega, signed=True),
+                {"help": _money_help(vega, "P&L for a 1-point rise in every leg's implied volatility.", signed=True)},
+            ),
+        ],
     )
 
     st.markdown(f"**Profit & loss** — front expiry in {front_days:.0f} days")
@@ -688,7 +697,7 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
         )
     band = (median * np.exp(-sigma_t), median * np.exp(sigma_t))  # the 15.9th and 84.1st percentiles
     visible_be = [b for b in be if lo <= b <= hi]
-    st.plotly_chart(
+    charts.show(
         charts.payoff_chart(
             spots,
             curves,
@@ -699,6 +708,8 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
             breakeven_decimals=breakeven_decimals(market.spot),
         ),
         key="payoff_chart",
+        alt="Profit and loss of the position against the underlying price, at expiry and before, with the strikes "
+        "and the breakevens",
     )
     profile = pd.DataFrame({"Underlying price": spots} | {name: values for values, name, _, _ in curves})
     st.download_button(
@@ -711,28 +722,34 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
         key="dl_pnl",
     )
 
-    c = st.columns(3)
     expected = metrics.expected_pnl * units
-    c[0].metric(
-        "Expected P&L at expiry",
-        money_short(expected, signed=True),
-        help=_money_help(
-            expected,
-            "Mean P&L under the chosen drift. With the risk-neutral drift and legs at model value it equals "
-            "the interest the premium would have earned (zero when the premium is financed); fills better or "
-            "worse than model value, leg IVs and fees show up as the difference.",
-            signed=True,
-        ),
-    )
     std = metrics.pnl_std * units
-    c[1].metric(
-        "P&L standard deviation",
-        money_short(std) if np.isfinite(std) else "Too large",
-        help=_money_help(std, "Dispersion of the P&L at the front expiry under the chosen drift.")
-        if np.isfinite(std)
-        else "Dispersion of the P&L at the front expiry under the chosen drift.",
+    dispersion = "Dispersion of the P&L at the front expiry under the chosen drift."
+    card_row(
+        "expectation_cards",
+        ("expectation_cards_all",),
+        [
+            (
+                "Expected P&L at expiry",
+                money_short(expected, signed=True),
+                {
+                    "help": _money_help(
+                        expected,
+                        "Mean P&L under the chosen drift. With the risk-neutral drift and legs at model value it "
+                        "equals the interest the premium would have earned (zero when the premium is financed); "
+                        "fills better or worse than model value, leg IVs and fees show up as the difference.",
+                        signed=True,
+                    )
+                },
+            ),
+            (
+                "P&L standard deviation",
+                money_short(std) if np.isfinite(std) else "Too large",
+                {"help": _money_help(std, dispersion) if np.isfinite(std) else dispersion},
+            ),
+            ("Drift used", f"{metrics.drift:.2%}", {"help": "Annual expected return of the underlying."}),
+        ],
     )
-    c[2].metric("Drift used", f"{metrics.drift:.2%}", help="Annual expected return of the underlying.")
 
     st.markdown("**Legs at inception**")
     table, decimals = legs_table(strategy, market, units)

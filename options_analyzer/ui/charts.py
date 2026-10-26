@@ -1,8 +1,8 @@
 """Plotly figure builders and the desk house style.
 
-Pure functions (data in, figure out) so they are easy to test. Render them with :func:`show`, which passes the
-desk Plotly config and keeps ``theme="streamlit"``, so fonts, backgrounds and the categorical colours follow the
-light or dark app theme.
+Pure functions (data in, figure out) so they are easy to test. The app draws every chart with :func:`show`, which
+passes the desk Plotly config and the chart's description for screen readers, and keeps ``theme="streamlit"``, so
+fonts, backgrounds and the categorical colours follow the light or dark app theme.
 
 Colours come from :mod:`.theme`. Each builder takes a ``palette`` (default: the current mode's semantic colours)
 for the colours that carry a meaning: profit and loss, call and put, reference lines. Series that are only told
@@ -14,6 +14,7 @@ style (unified hover, a crosshair, outside ticks, a legend at the top left), whi
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import plotly.graph_objects as go
@@ -21,6 +22,9 @@ import plotly.io as pio
 import streamlit as st
 
 from . import theme
+
+if TYPE_CHECKING:
+    from streamlit.delta_generator import DeltaGenerator
 from .format import signed
 
 #: Heights (px) of a primary chart and of a smaller, secondary one.
@@ -79,14 +83,55 @@ def translucent(color: str, alpha: float) -> str:
     return f"rgba({red},{green},{blue},{alpha:g})"
 
 
-def show(fig: go.Figure, *, key: str, container=None, **kwargs):
-    """Draw ``fig`` with the desk Plotly config; its SVG download is named after ``key``.
+def show(
+    fig: go.Figure,
+    *,
+    key: str,
+    alt: str,
+    container: DeltaGenerator | None = None,
+    theme: Literal["streamlit"] | None = "streamlit",
+    **kwargs: Any,
+) -> Any:
+    """Draw ``fig`` with the desk Plotly config and an accessible name: the one way the app draws a chart.
 
-    ``container`` is where to draw it (a column, say; default: the current position), and other keyword arguments
-    go to ``st.plotly_chart`` (``width``, ``on_select``, ...).
+    Parameters
+    ----------
+    fig : plotly.graph_objects.Figure
+        The figure, usually from one of the builders here.
+    key : str
+        The chart's element key. It also names the SVG download: ``options-analyzer-<key>.svg``.
+    alt : str
+        A short, specific description of the chart for screen readers, such as "Call and put delta against spot
+        price" (Streamlit's ``alt``: the chart's accessible name). It must not be blank.
+    container : DeltaGenerator, optional
+        Where to draw the chart (a column or a horizontal container, say); default: the current position.
+    theme : {"streamlit", None}, default "streamlit"
+        ``"streamlit"`` lets the app theme fill in the fonts, backgrounds and categorical colours of the light or
+        dark mode; ``None`` draws the figure exactly as built.
+    **kwargs
+        Further keyword arguments of ``st.plotly_chart`` (``width`` in px, ``on_select``, ...).
+
+    Returns
+    -------
+    DeltaGenerator or PlotlyState
+        What ``st.plotly_chart`` returns.
+
+    Raises
+    ------
+    ValueError
+        If ``alt`` is blank.
+
+    Examples
+    --------
+    Outside a running app Streamlit draws nothing:
+
+    >>> fig = sensitivity_chart([90.0, 100.0, 110.0], [3.0, 10.0, 18.0], [12.0, 5.0, 2.0], "Spot", "Value", 100.0)
+    >>> _ = show(fig, key="sensitivity_chart", alt="Call and put value against spot price")
     """
+    if not alt.strip():
+        raise ValueError(f"chart {key!r} needs a description (alt) for screen readers")
     config = PLOTLY_CONFIG | {"toImageButtonOptions": {"format": "svg", "filename": f"options-analyzer-{key}"}}
-    return (container or st).plotly_chart(fig, key=key, config=config, theme="streamlit", **kwargs)
+    return (container or st).plotly_chart(fig, key=key, config=config, theme=theme, alt=alt, **kwargs)
 
 
 def style(fig: go.Figure, palette: dict[str, str] | None = None, height: int | None = None) -> go.Figure:
@@ -570,7 +615,7 @@ def lines_chart(
     colors = palette or theme.palette()
     fig = go.Figure()
     for i, (name, y) in enumerate(series.items()):
-        line = dict(width=LINE_WIDTH)
+        line: dict[str, object] = dict(width=LINE_WIDTH)
         if styles is not None:
             line |= dict(color=styles[i][0], dash=styles[i][1])
         fig.add_trace(go.Scatter(x=x, y=y, name=name, line=line))
@@ -673,8 +718,8 @@ def smile_chart(
         fig.add_trace(
             go.Scatter(x=x, y=local, name=f"Local · {label}", line=dict(color=color, width=LINE_WIDTH, dash="dash"))
         )
-        if quotes is not None and quotes[i] is not None:
-            qx, qiv, fitted = quotes[i]
+        if quotes is not None and (quote := quotes[i]) is not None:
+            qx, qiv, fitted = quote
             fig.add_trace(
                 go.Scatter(
                     x=qx,
