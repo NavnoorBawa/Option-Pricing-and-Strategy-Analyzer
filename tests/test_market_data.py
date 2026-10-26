@@ -1072,17 +1072,99 @@ def test_long_layout_without_symbols_and_bad_rows():
         "1999-12-17,SPX,call,6000,1.0,1.2",  # before OCC's two-digit years and the NYSE calendar
         "2100-01-15,SPX,call,6000,1.0,1.2",  # OCC would write 2000
         "2101-01-20,SPX,call,6000,1.0,1.2",  # beyond the NYSE calendar too
+        "2000-01-01,SPX,call,1400,1.0,1.2",  # a Saturday: it would settle on Friday 31 December 1999
+        "2000-01-02,SPXW,call,1400,1.0,1.2",
         "2026-11-20,SPX,call,6000,-1.0,1.2",
         "2026-11-20,SPX,call,6000,1.0,-1.2",
     ],
 )
-def test_a_contract_an_occ_symbol_cannot_carry_is_dropped_not_fatal(bad_row):
-    """One bad row is dropped with a message; the rest of the upload is read."""
+@pytest.mark.parametrize("as_of", [AS_OF, datetime(1999, 12, 30, 10, 0)], ids=["2026", "1999"])
+def test_a_contract_an_occ_symbol_cannot_carry_is_dropped_not_fatal(bad_row, as_of):
+    """One bad row is dropped with a message; the rest of the upload is read, also when the valuation time comes
+    before an expiry that the NYSE calendar cannot settle."""
     text = "\n".join(["expiry,root,type,strike,bid,ask", bad_row, "2026-11-20,SPX,put,6000,1.5,1.7"])
-    chain, messages = read_chain(text.encode(), as_of=AS_OF)
+    chain, messages = read_chain(text.encode(), as_of=as_of)
     assert chain["symbol"].tolist() == ["SPX261120P06000000"]
     assert messages[0] == "Read 2 contract(s) in the app's long layout."
     assert len(messages) == 2 and messages[1].startswith("Dropped 1 contract(s) that an OCC symbol cannot carry")
+
+
+@pytest.mark.parametrize("bad", ["inf", "1e400", "Infinity", "-inf", "-0.2", "high", "1e-05"])
+@pytest.mark.parametrize("layout", ["yfinance", "cboe"])
+def test_an_unusable_vendor_iv_is_blanked_not_fatal(layout, bad):
+    """A vendor implied vol that is infinite, negative, unreadable or a placeholder, on a contract that is kept, is
+    blanked with the message; the contract and the rest of the file are read as before. A percentage is read."""
+    path = FIXTURES / FIXTURE_LAYOUTS[layout]
+    reference, reference_messages = read_chain(path, as_of=AS_OF)
+    cell = {"yfinance": ",0.15428,", "cboe": ",0.1506,"}[layout]  # the 2 November 7,880 call's
+    text = path.read_text(encoding="utf-8")
+    assert text.count(cell) == 1
+    chain, messages = read_chain(text.replace(cell, f",{bad},").encode(), as_of=AS_OF)
+    call = chain["symbol"] == "SPXW261102C07880000"
+    assert call.sum() == 1 and np.isnan(chain.loc[call, "vendor_iv"]).all()
+    pd.testing.assert_frame_equal(chain.drop(columns="vendor_iv"), reference.drop(columns="vendor_iv"))
+    blanked = int(reference["vendor_iv"].isna().sum()) + 1
+    assert any(m.startswith(f"Blanked {blanked} vendor implied vol(s) that are unreadable, infinite") for m in messages)
+    assert len(messages) == len(reference_messages) + (blanked == 1)
+    percent, _ = read_chain(text.replace(cell, ",15.43 %,").encode(), as_of=AS_OF)
+    assert percent.loc[percent["symbol"] == "SPXW261102C07880000", "vendor_iv"].tolist() == [pytest.approx(0.1543)]
+
+
+def test_cells_are_read_as_written_or_not_at_all():
+    """Commas only as thousands separators, an explicit set of option types, dates with a day, a month and a year;
+    anything else leaves its row unread, with a message, rather than read as another value."""
+    header = "expiry,root,type,strike,bid,ask"
+    good = "2026-11-20,SPX,put,6000,1.5,1.7"
+
+    def read(*rows: str, head: str = header, last: str = good) -> tuple[pd.DataFrame, list[str]]:
+        return read_chain("\n".join([head, *rows, last]).encode(), as_of=AS_OF)
+
+    # Thousands separators are read; a decimal comma (a European spreadsheet's 12,5) is not read as 125.
+    chain, messages = read('2026-11-20,SPX,call,"6,000.00","1,012.50","1,013.00"')
+    assert chain[["symbol", "bid", "ask"]].values.tolist()[0] == ["SPX261120C06000000", 1012.5, 1013.0]
+    chain, messages = read('2026-11-20,SPX,call,6000,"12,5","13,0"')
+    assert chain["symbol"].tolist() == ["SPX261120P06000000"]
+    assert "Left 1 cell(s) of 'bid' unread: their commas are not thousands separators (e.g. '12,5')" in messages[1]
+    assert (
+        messages[-1] == "Dropped 1 contract(s) with a missing or unreadable symbol, expiry, type, strike, bid or ask."
+    )
+    # In a column of decimal commas, 1,250 is no more a thousands separator than 12,5; and 0,500 is never one.
+    chain, _ = read('2026-11-20,SPX,call,6000,1.0,"1,250"', '2026-11-20,SPX,call,6010,1.0,"12,5"')
+    assert chain["symbol"].tolist() == ["SPX261120P06000000"]
+    chain, _ = read('2026-11-20,SPX,call,6000,"0,500",1.0')
+    assert chain["symbol"].tolist() == ["SPX261120P06000000"]
+    # Option types: C, Call, Calls, P, Put, Puts in any case; not the first letter of any word.
+    chain, _ = read(
+        "2026-11-20,SPX,Calls,6010,1.0,1.2", "2026-11-20,SPX,PUTS,6010,1.0,1.2", "2026-11-20,SPX,c,6020,1,2"
+    )
+    assert chain["symbol"].tolist() == [
+        "SPX261120P06000000",
+        "SPX261120C06010000",
+        "SPX261120P06010000",
+        "SPX261120C06020000",
+    ]
+    for word in ("cash", "pending", "x"):
+        chain, messages = read(f"2026-11-20,SPX,{word},6010,1.0,1.2")
+        assert chain["symbol"].tolist() == ["SPX261120P06000000"] and "unreadable" in messages[-1]
+    # With a symbol, an unreadable type, expiry or strike is not passed over either.
+    symbol_header = "symbol,expiry,type,strike,bid,ask"
+    for row in (
+        "SPX261120C06010000,2026-11-20,cash,6010,1,2",
+        "SPX261120C06010000,Nov 2026,call,6010,1,2",
+        "SPX261120C06010000,2026-11-20,call,six,1,2",
+    ):
+        chain, messages = read(row, head=symbol_header, last="SPX261120P06000000,2026-11-20,put,6000,1.5,1.7")
+        assert chain["symbol"].tolist() == ["SPX261120P06000000"] and "unreadable" in messages[-1], row
+    # Dates must give the day, the month and the year: dateutil would complete them from today's date.
+    for partial in ("Nov 2026", "Nov 20", "2026-11", "20"):
+        chain, messages = read(f"{partial},SPX,call,6010,1.0,1.2")
+        assert chain["symbol"].tolist() == ["SPX261120P06000000"] and "unreadable" in messages[-1], partial
+    for full in ("Nov 20 2026", "Fri Nov 20 2026", "11/20/2026", "2026-11-20 16:00"):
+        chain, _ = read(f"{full},SPX,call,6010,1.0,1.2")
+        assert "SPX261120C06010000" in chain["symbol"].tolist(), full
+    # An "expiration" column is the long layout's expiry.
+    chain, _ = read(head="expiration,root,type,strike,bid,ask")
+    assert chain["symbol"].tolist() == ["SPX261120P06000000"]
 
 
 def test_trailing_commas_encodings_and_empty_files():

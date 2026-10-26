@@ -4,8 +4,9 @@
 is added to :func:`options_analyzer.vol_surface.parse_quotes`:
 
 ``"long"``
-    The app's own layout, one row per contract: ``expiry``, ``type``, ``strike``, ``bid``, ``ask``, and ``root`` or
-    ``symbol`` (or both), with ``settlement`` and ``vendor_iv`` optional (column names in any case).
+    The app's own layout, one row per contract: ``expiry`` (or ``expiration``), ``type``, ``strike``, ``bid``,
+    ``ask``, and ``root`` or ``symbol`` (or both), with ``settlement`` and ``vendor_iv`` optional (column names in any
+    case).
 ``"yfinance"``
     What yfinance's ``Ticker.option_chain(date)`` returns for calls and puts, stacked over expiries and saved as CSV:
     ``contractSymbol``, ``bid``, ``ask`` and ``impliedVolatility`` are read, and ``strike`` and an ``expiry`` column,
@@ -23,14 +24,22 @@ Every layout identifies a contract by its OCC symbol (``ROOT + YYMMDD + C/P + st
 from root, expiry, type and strike. The settlement style comes from the root
 (:func:`options_analyzer.clock.settlement_style`) unless the long layout states it, and :func:`to_quotes` takes each
 time to expiry from :mod:`options_analyzer.clock`. Contracts that cannot be read, that an OCC symbol cannot carry (a
-root such as ``^SPX``, a strike off OCC's grid, an expiry outside 2000-2099) or that quote a negative price, whose
-symbol disagrees with their other columns, that have settled, that have no offer, whose bid is above the ask, or
-whose bid is zero are dropped, with one message per reason; a bad row never stops the rest of the file being read.
+root such as ``^SPX``, a strike off OCC's grid, an expiry outside 2000-2099) or the NYSE calendar cannot settle, or
+that quote a negative price, whose symbol disagrees with their other columns, that have settled, that have no offer,
+whose bid is above the ask, or whose bid is zero are dropped, with one message per reason; a bad row never stops the
+rest of the file being read.
 
-The vendor's implied vol is kept only as the ``vendor_iv`` diagnostic. Vendors compute it with their own rates,
-dividends and models, so two vendors disagree on the same quote, and some write a placeholder (such as 1e-05) where
-they have none; values below :data:`MIN_VENDOR_IV` are blanked. :func:`to_quotes` leaves it out, so it never reaches
-a fit.
+Cells are read strictly, so that a cell is either read as written or not at all: numbers with a decimal point, with
+commas only as thousands separators (``1,250.50``; a column whose commas are anything else, such as the decimal
+commas ``12,5`` of a European spreadsheet, has those cells left unread, with a message); types ``C``, ``Call``,
+``Calls``, ``P``, ``Put`` or ``Puts``; and dates that give the day, the month and the year (``Nov 2026`` and
+``Nov 20`` are refused rather than completed from today's date). A cell that is filled but unreadable makes its row
+unreadable, also where the row's OCC symbol would give the value.
+
+The vendor's implied vol is kept only as the ``vendor_iv`` diagnostic (decimal, or a percentage with a ``%`` sign).
+Vendors compute it with their own rates, dividends and models, so two vendors disagree on the same quote, and some
+write a placeholder (such as 1e-05) where they have none; values that are unreadable, infinite or below
+:data:`MIN_VENDOR_IV` are blanked. :func:`to_quotes` leaves it out, so it never reaches a fit.
 """
 
 from __future__ import annotations
@@ -126,7 +135,7 @@ def _layout_of(frame: pd.DataFrame) -> str:
         return "yfinance"
     if {"calls", "strike", "puts"} <= keys:
         return "cboe"
-    if {"expiry", "type", "strike", "bid", "ask"} <= keys and keys & {"root", "symbol"}:
+    if {"type", "strike", "bid", "ask"} <= keys and keys & {"expiry", "expiration"} and keys & {"root", "symbol"}:
         return "long"
     raise ValueError(
         "the file is not in a known chain layout: expected the app's long layout (expiry, type, strike, bid, ask and "
@@ -143,22 +152,60 @@ def _column(frame: pd.DataFrame, *names: str) -> pd.Series | None:
     return None
 
 
-def _numbers(values: pd.Series | None, index: pd.Index) -> pd.Series:
-    """Text cells as floats (spaces, $ signs and thousands separators removed); NaN where a cell is no number."""
+#: A number whose commas group its digits in thousands: 1,250 or -12,500,000.75 (not 0,500, a decimal comma).
+_THOUSANDS = re.compile(r"[-+]?[1-9]\d{0,2}(?:,\d{3})+(?:\.\d*)?")
+#: Option types as written in a type column (lowercase).
+_TYPES = {"c": "call", "call": "call", "calls": "call", "p": "put", "put": "put", "puts": "put"}
+#: Two defaults that differ in every part: a date that parses differently against them is missing a part.
+_DEFAULTS = (datetime(2001, 1, 1), datetime(2002, 2, 2))
+
+
+def _filled(values: pd.Series | None, index: pd.Index) -> pd.Series:
+    """Which cells hold something other than blanks."""
+    if values is None:
+        return pd.Series(False, index=index)
+    return _flags(values.astype("string").str.strip().ne(""))
+
+
+def _numbers(values: pd.Series | None, index: pd.Index, notes: list[str], *, percent: bool = False) -> pd.Series:
+    """Text cells as floats; NaN where a cell is blank or no number as written.
+
+    Spaces and $ signs are removed, and commas where every comma in the column is a thousands separator; a column
+    whose commas are anything else (decimal commas, lists) has those cells left unread, with a note. With
+    ``percent``, a cell that ends in ``%`` is divided by 100.
+    """
     if values is None:
         return pd.Series(np.nan, index=index)
-    text = values.astype("string").str.replace(r"[,\s$]", "", regex=True)
-    return pd.to_numeric(text, errors="coerce").astype(float)
+    text = values.astype("string").str.replace(r"[\s$]", "", regex=True)
+    commas = _flags(text.str.contains(",", regex=False))
+    if commas.any():
+        if _flags(text[commas].str.fullmatch(_THOUSANDS)).all():
+            text = text.str.replace(",", "", regex=False)
+        else:
+            example = text[commas & ~_flags(text.str.fullmatch(_THOUSANDS))].iloc[0]
+            notes.append(
+                f"Left {int(commas.sum())} cell(s) of '{values.name}' unread: their commas are not thousands "
+                f"separators (e.g. '{example}'); write numbers with a decimal point."
+            )
+            text = text.mask(commas)
+    scale = pd.Series(1.0, index=index)
+    if percent:
+        scaled = _flags(text.str.endswith("%"))
+        scale = scale.mask(scaled, 0.01)
+        text = text.str.removesuffix("%")
+    return pd.to_numeric(text, errors="coerce").astype(float) * scale
 
 
 def _dates(values: pd.Series) -> pd.Series:
-    """Text cells as dates (``2026-11-02``, ``11/2/2026``, ``Mon Nov 02 2026``); NaT where a cell is no date."""
+    """Text cells as dates (``2026-11-02``, ``11/2/2026``, ``Mon Nov 02 2026``); NaT where a cell is no date or
+    leaves out the day, the month or the year (which dateutil would take from today's date)."""
 
     def parse(text: object) -> pd.Timestamp | None:
         try:
-            return pd.Timestamp(dateutil_parser.parse(str(text)).date())
+            first, second = (dateutil_parser.parse(str(text), default=default) for default in _DEFAULTS)
         except (ValueError, OverflowError):
             return None
+        return pd.Timestamp(first.date()) if first.date() == second.date() else None
 
     return values.map(parse).astype("datetime64[ns]")
 
@@ -197,23 +244,31 @@ def _contracts(
     bid: pd.Series | None,
     ask: pd.Series | None,
     vendor_iv: pd.Series | None,
+    notes: list[str],
     settlement: pd.Series | None = None,
 ) -> pd.DataFrame:
-    """Contracts in the canonical columns (no symbol yet), plus ``_problem``: why a row cannot be used, or ''.
+    """Contracts in the canonical columns (no symbol yet), plus ``_problem``: why a row cannot be used, or '', and
+    ``_unread_iv``: whether a vendor implied vol was given but could not be read.
 
     Root, expiry, type and strike come from the symbol where there is one; where the row also gives one of them and
-    it differs from the symbol's, the row is inconsistent (blank cells are not compared).
+    it differs from the symbol's, the row is inconsistent (blank cells are not compared). A cell that is filled but
+    unreadable makes the row unreadable.
     """
-    strikes = _numbers(strike, index)
+    strikes = _numbers(strike, index, notes)
     given_type = None
     if kind is not None:
-        given_type = kind.astype("string").str.strip().str.lower().str[:1].map({"c": "call", "p": "put"})
+        given_type = kind.astype("string").str.strip().str.lower().map(_TYPES)
     given_root = None if root is None else root.astype("string").str.strip().str.upper()
     given_expiry = None if expiry is None else _dates(expiry)
+    garbled = _filled(strike, index) & strikes.isna()
+    if given_type is not None:
+        garbled |= _filled(kind, index) & given_type.isna()
+    if given_expiry is not None:
+        garbled |= _filled(expiry, index) & given_expiry.isna()
     disagree = pd.Series(False, index=index)
     if symbol is not None:
         frame = _from_symbols(symbol)
-        unreadable = frame["root"].isna()
+        unreadable = frame["root"].isna() | garbled
         if given_root is not None:
             disagree |= _flags(given_root.ne(frame["root"]) & given_root.notna())
         if given_expiry is not None:
@@ -236,10 +291,11 @@ def _contracts(
         )
         unreadable = frame.isna().any(axis=1)
     frame["bid"], frame["ask"], frame["vendor_iv"] = (
-        _numbers(bid, index),
-        _numbers(ask, index),
-        _numbers(vendor_iv, index),
+        _numbers(bid, index, notes),
+        _numbers(ask, index, notes),
+        _numbers(vendor_iv, index, notes, percent=True),
     )
+    frame["_unread_iv"] = (_filled(vendor_iv, index) & frame["vendor_iv"].isna()).to_numpy(bool)
     finite = np.isfinite(frame[["strike", "bid", "ask"]].to_numpy(dtype=float)).all(axis=1)
     unreadable |= pd.Series(~finite, index=index)
     prices = (frame["bid"] >= 0) & (frame["ask"] >= 0)
@@ -255,7 +311,7 @@ def _contracts(
     return frame
 
 
-def _long(frame: pd.DataFrame) -> pd.DataFrame:
+def _long(frame: pd.DataFrame, notes: list[str]) -> pd.DataFrame:
     return _contracts(
         frame.index,
         symbol=_column(frame, "symbol"),
@@ -266,11 +322,12 @@ def _long(frame: pd.DataFrame) -> pd.DataFrame:
         bid=_column(frame, "bid"),
         ask=_column(frame, "ask"),
         vendor_iv=_column(frame, "vendor_iv"),
+        notes=notes,
         settlement=_column(frame, "settlement"),
     )
 
 
-def _yfinance(frame: pd.DataFrame) -> pd.DataFrame:
+def _yfinance(frame: pd.DataFrame, notes: list[str]) -> pd.DataFrame:
     return _contracts(
         frame.index,
         symbol=_column(frame, "contractSymbol"),
@@ -281,10 +338,11 @@ def _yfinance(frame: pd.DataFrame) -> pd.DataFrame:
         bid=_column(frame, "bid"),
         ask=_column(frame, "ask"),
         vendor_iv=_column(frame, "impliedVolatility"),
+        notes=notes,
     )
 
 
-def _cboe(frame: pd.DataFrame) -> pd.DataFrame:
+def _cboe(frame: pd.DataFrame, notes: list[str]) -> pd.DataFrame:
     """Each row holds a call (from Calls to Strike) and a put (from Puts on): one contract per side."""
     names = [_key(column) for column in frame.columns]
     calls, strike, puts = names.index("calls"), names.index("strike"), names.index("puts")
@@ -303,12 +361,17 @@ def _cboe(frame: pd.DataFrame) -> pd.DataFrame:
                 bid=fields.get("bid"),
                 ask=fields.get("ask"),
                 vendor_iv=fields.get("iv"),
+                notes=notes,
             )
         )
     return pd.concat(sides, ignore_index=True)
 
 
-_READERS: dict[str, Callable[[pd.DataFrame], pd.DataFrame]] = {"long": _long, "yfinance": _yfinance, "cboe": _cboe}
+_READERS: dict[str, Callable[[pd.DataFrame, list[str]], pd.DataFrame]] = {
+    "long": _long,
+    "yfinance": _yfinance,
+    "cboe": _cboe,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -317,13 +380,17 @@ _READERS: dict[str, Callable[[pd.DataFrame], pd.DataFrame]] = {"long": _long, "y
 
 
 def _years_to_settlement(expiry: pd.Series, settlement: pd.Series, as_of: datetime) -> np.ndarray:
-    """Years from ``as_of`` to each contract's settlement (:func:`options_analyzer.clock.time_to_expiry`)."""
+    """Years from ``as_of`` to each contract's settlement (:func:`options_analyzer.clock.time_to_expiry`); NaN where
+    the settlement day falls outside the NYSE calendar (an expiry on 1 or 2 January 2000 settles in 1999)."""
     years: dict[tuple[date, str], float] = {}
     out = np.empty(len(expiry))
     for i, (day, style) in enumerate(zip(expiry, settlement, strict=True)):
         key = (day.date(), style)
         if key not in years:
-            years[key] = time_to_expiry(as_of, key[0], style=style)
+            try:
+                years[key] = time_to_expiry(as_of, key[0], style=style)
+            except ValueError:
+                years[key] = np.nan
         out[i] = years[key]
     return out
 
@@ -333,8 +400,10 @@ def _finish(frame: pd.DataFrame, as_of: datetime, messages: list[str]) -> pd.Dat
     as_of = to_new_york(as_of)
     problem = frame["_problem"].to_numpy(dtype=object)
     usable = problem == ""
-    settled = np.zeros(len(frame), dtype=bool)
-    settled[usable] = _years_to_settlement(frame["expiry"][usable], frame["settlement"][usable], as_of) <= 0
+    years = np.zeros(len(frame))
+    years[usable] = _years_to_settlement(frame["expiry"][usable], frame["settlement"][usable], as_of)
+    problem = np.where(np.isnan(years), "invalid", problem)
+    settled = years <= 0
     bid, ask = frame["bid"].to_numpy(float), frame["ask"].to_numpy(float)
     for reason, rows in (("expired", settled), ("no offer", ask <= 0), ("crossed", bid > ask), ("zero bid", bid <= 0)):
         problem = np.where((problem == "") & rows, reason, problem)
@@ -342,7 +411,8 @@ def _finish(frame: pd.DataFrame, as_of: datetime, messages: list[str]) -> pd.Dat
         "unreadable": "with a missing or unreadable symbol, expiry, type, strike, bid or ask",
         "invalid": (
             "that an OCC symbol cannot carry or that quote a negative price (OCC symbols need a root of 1 to 6 letters "
-            "or digits, an expiry in 2000-2099 and a strike that is a positive multiple of 0.001 below 100,000)"
+            "or digits, an expiry in 2000-2099 and a strike that is a positive multiple of 0.001 below 100,000; the "
+            "NYSE calendar settles expiries from 3 January 2000)"
         ),
         "inconsistent": "whose OCC symbol disagrees with their root, expiry, type or strike",
         "expired": f"that had settled by {as_of:%Y-%m-%d %H:%M} ET (expired)",
@@ -359,13 +429,16 @@ def _finish(frame: pd.DataFrame, as_of: datetime, messages: list[str]) -> pd.Dat
     if repeated.any():
         messages.append(f"Dropped {int(repeated.sum())} repeated contract(s), keeping the first quote of each.")
         chain = chain[~repeated]
-    placeholder = chain["vendor_iv"] < MIN_VENDOR_IV
-    if placeholder.any():
+    iv = chain["vendor_iv"].to_numpy(float)
+    unread = chain["_unread_iv"].to_numpy(bool) if "_unread_iv" in chain else np.zeros(len(chain), dtype=bool)
+    blanked = unread | (~np.isnan(iv) & ~(np.isfinite(iv) & (iv >= MIN_VENDOR_IV)))
+    if blanked.any():
         messages.append(
-            f"Blanked {int(placeholder.sum())} vendor implied vol(s) below {MIN_VENDOR_IV:.0%}, the placeholders some "
-            "vendors write where they have none; vendor implied vols are a diagnostic only and are never fitted."
+            f"Blanked {int(blanked.sum())} vendor implied vol(s) that are unreadable, infinite or below "
+            f"{MIN_VENDOR_IV:.0%}, such as the placeholders some vendors write where they have none; vendor implied "
+            "vols are a diagnostic only and are never fitted."
         )
-        chain = chain.assign(vendor_iv=chain["vendor_iv"].where(~placeholder))
+        chain = chain.assign(vendor_iv=np.where(blanked, np.nan, iv))
     chain = chain.assign(_kind=chain["type"].map({"call": 0, "put": 1}))
     chain = chain.sort_values(["expiry", "root", "strike", "_kind"], kind="stable")
     symbols = [
@@ -381,9 +454,10 @@ def clean_chain(chain: pd.DataFrame, *, as_of: datetime) -> tuple[pd.DataFrame, 
     """Drop the contracts of a canonical chain that cannot be quoted at ``as_of``, with one message per reason.
 
     As :func:`read_chain` does for a file: contracts that have settled by ``as_of``
-    (:func:`options_analyzer.clock.settlement_time`), that have no offer, whose bid is above the ask, or whose bid is
-    zero are dropped, repeated contracts keep their first quote, and vendor implied vols below
-    :data:`MIN_VENDOR_IV` are blanked. Symbols are rebuilt from root, expiry, type and strike.
+    (:func:`options_analyzer.clock.settlement_time`) or that the NYSE calendar cannot settle, that have no offer,
+    whose bid is above the ask, or whose bid is zero are dropped, repeated contracts keep their first quote, and
+    vendor implied vols that are infinite or below :data:`MIN_VENDOR_IV` are blanked. Symbols are rebuilt from root,
+    expiry, type and strike.
 
     Parameters
     ----------
@@ -464,8 +538,9 @@ def read_chain(
         found, frame = _table(_text(source))
     if layout != "auto" and found != layout:
         raise ValueError(f"the file looks like {_NAMES[found]}, not the {layout} layout")
-    contracts = _READERS[found](frame.reset_index(drop=True))
-    messages = [f"Read {len(contracts)} contract(s) in {_NAMES[found]}."]
+    notes: list[str] = []
+    contracts = _READERS[found](frame.reset_index(drop=True), notes)
+    messages = [f"Read {len(contracts)} contract(s) in {_NAMES[found]}.", *notes]
     return _finish(contracts, as_of, messages), messages
 
 
@@ -495,7 +570,10 @@ def to_quotes(chain: pd.DataFrame, *, as_of: datetime) -> pd.DataFrame:
     settled = int(np.sum(~(maturity > 0)))
     if settled:
         when = f"{to_new_york(as_of):%Y-%m-%d %H:%M} ET"
-        raise ValueError(f"{settled} contract(s) had settled by {when}; clean the chain with clean_chain first")
+        raise ValueError(
+            f"{settled} contract(s) had settled by {when} or settle outside the NYSE calendar; clean the chain with "
+            "clean_chain first"
+        )
     return pd.DataFrame(
         {
             "Strike": chain["strike"].to_numpy(float),
