@@ -1,3 +1,4 @@
+import re
 import sys
 
 import mpmath as mp
@@ -564,12 +565,59 @@ def test_delta_mode_errors():
         S.build_template("Bull Call Spread", 110, 0, strikes_by="delta", deltas=0.25, market=market)
     with pytest.raises(ValueError, match="strikes_by"):
         S.build_template("Iron Condor", 100, 5, strikes_by="moneyness")
+    # The out-of-order strikes are given in cents (the 25-delta call strike is 104.96869671...).
+    with pytest.raises(ValueError, match=re.escape("the delta strikes 120 and 104.97 are out of order")):
+        S.build_template("Bull Call Spread", 120, 0, strikes_by="delta", deltas=0.25, market=market)
     # A single delta works where one step is enough.
     strangle = S.build_template("Short Strangle", 100, 0, strikes_by="delta", deltas=0.16, market=market)
     assert [round(leg.strike, 4) for leg in strangle.legs] == [
         round(S.strike_for_delta(-0.16, market, market.expiry, 0.18, "put"), 4),
         round(S.strike_for_delta(0.16, market, market.expiry, 0.18, "call"), 4),
     ]
+
+
+@pytest.mark.parametrize(
+    ("name", "kwargs", "message"),
+    [
+        ("Iron Condor", {"deltas": ("a", 0.1)}, "deltas must be numbers, got ('a', 0.1)"),
+        ("Iron Condor", {"deltas": (0.16, None)}, "deltas must be numbers, got (0.16, None)"),
+        ("Iron Condor", {"deltas": "0.16"}, "deltas must be numbers, got '0.16'"),
+        ("Iron Condor", {"deltas": [[0.16, 0.05]]}, "deltas must be numbers, got [[0.16, 0.05]]"),
+        ("Iron Condor", {"deltas": [0.16, [0.05, 0.01]]}, "deltas must be numbers"),
+        ("Iron Condor", {"deltas": (0.16, float("nan"))}, "deltas are absolute values in (0, 1), got (0.16, nan)"),
+        ("Iron Condor", {"deltas": np.array([0.16, 0.0])}, "deltas are absolute values in (0, 1), got (0.16, 0.0)"),
+        ("Iron Condor", {"deltas": (0.16,)}, "needs 2 deltas (one per strike step out from the centre), got 1"),
+        # Centre-only templates need no deltas, but deltas that are given are still checked.
+        ("Long Straddle", {"deltas": ("a",)}, "deltas must be numbers"),
+        ("Bull Call Spread", {"deltas": 0.25, "strike": float("nan")}, "strike must be a finite number, got nan"),
+        ("Iron Condor", {"deltas": (0.16, 0.05), "strike": -100.0}, "strike must be positive, got -100"),
+    ],
+)
+def test_delta_mode_names_the_bad_argument(name, kwargs, message):
+    arguments = {"strike": 100.0, "width": 0.0, "strikes_by": "delta", "market": CONDOR_MARKET, **kwargs}
+    with pytest.raises(ValueError, match=re.escape(message)):
+        S.build_template(name, **arguments)
+
+
+def test_deltas_without_delta_mode_are_rejected():
+    # Deltas used to be ignored silently in the default width mode, which spaced the strikes by width instead.
+    message = "deltas are only used with strikes_by='delta', got deltas=(0.16, 0.05) with strikes_by='width'"
+    with pytest.raises(ValueError, match=re.escape(message)):
+        S.build_template("Iron Condor", 100, 5, deltas=(0.16, 0.05), market=CONDOR_MARKET)
+    with pytest.raises(ValueError, match="only used with strikes_by='delta'"):
+        S.build_template("Long Straddle", 100, 5, strikes_by="width", deltas=0.16)
+    # The market alone is harmless in width mode (a caller may pass it whichever mode is chosen) and is unused.
+    by_width = S.build_template("Iron Condor", 100, 5, market=CONDOR_MARKET)
+    assert by_width == S.build_template("Iron Condor", 100, 5)
+
+
+def test_delta_mode_accepts_numpy_deltas():
+    market = CONDOR_MARKET
+    plain = S.build_template("Iron Condor", 100, 0, strikes_by="delta", deltas=(0.16, 0.05), market=market)
+    array = np.array([0.16, 0.05])
+    assert S.build_template("Iron Condor", 100, 0, strikes_by="delta", deltas=array, market=market) == plain
+    single = S.build_template("Short Strangle", 100, 0, strikes_by="delta", deltas=np.float64(0.16), market=market)
+    assert single == S.build_template("Short Strangle", 100, 0, strikes_by="delta", deltas=[0.16], market=market)
 
 
 _MARKET_FIELDS = ("spot", "rate", "volatility", "expiry", "dividend_yield")

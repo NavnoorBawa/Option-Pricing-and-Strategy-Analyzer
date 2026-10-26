@@ -8,6 +8,8 @@ valuation the P&L uses), and against QuantLib's analytic European engine on a mu
 from __future__ import annotations
 
 import dataclasses
+import math
+import re
 import warnings
 
 import numpy as np
@@ -240,3 +242,53 @@ def test_dollar_gamma_is_the_convexity_of_a_one_percent_move():
     up, down, flat = (float(S.position_value(strategy, market, s)) for s in (101.0, 99.0, 100.0))
     assert (up + down) / 2 - flat == pytest.approx(risk.dollar_gamma_1pct, rel=1e-3)
     assert np.sign(risk.dollar_gamma_1pct) == 1
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"spot": math.inf}, "spot must be a finite number, got inf"),
+        ({"spot": math.nan}, "spot must be a finite number, got nan"),
+        ({"spot": -1.0}, "spot must be a non-negative price, got -1"),
+        ({"spot": "100"}, "spot must be a number, got '100'"),
+        ({"spot": np.array([100.0])}, "spot must be a single number"),
+        ({"t": -1.0}, "t must be a non-negative number of years elapsed, got -1"),
+        ({"t": math.nan}, "t must be a finite number, got nan"),
+        ({"t": math.inf}, "t must be a finite number, got inf"),
+        ({"t": None}, "t must be a number, got None"),
+        ({"multiplier": math.nan}, "multiplier must be a finite number, got nan"),
+        ({"multiplier": math.inf}, "multiplier must be a finite number, got inf"),
+        ({"multiplier": -math.inf}, "multiplier must be a finite number, got -inf"),
+        ({"multiplier": "100"}, "multiplier must be a number, got '100'"),
+    ],
+)
+def test_invalid_arguments_are_rejected_by_name(kwargs, message):
+    # A negative t used to return the risk at a date before today (every leg's life made longer), an infinite spot
+    # raised a RuntimeWarning and a NaN multiplier gave NaN in every field.
+    strategy = S.build_template("Iron Condor", 100, 5)
+    with pytest.raises(ValueError, match=re.escape(message)):
+        S.position_risk(strategy, S.Market(100, 0.05, 0.2, 30 / 365), **kwargs)
+
+
+def test_boundary_arguments_are_accepted():
+    market = S.Market(100, 0.05, 0.2, 0.25, 0.01)
+    put = S.Strategy("put", (S.Leg("put", 2, 100),))
+    # At zero spot a put is worth its discounted strike, with delta -e^{-qT} per option and no curvature.
+    zero = S.position_risk(put, market, 0.0)
+    assert zero.value == pytest.approx(2 * 100 * math.exp(-0.05 * 0.25), rel=1e-15)
+    assert zero.delta == pytest.approx(-2 * math.exp(-0.01 * 0.25), rel=1e-15)
+    assert zero.gamma == zero.vega == zero.dollar_delta == 0.0
+    # numpy scalars and integers are numbers; a negative multiplier reverses the position.
+    plain = S.position_risk(put, market, 101.0, 0.01, multiplier=100.0)
+    from_numpy = S.position_risk(put, market, np.float64(101.0), np.float64(0.01), multiplier=np.int64(100))
+    assert plain == from_numpy
+    short = S.position_risk(put, market, 101.0, 0.01, multiplier=-100)
+    assert short.delta == -plain.delta and short.vega == -plain.vega and short.spot == plain.spot
+
+
+def test_a_huge_spot_gives_numbers_not_an_overflow_error():
+    # The 1% dollar gamma is 0.5 gamma (0.01 S)^2; written with ** it raised OverflowError from S of about 1.3e156.
+    risk = S.position_risk(S.Strategy("call", (S.Leg("call", 1, 100),)), MARKET, 1e200)
+    assert risk.delta == pytest.approx(math.exp(-0.01 * 0.25), rel=1e-15)
+    assert risk.dollar_delta == pytest.approx(1e200 * risk.delta, rel=1e-15)
+    assert risk.gamma == risk.dollar_gamma_1pct == 0.0

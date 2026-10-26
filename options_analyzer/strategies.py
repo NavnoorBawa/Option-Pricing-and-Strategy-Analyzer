@@ -82,6 +82,19 @@ def _require_finite(owner: str, *, optional: tuple[str, ...] = (), **values: Any
             raise ValueError(f"{owner} {name} must be a finite number, got {value!r}")
 
 
+def _number(name: str, value: Any) -> float:
+    """``value`` as a float; ``ValueError`` naming the argument ``name`` unless it is a single finite number."""
+    if np.ndim(value) != 0:
+        raise ValueError(f"{name} must be a single number, got {value!r}")
+    try:
+        finite = math.isfinite(value)
+    except TypeError:  # a string, None, ...
+        raise ValueError(f"{name} must be a number, got {value!r}") from None
+    if not finite:
+        raise ValueError(f"{name} must be a finite number, got {value!r}")
+    return float(value)
+
+
 @dataclass(frozen=True)
 class Market:
     """Market state. ``expiry`` is the default time to expiry (years) for legs.
@@ -446,16 +459,24 @@ def position_risk(
     strategy, market : Strategy, Market
         The position and the market it is valued in.
     spot : float, optional
-        Spot price ($ per share); defaults to ``market.spot``.
+        Spot price ($ per share), finite and non-negative; defaults to ``market.spot``.
     t : float, default 0.0
-        Elapsed time in years (legs then have ``expiry - t`` left).
+        Elapsed time in years, finite and non-negative (legs then have ``expiry - t`` left; a leg past its expiry
+        is worth its intrinsic value).
     multiplier : float, default 1.0
-        Scale of every field, e.g. contracts x shares per contract.
+        Scale of every field, e.g. contracts x shares per contract; finite (a negative multiplier reverses the
+        position).
 
     Returns
     -------
     PositionRisk
         See :class:`PositionRisk` for the units of each field.
+
+    Raises
+    ------
+    ValueError
+        Naming the argument, if ``spot``, ``t`` or ``multiplier`` is not a single finite number, or if ``spot`` or
+        ``t`` is negative.
 
     Examples
     --------
@@ -473,11 +494,16 @@ def position_risk(
     >>> shares.delta, shares.gamma, shares.vega
     (250.0, 0.0, 0.0)
     """
-    spot = float(market.spot if spot is None else spot)
+    spot = float(market.spot) if spot is None else _number("spot", spot)
+    t, m = _number("t", t), _number("multiplier", multiplier)
+    if spot < 0:
+        raise ValueError(f"spot must be a non-negative price, got {spot:g}")
+    if t < 0:
+        raise ValueError(f"t must be a non-negative number of years elapsed, got {t:g}")
     raw = _greek_totals(strategy, market, spot, t, _FIRST_ORDER + _SECOND_ORDER)
-    m = float(multiplier)
     gamma = m * float(raw["gamma"])
     delta = m * float(raw["delta"])
+    move = 0.01 * spot  # a 1% move ($ per share)
 
     def scaled(name: str) -> float:
         return m * float(raw[name]) * bs.GREEKS[name].scale
@@ -489,7 +515,7 @@ def position_risk(
         dollar_delta=delta * spot,
         gamma=gamma,
         gamma_1pct=gamma * spot * 0.01,
-        dollar_gamma_1pct=0.5 * gamma * (0.01 * spot) ** 2,
+        dollar_gamma_1pct=0.5 * gamma * move * move,  # not move**2, which raises OverflowError for a huge spot
         vega=scaled("vega"),
         theta=scaled("theta"),
         rho=scaled("rho"),
@@ -1250,23 +1276,39 @@ def strike_for_delta(target: float, market: Market, expiry: float, volatility: f
 _PROBE_STRIKE = 1000.0
 
 
-def _delta_strikes(template: StrategyTemplate, strike: float, expiry: float, deltas, market: Market) -> tuple:
+def _check_deltas(deltas: Any) -> tuple[float, ...]:
+    """``deltas`` (one number or a sequence) as a tuple of floats in (0, 1); ``ValueError`` naming them otherwise."""
+    try:
+        raw = np.asarray(deltas)
+        numeric = raw.dtype.kind in "biuf" and raw.ndim <= 1  # not strings, None, nested sequences, ...
+    except ValueError:  # a ragged sequence
+        numeric = False
+    if not numeric:
+        raise ValueError(f"deltas must be numbers, got {deltas!r}")
+    values = tuple(float(d) for d in np.atleast_1d(raw))
+    if any(not 0.0 < d < 1.0 for d in values):  # NaN fails too
+        raise ValueError(f"deltas are absolute values in (0, 1), got {values}")
+    return values
+
+
+def _delta_strikes(
+    template: StrategyTemplate, strike: float, expiry: float, deltas: tuple[float, ...], market: Market
+) -> tuple:
     """Template legs with each strike ``K + n w`` replaced by the strike of the ``deltas[|n| - 1]`` option.
 
     Strikes above the centre (n > 0) are those of out-of-the-money calls with delta ``deltas[n - 1]``, strikes
     below it (n < 0) those of out-of-the-money puts with delta ``-deltas[-n - 1]``, each at the leg's own expiry and
-    the market volatility; legs at the centre (n = 0) keep ``strike``.
+    the market volatility; legs at the centre (n = 0) keep ``strike``. ``deltas`` were checked by the caller.
     """
     probe = template.build(_PROBE_STRIKE, 1.0, expiry)
     offsets = [round(leg.strike - _PROBE_STRIKE) if leg.is_option else 0 for leg in probe]
     needed = max((abs(n) for n in offsets), default=0)
     if needed == 0:
         return template.build(strike, 1.0, expiry)
-    deltas = (deltas,) if np.ndim(deltas) == 0 else tuple(deltas)
     if len(deltas) < needed:
-        raise ValueError(f"{template.name} needs {needed} deltas (one per strike step out from the centre)")
-    if any(not 0.0 < float(d) < 1.0 for d in deltas):
-        raise ValueError(f"deltas are absolute values in (0, 1), got {deltas}")
+        raise ValueError(
+            f"{template.name} needs {needed} deltas (one per strike step out from the centre), got {len(deltas)}"
+        )
     if any(a <= b for a, b in pairwise(deltas[:needed])):
         raise ValueError(f"deltas must decrease away from the centre (wings further out), got {deltas[:needed]}")
     legs = []
@@ -1283,9 +1325,10 @@ def _delta_strikes(template: StrategyTemplate, strike: float, expiry: float, del
     by_offset = sorted({(n, leg.strike) for n, leg in zip(offsets, legs, strict=True) if leg.is_option})
     for (n0, k0), (n1, k1) in pairwise(by_offset):
         if n1 > n0 and not k1 > k0:
+            cents = [strike_text(round(k, 2)) for k in (k0, k1, strike)]
             raise ValueError(
-                f"the delta strikes {strike_text(k0)} and {strike_text(k1)} are out of order around the centre "
-                f"strike {strike_text(strike)}: choose a centre strike between the put and call strikes"
+                f"the delta strikes {cents[0]} and {cents[1]} are out of order around the centre strike {cents[2]}: "
+                "choose a centre strike between the put and call strikes"
             )
     return tuple(legs)
 
@@ -1312,7 +1355,8 @@ def build_template(
     delta is ``-deltas[n - 1]``, each at the leg's expiry and ``market.volatility`` (see :func:`strike_for_delta`).
     ``deltas`` are absolute values that decrease outwards, e.g. ``(0.16, 0.05)`` for an iron condor with 16-delta
     shorts and 5-delta wings; ``width`` is then unused and legs at the centre (straddles, calendars, single
-    options) stay at ``strike``. ``market`` is required in this mode.
+    options) stay at ``strike``. ``market`` is required in this mode and unused in the default ``"width"`` mode,
+    where passing ``deltas`` raises ``ValueError`` (the strikes would silently be spaced by ``width``).
 
     Examples
     --------
@@ -1326,11 +1370,18 @@ def build_template(
     template = TEMPLATES[name]
     if strikes_by not in ("width", "delta"):
         raise ValueError(f"strikes_by must be 'width' or 'delta', got {strikes_by!r}")
+    checked: tuple[float, ...] = ()
     if strikes_by == "delta":
         if market is None:
             raise ValueError("strikes_by='delta' needs the market (spot, rate, dividend yield and volatility)")
         if template.uses_width and deltas is None:
             raise ValueError(f"strikes_by='delta' needs the deltas of {name}'s strikes, e.g. deltas=(0.16, 0.05)")
+        if not _number("strike", strike) > 0:
+            raise ValueError(f"strike must be positive, got {strike:g}")
+        if deltas is not None:  # checked even where the template has no strikes away from the centre
+            checked = _check_deltas(deltas)
+    elif deltas is not None:
+        raise ValueError(f"deltas are only used with strikes_by='delta', got deltas={deltas!r} with strikes_by='width'")
     elif template.uses_width:
         if not width > 0:
             raise ValueError("strike width must be positive")
@@ -1345,7 +1396,7 @@ def build_template(
     elif expiry is None:
         expiry = 1.0  # unused: these legs take the market expiry
     if strikes_by == "delta" and market is not None:
-        legs = _delta_strikes(template, strike, expiry, deltas, market)
+        legs = _delta_strikes(template, strike, expiry, checked, market)
     else:
         legs = template.build(strike, width, expiry)
     return Strategy(name, legs, template.description)

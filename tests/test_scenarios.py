@@ -254,3 +254,52 @@ def test_a_minus_100_percent_move_is_valued_at_zero_spot():
     expected = 100 * np.exp(-MARKET.rate * MARKET.expiry) - base
     assert sc.pnl_grid(strategy, MARKET, [-1.0])[0, 0] == pytest.approx(expected, rel=1e-14)
     assert sc.scenario_cube(strategy, MARKET, [-1.0], [0.0])[0, 0, 0] == pytest.approx(expected, rel=1e-14)
+
+
+_CONDOR = S.build_template("Iron Condor", 100, 5)
+#: Every scenario function that takes a dollar multiplier, called on an iron condor.
+_WITH_MULTIPLIER = {
+    "pnl_grid": lambda m: sc.pnl_grid(_CONDOR, MARKET, SPOT_MOVES, VOL_SHOCKS, multiplier=m),
+    "pnl_grid by date": lambda m: sc.pnl_grid(_CONDOR, MARKET, SPOT_MOVES, days=DAYS, multiplier=m),
+    "scenario_cube": lambda m: sc.scenario_cube(_CONDOR, MARKET, SPOT_MOVES, VOL_SHOCKS, DAYS, multiplier=m),
+    "greek_ladder": lambda m: sc.greek_ladder(_CONDOR, MARKET, multiplier=m),
+    "vega_buckets": lambda m: sc.vega_buckets(_CONDOR, MARKET, multiplier=m),
+    "weighted_vega": lambda m: sc.weighted_vega(_CONDOR, MARKET, multiplier=m),
+    "run_stress_tests": lambda m: sc.run_stress_tests(_CONDOR, MARKET, sc.HYPOTHETICAL_SCENARIOS, multiplier=m),
+}
+
+
+@pytest.mark.parametrize(
+    ("bad", "message"),
+    [
+        (np.nan, "multiplier must be a finite number, got nan"),
+        (np.inf, "multiplier must be a finite number, got inf"),
+        (-np.inf, "multiplier must be a finite number, got -inf"),
+        ("100", "multiplier must be a number, got '100'"),
+        (None, "multiplier must be a number, got None"),
+        (np.array([100.0, 200.0]), "multiplier must be a single number"),
+    ],
+    ids=["nan", "inf", "-inf", "string", "None", "array"],
+)
+@pytest.mark.parametrize("function", list(_WITH_MULTIPLIER))
+def test_multiplier_must_be_a_finite_number(function, bad, message):
+    # A NaN or infinite multiplier used to give an all-NaN table (and a RuntimeWarning in vega_buckets).
+    with pytest.raises(ValueError, match=re.escape(message)):
+        _WITH_MULTIPLIER[function](bad)
+
+
+@pytest.mark.parametrize("function", list(_WITH_MULTIPLIER))
+def test_multiplier_accepts_numpy_and_negative_numbers(function):
+    # Validation keeps every finite number: numpy scalars, integers and a negative multiplier (the reversed position).
+    def as_array(value):
+        if isinstance(value, list):  # run_stress_tests
+            return np.array([row["P&L"] for row in value])
+        return np.asarray(value.to_numpy() if hasattr(value, "to_numpy") else value, dtype=float)
+
+    call = _WITH_MULTIPLIER[function]
+    one = as_array(call(1.0))
+    assert np.array_equal(as_array(call(np.float64(250.0))), as_array(call(250)))
+    reversed_ = as_array(call(-1))
+    if function == "greek_ladder":  # the shock, spot_change and spot columns do not scale
+        one, reversed_ = one[:, 3:], reversed_[:, 3:]
+    assert np.array_equal(reversed_, -one)

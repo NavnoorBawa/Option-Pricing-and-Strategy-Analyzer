@@ -17,7 +17,6 @@ import math
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, fields
 from itertools import pairwise
-from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -30,6 +29,7 @@ from .strategies import (
     Market,
     PositionRisk,
     Strategy,
+    _number,
     position_risk,
     position_value,
 )
@@ -38,6 +38,7 @@ __all__ = [
     "DEFAULT_EXPIRY_EDGES_DAYS",
     "DEFAULT_LADDER_SHOCKS",
     "DEFAULT_MONEYNESS_EDGES",
+    "DEFAULT_SIGMA_SHOCKS",
     "DEFAULT_VOL_TENOR_DECAY",
     "DELTA_BUCKETS",
     "HISTORICAL_SCENARIOS",
@@ -194,8 +195,10 @@ def run_stress_tests(
     IV shocks apply literally to every leg. With ``include_elapsed_time`` the
     scenario's duration also passes, so options decay; a leg that expires
     during the episode is settled on the end-of-episode price (a stylised
-    simplification, flagged in the ``Legs expired`` column).
+    simplification, flagged in the ``Legs expired`` column). A ``multiplier`` that is not a finite number raises
+    ``ValueError``.
     """
+    multiplier = _number("multiplier", multiplier)
     base = float(position_value(strategy, market))
     rows = []
     for sc in scenarios:
@@ -232,19 +235,6 @@ def run_stress_tests(
 
 #: How a volatility shock moves each leg's implied vol (see :func:`scenario_cube`).
 VOL_MODES = ("relative", "absolute", "1m")
-
-
-def _number(name: str, value: Any) -> float:
-    """``value`` as a float; ``ValueError`` naming ``name`` unless it is a single finite number."""
-    if np.ndim(value) != 0:
-        raise ValueError(f"{name} must be a single number, got {value!r}")
-    try:
-        finite = math.isfinite(value)
-    except TypeError:  # a string, None, ...
-        raise ValueError(f"{name} must be a number, got {value!r}") from None
-    if not finite:
-        raise ValueError(f"{name} must be a finite number, got {value!r}")
-    return float(value)
 
 
 def _axis(name: str, values: ArrayLike, requirement: str = "finite", minimum: float = -math.inf) -> np.ndarray:
@@ -311,11 +301,12 @@ def pnl_grid(
     relative shock to one-month IV, damped for longer tenors by
     ``vol_tenor_decay``); see :func:`scenario_cube`.
 
-    Spot changes must be finite and at least -1, volatility changes finite and
-    days finite and non-negative; anything else raises ``ValueError`` naming
-    the argument.
+    Spot changes must be finite and at least -1, volatility changes and the
+    multiplier finite and days finite and non-negative; anything else raises
+    ``ValueError`` naming the argument.
     """
     _check_vol_mode(vol_mode, vol_tenor_decay)
+    multiplier = _number("multiplier", multiplier)
     spots = market.spot * (1.0 + _spot_axis(spot_changes))[None, :]
     if vol_changes is not None:
         if np.ndim(days) != 0:
@@ -373,7 +364,7 @@ def scenario_cube(
     vol_tenor_decay : float, default DEFAULT_VOL_TENOR_DECAY
         Exponent of the tenor damping in ``"1m"`` mode.
     multiplier : float, default 1.0
-        Dollar scaling, e.g. contracts x shares per contract.
+        Dollar scaling, e.g. contracts x shares per contract; finite.
 
     Returns
     -------
@@ -383,8 +374,8 @@ def scenario_cube(
     Raises
     ------
     ValueError
-        Naming the argument, if a spot change is below -1, a day count is negative or any value is not a finite
-        number, or if ``vol_mode`` is unknown.
+        Naming the argument, if a spot change is below -1, a day count is negative or any value (the multiplier
+        too) is not a finite number, or if ``vol_mode`` is unknown.
 
     Examples
     --------
@@ -400,6 +391,7 @@ def scenario_cube(
     0.4553
     """
     _check_vol_mode(vol_mode, vol_tenor_decay)
+    multiplier = _number("multiplier", multiplier)
     spots = market.spot * (1.0 + _spot_axis(spot_changes))[None, None, :]
     shocks = _axis("vol_shocks", vol_shocks)[None, :, None]
     t = _days_axis(days)[:, None, None] / DAYS_PER_YEAR
@@ -413,14 +405,16 @@ def scenario_cube(
 # Greek ladder
 # ---------------------------------------------------------------------------
 
-#: Default spot shocks of :func:`greek_ladder`, in percent.
+#: Default spot shocks of :func:`greek_ladder` in percent (``unit="percent"``).
 DEFAULT_LADDER_SHOCKS: tuple[float, ...] = (-20, -10, -5, -3, -2, -1, 0, 1, 2, 3, 5, 10, 20)
+#: Default spot shocks of :func:`greek_ladder` in standard deviations (``unit="sigma"``).
+DEFAULT_SIGMA_SHOCKS: tuple[float, ...] = (-3, -2, -1, 0, 1, 2, 3)
 
 
 def greek_ladder(
     strategy: Strategy,
     market: Market,
-    shocks: Sequence[float] = DEFAULT_LADDER_SHOCKS,
+    shocks: Sequence[float] | None = None,
     *,
     unit: str = "percent",
     sigma_days: float = 1.0,
@@ -438,17 +432,20 @@ def greek_ladder(
     ----------
     strategy, market : Strategy, Market
         The position and today's market.
-    shocks : sequence of float, default DEFAULT_LADDER_SHOCKS
-        Spot shocks, in percent (``unit="percent"``: 5 = +5%) or in standard deviations (``unit="sigma"``: 2 =
-        +2 sigma, one sigma being ``market.volatility * sqrt(sigma_days / 365)`` of spot).
+    shocks : sequence of float, optional
+        Spot shocks in ``unit``; the default is :data:`DEFAULT_LADDER_SHOCKS` (-20% to +20%) in percent and
+        :data:`DEFAULT_SIGMA_SHOCKS` (-3 to +3) in standard deviations.
     unit : {"percent", "sigma"}, default "percent"
-        See ``shocks``.
+        ``"percent"``: a shock of 5 moves spot by +5%, to ``spot x 1.05``. ``"sigma"``: a shock of ``k`` is a move
+        of ``k`` standard deviations of the log price over ``sigma_days``, to ``spot x exp(k sigma sqrt(sigma_days
+        / 365))`` with ``sigma = market.volatility`` (the convention of the Risk tab's price rows), so a downward
+        shock never takes spot to zero.
     sigma_days : float, default 1.0
         Horizon of one standard deviation in ``"sigma"`` units, in calendar days.
     roll_days : float, default 0.0
         Calendar days that pass before the shock (fractions allowed), so the P&L includes the time decay.
     multiplier : float, default 1.0
-        Dollar scaling, e.g. contracts x shares per contract.
+        Dollar scaling, e.g. contracts x shares per contract; finite.
 
     Returns
     -------
@@ -461,8 +458,9 @@ def greek_ladder(
     Raises
     ------
     ValueError
-        Naming the argument, if a shock, ``roll_days`` or ``sigma_days`` is not a single finite number, if
-        ``roll_days`` is negative or ``sigma_days`` not positive, or if a shock takes spot to zero or below.
+        Naming the argument, if a shock, ``roll_days``, ``sigma_days`` or ``multiplier`` is not a single finite
+        number, if ``roll_days`` is negative or ``sigma_days`` not positive, or if a shock takes spot to zero or
+        below (a percent shock of -100 or less) or out of floating-point range.
 
     Examples
     --------
@@ -472,27 +470,45 @@ def greek_ladder(
     >>> ladder = greek_ladder(strangle, market, (-5, 0, 5), multiplier=100)
     >>> ladder[["shock", "spot", "pnl", "delta"]].round(2).to_dict("list")
     {'shock': [-5, 0, 5], 'spot': [95.0, 100.0, 105.0], 'pnl': [-86.45, 0.0, -147.02], 'delta': [41.01, -6.66, -50.75]}
+
+    In standard deviations of the 5-day log return, 20% x sqrt(5 / 365) = 2.34%:
+
+    >>> greek_ladder(strangle, market, unit="sigma", sigma_days=5)["spot"].round(2).tolist()
+    [93.22, 95.43, 97.69, 100.0, 102.37, 104.79, 107.27]
     """
     if unit not in ("percent", "sigma"):
         raise ValueError(f"unit must be 'percent' or 'sigma', got {unit!r}")
     roll, horizon = _number("roll_days", roll_days), _number("sigma_days", sigma_days)
+    multiplier = _number("multiplier", multiplier)
     if roll < 0:
         raise ValueError(f"roll_days must be a non-negative number of days, got {roll_days!r}")
     if not horizon > 0:
         raise ValueError(f"sigma_days must be a positive number of days, got {sigma_days!r}")
+    if shocks is None:
+        shocks = DEFAULT_LADDER_SHOCKS if unit == "percent" else DEFAULT_SIGMA_SHOCKS
     try:
         shocks = list(shocks)
     except TypeError:
         raise ValueError(f"shocks must be a sequence of numbers, got {shocks!r}") from None
-    step = 0.01 if unit == "percent" else market.volatility * math.sqrt(horizon / DAYS_PER_YEAR)
+    sigma = market.volatility * math.sqrt(horizon / DAYS_PER_YEAR)  # one standard deviation of the log price
     t = roll / DAYS_PER_YEAR
     base = multiplier * float(position_value(strategy, market, market.spot, 0.0))
     rows = []
     for shock in shocks:
-        change = _number("shock", shock) * step
-        if not change > -1.0:
+        k = _number("shock", shock)
+        if unit == "percent":
+            change = 0.01 * k
+        else:
+            try:
+                change = math.expm1(k * sigma)  # exp(k sigma) - 1 without cancellation for small moves
+            except OverflowError:
+                change = math.inf
+        spot = market.spot * (1.0 + change)
+        if not spot > 0:
             raise ValueError(f"a shock of {shock} ({unit}) takes spot to zero or below")
-        risk = asdict(position_risk(strategy, market, market.spot * (1.0 + change), t, multiplier=multiplier))
+        if not math.isfinite(spot):
+            raise ValueError(f"a shock of {shock} ({unit}) takes spot out of floating-point range")
+        risk = asdict(position_risk(strategy, market, spot, t, multiplier=multiplier))
         rows.append({"shock": shock, "spot_change": change, "spot": risk["spot"], "pnl": risk["value"] - base, **risk})
     risk_columns = [f.name for f in fields(PositionRisk) if f.name != "spot"]
     return pd.DataFrame(rows, columns=["shock", "spot_change", "spot", "pnl", *risk_columns])
@@ -518,8 +534,8 @@ def _bucket_labels(edges: np.ndarray, unit: str) -> list[str]:
 
 
 def _edges(name: str, edges: Sequence[float]) -> np.ndarray:
-    values = np.asarray(edges, dtype=float)
-    if values.ndim != 1 or values.size == 0 or not np.all(np.isfinite(values)) or np.any(values <= 0):
+    values = _axis(name, edges)
+    if values.size == 0 or np.any(values <= 0):
         raise ValueError(f"{name} must be a non-empty sequence of positive numbers, got {edges!r}")
     if np.any(np.diff(values) <= 0):
         raise ValueError(f"{name} must increase strictly, got {tuple(edges)}")
@@ -566,7 +582,7 @@ def vega_buckets(
     moneyness_edges : sequence of float, default DEFAULT_MONEYNESS_EDGES
         Upper edges of the moneyness buckets (strike / spot), increasing.
     multiplier : float, default 1.0
-        Dollar scaling, e.g. contracts x shares per contract.
+        Dollar scaling, e.g. contracts x shares per contract; finite.
 
     Returns
     -------
@@ -574,6 +590,12 @@ def vega_buckets(
         Index ``expiry_bucket`` (``up_to_7d``, ``7d_to_14d``, ..., ``over_730d``, then ``total``) and columns
         ``strike_bucket`` (low to high strike, then ``total``). Empty buckets are kept, so the shape depends only
         on the edges.
+
+    Raises
+    ------
+    ValueError
+        Naming the argument, if the edges are not positive, finite and increasing, ``strike_axis`` is unknown or
+        ``multiplier`` is not a finite number.
 
     Examples
     --------
@@ -588,6 +610,7 @@ def vega_buckets(
     over_91d          0.00      0.0  0.00       0.0       0.0   0.00
     total            -0.47      0.0  1.14       0.0       0.0   0.67
     """
+    multiplier = _number("multiplier", multiplier)
     expiry = _edges("expiry_edges", expiry_edges)
     rows = _bucket_labels(expiry, "d")
     if strike_axis == "delta":
@@ -657,12 +680,17 @@ def weighted_vega(
     scheme : {"relative", "sqrt_time"}, default "relative"
         See above.
     multiplier : float, default 1.0
-        Dollar scaling, e.g. contracts x shares per contract.
+        Dollar scaling, e.g. contracts x shares per contract; finite.
 
     Returns
     -------
     float
         Weighted vega ($).
+
+    Raises
+    ------
+    ValueError
+        Naming the argument, if ``scheme`` is unknown or ``decay`` or ``multiplier`` is not a finite number.
 
     Examples
     --------
@@ -680,7 +708,7 @@ def weighted_vega(
     """
     if scheme not in VEGA_WEIGHTINGS:
         raise ValueError(f"scheme must be one of {VEGA_WEIGHTINGS}, got {scheme!r}")
-    decay = _number("decay", decay)
+    decay, multiplier = _number("decay", decay), _number("multiplier", multiplier)
     total = 0.0
     for leg, tau, vol, vega in _option_legs(strategy, market):
         # Same floor and ratio as the damping in strategies.position_value, so the two agree to first order.
