@@ -17,8 +17,8 @@ equation ``B(tau) = K e^{-(r - q) tau} N(tau, B) / D(tau, B)`` whose ``N`` and `
 boundary before ``tau``:
 
 * the *cdf form* (the paper's FP-B), used when ``|r - q| >= 1e-3``, has normal distribution functions in ``N`` and
-  ``D``; the *density form* (FP-A), used otherwise, has normal densities, and converges where the cdf form stalls
-  (``r`` close to ``q``);
+  ``D``; the *density form* (FP-A), used otherwise, has normal densities and converges faster when ``r`` is close to
+  ``q`` (at ``r = q`` the value settles to 1e-12 in 8 iterations, with the cdf form in 14);
 * ``B`` is represented by ``H = ln(B / X)^2`` on ``n + 1`` Chebyshev-Lobatto nodes in ``z = 2 sqrt(tau / T) - 1``,
   where ``X = K min(1, r / q)`` is the boundary at expiry: ``H`` is smooth in ``sqrt(tau)`` although ``B`` is not;
 * the iteration starts from Li's (2010) QD+ approximation of the boundary, takes one Jacobi-Newton step and then
@@ -68,6 +68,7 @@ from __future__ import annotations
 import functools
 import math
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -94,8 +95,16 @@ _QD_PLUS_STEPS = 12
 _QD_PLUS_TOLERANCE = 1e-9
 #: Normalised boundaries kept in the cache (one per expiry, rate, dividend yield, volatility and scheme).
 _CACHE_SIZE = 4096
-#: Steps of the Leisen-Reimer tree in the double-boundary fallback (Richardson with twice as many).
+#: Steps of the Leisen-Reimer tree in the fallback (Richardson with twice as many).
 _TREE_STEPS = 2001
+#: A boundary whose last fixed-point iteration still moved ``ln B`` by more than this at some node has not converged,
+#: and the option is valued on the tree instead. On the 4,495-put grid the largest last step is 5.5e-4 (fast),
+#: 1.2e-5 (accurate) and 2.8e-7 (high); the iterations that failed in tests/test_american.py moved it by 4e-2 to 1.3.
+_MAX_LAST_STEP = 1e-2
+#: The smallest normal double. Rates and yields smaller in magnitude count as zero (they move no value by more than
+#: 1e-307 of the strike per year, and subnormal arithmetic derails the boundary iteration); a put with
+#: ``X / K = r / q`` below it is exercised only at spots under 2.2e-308 K, and is valued as European.
+_TINY = float(np.finfo(float).tiny)
 
 
 @dataclass(frozen=True)
@@ -150,15 +159,21 @@ class AmericanPrice:
         ``value - european``, the early-exercise premium.
     method : str
         ``"alo"`` (spectral collocation), ``"european"`` (early exercise never optimal), ``"tree"`` (the
-        double-boundary fallback), ``"exact"`` (zero volatility or a zero spot) or ``"intrinsic"`` (expired).
+        fallback), ``"exact"`` (zero volatility) or ``"intrinsic"`` (expired).
     fallback : bool
         True when the engine could not price the option and :func:`binomial.extrapolated_price` did.
+    fallback_reason : str or None
+        Why it could not: ``"double boundary"`` (the regime of :func:`exercise_regime`, which the engine does not
+        solve) or ``"not converged"`` (the boundary iteration was still moving, see ``last_step``).
     critical_spot : float
         The exercise boundary today: a put is exercised at or below it, a call at or above it. ``0`` (put) or
         ``inf`` (call) when early exercise is never optimal; NaN where it is not computed (``tree``, ``exact``,
         ``intrinsic``).
     fixed_point : str or None
-        ``"cdf"`` or ``"density"``: the form of the boundary equation, for ``method == "alo"``.
+        ``"cdf"`` or ``"density"``: the form of the boundary equation, when a boundary was solved.
+    last_step : float
+        Convergence check: the largest change of ``ln B`` over the collocation nodes in the last fixed-point
+        iteration, when a boundary was solved (NaN otherwise). Above 1e-2 the boundary is rejected.
     scheme : str
         The scheme's name.
     """
@@ -168,8 +183,10 @@ class AmericanPrice:
     premium: float
     method: str
     fallback: bool
+    fallback_reason: str | None
     critical_spot: float
     fixed_point: str | None
+    last_step: float
     scheme: str
 
 
@@ -213,6 +230,11 @@ def _put_regime(r: float, q: float) -> str:
     if q < r < 0.0:
         return "double"
     return "single"
+
+
+def _flush(x: float) -> float:
+    """A rate or yield, with magnitudes below the smallest normal double (:data:`_TINY`) set to zero."""
+    return 0.0 if abs(x) < _TINY else x
 
 
 def _put_x(r: float, q: float) -> float:
@@ -343,8 +365,9 @@ def _qd_plus(tau: np.ndarray, r: float, q: float, sigma: float, x_max: float) ->
 
 
 @functools.lru_cache(maxsize=_CACHE_SIZE)
-def _put_boundary(T: float, r: float, q: float, sigma: float, scheme: Scheme) -> tuple[np.ndarray, str]:
-    """``H = ln(B / X)^2`` of the normalised put boundary at the scheme's nodes, and the fixed-point form used.
+def _put_boundary(T: float, r: float, q: float, sigma: float, scheme: Scheme) -> tuple[np.ndarray, str, float]:
+    """``H = ln(B / X)^2`` of the normalised put boundary at the scheme's nodes, the fixed-point form used and the
+    last iteration's largest change of ``ln B`` (the convergence check).
 
     For ``r > 0`` (or ``r = 0 > q``) and ``sigma > 0``. The array is read-only: it is shared through the cache.
     """
@@ -390,7 +413,7 @@ def _put_boundary(T: float, r: float, q: float, sigma: float, scheme: Scheme) ->
         b = x_max * np.exp(-root_h)
         # A node whose update is not a positive number (a vanishing denominator, a Newton step through zero)
         # keeps its value for this iteration.
-        with np.errstate(divide="ignore", invalid="ignore"):
+        with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
             f = growth * numerator / denominator
             if iteration == 0:
                 # Jacobi-Newton: the derivative of f in B(tau_i) through the terms outside the integrals.
@@ -405,8 +428,10 @@ def _put_boundary(T: float, r: float, q: float, sigma: float, scheme: Scheme) ->
                 f = np.where(np.isfinite(newton) & (newton > 0.0), newton, f)
         new = np.where(np.isfinite(f) & (f > 0.0), f, b)
         h[1:] = (np.log(new) - log_x) ** 2
+    # sqrt(H) = ln(X / B): its change is the change of ln B the last iteration made.
+    last_step = float(np.max(np.abs(np.sqrt(h[1:]) - root_h)))
     h.flags.writeable = False
-    return h, "density" if density else "cdf"
+    return h, "density" if density else "cdf", last_step
 
 
 def _boundary_at(h: np.ndarray, z: np.ndarray, n: int, x_max: float) -> np.ndarray:
@@ -441,9 +466,10 @@ def _deterministic_put(S: np.ndarray, K: np.ndarray, T: float, r: float, q: floa
         return K * np.exp(-r * t) - S * np.exp(-q * t)
 
     best = np.maximum(np.maximum(gain(0.0), gain(T)), 0.0)
-    if r != q and r * q > 0.0:
-        with np.errstate(divide="ignore", invalid="ignore"):
-            t_star = np.log(r * K / (q * S)) / (r - q)
+    if r != q and ((r > 0.0 and q > 0.0) or (r < 0.0 and q < 0.0)):
+        # The gain is stationary at t* = ln(r K / (q S)) / (r - q), taken in logarithms so that no ratio overflows.
+        with np.errstate(divide="ignore", invalid="ignore"):  # a zero spot or strike has no stationary date
+            t_star = (math.log(abs(r)) - math.log(abs(q)) + np.log(K) - np.log(S)) / (r - q)
         inside = np.isfinite(t_star) & (t_star > 0.0) & (t_star < T)
         best = np.where(inside, np.maximum(best, gain(np.where(inside, t_star, 0.0))), best)
     return best
@@ -459,45 +485,64 @@ def _european_put(S: np.ndarray, K: np.ndarray, T: float, r: float, q: float, si
     return np.maximum(value, K * dr - S * dq)  # cancellation can leave a hair below the no-arbitrage floor
 
 
-def _price_puts(
-    S: np.ndarray, K: np.ndarray, T: float, r: float, q: float, sigma: float, scheme: Scheme
-) -> tuple[np.ndarray, np.ndarray, str, float, str | None]:
-    """American puts sharing ``(T, r, q, sigma)``.
+class _Puts(NamedTuple):
+    """American puts that share ``(T, r, q, sigma)``, and how they were valued (see :class:`AmericanPrice`)."""
 
-    Returns ``(value, european, method, b, form)``: ``b`` is the exercise boundary today over the strike (0 when
-    early exercise is never optimal, NaN when the method does not compute it) and ``form`` the fixed-point form.
-    """
+    value: np.ndarray
+    european: np.ndarray
+    method: str
+    boundary: float  # the exercise boundary today over the strike: 0 when never exercised, NaN when not computed
+    form: str | None = None
+    reason: str | None = None
+    last_step: float = math.nan
+
+
+def _tree_puts(value: np.ndarray, live: np.ndarray, S, K, T, r, sigma, q) -> np.ndarray:
+    """The fallback: :func:`binomial.extrapolated_price` for the live rows of ``value`` (changed in place)."""
+    for i in np.flatnonzero(live):
+        value[i] = binomial.extrapolated_price(S[i], K[i], T, r, sigma, q, "put", True, _TREE_STEPS)
+    return value
+
+
+def _price_puts(S: np.ndarray, K: np.ndarray, T: float, r: float, q: float, sigma: float, scheme: Scheme) -> _Puts:
+    """American puts sharing ``(T, r, q, sigma)``."""
     intrinsic = np.maximum(K - S, 0.0)
     if T <= 0.0:
-        return intrinsic, intrinsic, "intrinsic", math.nan, None
+        return _Puts(intrinsic, intrinsic, "intrinsic", math.nan)
+    r, q = _flush(r), _flush(q)
     regime = _put_regime(r, q)
     live = (K > 0.0) & (S > 0.0)
     if regime != "single" or sigma == 0.0 or not live.all():
         european = np.asarray(bs.price(S, K, T, r, sigma, q, "put"), dtype=float).reshape(S.shape)
     else:
         european = _european_put(S, K, T, r, q, sigma)
+    # Where the put is exercised it is worth its intrinsic value, never less than the European one. Only a
+    # boundary placed too high could make the two differ there (it happens just before expiry at extreme
+    # volatilities, by a few 1e-9). A zero spot stays at zero: the put pays K at once (r >= 0) or at expiry (r < 0).
+    floor = np.maximum(european, intrinsic)
     if regime == "european":
-        return np.maximum(european, intrinsic), european, "european", 0.0, None
+        return _Puts(floor, european, "european", 0.0)
     if sigma == 0.0:
-        value = _deterministic_put(S, K, T, r, q)
-        return np.maximum(value, intrinsic), european, "exact", math.nan, None
-    # A zero spot stays at zero: the put pays its whole strike, at once (r >= 0) or at expiry (r < 0).
-    value = np.where(S == 0.0, K * max(1.0, math.exp(-r * T)), intrinsic)
+        return _Puts(np.maximum(_deterministic_put(S, K, T, r, q), intrinsic), european, "exact", math.nan)
     if regime == "double":
-        for i in np.flatnonzero(live):
-            value[i] = binomial.extrapolated_price(S[i], K[i], T, r, sigma, q, "put", True, _TREE_STEPS)
-        return value, european, "tree", math.nan, None
-    h, form = _put_boundary(T, r, q, sigma, scheme)
+        return _Puts(_tree_puts(floor, live, S, K, T, r, sigma, q), european, "tree", math.nan, None, "double boundary")
+    if _put_x(r, q) < _TINY:
+        return _Puts(floor, european, "european", 0.0)
+    h, form, last_step = _put_boundary(T, r, q, sigma, scheme)
+    if last_step > _MAX_LAST_STEP:
+        value = _tree_puts(floor, live, S, K, T, r, sigma, q)
+        return _Puts(value, european, "tree", math.nan, form, "not converged", last_step)
     b_today = _put_x(r, q) * math.exp(-math.sqrt(h[-1]))
     s = np.where(live, S / np.where(live, K, 1.0), 0.0)
-    holding = live & (s > b_today)  # below the boundary the put is exercised: its value is K - S
+    holding = live & (s > b_today)  # at or below the boundary the put is exercised
+    value = floor
     if holding.all():
         premium = K * _premium(s, T, r, q, sigma, h, scheme)
         value = np.maximum(european + np.maximum(premium, 0.0), intrinsic)
     elif holding.any():
         premium = K[holding] * _premium(s[holding], T, r, q, sigma, h, scheme)
         value[holding] = np.maximum(european[holding] + np.maximum(premium, 0.0), intrinsic[holding])
-    return value, european, "alo", b_today, form
+    return _Puts(value, european, "alo", b_today, form, None, last_step)
 
 
 _NAMES = ("S", "K", "T", "r", "sigma", "q")
@@ -514,7 +559,7 @@ def _check(values: tuple[np.ndarray, ...] | tuple[float, ...]) -> None:
         raise ValueError("volatility must be non-negative")
 
 
-def _price_group(S, K, T, r, sigma, q, phi, scheme):
+def _price_group(S, K, T, r, sigma, q, phi, scheme) -> _Puts:
     """Value options of one type that share ``(T, r, sigma, q)``: a call is the put ``P(K, S; q, r)``."""
     if phi > 0:
         return _price_puts(K, S, T, q, r, sigma, scheme)
@@ -558,7 +603,9 @@ def price(
 
     Notes
     -----
-    In the double-boundary regime (:func:`exercise_regime`) the value comes from
+    In the double-boundary regime (:func:`exercise_regime`), and when the boundary iteration has not converged
+    (its last step moved ``ln B`` by more than 1e-2 at some node, which happens only far outside the validated
+    domain, for instance decades of expiry with a dividend yield of -30 %), the value comes from
     :func:`binomial.extrapolated_price`; :func:`price_details` reports it.
 
     Examples
@@ -581,7 +628,7 @@ def price(
         scalars = tuple(float(x) for x in (S, K, T, r, sigma, q))
         _check(scalars)
         S1, K1 = np.array([scalars[0]]), np.array([scalars[1]])
-        return float(_price_group(S1, K1, *scalars[2:], phi, chosen)[0][0])
+        return float(_price_group(S1, K1, *scalars[2:], phi, chosen).value[0])
     arrays = np.broadcast_arrays(*(np.asarray(x, dtype=float) for x in (S, K, T, r, sigma, q)))
     _check(tuple(arrays))
     shape = arrays[0].shape
@@ -590,13 +637,13 @@ def price(
     if not S_.size:
         return out.reshape(shape)
     if all(np.ndim(x) == 0 for x in (T, r, sigma, q)):  # a strip or a profile: one boundary
-        out[:] = _price_group(S_, K_, float(T_[0]), float(r_[0]), float(sigma_[0]), float(q_[0]), phi, chosen)[0]
+        out[:] = _price_group(S_, K_, *(float(x[0]) for x in (T_, r_, sigma_, q_)), phi, chosen).value
     else:
         keys = np.stack([T_, r_, sigma_, q_], axis=1)
         unique, inverse = np.unique(keys, axis=0, return_inverse=True)
-        for g, (t, rate, vol, div) in enumerate(unique):
+        for g, key in enumerate(unique):
             rows = np.flatnonzero(inverse.reshape(-1) == g)
-            out[rows] = _price_group(S_[rows], K_[rows], float(t), float(rate), float(vol), float(div), phi, chosen)[0]
+            out[rows] = _price_group(S_[rows], K_[rows], *(float(x) for x in key), phi, chosen).value
     return float(out[0]) if not shape else out.reshape(shape)
 
 
@@ -624,11 +671,11 @@ def price_details(
     Examples
     --------
     >>> details = price_details(100, 100, 1.0, -0.01, 0.2, -0.02, option_type="put")
-    >>> details.method, details.fallback, round(details.value, 4)
-    ('tree', True, 7.6253)
+    >>> details.method, details.fallback_reason, round(details.value, 4)
+    ('tree', 'double boundary', 7.6253)
     >>> details = price_details(100, 100, 1.0, 0.05, 0.25, 0.05, option_type="put")
-    >>> details.method, details.fixed_point, round(details.critical_spot, 3)
-    ('alo', 'density', 64.792)
+    >>> details.method, details.fixed_point, round(details.critical_spot, 3), details.last_step < 1e-9
+    ('alo', 'density', 64.792, True)
     """
     phi = bs.option_sign(option_type)
     chosen = _scheme(scheme)
@@ -637,18 +684,21 @@ def price_details(
     scalars = tuple(float(x) for x in (S, K, T, r, sigma, q))
     _check(scalars)
     S1, K1 = np.array([scalars[0]]), np.array([scalars[1]])
-    value, european, method, b, form = _price_group(S1, K1, *scalars[2:], phi, chosen)
+    puts = _price_group(S1, K1, *scalars[2:], phi, chosen)
     # A put is exercised at or below K b. The call is its symmetric put, with spot K and strike S, exercised when
     # K <= S b, that is at or above S = K / b (infinity when b = 0: never).
+    b = puts.boundary
     critical = scalars[1] * b if phi < 0 else (math.inf if b == 0.0 else scalars[1] / b)
     return AmericanPrice(
-        value=float(value[0]),
-        european=float(european[0]),
-        premium=float(value[0] - european[0]),
-        method=method,
-        fallback=method == "tree",
+        value=float(puts.value[0]),
+        european=float(puts.european[0]),
+        premium=float(puts.value[0] - puts.european[0]),
+        method=puts.method,
+        fallback=puts.method == "tree",
+        fallback_reason=puts.reason,
         critical_spot=critical,
-        fixed_point=form,
+        fixed_point=puts.form,
+        last_step=puts.last_step,
         scheme=chosen.name,
     )
 
@@ -688,8 +738,9 @@ def exercise_boundary(
     Raises
     ------
     ValueError
-        In the double-boundary regime (:func:`exercise_regime`), which this engine does not solve, or when ``K``,
-        ``T`` or ``sigma`` is not positive.
+        In the double-boundary regime (:func:`exercise_regime`), which this engine does not solve; when the
+        boundary iteration has not converged (see :func:`price`); or when ``K``, ``T`` or ``sigma`` is not
+        positive.
 
     Examples
     --------
@@ -711,15 +762,20 @@ def exercise_boundary(
         times = np.asarray(tau, dtype=float).reshape(-1)
         if not np.all(np.isfinite(times)) or np.any(times < 0.0) or np.any(times > T):
             raise ValueError("tau must lie in [0, T]")
-    put_r, put_q = (q, r) if phi > 0 else (r, q)
+    put_r, put_q = (_flush(q), _flush(r)) if phi > 0 else (_flush(r), _flush(q))
     regime = _put_regime(put_r, put_q)
     if regime == "double":
         raise ValueError(
             "two exercise boundaries (a put with q < r < 0, a call with r < q < 0): this engine solves one; "
             "price() values the option on a tree instead"
         )
-    if regime == "european":
+    if regime == "european" or _put_x(put_r, put_q) < _TINY:  # never exercised, or only below 2.2e-308 K
         return times, np.full(times.shape, np.inf if phi > 0 else 0.0)
-    h, _ = _put_boundary(T, put_r, put_q, sigma, chosen)
+    h, _, last_step = _put_boundary(T, put_r, put_q, sigma, chosen)
+    if last_step > _MAX_LAST_STEP:
+        raise ValueError(
+            f"the boundary iteration has not converged (its last step moved ln B by {last_step:.1e}); "
+            "price() values the option on a tree instead"
+        )
     b = _boundary_at(h, 2.0 * np.sqrt(times / T) - 1.0, chosen.n, _put_x(put_r, put_q))
     return times, K / b if phi > 0 else K * b

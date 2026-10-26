@@ -42,3 +42,44 @@ package never imports them.
 | cody-special 1.0.0, piecewise-rational 1.0.0 | MIT | dependencies of lets-be-rational |
 | QuantLib 1.44 | BSD-3-Clause | reference prices, trees and finite-difference engines |
 | mpmath 1.4.1 | BSD-3-Clause | high-precision reference values |
+
+## QuantLib's QdFp American engine (design reference and reference prices)
+
+`options_analyzer/american.py` follows the design of QuantLib's `QdFpAmericanEngine` and `QdPlusAmericanEngine`
+(`ql/pricingengines/vanilla/qdfpamericanengine.cpp` and `qdplusamericanengine.cpp` in QuantLib 1.44, Copyright (C)
+2022 Klaus Spanderen): the fixed-point equations of Andersen, Lake and Offengenden (2016) on Chebyshev nodes in the
+square root of the time to expiry, the QD+ initial guess of Li (2010) solved by Halley's method, one Jacobi-Newton
+step followed by plain fixed-point steps, and the density form of the equation when |r - q| < 1e-3. The module is
+written from the papers; no QuantLib source code is copied into it. The reference prices in
+`tests/fixtures/alo_grid_qdfp.npz` were computed with QuantLib 1.44 by `scripts/gen_alo_reference.py`. QuantLib is
+distributed under the following licence (from its `LICENSE.TXT`, which lists the copyright holders):
+
+```text
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+    Redistributions of source code must retain the above copyright notice,
+    this list of conditions and the following disclaimer.
+
+    Redistributions in binary form must reproduce the above copyright notice,
+    this list of conditions and the following disclaimer in the documentation
+    and/or other materials provided with the distribution.
+
+    Neither the names of the copyright holders nor the names of the QuantLib
+    Group and its contributors may be used to endorse or promote products
+    derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND
+CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
+INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
+CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
+USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
+AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+```

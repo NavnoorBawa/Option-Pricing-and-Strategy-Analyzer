@@ -28,7 +28,7 @@ FIXTURE = Path(__file__).parent / "fixtures" / "alo_grid_qdfp.npz"
 
 #: Early-exercise premia of the example of Andersen et al. (2016): S = K = 100, q = 5 %, sigma = 25 %, one year,
 #: with r = 5 % (the density form) and 7.5 % (the cdf form). From QuantLib 1.44's QdFp engine at its tightest
-#: settings (tanh-sinh to 1e-14, 40 iterations, 81 nodes), which agree with the "high" scheme to 1.2e-12 and 7e-12.
+#: settings (tanh-sinh to 1e-14, 40 iterations, 81 nodes), which agree with the "high" scheme to 1.0e-12 and 4.6e-11.
 LITERATURE_PREMIA = {0.05: 0.1069527027479, 0.075: 0.3671111406253}
 
 
@@ -77,14 +77,15 @@ def test_the_fixture_is_healys_table_5_grid(grid):
     assert np.sqrt(np.mean(difference**2)) < 6e-8
 
 
-# Targets of roadmap item PR-2 (against QdFp high precision) and the measured values, with headroom. Measured on
-# QuantLib 1.44: fast RMSE 3.7e-5, max 7.1e-4; accurate RMSE 1.6e-7, max 3.8e-6; high RMSE 5.2e-8, max 1.0e-6
-# (which is QdFp high precision's own error: against the strict column, high has RMSE 1.3e-8, max 3.1e-7).
+# Targets of roadmap item PR-2 against QdFp high precision (RMSE: fast 1e-4, accurate 5e-6 with max 5e-5, high
+# 3e-7) and bounds with headroom over the measured errors. Measured against qdfp_high / qdfp_strict: fast RMSE
+# 3.7e-5 / 3.7e-5, max 7.1e-4 / 7.1e-4; accurate 1.6e-7 / 1.7e-7, max 3.7e-6 / 4.8e-6; high 5.2e-8 / 1.8e-9, max
+# 1.0e-6 / 5.4e-8. High's error against qdfp_high is that column's own error.
 ACCURACY = {
     # scheme: (RMSE vs qdfp_high, max vs qdfp_high, RMSE vs qdfp_strict, max vs qdfp_strict)
     "fast": (1e-4, 1e-3, 1e-4, 1e-3),
     "accurate": (5e-6, 5e-5, 5e-7, 1e-5),
-    "high": (3e-7, 1.2e-6, 3e-8, 5e-7),
+    "high": (3e-7, 1.2e-6, 1e-8, 2e-7),
 }
 
 
@@ -219,24 +220,32 @@ def test_the_value_is_monotone_in_volatility_expiry_and_strike(scheme):
 
 
 # Largest rise of a put's boundary (fall of a call's) with time to expiry, relative to the boundary: the ripple of
-# the Chebyshev interpolant between nodes. Measured over r in [0, 0.3], q in [-0.05, 0.12], T in [1/52, 20] and
-# sigma in [0.05, 1.5]: fast 2.1e-2 (sigma = 1.5 just before expiry), accurate 3.0e-5, high 4.1e-6.
+# the Chebyshev interpolant between nodes, largest just before expiry at high volatility. Measured over r in
+# [0, 0.3], q in [-0.05, 0.12], T in [1/52, 20] and sigma in [0.05, 1.5]: fast 2.1e-2 (sigma = 1.5; 8e-6 up to
+# sigma = 0.2), accurate 3.0e-5 and high 4.1e-6.
 BOUNDARY_RIPPLE = {"fast": 2.5e-2, "accurate": 5e-5, "high": 6e-6}
+#: Boundaries that do not converge in that set (r = 0 with q < 0 converges slowest): the engine rejects them.
+NOT_CONVERGED = {"fast": {(0.0, -0.05, 5.0, 1.5), (0.0, -0.05, 20.0, 1.5)}, "accurate": set(), "high": set()}
 
 
 @pytest.mark.parametrize("scheme", sorted(am.SCHEMES))
 @pytest.mark.parametrize("kind", ["put", "call"])
 def test_the_boundary_moves_monotonically_and_starts_at_x(scheme, kind):
-    worst = 0.0
+    worst, rejected = 0.0, set()
     for r in (0.0, 0.01, 0.05, 0.1, 0.3):
         for q in (-0.05, 0.0, 0.02, 0.05, 0.12):
             if am.exercise_regime(r, q, option_type=kind) != "single":
                 continue
             for T in (1 / 52, 0.25, 1.0, 5.0, 20.0):
                 for sigma in (0.05, 0.2, 0.5, 1.5):
-                    _, b = am.exercise_boundary(
-                        100.0, T, r, sigma, q, option_type=kind, scheme=scheme, tau=np.linspace(0.0, T, 2001)
-                    )
+                    try:
+                        _, b = am.exercise_boundary(
+                            100.0, T, r, sigma, q, option_type=kind, scheme=scheme, tau=np.linspace(0.0, T, 2001)
+                        )
+                    except ValueError as error:
+                        assert "has not converged" in str(error)
+                        rejected.add((r, q, T, sigma))
+                        continue
                     # Expiry: X = K min(1, r / q) for a put and K max(1, r / q) for a call (q > 0), K otherwise.
                     put_r, put_q = (q, r) if kind == "call" else (r, q)
                     x = 100.0 * (min(1.0, put_r / put_q) if put_q > 0 else 1.0)
@@ -244,6 +253,7 @@ def test_the_boundary_moves_monotonically_and_starts_at_x(scheme, kind):
                     normalised = b / 100.0 if kind == "put" else 100.0 / b
                     worst = max(worst, float(np.max(np.diff(normalised) / normalised[:-1])))
     assert worst <= BOUNDARY_RIPPLE[scheme]
+    assert rejected == (NOT_CONVERGED[scheme] if kind == "put" else set())
 
 
 def test_the_boundary_separates_exercise_from_holding():
@@ -286,8 +296,8 @@ def test_exercise_regimes(r, q, put, call):
 def test_the_double_boundary_case_falls_back_to_the_tree_and_says_so():
     """QuantLib refuses q < r < 0 for a put; its FD engine on a 4000 x 4000 grid gives 7.62526 for this put."""
     details = am.price_details(100.0, 100.0, 1.0, -0.01, 0.2, -0.02, option_type="put")
-    assert details.method == "tree" and details.fallback
-    assert math.isnan(details.critical_spot) and details.fixed_point is None
+    assert details.method == "tree" and details.fallback and details.fallback_reason == "double boundary"
+    assert math.isnan(details.critical_spot) and details.fixed_point is None and math.isnan(details.last_step)
     assert abs(details.value - 7.62526) <= 1e-4  # measured 7.6252878 (QuantLib FD 7.6252621)
     assert details.value == am.price(100.0, 100.0, 1.0, -0.01, 0.2, -0.02, option_type="put")
     assert details.value == binomial.extrapolated_price(100.0, 100.0, 1.0, -0.01, 0.2, -0.02, "put")
@@ -295,6 +305,23 @@ def test_the_double_boundary_case_falls_back_to_the_tree_and_says_so():
     assert call.fallback and call.value == details.value
     with pytest.raises(ValueError, match="two exercise boundaries"):
         am.exercise_boundary(100.0, 1.0, -0.01, 0.2, -0.02, option_type="put")
+
+
+def test_a_boundary_that_has_not_converged_falls_back_to_the_tree_and_says_so():
+    """Fast's 3 iterations do not settle a 20-year put with r = 0, q = -5 % and sigma = 150 %: its last step moves
+    ln B by 0.13 (accurate's by 4e-3, high's by 4e-5). The tree value is within 1e-6 of the high scheme's."""
+    args = (100.0, 100.0, 20.0, 0.0, 1.5, -0.05)
+    fast = am.price_details(*args, option_type="put", scheme="fast")
+    assert (fast.method, fast.fallback, fast.fallback_reason) == ("tree", True, "not converged")
+    assert fast.last_step > 1e-2 and math.isnan(fast.critical_spot)
+    assert fast.value == am.price(*args, option_type="put", scheme="fast")
+    assert fast.value == binomial.extrapolated_price(100.0, 100.0, 20.0, 0.0, 1.5, -0.05, "put")
+    high = am.price_details(*args, option_type="put", scheme="high")
+    assert (high.method, high.fallback, high.fallback_reason) == ("alo", False, None) and high.last_step < 1e-3
+    assert abs(fast.value - high.value) <= 1e-6  # measured 3.4e-7
+    # The symmetric call takes the same path.
+    call = am.price_details(100.0, 100.0, 20.0, -0.05, 1.5, 0.0, option_type="call", scheme="fast")
+    assert call.fallback_reason == "not converged" and call.value == fast.value
 
 
 def test_european_regimes_report_no_early_exercise():
