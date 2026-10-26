@@ -124,9 +124,14 @@ def _median_seconds(function, cases, repeats: int = 3) -> float:
     return min(medians)
 
 
-@pytest.mark.parametrize(("scheme", "budget"), [("fast", 1e-3), ("accurate", 5e-3)])
+@pytest.mark.parametrize(("scheme", "budget"), [("fast", 5e-3), ("accurate", 10e-3)])
 def test_time_per_option(grid, scheme, budget):
-    """One option at a time, each solving its own boundary. Measured: fast 0.4 ms, accurate 0.6 ms, high 1.5 ms."""
+    """One option at a time, each solving its own boundary: a guard against slowdowns, not a benchmark.
+
+    Measured on a 4-core container: fast 0.4 ms, accurate 0.6-0.9 ms, high 1.5 ms (benchmarks/bench_american.py); on
+    GitHub's shared runners fast takes 1.0-1.4 ms. The budgets leave room for slow runners and still catch a slowdown
+    of an order of magnitude.
+    """
     rows = np.random.default_rng(5).choice(grid["spot"].size, size=100, replace=False)
     cases = [
         (grid["spot"][i], 100.0, grid["maturity"][i], grid["rate"][i], grid["volatility"][i], grid["dividend_yield"][i])
