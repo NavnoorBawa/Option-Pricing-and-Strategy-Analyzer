@@ -59,16 +59,12 @@ def _with_expiry_data(chain: synthetic.SyntheticChain) -> pd.DataFrame:
 
 
 def _black_vega(rows: pd.DataFrame) -> np.ndarray:
-    sd = rows["iv"].to_numpy() * np.sqrt(rows["maturity"].to_numpy())
-    d1 = np.log((rows["forward"] / rows["strike"]).to_numpy()) / sd + 0.5 * sd
+    """Black-76 vega per unit of vol: DF F n(d1) sqrt(T)."""
     root_t = np.sqrt(rows["maturity"].to_numpy())
-    return (
-        rows["discount_factor"].to_numpy()
-        * rows["forward"].to_numpy()
-        * np.exp(-0.5 * d1**2)
-        / 2.5066282746310002
-        * root_t
-    )
+    forward, sd = rows["forward"].to_numpy(), rows["iv"].to_numpy() * root_t
+    d1 = np.log(forward / rows["strike"].to_numpy()) / sd + 0.5 * sd
+    density = np.exp(-0.5 * d1**2) / math.sqrt(2.0 * math.pi)
+    return rows["discount_factor"].to_numpy() * forward * density * root_t
 
 
 def _price_arbitrage(quotes: pd.DataFrame) -> int:
@@ -623,6 +619,6 @@ def test_clean_chain_on_the_synthetic_chain(index_chain):
     settled = index_chain.quotes["expiry"] <= pd.Timestamp("2026-10-30")
     assert messages[0] == f"Dropped {int(settled.sum())} contract(s) that had settled by 2026-11-02 10:00 ET (expired)."
     kept = index_chain.quotes[~settled & (index_chain.quotes["bid"] > 0)].reset_index(drop=True)
-    pd.testing.assert_frame_equal(cleaned, kept, check_like=False)
+    pd.testing.assert_frame_equal(cleaned, kept)
     with pytest.raises(ValueError, match="lacks the column"):
         clean_chain(index_chain.quotes.drop(columns="settlement"), as_of=later)
