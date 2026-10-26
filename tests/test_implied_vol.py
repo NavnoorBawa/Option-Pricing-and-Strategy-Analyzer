@@ -330,6 +330,7 @@ def test_errors_carry_a_reason_code_and_survive_pickling():
         ((math.nan, 100, 100, 1, 0.05), "not_finite"),
         ((5.0, -100, 100, 1, 0.05), "not_positive"),
         ((5.0, 100, 100, 0, 0.05), "expired"),
+        ((5.0, 100, 100, 1, -800.0), "not_finite"),  # K e^(-rT) overflows
         ((1.0, 100, 90, 1, 0.05), "below_lower_bound"),
         ((100.0, 100, 90, 1, 0.05), "at_or_above_upper_bound"),
         ((99.9999, 100, 100, 0.01, 0.0), "above_max_vol"),
@@ -444,30 +445,68 @@ def test_batch_zero_time_value():
     np.testing.assert_array_equal(vol, [0.0, 0.0])  # on the bound, and inside the 1e-12·max(S, K) tolerance
 
 
+def _assert_batch_equals_scalar(quotes):
+    """The batch gives each quote (a row of implied_volatility's arguments) the scalar path's result and error."""
+    columns = [np.array(column) for column in zip(*quotes, strict=True)]
+    result = implied_volatility_batch(*columns, return_reasons=True)
+    for i, quote in enumerate(quotes):
+        try:
+            expected, reason, message = implied_volatility(*quote), "", ""
+        except ImpliedVolError as error:
+            expected, reason, message = math.nan, error.reason, str(error)
+        assert (result.reason[i], result.message[i]) == (reason, message), quote
+        np.testing.assert_allclose(result.vol[i], expected, rtol=1e-12, err_msg=str(quote))  # NaN matches NaN
+    return result
+
+
+# S e^(-qT) or K e^(-rT) overflows (-qT or -rT beyond about 709): rejected as not finite on both paths. Before, the
+# out-of-the-money price was inf - inf = NaN or the normalised price 0: the first two rows were "exceeds 2000%" on
+# the scalar path and 0.0 in the batch, and the call at r = -800 (-80,000 %) was 0.0 on both, although its
+# volatility, 38.4, is above the cap.
+OVERFLOWING = [
+    (5.0, 100, 100, 10, -75.0, -75.0, "call"),
+    (188.66, 40309.17, 56.76, 2.04, -421.77, -619.89, "call"),
+    (5.0, 100, 100, 1, -800.0, 0.0, "call"),
+    (5.0, 100, 100, 1, -800.0, 0.0, "put"),
+    (5.0, 100, 100, 1, 0.0, -800.0, "call"),
+    (5.0, 1e308, 100, 1, 0.0, -1.0, "put"),  # the discount factor is finite, the product is not
+]
+
+
 def test_batch_raises_no_warnings_on_extreme_inputs():
     import warnings
 
-    prices = np.array([1e-300, 5.0, 5.0, 5.0, 1e300, 5.0])
-    spots = np.array([100, 1e300, 1e-300, 100, 100, 100])
-    expiries = np.array([1, 1, 1, 1e-12, 1, 1e4])
-    rates = np.array([0.05, 0.05, 0.05, 0.05, 0.05, 2.0])
+    extreme = [
+        (1e-300, 100, 100, 1, 0.05, 0.0, "call"),
+        (5.0, 1e300, 100, 1, 0.05, 0.0, "call"),
+        (5.0, 1e-300, 100, 1, 0.05, 0.0, "call"),
+        (5.0, 100, 100, 1e-12, 0.05, 0.0, "call"),
+        (1e300, 100, 100, 1, 0.05, 0.0, "call"),
+        (5.0, 100, 100, 1e4, 2.0, 0.0, "call"),  # e^(-rT) underflows to 0
+        (5.0, 100, 100, 1, 800.0, 0.0, "call"),
+        (5.0, 100, 100, 1, 800.0, 0.0, "put"),
+        (5.0, 100, 100, 1, 0.0, 800.0, "put"),  # e^(-qT) underflows to 0
+    ]
+    # S/K under- or overflows (finite, positive S and K): a row of its own, not a ValueError for the batch.
+    log_ratio = [
+        (1e-210, 1e-200, 1e200, 1.0, 0.0, 0.0, "call"),
+        (0.0, 5e-324, 1e300, 1.0, 0.0, 0.0, "call"),
+        (5e-324, 5e-324, 1e300, 1.0, 0.0, 0.0, "put"),
+        (1e-210, 1e200, 1e-200, 1.0, 0.0, 0.0, "put"),
+        (10.0, 100, 100, 1.0, 0.0, 0.0, "call"),
+    ]
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        implied_volatility_batch(prices, spots, 100, expiries, rates, return_reasons=True)
-        implied_volatility_batch(5.0, 100, 100, 1, 800.0)  # e^(-rT) underflows
-        implied_volatility_batch(5.0, 100, 100, 1, -800.0)  # e^(-rT) overflows
-        # S/K under- or overflows (finite, positive S and K): a row of its own, not a ValueError for the batch.
-        quotes = [1e-210, 0.0, 5e-324, 1e-210, 10.0]
-        spots, strikes = [1e-200, 5e-324, 5e-324, 1e200, 100], [1e200, 1e300, 1e300, 1e-200, 100]
-        kinds = ["call", "call", "put", "put", "call"]
-        result = implied_volatility_batch(quotes, spots, strikes, 1.0, 0.0, 0.0, kinds, return_reasons=True)
+        _assert_batch_equals_scalar(extreme)
+        result = _assert_batch_equals_scalar(log_ratio)
+        overflowing = _assert_batch_equals_scalar(OVERFLOWING)
     assert result.reason.tolist() == ["above_max_vol", "", "below_lower_bound", "above_max_vol", ""]
     np.testing.assert_array_equal(result.vol[:4], [np.nan, 0.0, np.nan, np.nan])
-    for i, quote in enumerate(quotes):  # the scalar path raises the same ImpliedVolError (or solves the same)
-        try:
-            assert implied_volatility(quote, spots[i], strikes[i], 1.0, 0.0, 0.0, kinds[i]) == result.vol[i]
-        except ImpliedVolError as error:
-            assert (error.reason, str(error)) == (result.reason[i], result.message[i])
+    assert np.isnan(overflowing.vol).all() and set(overflowing.reason) == {"not_finite"}
+    assert overflowing.message[2] == (
+        "the discounted spot S e^(-qT) (100) or strike K e^(-rT) (inf) overflows; "
+        "check the rate, dividend yield and time to expiry"
+    )
 
 
 def test_strike_ratios_beyond_double_precision():

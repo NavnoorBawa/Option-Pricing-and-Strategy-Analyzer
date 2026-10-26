@@ -53,7 +53,7 @@ _VOL_FLOOR = 1e-12  # European volatilities below this are reported as 0 (and it
 
 #: The codes of :attr:`ImpliedVolError.reason`, with what each means.
 REJECTION_REASONS = {
-    "not_finite": "an input is not a finite number",
+    "not_finite": "an input, or the discounted spot S e^(-qT) or strike K e^(-rT), is not a finite number",
     "not_positive": "the spot or the strike is not positive",
     "expired": "the option has expired",
     "below_lower_bound": "the price is below the no-arbitrage lower bound",
@@ -120,9 +120,18 @@ def _check_european_quote(price, S, K, T, r, q, phi: int) -> tuple[float, ...]:
     """Raise the :class:`ImpliedVolError` of a quote outside the European bounds; return the floats and forwards.
 
     Returns ``(price, S, K, T, r, q, fwd_s, pv_k)`` as floats, ``fwd_s = S e^(-qT)`` and ``pv_k = K e^(-rT)``.
+    Where one of these overflows (``-rT`` or ``-qT`` beyond about 709, less for a large spot or strike) the bounds
+    and the normalised price become ``inf - inf`` or 0, so the quote is rejected as not finite rather than given a
+    meaningless volatility.
     """
     price, S, K, T, r, q = _check_contract(price, S, K, T, r, q)
     fwd_s, pv_k = _discounted(S, K, T, r, q)
+    if not (math.isfinite(fwd_s) and math.isfinite(pv_k)):
+        raise ImpliedVolError(
+            f"the discounted spot S e^(-qT) ({fwd_s:.6g}) or strike K e^(-rT) ({pv_k:.6g}) overflows; "
+            "check the rate, dividend yield and time to expiry",
+            "not_finite",
+        )
     lower = max(phi * (fwd_s - pv_k), 0.0)
     upper = fwd_s if phi > 0 else pv_k
     if price < lower - 1e-12 * max(S, K):
@@ -155,9 +164,11 @@ def implied_volatility(
 
     Raises :class:`ImpliedVolError` with an explanation when the quote is
     outside the no-arbitrage bounds or implies a volatility above
-    ``MAX_VOL`` (2,000 %). The result is accurate to machine precision
-    (Let's Be Rational); ``tol`` is the volatility tolerance of the Brent
-    fallback, used only where Let's Be Rational does not report convergence.
+    ``MAX_VOL`` (2,000 %), and when the discounted spot ``S e^(-qT)`` or
+    strike ``K e^(-rT)`` overflows (reason ``"not_finite"``). The result
+    is accurate to machine precision (Let's Be Rational); ``tol`` is the
+    volatility tolerance of the Brent fallback, used only where Let's Be
+    Rational does not report convergence.
 
     Examples
     --------
@@ -174,7 +185,7 @@ def implied_volatility(
     otm_price = price if otm_phi == phi else price - phi * _forward_intrinsic(fwd_s, pv_k, x)
     if otm_price <= 0.0:
         return 0.0  # no time value: the quote sits exactly on the lower bound
-    # The undiscounted out-of-the-money price over √(FK); with time value left, both forwards are positive here.
+    # The undiscounted out-of-the-money price over √(FK); with time value left, both forwards are positive (and finite).
     beta = otm_price / (math.sqrt(fwd_s) * math.sqrt(pv_k))
     try:
         s, converged = lbr._lets_be_rational_s(beta, -abs(x))
@@ -367,12 +378,14 @@ def implied_volatility_batch(
         p, s_, k_, t_, r_, q_, ph = (a[rows] for a in (price, S, K, T, r, q, phi))
         fwd_s = s_ * _libm(_exp, -q_ * t_)  # as _discounted
         pv_k = k_ * _libm(_exp, -r_ * t_)
-        below = p < np.maximum(ph * (fwd_s - pv_k), 0.0) - 1e-12 * np.maximum(s_, k_)
-        above = ~below & (p >= np.where(ph > 0, fwd_s, pv_k))
+        overflow = ~(np.isfinite(fwd_s) & np.isfinite(pv_k))
+        below = ~overflow & (p < np.maximum(ph * (fwd_s - pv_k), 0.0) - 1e-12 * np.maximum(s_, k_))
+        above = ~overflow & ~below & (p >= np.where(ph > 0, fwd_s, pv_k))
+        code[rows[overflow]] = _CODES.index("not_finite")
         code[rows[below]] = _CODES.index("below_lower_bound")
         code[rows[above]] = _CODES.index("at_or_above_upper_bound")
 
-        keep = ~below & ~above
+        keep = ~overflow & ~below & ~above
         rows, p, s_, k_, t_, r_, q_, ph = (a[keep] for a in (rows, p, s_, k_, t_, r_, q_, ph))
         fwd_s, pv_k = fwd_s[keep], pv_k[keep]
         x = _log_ratio_libm(s_, k_) + (r_ - q_) * t_  # as _log_moneyness
