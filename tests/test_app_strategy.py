@@ -456,6 +456,43 @@ def test_edits_are_applied_as_the_legs_editor_applies_them(edits):
     assert tab_strategy._same(tab_strategy._apply_edits(legs["seed"], {**NO_EDITS, **edits}), legs["edited"])
 
 
+def _condor_frame():
+    return tab_strategy._template_frame(strat.build_template("Iron Condor", 100.0, 10.0, 1.0))
+
+
+def _changed(**cells):
+    """The condor's legs with cells changed: ``Strike=(0, 95.0)`` sets the first row's strike."""
+    frame = _condor_frame()
+    for column, (row, value) in cells.items():
+        frame.loc[row, column] = value
+    return frame
+
+
+@pytest.mark.parametrize(
+    ("other", "same"),
+    [
+        (lambda f: f.astype(object), True),
+        (lambda f: f.astype({"Quantity": int, "Days": "Int64", "Type": "string"}), True),
+        (lambda f: f.set_axis([5, 6, 7, 8]), True),  # the editor's index does not matter
+        (lambda f: f[["Type", "Quantity", "Strike"]], True),  # missing columns are blank, as Days, IV and Premium
+        (lambda f: _changed(Type=(1, None)), False),
+        (lambda f: _changed(Strike=(0, np.nan)), False),
+        (lambda f: _changed(Premium=(2, 1.5)), False),
+        (lambda f: f.iloc[:3], False),
+    ],
+    ids=["object", "other dtypes", "index", "missing blank columns", "blank type", "blank strike", "premium", "row"],
+)
+def test_legs_compare_equal_whatever_dtypes_the_editor_returns(other, same):
+    # tab_strategy._same decides whether legs follow the template; it runs on every run of the app.
+    frame = _condor_frame()
+    assert tab_strategy._same(frame, other(frame)) is same
+
+
+def test_blank_cells_and_signed_zeros_compare_equal():
+    assert tab_strategy._same(_changed(Type=(1, None)), _changed(Type=(1, np.nan)))
+    assert tab_strategy._same(_changed(Quantity=(0, -0.0)), _changed(Quantity=(0, 0.0)))
+
+
 # --- Strike width and defaults --------------------------------------------------------------------------------
 
 

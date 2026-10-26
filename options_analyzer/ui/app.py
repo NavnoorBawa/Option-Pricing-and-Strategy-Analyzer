@@ -130,7 +130,7 @@ def run() -> None:
     pricing, strategy, risk, surface, iv, methodology = st.tabs(TABS, key="tab", on_change="rerun", bind="query-params")
     with strategy:
         tab_strategy.controls(inputs)
-    # With the Strategy tab closed, its position is built without drawing anything (no analysis: 10-20 ms), whichever
+    # With the Strategy tab closed, its position is built without drawing anything (no analysis: 5-10 ms), whichever
     # tab is open, and before that tab runs. The legs editor commits a cell when it loses the focus, so an edit can
     # arrive with the click on another tab, and Streamlit drops the state of the editor at the end of a run that does
     # not draw it: build_position keeps that edit in the session. The Risk tab analyses the position.

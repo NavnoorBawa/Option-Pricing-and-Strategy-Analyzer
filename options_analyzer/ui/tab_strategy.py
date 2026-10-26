@@ -260,8 +260,18 @@ def _canonical(frame: pd.DataFrame) -> pd.DataFrame:
     return out.astype(dict.fromkeys(NUMERIC_LEG_COLUMNS, float))
 
 
+def _cells(frame: pd.DataFrame) -> list[tuple]:
+    """The legs' cells row by row, blanks as None and numbers as floats, so that equal legs give equal cells whatever
+    dtypes the editor returned. (Plain Python: for a few rows it is several times faster than :func:`_canonical`,
+    and the app compares the legs on every run.)"""
+    cells = []
+    for kind, *numbers in frame.reindex(columns=LEG_COLUMNS).itertuples(index=False, name=None):  # Type first
+        cells.append((None if pd.isna(kind) else str(kind), *(None if pd.isna(x) else float(x) for x in numbers)))
+    return cells
+
+
 def _same(a: pd.DataFrame, b: pd.DataFrame) -> bool:
-    return _canonical(a).equals(_canonical(b))
+    return _cells(a) == _cells(b)
 
 
 def _editor_key(name: str, state: dict) -> str:
