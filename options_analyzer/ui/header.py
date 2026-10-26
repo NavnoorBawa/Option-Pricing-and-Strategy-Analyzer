@@ -8,10 +8,12 @@ One row above the price cards, ``st.container(horizontal=True, key="desk_header"
   this exact view (:func:`share_link`) and a Methodology button.
 
 How the row wraps is set in ``static/desk.css``. The ticker wraps between its items, never inside one, in lines
-of balanced length. The action group stays beside it while the brand and the ticker fit in two lines there
-(:func:`render` gives the stylesheet the width that takes, which depends on the ticker's text), and otherwise
-moves, whole, under it on the right. On a phone the Share and Methodology buttons show their icons only, so that
-the group stays on one line down to a 360 px screen. :func:`logo` draws the monogram of ``static/logo.svg``.
+of balanced length. Where the ticker's two lines fit beside the brand, they start one under the other (a hanging
+indent), and the action group stays beside them while there is room; otherwise the group moves, whole, under the
+ticker on the right. :func:`render` gives the stylesheet the width that this two-line layout takes, which depends
+on the ticker's text. On a phone, where a column beside the brand would need three lines, the ticker's second
+line starts under the brand instead, and the Share and Methodology buttons show their icons only, so that the
+group stays on one line down to a 360 px screen. :func:`logo` draws the monogram of ``static/logo.svg``.
 """
 
 from __future__ import annotations
@@ -47,13 +49,15 @@ SHARE_NOTE = (
 _LATTICE = {"crr": "CRR", "lr": "LR"}
 #: The ticker's items are joined by a no-break space, a middle dot and a space: a line can end after the dot only.
 _SEPARATOR = "\xa0· "
-#: The identity block's text in static/desk.css, in rem of the theme's 14 px root, where the action group sits
-#: beside it (a header strip of 600 px and more, so the ticker is at its full 0.8125rem): every character of the
-#: ticker in IBM Plex Mono is 0.6 em wide, but σ comes from Plex Sans Regular (0.583 em), as Plex Mono has no Greek.
-#: The brand is Plex Sans SemiBold capitals at 0.75rem, 10.106 em of glyphs and 0.08 em of tracking after each of
-#: its 17 characters, and has a 0.75rem margin. tests/test_app_header.py checks these advances against the fonts.
+#: The identity block's text in static/desk.css, in rem of the theme's 14 px root, where the ticker's lines start
+#: one under the other, with the ticker at its full 0.8125rem (it has that size on a header strip of 406 px and
+#: more; on a narrower one it is smaller and needs less room): every character of the ticker in IBM Plex Mono is
+#: 0.6 em wide, but σ comes from Plex Sans Regular (0.583 em), as Plex Mono has no Greek. The brand is Plex Sans
+#: SemiBold capitals at 0.75rem, 10.106 em of glyphs and 0.08 em of tracking after each of its 17 characters
+#: (8.6rem), in a box 9.35rem wide, which leaves a 0.75rem gap before the space that precedes the ticker.
+#: tests/test_app_header.py checks these advances against the fonts and the box against the stylesheet.
 _TICKER_REM, _MONO_EM, _SIGMA_EM = 0.8125, 0.6, 0.583
-_BRAND_REM = 0.75 * (10.106 + 0.08 * len(BRAND)) + 0.75
+_BRAND_REM = 9.35
 #: Room to spare on the identity block's width (half a ticker character), for browsers that round glyph widths.
 _SPARE_REM = 0.25
 
@@ -110,17 +114,17 @@ def _ticker_rem(text: str) -> float:
 
 
 def _identity_rem(text: str) -> float:
-    """Width in rem that the identity block needs to show the brand and the ticker ``text`` (:func:`ticker`) in two
-    lines at most: the narrowest of its two-line layouts, each with the first ``k`` items on the brand's line (after
-    the space that follows the brand) and the rest on the second line. A line that ends at a separator keeps its
-    middle dot; the space after the dot does not count."""
+    """Width in rem that the identity block needs to show the brand and, beside it, the ticker ``text``
+    (:func:`ticker`) in two lines at most that start one under the other: the brand's box, the space after it and
+    the narrowest of the ticker's layouts, each with its first ``k`` items on the first line and the rest (if any)
+    on the second. A line that ends at a separator keeps its middle dot; the space after the dot does not count."""
     items = text.split(_SEPARATOR)
 
-    def lines(k: int) -> float:
-        first = _BRAND_REM + (_ticker_rem(" " + _SEPARATOR.join(items[:k]) + _SEPARATOR.rstrip()) if k else 0.0)
-        return max(first, _ticker_rem(_SEPARATOR.join(items[k:])))
+    def column(k: int) -> float:
+        first = _SEPARATOR.join(items[:k]) + (_SEPARATOR.rstrip() if k < len(items) else "")
+        return max(_ticker_rem(first), _ticker_rem(_SEPARATOR.join(items[k:])))
 
-    return min(map(lines, range(len(items)))) + _SPARE_REM
+    return _BRAND_REM + _ticker_rem(" ") + min(map(column, range(1, len(items) + 1))) + _SPARE_REM
 
 
 def model_badge(model: ModelConfig) -> str:
@@ -134,20 +138,25 @@ def model_badge(model: ModelConfig) -> str:
     Returns
     -------
     str
-        ``BSM · closed form``, ``LR tree · 2,000 steps · American`` or ``Monte Carlo · 1,000,000 paths``.
+        ``BSM · closed form``, ``LR tree · 2,000 steps · American`` or ``MC · 1,000,000 paths · AV+CV``: a Monte
+        Carlo simulation names the variance reductions in use, which its standard error includes: antithetic
+        variates (AV) and a control variate (CV). The badge's tooltip spells the model out.
 
     Examples
     --------
     >>> model_badge(ModelConfig(kind="binomial", steps=2000, american=True))
     'LR tree · 2,000 steps · American'
     >>> model_badge(ModelConfig(kind="monte_carlo", n_paths=1_000_000))
-    'Monte Carlo · 1,000,000 paths'
+    'MC · 1,000,000 paths · AV+CV'
+    >>> model_badge(ModelConfig(kind="monte_carlo", antithetic=False, control_variate=False))
+    'MC · 100,000 paths'
     """
     if model.kind == "binomial":
         lattice = _LATTICE.get(model.tree_method, METHODS[model.tree_method])
         return f"{lattice} tree · {model.steps:,} steps · {'American' if model.american else 'European'}"
     if model.kind == "monte_carlo":
-        return f"Monte Carlo · {model.n_paths:,} paths"
+        reductions = "+".join(name for name, on in (("AV", model.antithetic), ("CV", model.control_variate)) if on)
+        return f"MC · {model.n_paths:,} paths" + (f" · {reductions}" if reductions else "")
     return "BSM · closed form"
 
 
@@ -235,11 +244,16 @@ def render(inputs: Inputs, *, on_methodology: Callable[[], None]) -> DeltaGenera
     """
     text = ticker(inputs)
     # The width of the identity block's two-line layout, which static/desk.css reads to keep the action group
-    # beside the ticker only while the ticker needs two lines at most there.
-    st.html(f"<style>.st-key-desk_header {{ --desk-identity-min: {_identity_rem(text):.2f}rem; }}</style>")
+    # beside the ticker only while the ticker needs two lines at most there; from that width of the strip on, the
+    # ticker's lines start one under the other (--desk-hang).
+    width = f"{_identity_rem(text):.2f}rem"
+    st.html(
+        f"<style>.st-key-desk_header {{ --desk-identity-min: {width}; }} "
+        f"@container desk-header (width >= {width}) {{ .st-key-desk_identity {{ --desk-hang: 1; }} }}</style>"
+    )
     row = st.container(horizontal=True, key="desk_header", vertical_alignment="center", gap="small")
-    # One paragraph: the brand (bold, which the stylesheet sets in small capitals) and the ticker flow together,
-    # so that a 390 px phone needs two lines for both.
+    # One paragraph: the brand (bold, which the stylesheet sets in small capitals) and the ticker, so that on a
+    # 390 px phone the ticker can flow under the brand and both take two lines.
     row.container(key="desk_identity").markdown(f"**{BRAND}** {text}")
     actions = row.container(horizontal=True, key="desk_actions", vertical_alignment="center", width="content")
     model = f"Pricing model of the price cards: {inputs.model.label}."

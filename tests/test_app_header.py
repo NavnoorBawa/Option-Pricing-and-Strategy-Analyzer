@@ -112,17 +112,37 @@ def test_the_ticker_updates_after_a_spot_change(app):
 
 
 @pytest.mark.parametrize(
-    ("query", "badge"),
+    ("query", "badge", "model"),
     [
-        ({"model": "Binomial tree", "steps": 2000, "style": "American"}, "LR tree · 2,000 steps · American"),
-        ({"model": "Binomial tree", "tree": "Cox-Ross-Rubinstein"}, "CRR tree · 501 steps · European"),
-        ({"model": "Monte Carlo", "paths": "1,000,000"}, "Monte Carlo · 1,000,000 paths"),
+        (
+            {"model": "Binomial tree", "steps": 2000, "style": "American"},
+            "LR tree · 2,000 steps · American",
+            "Leisen-Reimer tree · 2000 steps · American",
+        ),
+        (
+            {"model": "Binomial tree", "tree": "Cox-Ross-Rubinstein"},
+            "CRR tree · 501 steps · European",
+            "Cox-Ross-Rubinstein tree · 501 steps · European",
+        ),
+        # A simulation names the variance reductions that its standard error includes; the tooltip spells them out.
+        (
+            {"model": "Monte Carlo", "paths": "1,000,000"},
+            "MC · 1,000,000 paths · AV+CV",
+            "Monte Carlo · 1,000,000 paths · antithetic + control variate",
+        ),
+        (
+            {"model": "Monte Carlo", "antithetic": "false"},
+            "MC · 100,000 paths · CV",
+            "Monte Carlo · 100,000 paths · control variate",
+        ),
     ],
 )
-def test_the_badge_names_the_pricing_model(new_app, query, badge):
+def test_the_badge_names_the_pricing_model(new_app, query, badge, model):
     at = new_app(**query).run()
     _ok(at)
     assert _badge(at) == badge
+    [element] = _block(at, "desk_actions").markdown
+    assert element.proto.help == f"Pricing model of the price cards: {model}."
 
 
 def test_the_badge_names_the_model_of_the_values_on_screen(app):
@@ -256,7 +276,8 @@ def test_the_price_cards_have_no_caption_at_the_closed_form(app):
     [
         ({"model": "Binomial tree"}, r"Error against the closed-form value: call [+-]\$0\.\d{6}, put [+-]\$0\.\d{6}$"),
         ({"model": "Binomial tree", "style": "American"}, r"Early-exercise premium: call \$0\.0000, put \+\$0\.\d{4} "),
-        ({"model": "Monte Carlo"}, r"Standard error: call \$0\.\d{4}, put \$0\.\d{4}; 95% CI = price ± 1\.96 SE$"),
+        # "1.96 SE" is never split over two lines (a no-break space): on a phone "SE" stood alone on the second line.
+        ({"model": "Monte Carlo"}, r"Standard error: call \$0\.\d{4}, put \$0\.\d{4}; 95% CI = price ± 1\.96\xa0SE$"),
     ],
 )
 def test_the_price_cards_caption_gives_the_call_and_the_put(new_app, query, caption):
@@ -337,14 +358,16 @@ def test_no_emoji_in_the_ui(new_app, monkeypatch):
 
 
 def _wrap(text: str, width_rem: float) -> list[str]:
-    """The lines of the identity block (brand, then ``text``) at ``width_rem``, broken as a browser breaks them:
-    greedily, at the spaces only (the ticker's other spaces are no-break spaces), with the space at a line's end not
-    counted. Widths from the model of ui/header.py."""
-    words = [header.BRAND, *text.split(" ")]
-    lines, width = [[words[0]]], header._BRAND_REM
+    """The lines of the ticker ``text`` in an identity block ``width_rem`` wide, one under the other beside the brand
+    (the hanging indent of static/desk.css: a column as wide as the block less the brand's box and the space after
+    it), broken as a browser breaks them: greedily, at the spaces only (the ticker's other spaces are no-break
+    spaces), with the space at a line's end not counted. Widths from the model of ui/header.py."""
+    column = width_rem - header._BRAND_REM - header._ticker_rem(" ")
+    words = text.split(" ")
+    lines, width = [[words[0]]], header._ticker_rem(words[0])
     for word in words[1:]:
         extra = header._ticker_rem(" " + word)
-        if width + extra > width_rem:
+        if width + extra > column:
             lines.append([word])
             width = header._ticker_rem(word)
         else:
@@ -367,14 +390,15 @@ TICKERS = [
 
 @pytest.mark.parametrize("inputs", TICKERS, ids=lambda i: f"S={i.spot:g},T={i.days}")
 def test_the_identity_width_is_the_narrowest_two_line_layout(inputs):
-    # The action group sits beside the ticker only where the brand and the ticker fit in two lines: the header
-    # gives the stylesheet the narrowest such width. At that width a browser's line breaking needs two lines (or
-    # one), and half a ticker character narrower (less the room to spare) it needs three.
+    # The ticker's lines start one under the other beside the brand, and the action group sits beside them, only
+    # where they are two at most: the header gives the stylesheet the narrowest such width. At that width a
+    # browser's line breaking needs two lines (or one), and half a ticker character narrower (less the room to
+    # spare) it needs three.
     text = header.ticker(inputs, today=dt.date(2026, 10, 26))
     width = header._identity_rem(text)
     assert len(_wrap(text, width)) <= 2
     assert len(_wrap(text, width - header._SPARE_REM - 0.25)) == 3
-    assert 25 < width < 40  # rem: 350 to 560 px
+    assert 28 < width < 37  # rem: 392 to 518 px
 
 
 def test_the_identity_width_model_matches_the_fonts():
@@ -391,24 +415,35 @@ def test_the_identity_width_model_matches_the_fonts():
     alphabet = set("".join(header.ticker(i, today=dt.date(2026, 10, 26)) for i in TICKERS)) - {"σ"}
     assert alphabet <= set(mono) and {mono[c] for c in alphabet} == {header._MONO_EM}
     assert "σ" not in mono and sans["σ"] == header._SIGMA_EM
-    # The brand: SemiBold capitals at 0.75rem, tracked 0.08 em, and a 0.75rem margin (static/desk.css).
+    # The brand: SemiBold capitals at 0.75rem, tracked 0.08 em, in a box of header._BRAND_REM (static/desk.css): its
+    # glyphs and a 0.75rem gap.
     css = (UI / "static" / "desk.css").read_text(encoding="utf-8")
     brand = re.search(r"\.st-key-desk_identity strong \{([^}]*)\}", css).group(1)
-    for declaration in ("margin-right: 0.75rem", "font-size: 0.75rem", "font-weight: 600", "letter-spacing: 0.08em"):
+    box = ("display: inline-block", f"width: {header._BRAND_REM}rem", "text-indent: 0")
+    for declaration in (*box, "font-size: 0.75rem", "font-weight: 600", "letter-spacing: 0.08em"):
         assert declaration in brand, declaration
-    assert "font-size: clamp(0.72rem, 2.8cqi, 0.8125rem)" in css  # the ticker's full size, header._TICKER_REM
-    glyphs = sum(semibold[c] for c in header.BRAND.upper())
-    brand = 0.75 * (glyphs + 0.08 * len(header.BRAND)) + 0.75
-    assert abs(header._BRAND_REM - brand) < 1e-9
+    glyphs = 0.75 * (sum(semibold[c] for c in header.BRAND.upper()) + 0.08 * len(header.BRAND))
+    assert header._BRAND_REM - glyphs == pytest.approx(0.75, abs=0.001)
+    # The ticker's full size (header._TICKER_REM), and the hanging indent: the brand's box and the space after it,
+    # which is 0.6 em wide in Plex Mono.
+    ticker = re.search(r"\.st-key-desk_identity p \{([^}]*)\}", css).group(1)
+    assert "font-size: clamp(0.72rem, 2.8cqi, 0.8125rem)" in ticker and header._TICKER_REM == 0.8125
+    assert mono[" "] == header._MONO_EM == 0.6
+    assert f"padding-left: calc(var(--desk-hang, 0) * ({header._BRAND_REM}rem + 0.6em))" in ticker
+    assert f"text-indent: calc(var(--desk-hang, 0) * (-{header._BRAND_REM}rem - 0.6em))" in ticker
 
 
 def test_the_header_gives_the_stylesheet_its_two_line_width(app):
-    # A custom property, set on every run for the ticker on screen; static/desk.css reads it.
+    # Set on every run for the ticker on screen, and read by static/desk.css: the identity block's least width beside
+    # the actions, and from that width of the strip on, the hanging indent.
     style = next(h.proto.body for h in app.get("html") if h.proto.body.startswith("<style>.st-key-desk_header {"))
-    text = header.ticker(_inputs())
-    width = header._identity_rem(text)
-    assert style == f"<style>.st-key-desk_header {{ --desk-identity-min: {width:.2f}rem; }}</style>"
+    width = f"{header._identity_rem(header.ticker(_inputs())):.2f}rem"
+    assert style == (
+        f"<style>.st-key-desk_header {{ --desk-identity-min: {width}; }} "
+        f"@container desk-header (width >= {width}) {{ .st-key-desk_identity {{ --desk-hang: 1; }} }}</style>"
+    )
     css = (UI / "static" / "desk.css").read_text(encoding="utf-8")
+    assert "container: desk-header / inline-size;" in css
     assert "min-width: min(100%, var(--desk-identity-min, 30rem));" in css
 
 
@@ -453,7 +488,10 @@ def test_the_ticker_rates_use_the_minus_sign():
         (ModelConfig(), "BSM · closed form"),
         (ModelConfig(kind="binomial"), "LR tree · 501 steps · European"),
         (ModelConfig(kind="binomial", tree_method="crr", steps=20, american=True), "CRR tree · 20 steps · American"),
-        (ModelConfig(kind="monte_carlo", n_paths=25_000, antithetic=False), "Monte Carlo · 25,000 paths"),
+        (ModelConfig(kind="monte_carlo"), "MC · 100,000 paths · AV+CV"),
+        (ModelConfig(kind="monte_carlo", n_paths=25_000, antithetic=False), "MC · 25,000 paths · CV"),
+        (ModelConfig(kind="monte_carlo", control_variate=False), "MC · 100,000 paths · AV"),
+        (ModelConfig(kind="monte_carlo", antithetic=False, control_variate=False), "MC · 100,000 paths"),
     ],
 )
 def test_model_badge(model, badge):

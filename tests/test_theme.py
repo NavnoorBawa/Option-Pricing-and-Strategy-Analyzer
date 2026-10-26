@@ -272,8 +272,9 @@ def test_apply_stylesheet_sends_the_desk_stylesheet(monkeypatch):
 #: block, and of the elements the stylesheet styles. (No "section[data-testid=...]" or emotion class: those change
 #: between Streamlit releases.)
 DESK_TESTIDS = {
-    "stMainBlockContainer", "stVerticalBlock", "stMetric", "stMetricLabel", "stMetricValue", "stMarkdownContainer",
-    "stMultiSelect", "stNumberInput", "stNumberInputStepUp", "stNumberInputStepDown",
+    "stMainBlockContainer", "stVerticalBlock", "stTabPanel", "stMetric", "stMetricLabel", "stMetricValue",
+    "stMarkdownContainer", "stTooltipIcon", "stMultiSelect", "stNumberInput", "stNumberInputStepUp",
+    "stNumberInputStepDown",
 }  # fmt: skip
 #: Attributes other than data-testid: a multiselect's chips have no test id of their own.
 DESK_ATTRIBUTES = {"data-tag"}
@@ -511,14 +512,21 @@ def test_every_run_loads_the_stylesheet_before_the_app(monkeypatch):
 
 def test_the_page_carries_the_stylesheet_once():
     # The whole desk stylesheet in one <style>, first on the page. The only other style elements hold the sizes that
-    # depend on the text on screen: the header's two-line width (one custom property) and the card rows' sizes.
+    # depend on the text on screen: the header's two-line width (a custom property, and the strip's width from which
+    # the ticker's lines start one under the other) and the card rows' sizes.
     from streamlit.testing.v1 import AppTest
 
     at = AppTest.from_file(str(ROOT / "main.py"), default_timeout=120).run()
     assert not at.exception, at.exception
     bodies = [h.proto.body for h in at.get("html")]
     assert bodies[0] == f"<style>{theme.STYLESHEET.read_text(encoding='utf-8')}</style>"
-    assert re.fullmatch(r"<style>\.st-key-desk_header \{ --desk-identity-min: \d+\.\d\drem; \}</style>", bodies[1])
+    width = r"(\d+\.\d\drem)"
+    header = re.fullmatch(
+        rf"<style>\.st-key-desk_header \{{ --desk-identity-min: {width}; \}} "
+        rf"@container desk-header \(width >= {width}\) \{{ \.st-key-desk_identity \{{ --desk-hang: 1; \}} \}}</style>",
+        bodies[1],
+    )
+    assert header and header[1] == header[2], bodies[1]
     assert all(re.match(r"<style>\.st-key-\w+_cards \{ container:", b) for b in bodies[2:]), bodies[2:]
 
 
@@ -808,17 +816,24 @@ _CARD_ROW = """key => [...document.querySelectorAll(`.st-key-${key} [data-testid
     const range = document.createRange();
     range.selectNodeContents(element);
     const rects = [...range.getClientRects()].filter(r => r.width > 0);
+    const last = rects.filter(r => r.top > Math.max(...rects.map(r => r.top)) - 2);
     return {top: Math.min(...rects.map(r => r.top)), left: Math.min(...rects.map(r => r.left)),
-            right: Math.max(...rects.map(r => r.right)), lines: new Set(rects.map(r => Math.round(r.top))).size};
+            right: Math.max(...rects.map(r => r.right)), lines: new Set(rects.map(r => Math.round(r.top))).size,
+            lastRight: Math.max(...last.map(r => r.right)), lastTop: Math.min(...last.map(r => r.top)),
+            lastBottom: Math.max(...last.map(r => r.bottom))};
   };
   const valueBox = card.querySelector('[data-testid=stMetricValue]'), value = glyphs(valueBox);
   const label = glyphs(card.querySelector('[data-testid=stMetricLabel] [data-testid=stMarkdownContainer]'));
+  const icon = card.querySelector('[data-testid=stMetricLabel] [data-testid=stTooltipIcon]')?.getBoundingClientRect();
   const left = parseFloat(outer.borderLeftWidth) + parseFloat(outer.paddingLeft) + parseFloat(inner.paddingLeft);
   const right = parseFloat(outer.borderRightWidth) + parseFloat(outer.paddingRight) + parseFloat(inner.paddingRight);
   return {label: card.querySelector('[data-testid=stMetricLabel]').innerText.trim(), x: box.left, y: box.top,
           width: box.width, height: box.height, valueTop: value.top - box.top, valueLeft: value.left,
-          valueRight: value.right, labelRight: label.right, labelLines: label.lines, contentLeft: box.left + left,
-          contentRight: box.right - right, font: parseFloat(getComputedStyle(valueBox).fontSize)};
+          valueRight: value.right, labelRight: Math.max(label.right, icon ? icon.right : -Infinity),
+          labelLines: label.lines, contentLeft: box.left + left, contentRight: box.right - right,
+          font: parseFloat(getComputedStyle(valueBox).fontSize),
+          iconGap: icon ? icon.left - label.lastRight : null,
+          iconOnLastLine: icon ? Math.abs((icon.top + icon.bottom - label.lastTop - label.lastBottom) / 2) < 3 : null};
 })"""
 
 
@@ -874,6 +889,10 @@ def test_card_rows_line_up(chromium, app_url, width, query, three_up):
                 assert card["font"] == pytest.approx(22.75, abs=0.01), (key, card["label"], card["font"])
                 assert card["valueLeft"] >= card["contentLeft"] - 0.5, (key, card["label"])
                 assert max(card["valueRight"], card["labelRight"]) <= card["contentRight"] + 0.5, (key, card)
+                # The help icon follows the label's last word, on its line, also where the label wraps (Streamlit
+                # set it at the card's right edge then: 46 to 54 px after "Call ITM probability" at 360-375 px).
+                if card["iconGap"] is not None:
+                    assert 0 <= card["iconGap"] <= 8 and card["iconOnLastLine"], (key, card)
         for key in ("expectation_cards", "var_cards"):
             assert [len(line) for line in _lines(rows[key])] == ([3] if three_up else [2, 1]), key
         for key in ("strategy_cards", "greek_cards"):
@@ -1064,8 +1083,9 @@ def test_text_on_the_primary_colour_is_legible_in_the_app(chromium, app_url, sch
 
 
 #: The desk shell's layout: boxes (page coordinates, px) of the header strip, its two blocks and the first card, the
-#: tab bar and the open tab's panel; the vertical centres of the action group's items; the tab labels that are cut
-#: off or scrolled out of the tab bar; and how far the tab bar and the page scroll sideways.
+#: tab bar, the open tab's panel (its box starts at the tab bar's bottom edge, and its padding sets its content
+#: below) and the first element inside that panel; the vertical centres of the action group's items; the tab labels
+#: that are cut off or scrolled out of the tab bar; and how far the tab bar and the page scroll sideways.
 _SHELL = """() => {
   const box = e => { if (!e) return null; const r = e.getBoundingClientRect();
     return {top: r.top + scrollY, bottom: r.bottom + scrollY, left: r.left, right: r.right, height: r.height}; };
@@ -1077,6 +1097,7 @@ _SHELL = """() => {
   const header = q('.st-key-desk_header');
   return {header: box(header), identity: box(q('.st-key-desk_identity')), actions: box(q('.st-key-desk_actions')),
     kpi: box(q('[data-testid=stMain] [data-testid=stMetric]')), tabs: box(list), panel: box(panel),
+    content: box([...panel.querySelector('[data-testid=stVerticalBlock]').children].find(e => e.offsetHeight)),
     centres: [...document.querySelectorAll('.st-key-desk_actions > *')].map(e => {
       const r = e.getBoundingClientRect(); return r.top + r.height / 2; }),
     cut: [...list.querySelectorAll('[role=tab]')].filter(cut).map(t => t.innerText),
@@ -1139,6 +1160,26 @@ _IDENTITY_LINES = """() => {
 }"""
 
 
+#: Where each line of the identity block starts: the left edge of its first glyph after the brand, in px from the
+#: paragraph's left edge (the first line's is that of the ticker's S).
+_IDENTITY_STARTS = """() => {
+  const p = document.querySelector('.st-key-desk_identity p'), brand = p.querySelector('strong');
+  const left = p.getBoundingClientRect().left, range = document.createRange(), starts = [];
+  const walker = document.createTreeWalker(p, NodeFilter.SHOW_TEXT);
+  let top = null;
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (brand.contains(node)) continue;
+    for (let i = 0; i < node.length; i++) {
+      if (!node.data[i].trim()) continue;
+      range.setStart(node, i); range.setEnd(node, i + 1);
+      const r = range.getClientRects()[0];
+      if (r && (top === null || r.top > top + 2)) { starts.push(r.left - left); top = r.top; }
+    }
+  }
+  return starts;
+}"""
+
+
 def _items(line: str) -> list[str]:
     """The ticker items of a line of the identity block (the brand left out)."""
     return [item for item in line.removeprefix("Options Analytics").split(" · ") if item.strip(" ·")]
@@ -1159,9 +1200,11 @@ SHELL_INPUTS = {"default": {}, **LONG_INPUTS}
 @pytest.mark.slow
 @pytest.mark.parametrize("inputs", SHELL_INPUTS)
 def test_the_desk_shell_on_a_phone(chromium, app_url, inputs):
-    # On a 390 x 844 phone the tabs started 518 px down (and about 620 px before the card rows wrapped in pairs).
-    # With the header strip in two lines and the price cards' caption gone (it repeated the badge and the fourth
-    # card), the tab content starts at about 327 px. A long badge split the action group, which left the
+    # On a 390 x 844 phone the tabs started 518 px down in version 2.0.0, the tab panel at 714 px and the first
+    # element in it at 730 px (the plan's "about 620" was not reproduced). With the header strip in two lines, the
+    # price cards' caption gone (it repeated the badge and the fourth card) and half a rem between the shell's rows
+    # and under the tab bar, the panel's box starts at about 313 px and its first element at about 320 px: both
+    # readings of "tab content" meet the 330 px target. A long badge split the action group, which left the
     # Methodology button alone on a third line (tab content at 447 px): on a phone the buttons show their icons only.
     query = f"/?{urllib.parse.urlencode(SHELL_INPUTS[inputs])}" if SHELL_INPUTS[inputs] else ""
     page = chromium.new_page(viewport={"width": 390, "height": 844}, color_scheme="dark")
@@ -1170,7 +1213,9 @@ def test_the_desk_shell_on_a_phone(chromium, app_url, inputs):
         page.wait_for_selector("[data-testid=stMetricValue]", timeout=120_000)
         _settle(page)
         if inputs == "default":
-            assert _shell(page)["panel"]["top"] <= 330
+            shell = _shell(page)
+            assert shell["panel"]["top"] == pytest.approx(shell["tabs"]["bottom"], abs=0.5)
+            assert shell["panel"]["top"] <= 330 and shell["content"]["top"] <= 330, shell
         for width in (390, 430, 375, 360):
             page.set_viewport_size({"width": width, "height": 844})
             page.wait_for_timeout(300)
@@ -1190,6 +1235,8 @@ def test_the_desk_shell_on_a_phone(chromium, app_url, inputs):
             lines = page.evaluate(_IDENTITY_LINES)
             assert len(lines) <= (2 if inputs == "default" and width == 390 else 3), (width, lines)
             assert len(_items(lines[-1])) >= 2, (width, lines)  # balanced lines: no item alone on the last one
+            # A column beside the brand would need a line more on a phone: the ticker flows under the brand.
+            assert all(abs(start) < 1 for start in page.evaluate(_IDENTITY_STARTS)[1:]), width
     finally:
         page.close()
 
@@ -1202,7 +1249,8 @@ def test_the_header_wraps_cleanly_on_a_laptop(chromium, app_url, inputs):
     # 16rem, so between about 960 and 1,220 px the ticker wrapped into three or four ragged lines (header 73 px at
     # 1,000 px but 68 px at 1,024). Now the actions stay beside the ticker only while it fits in two lines there,
     # and otherwise move, whole, under it on the right: the ticker never takes more than two lines, and the strip
-    # never grows as the window widens.
+    # never grows as the window widens. The ticker's second line started under the brand, like wrapped prose; now
+    # the two lines start one under the other.
     query = f"/?{urllib.parse.urlencode(SHELL_INPUTS[inputs])}" if SHELL_INPUTS[inputs] else ""
     page = _open(chromium, app_url + query, "dark", 1440)
     try:
@@ -1213,6 +1261,9 @@ def test_the_header_wraps_cleanly_on_a_laptop(chromium, app_url, inputs):
             shell, lines = _shell(page), page.evaluate(_IDENTITY_LINES)
             assert len(lines) <= 2, (width, lines)
             assert all(_items(line) for line in lines[1:]), (width, lines)
+            # The ticker's second line starts under its first item, S, not under the brand (a hanging indent).
+            starts = page.evaluate(_IDENTITY_STARTS)
+            assert starts[0] > 100 and all(abs(start - starts[0]) < 1 for start in starts[1:]), (width, starts)
             assert max(shell["centres"]) - min(shell["centres"]) < 2, width  # the group never splits
             assert abs(shell["actions"]["right"] - shell["header"]["right"]) < 1, width
             assert shell["headerScroll"] <= 0 and shell["pageScroll"] <= 0, width

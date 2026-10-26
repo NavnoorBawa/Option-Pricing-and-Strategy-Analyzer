@@ -121,10 +121,11 @@ def _model_card(inputs: Inputs, prices: Prices) -> tuple[str, str, str, str]:
         return (
             "Std. error",
             money(max(finite), 4) if finite else "–",
-            f"Standard error: call {money(se['call'], 4)}, put {money(se['put'], 4)}; 95% CI = price ± 1.96 SE"
+            f"Standard error: call {money(se['call'], 4)}, put {money(se['put'], 4)}; 95% CI = price ± 1.96\xa0SE"
             + (f". {HEAVY_TAIL_NOTE}." if heavy else ""),
-            "Standard error of the simulated prices (the larger of the call's and the put's is shown); it falls "
-            "as one over the square root of the number of paths.",
+            "Standard error of the simulated prices, after any variance reduction in use (the header's badge names "
+            "it: AV for antithetic variates, CV for a control variate). The larger of the call's and the put's is "
+            "shown; it falls as one over the square root of the number of paths.",
         )
     vst = sigma * np.sqrt(T)
     if vst > 0:

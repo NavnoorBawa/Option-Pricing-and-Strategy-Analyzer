@@ -97,6 +97,8 @@ def run() -> None:
     cards and the open tab."""
     st.set_page_config(
         page_title="Options Analytics",
+        # Streamlit links a Material icon favicon from fonts.gstatic.com: the app's only request to another host.
+        # Where that host is blocked, the browser tab shows its default icon; everything else is served by the app.
         page_icon=":material/candlestick_chart:",
         layout="wide",
         # Open on desktops; on phones the sidebar would cover the whole page, so it starts collapsed there.
