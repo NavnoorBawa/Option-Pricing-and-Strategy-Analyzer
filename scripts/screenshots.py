@@ -23,12 +23,14 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
+#: Screenshot name: the tab's label and a chart that the tab draws when it runs (only the open tab runs, so a
+#: click on a tab is complete once that chart is on the page).
 TABS = {
-    "pricing": "Pricing & Greeks",
-    "strategy": "Strategy Builder",
-    "risk": "Risk & Scenarios",
-    "surface": "Volatility Surface",
-    "iv": "Implied Volatility",
+    "pricing": ("Pricing", "sensitivity_chart"),
+    "strategy": ("Strategy", "payoff_chart"),
+    "risk": ("Risk", "var_hist"),
+    "surface": ("Vol surface", "surf_iv"),
+    "iv": ("IV", "iv_curve"),
 }
 
 
@@ -73,8 +75,9 @@ def main() -> None:
                     time.sleep(0.5)
             page.wait_for_selector('[data-testid="stMetric"]', timeout=120_000)
             _wait_until_idle(page, 3.0)
-            for name, label in TABS.items():
-                page.get_by_role("tab", name=label).click()
+            for name, (label, chart) in TABS.items():
+                page.get_by_role("tab", name=label, exact=True).click()
+                page.locator(f"[role=tabpanel] .st-key-{chart}").wait_for(state="visible", timeout=120_000)
                 _wait_until_idle(page)
                 path = args.out / f"{name}.png"
                 page.screenshot(path=str(path))

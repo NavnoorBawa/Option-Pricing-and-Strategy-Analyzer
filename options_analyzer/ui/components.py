@@ -5,6 +5,9 @@ container on a fixed 8rem, so a row of four cards wraps 3 + 1, and ``st.columns`
 a phone. :func:`card_row` instead sizes all the cards of a row from a model of their text in the theme's IBM Plex
 Sans and groups them, so that the row wraps whole groups, the cards of a line have one width and height and their
 values one baseline, and no value is ever cut off.
+
+:func:`current_key` serves the widgets that keep their values while their tab is closed but whose keys change on
+purpose.
 """
 
 from __future__ import annotations
@@ -210,3 +213,38 @@ def card_row(key: str, group_keys: Sequence[str], cards: Sequence[Card], *, size
     per_group = len(cards) // len(groups)
     for i, (label, value, options) in enumerate(cards):
         groups[i // per_group].metric(label, value, border=True, **options)
+
+
+def current_key(family: str, key: str) -> str:
+    """Return ``key`` after forgetting the values kept under the other keys of its ``family``.
+
+    For a widget that keeps its value while its tab is closed (``persist_state="session"``) and whose key changes on
+    purpose, because it holds what the value belongs to (a contract, a range, a grid): the value is then kept only
+    while the key stays the same, and a key used before starts from the widget's default again, as it did before
+    the tabs ran lazily (a widget that is not drawn in a run loses its value).
+
+    Parameters
+    ----------
+    family : str
+        The prefix that the widget's keys share, such as ``"smile_pick_"``.
+    key : str
+        The widget's key in this run, which starts with ``family``.
+
+    Returns
+    -------
+    str
+        ``key``, for the widget's ``key`` argument.
+
+    Examples
+    --------
+    Outside a running app the session state is a plain store (Streamlit logs a warning):
+
+    >>> st.session_state["smile_pick_1"] = [0, 2]
+    >>> current_key("smile_pick_", "smile_pick_2")
+    'smile_pick_2'
+    >>> "smile_pick_1" in st.session_state
+    False
+    """
+    for other in [k for k in st.session_state if k.startswith(family) and k != key]:
+        del st.session_state[other]
+    return key

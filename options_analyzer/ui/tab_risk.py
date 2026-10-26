@@ -1,6 +1,6 @@
 """Risk & Scenarios tab: scenario grids, time decay, stress tests and VaR/ES.
 
-Everything here analyses the position built in the Strategy Builder tab and
+Everything here analyses the position built in the Strategy tab and
 re-prices it leg by leg, so the numbers are consistent across the app.
 """
 
@@ -13,7 +13,7 @@ import streamlit as st
 from .. import risk, scenarios
 from .. import strategies as strat
 from . import cache, charts
-from .components import card_row
+from .components import card_row, current_key
 from .format import md, money, money_short
 from .tab_strategy import Position
 
@@ -62,9 +62,15 @@ def _scenario_grid(position: Position, front_days: float) -> None:
     horizon = 0
     if last_day >= 1:
         horizon = c1.slider(
-            "Days from today", 0, last_day, 0, key="grid_days", help="Time that passes before the shock is applied."
+            "Days from today",
+            0,
+            last_day,
+            0,
+            key=current_key("grid_days_", f"grid_days_{last_day}"),  # with the range, as on the Strategy tab
+            persist_state="session",
+            help="Time that passes before the shock is applied.",
         )
-    span = c2.slider("Spot range (±%)", 10, 60, 30, 5, key="grid_span")
+    span = c2.slider("Spot range (±%)", 10, 60, 30, 5, key="grid_span", persist_state="session")
     spot_changes = np.linspace(-span, span, 13) / 100
     vol_changes = np.array([-0.5, -0.25, 0.0, 0.25, 0.5, 1.0])
     grid = scenarios.pnl_grid(position.strategy, position.market, spot_changes, vol_changes, horizon, position.units)
@@ -98,6 +104,7 @@ def _date_grid(position: Position, front_days: float) -> None:
         value=2.0,
         format_func=lambda z: f"±{z:g}σ",
         key="date_grid_reach",
+        persist_state="session",
         help="Rows are spaced evenly in standard deviations σ√T of the log price at the front expiry, so the "
         "range follows the volatility and the time left.",
     )
@@ -169,7 +176,9 @@ GREEK_VIEWS = {
 
 def _greek_profiles(position: Position, front_days: float) -> None:
     market = position.market
-    greek = st.segmented_control("Greek", list(GREEK_VIEWS), default="Delta", key="risk_greek", required=True)
+    greek = st.segmented_control(
+        "Greek", list(GREEK_VIEWS), default="Delta", key="risk_greek", required=True, persist_state="session"
+    )
     name, scale, title = GREEK_VIEWS[greek]
     spots = market.spot * np.exp(np.linspace(-3.0, 3.0, 241) * _sigma_t(position, front_days))
     dates = [d for d in dict.fromkeys([0, round(front_days / 2), round(front_days) - 1]) if 0 <= d < front_days]
@@ -190,28 +199,32 @@ def _greek_profiles(position: Position, front_days: float) -> None:
 
 def _stress_tests(position: Position) -> None:
     c1, c2, c3 = st.columns(3)
-    show_hist = c1.toggle("Historical analogues", value=True, key="stress_hist")
-    show_hypo = c1.toggle("Hypothetical shocks", value=True, key="stress_hypo")
+    show_hist = c1.toggle("Historical analogues", value=True, key="stress_hist", persist_state="session")
+    show_hypo = c1.toggle("Hypothetical shocks", value=True, key="stress_hypo", persist_state="session")
     elapsed = c2.toggle(
         "Include episode duration",
         value=False,
         key="stress_elapsed",
+        persist_state="session",
         help="Let the episode's calendar time pass too (options decay or expire).",
     )
     damp = c2.toggle(
         "Damp IV shock for longer tenors",
         value=True,
         key="stress_damp",
+        persist_state="session",
         help="Historical and Fed scenarios shock one-month (VIX-like) implied vol; longer-dated IV moves less, "
         f"so the shock is scaled by (T / 1 month)^-{scenarios.DEFAULT_VOL_TENOR_DECAY}. Hypothetical IV shocks "
         "always apply literally to every leg, like the heatmap above.",
     )
     with c3.popover("Custom scenario", icon=":material/tune:"):
-        custom_on = st.toggle("Include custom scenario", value=False, key="stress_custom")
-        spot = st.number_input("Spot change (%)", -99.0, 500.0, -15.0, 1.0, key="custom_spot")
-        vol = st.number_input("IV multiplier", 0.1, 10.0, 1.5, 0.1, key="custom_vol")
-        rate = st.number_input("Rate change (bp)", -1000.0, 1000.0, 0.0, 25.0, key="custom_rate")
-        days = st.number_input("Days elapsed", 0, 3650, 0, 1, key="custom_days")
+        custom_on = st.toggle("Include custom scenario", value=False, key="stress_custom", persist_state="session")
+        spot = st.number_input("Spot change (%)", -99.0, 500.0, -15.0, 1.0, key="custom_spot", persist_state="session")
+        vol = st.number_input("IV multiplier", 0.1, 10.0, 1.5, 0.1, key="custom_vol", persist_state="session")
+        rate = st.number_input(
+            "Rate change (bp)", -1000.0, 1000.0, 0.0, 25.0, key="custom_rate", persist_state="session"
+        )
+        days = st.number_input("Days elapsed", 0, 3650, 0, 1, key="custom_days", persist_state="session")
 
     presets = []
     if show_hist:
@@ -283,14 +296,24 @@ def _var(position: Position) -> None:
         index=2,
         format_func=lambda c: f"{c:.1%}",
         key="var_conf",
+        persist_state="session",
         help="97.5% is the Basel FRTB Expected Shortfall level; 99% is the classic VaR level.",
     )
-    horizon = c2.number_input("Horizon (trading days)", 1, 60, 1, 1, key="var_horizon")
+    horizon = c2.number_input("Horizon (trading days)", 1, 60, 1, 1, key="var_horizon", persist_state="session")
     n_paths = c3.select_slider(
-        "Simulations", PATH_CHOICES, value=100_000, format_func=lambda n: f"{n:,}", key="var_paths"
+        "Simulations",
+        PATH_CHOICES,
+        value=100_000,
+        format_func=lambda n: f"{n:,}",
+        key="var_paths",
+        persist_state="session",
     )
     distribution = c4.selectbox(
-        "Return model", list(risk.DISTRIBUTIONS), format_func=risk.DISTRIBUTIONS.get, key="var_dist"
+        "Return model",
+        list(risk.DISTRIBUTIONS),
+        format_func=risk.DISTRIBUTIONS.get,
+        key="var_dist",
+        persist_state="session",
     )
 
     dof, alpha, beta, garch_t = 5.0, 0.09, 0.90, False
@@ -302,13 +325,18 @@ def _var(position: Position) -> None:
             30,
             5,
             key="var_dof",
+            persist_state="session",
             help="Lower = fatter tails. Daily equity returns are typically 3–6.",
         )
     elif distribution == "garch":
         c1, c2, c3, c4 = st.columns(4)
-        alpha = c1.number_input("GARCH α", 0.0, 0.5, 0.09, 0.01, format="%.3f", key="garch_alpha")
-        beta = c2.number_input("GARCH β", 0.0, 0.999, 0.90, 0.01, format="%.3f", key="garch_beta")
-        garch_t = c3.toggle("Student-t innovations", value=False, key="garch_t")
+        alpha = c1.number_input(
+            "GARCH α", 0.0, 0.5, 0.09, 0.01, format="%.3f", key="garch_alpha", persist_state="session"
+        )
+        beta = c2.number_input(
+            "GARCH β", 0.0, 0.999, 0.90, 0.01, format="%.3f", key="garch_beta", persist_state="session"
+        )
+        garch_t = c3.toggle("Student-t innovations", value=False, key="garch_t", persist_state="session")
         if garch_t:
             dof = c4.slider(
                 "Degrees of freedom ν",
@@ -316,6 +344,7 @@ def _var(position: Position) -> None:
                 30,
                 6,
                 key="var_dof_garch",
+                persist_state="session",
                 help="GARCH-t fits to equity indices typically give ν ≈ 6–8.",
             )
         if alpha + beta >= 1:
@@ -333,6 +362,7 @@ def _var(position: Position) -> None:
         "Simulate implied-vol moves",
         value=False,
         key="var_volmoves",
+        persist_state="session",
         help="Adds vega risk: log implied vol moves with the chosen vol-of-vol, correlated with spot.",
     )
     vov, corr = 0.0, -0.7
@@ -345,6 +375,7 @@ def _var(position: Position) -> None:
                 100.0,
                 10.0,
                 key="var_vov",
+                persist_state="session",
                 help="Volatility of one-month implied vol; about 100% matches index (VIX) dynamics. Longer-dated "
                 "legs move less, damped by tenor like the stress tests.",
             )
@@ -357,6 +388,7 @@ def _var(position: Position) -> None:
             -0.7,
             0.05,
             key="var_corr",
+            persist_state="session",
             help="Equity indices: about −0.7 (spot down, implied vol up).",
         )
     seed = int(st.session_state.get("var_seed", 7))
@@ -459,13 +491,13 @@ def _var(position: Position) -> None:
             else ""
         )
     )
-    c2.number_input("Random seed", 0, 2**32 - 1, 7, 1, key="var_seed")
+    c2.number_input("Random seed", 0, 2**32 - 1, 7, 1, key="var_seed", persist_state="session")
 
 
 @st.fragment
 def render(position: Position | None) -> None:
     if position is None:
-        st.info("Build a valid position in the **Strategy Builder** tab to analyse its risk.")
+        st.info("Build a valid position in the **Strategy** tab to analyse its risk.")
         return
     st.markdown(f"Analysing {position.describe()}")
     st.caption(

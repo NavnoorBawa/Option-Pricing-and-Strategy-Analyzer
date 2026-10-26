@@ -18,6 +18,14 @@ def _ok(at: AppTest) -> None:
     assert not at.error, [e.value for e in at.error]
 
 
+@pytest.fixture
+def app(new_app) -> AppTest:
+    """The app with the Vol surface tab open (only the open tab runs)."""
+    at = new_app(tab="Vol surface").run()
+    _ok(at)
+    return at
+
+
 def _picker(at: AppTest):
     return next(w for w in at.multiselect if w.label == "Maturities")
 

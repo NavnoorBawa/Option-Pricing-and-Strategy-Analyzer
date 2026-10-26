@@ -13,7 +13,7 @@ import streamlit as st
 from .. import black_scholes as bs
 from .. import strategies as strat
 from . import cache, charts
-from .components import Card, card_row
+from .components import Card, card_row, current_key
 from .format import md, money, money_short, number, number_short, shown_decimals
 from .inputs import Inputs
 
@@ -140,6 +140,13 @@ def auto_width(strike: float, volatility: float, expiry: float) -> float:
     return round_width(float(np.clip(step, strike * MIN_WIDTH_PCT / 100, strike * MAX_AUTO_WIDTH_PCT / 100)))
 
 
+def _width(inputs: Inputs, width_pct: float | None) -> float:
+    """The strike width ($): automatic when ``width_pct`` is None, otherwise that share of the strike on a tick."""
+    if width_pct is None:
+        return auto_width(inputs.strike, inputs.volatility, inputs.expiry)
+    return round_width(inputs.strike * float(width_pct) / 100.0)
+
+
 def _selector(inputs: Inputs):
     c1, c2, c3 = st.columns([1.1, 1.4, 1])
     categories = [*strat.TEMPLATE_CATEGORIES, CUSTOM]
@@ -176,7 +183,7 @@ def _selector(inputs: Inputs):
         "for the automatic width: about half the expected move σ√T to expiry, rounded to a strike step of 1, 2, "
         "2.5 or 5 times a power of ten (at most 25% of the strike).",
     )
-    width = automatic if width_pct is None else round_width(inputs.strike * float(width_pct) / 100.0)
+    width = _width(inputs, width_pct)
     width_text = ""
     if uses_width:
         source = "automatic" if width_pct is None else "set by you"
@@ -227,15 +234,38 @@ def _legs_state(name: str, base: pd.DataFrame) -> dict:
         # A new editor key, so that nothing typed on the old legs can apply to the new ones.
         state = store[name] = _new_legs(base, state["version"] + 1)
     elif key not in st.session_state and not _same(state["seed"], state["edited"]):
-        # The editor was not on screen in the last run (another strategy was selected), so it no longer holds
-        # the edits: show the edited legs as its new starting point.
+        # The editor was not on screen in the last run (another strategy was selected, or the tab was closed), so
+        # it no longer holds the edits: show the edited legs as its new starting point.
         state["seed"] = state["edited"]
     return state
 
 
-def render(inputs: Inputs) -> Position | None:
-    """Render the tab and return the position (``None`` if the legs are invalid)."""
-    name, template, width, width_text = _selector(inputs)
+def controls(inputs: Inputs) -> None:
+    """Draw the controls above the legs: template, strike width, position size, commission and assumptions.
+
+    The app draws them on every run, also while the tab is closed. Most of them are bound to the URL, and Streamlit
+    removes the URL parameter of a widget it does not draw, so a link to any tab keeps the position; they also keep
+    their values that way. They are cheap: the legs editor and the analysis run only in :func:`render`, while the
+    tab is open. :func:`build_position` and :func:`render` read the values from the session state.
+
+    Parameters
+    ----------
+    inputs : Inputs
+        The sidebar inputs: the automatic strike width follows the strike, volatility and expiry.
+
+    Examples
+    --------
+    In a script run (here one of Streamlit's testing framework), below the sidebar:
+
+    >>> from streamlit.testing.v1 import AppTest
+    >>> page = AppTest.from_string('''
+    ... from options_analyzer.ui import inputs, tab_strategy
+    ... tab_strategy.controls(inputs.sidebar())
+    ... ''').run()
+    >>> sorted(widget.key for widget in page.main.number_input)
+    ['commission', 'contracts', 'multiplier', 'strategy_width_pct']
+    """
+    _, template, _, width_text = _selector(inputs)
     if template is not None:
         st.caption(
             md(f"**Outlook:** {template.outlook} · **Structure:** {template.structure} — {template.description}")
@@ -243,35 +273,27 @@ def render(inputs: Inputs) -> Position | None:
         )
 
     c1, c2, c3, c4 = st.columns(4)
-    contracts = int(
-        c1.number_input(
-            "Contracts", min_value=1, max_value=100_000, value=1, step=1, key="contracts", bind="query-params"
-        )
+    c1.number_input("Contracts", min_value=1, max_value=100_000, value=1, step=1, key="contracts", bind="query-params")
+    c2.number_input(
+        "Shares per contract",
+        min_value=1,
+        max_value=10_000,
+        value=100,
+        step=1,
+        key="multiplier",
+        bind="query-params",
+        help="100 for US equity options. P&L below is for the whole position.",
     )
-    multiplier = float(
-        c2.number_input(
-            "Shares per contract",
-            min_value=1,
-            max_value=10_000,
-            value=100,
-            step=1,
-            key="multiplier",
-            bind="query-params",
-            help="100 for US equity options. P&L below is for the whole position.",
-        )
-    )
-    commission = float(
-        c3.number_input(
-            "Commission per contract ($)",
-            min_value=0.0,
-            max_value=100.0,
-            value=0.0,
-            step=0.05,
-            format="%.2f",
-            key="commission",
-            bind="query-params",
-            help="Charged on every option contract when the position is opened.",
-        )
+    c3.number_input(
+        "Commission per contract ($)",
+        min_value=0.0,
+        max_value=100.0,
+        value=0.0,
+        step=0.05,
+        format="%.2f",
+        key="commission",
+        bind="query-params",
+        help="Charged on every option contract when the position is opened.",
     )
     with c4.popover("Assumptions", icon=":material/tune:", width="stretch"):
         risk_neutral = st.toggle(
@@ -280,10 +302,9 @@ def render(inputs: Inputs) -> Position | None:
             key="risk_neutral",
             help="Probabilities and expected P&L use drift = risk-free rate. Turn off to enter your own view.",
         )
-        drift = inputs.rate
         if not risk_neutral:
-            drift = st.number_input("Expected annual return (%)", -100.0, 200.0, 8.0, 0.5, key="drift") / 100.0
-        carry = st.toggle(
+            st.number_input("Expected annual return (%)", -100.0, 200.0, 8.0, 0.5, key="drift")
+        st.toggle(
             "Finance the premium",
             value=False,
             key="carry",
@@ -292,17 +313,121 @@ def render(inputs: Inputs) -> Position | None:
             "fees. Payoff diagrams conventionally leave it off.",
         )
 
+
+@dataclass(frozen=True)
+class _Choice:
+    """What the controls chose: the strategy, its template (``None`` for a custom position), the template's legs at
+    the sidebar inputs, and the position size and commission."""
+
+    name: str
+    template: strat.StrategyTemplate | None
+    base: strat.Strategy
+    contracts: int
+    multiplier: float
+    commission: float
+
+
+def _choice(inputs: Inputs) -> _Choice:
+    """The controls' values, from the session state (:func:`controls` draws them earlier in the same run).
+
+    Raises ``ValueError`` when the template cannot be built at the sidebar inputs.
+    """
+    state = st.session_state
+    category = state["strategy_category"]
+    if category == CUSTOM:
+        name, template = CUSTOM, None
+        base = strat.Strategy(CUSTOM, (strat.Leg("call", 1, inputs.strike),))
+    else:
+        name = state[f"strategy_{category}"]
+        template = strat.TEMPLATES[name]
+        width = _width(inputs, state["strategy_width_pct"])
+        base = strat.build_template(name, inputs.strike, width, inputs.expiry)
+    return _Choice(
+        name, template, base, int(state["contracts"]), float(state["multiplier"]), float(state["commission"])
+    )
+
+
+def _position(inputs: Inputs, choice: _Choice, legs: list[strat.Leg]) -> Position:
+    modified = tuple(legs) != tuple(choice.base.legs)
+    name = choice.name
+    label = name if not modified else (f"{name} (modified)" if name != CUSTOM else CUSTOM)
+    option_units = sum(abs(leg.quantity) for leg in legs if leg.is_option)
+    fees = choice.commission * option_units / choice.multiplier
+    description = choice.template.description if choice.template else ""
+    strategy = strat.Strategy(label, tuple(legs), description, fees)
+    return Position(strategy, inputs.market, choice.contracts, choice.multiplier)
+
+
+def _apply_edits(frame: pd.DataFrame, edits: dict) -> pd.DataFrame:
+    """The legs ``frame`` with a legs editor's edits applied, as ``st.data_editor`` applies them.
+
+    ``edits`` is the editor's session state: cell edits by row position, then the positions of deleted rows, then
+    the added rows (values by column name).
+    """
+    rows = frame.reset_index(drop=True).to_dict("records")
+    for position, changes in edits.get("edited_rows", {}).items():
+        rows[int(position)].update(changes)
+    deleted = {int(position) for position in edits.get("deleted_rows", [])}
+    rows = [row for i, row in enumerate(rows) if i not in deleted]
+    rows += [dict.fromkeys(LEG_COLUMNS) | added for added in edits.get("added_rows", [])]
+    return _canonical(pd.DataFrame(rows, columns=LEG_COLUMNS))
+
+
+def build_position(inputs: Inputs) -> Position | None:
+    """The tab's position, built without drawing anything: the Risk tab analyses it while this tab is closed.
+
+    It reads the controls' values (drawn earlier in the same run by :func:`controls`) and the legs from the session
+    state, as :func:`render` would show them: legs that match the template follow it, edited legs are kept, and an
+    edit sent together with the switch to another tab is applied (the editor is not drawn to apply it).
+
+    Parameters
+    ----------
+    inputs : Inputs
+        The sidebar inputs of this run: the market the legs are valued in and the template's strikes and expiry.
+
+    Returns
+    -------
+    Position or None
+        ``None`` when the template cannot be built at the sidebar inputs or the legs are invalid (the tab says why).
+
+    Examples
+    --------
+    The position of the controls, five contracts of the default template:
+
+    >>> from streamlit.testing.v1 import AppTest
+    >>> page = AppTest.from_string('''
+    ... import streamlit as st
+    ... from options_analyzer.ui import inputs, tab_strategy
+    ... market = inputs.sidebar()
+    ... tab_strategy.controls(market)
+    ... st.write(tab_strategy.build_position(market).describe())
+    ... ''').run()
+    >>> page.number_input(key="contracts").set_value(5).run().markdown[0].value
+    '**Bull Call Spread** — Long 1 × 100 Call, Short 1 × 110 Call · 5 × 100 multiplier'
+    """
     try:
-        base = (
-            strat.build_template(name, inputs.strike, width, inputs.expiry)
-            if template
-            else strat.Strategy(CUSTOM, (strat.Leg("call", 1, inputs.strike),))
-        )
+        choice = _choice(inputs)
+    except ValueError:
+        return None
+    base_frame = _template_frame(choice.base)
+    state = _legs_state(choice.name, base_frame)
+    edits = st.session_state.get(_editor_key(choice.name, state))
+    edited = state["edited"] if edits is None or edits == state["edits"] else _apply_edits(state["seed"], edits)
+    state.update(edited=edited, template=base_frame, edits=copy.deepcopy(edits))
+    legs, errors = _legs_from_frame(edited, inputs.strike)
+    return _position(inputs, choice, legs) if legs and not errors else None
+
+
+def render(inputs: Inputs) -> None:
+    """Draw the rest of the tab, below :func:`controls`: the legs editor and the analysis of the position."""
+    try:
+        choice = _choice(inputs)
     except ValueError as exc:
         st.error(str(exc))
-        return None
+        return
 
-    base_frame = _template_frame(base)
+    name, template = choice.name, choice.template
+    base_frame = _template_frame(choice.base)
     state = _legs_state(name, base_frame)
     st.markdown("**Legs** — edit, add or delete rows to customise the position.")
     key = _editor_key(name, state)
@@ -333,18 +458,13 @@ def render(inputs: Inputs) -> Position | None:
     if errors or not legs:
         if not legs and not errors:
             st.warning("Add at least one leg with a non-zero quantity.")
-        return None
+        return
 
-    modified = tuple(legs) != tuple(base.legs)
-    label = name if not modified else (f"{name} (modified)" if name != CUSTOM else CUSTOM)
-    option_units = sum(abs(leg.quantity) for leg in legs if leg.is_option)
-    fees = commission * option_units / multiplier
-    strategy = strat.Strategy(label, tuple(legs), template.description if template else "", fees)
-    market = inputs.market
-    position = Position(strategy, market, contracts, multiplier)
-    _valuation_note(inputs, strategy)
-    _analysis(position, drift, carry)
-    return position
+    position = _position(inputs, choice, legs)
+    _valuation_note(inputs, position.strategy)
+    risk_neutral = st.session_state["risk_neutral"]
+    drift = inputs.rate if risk_neutral else st.session_state["drift"] / 100.0
+    _analysis(position, drift, st.session_state["carry"])
 
 
 def _is_sidebar_contract(leg: strat.Leg, inputs: Inputs) -> bool:
@@ -639,7 +759,10 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
             0,
             last_day,
             last_day // 2 + 1 if last_day > 1 else 1,
-            key="pnl_date",
+            # The key holds the range (and current_key keeps only this key's value), so the value kept while the
+            # tab is closed always fits it; another expiry starts from the default again, as a changed range does.
+            key=current_key("pnl_date_", f"pnl_date_{last_day}"),
+            persist_state="session",
         )
     iv_shift = (
         c2.slider(
@@ -649,6 +772,7 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
             0,
             1,
             key="pnl_iv_shift",
+            persist_state="session",
             help="Adds this many volatility points to every leg's IV in the 'Today' and dated curves. The "
             "at-expiry curve, breakevens and the metrics above use the legs' own IVs.",
         )

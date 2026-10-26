@@ -11,6 +11,9 @@ from . import tab_iv, tab_methodology, tab_pricing, tab_risk, tab_strategy, tab_
 from .inputs import sidebar
 
 REPO_URL = "https://github.com/NavnoorBawa/Option-Pricing-and-Strategy-Analyzer"
+#: The tabs, in order. The open tab is bound to the URL by its label, verbatim (``?tab=Risk``; no parameter for the
+#: first tab), so the labels are short plain text: an icon would put its Markdown code into every link.
+TABS = ("Pricing", "Strategy", "Risk", "Vol surface", "IV", "Methodology")
 
 
 def run() -> None:
@@ -45,25 +48,28 @@ def run() -> None:
         prices = tab_pricing.compute_prices(inputs)
     tab_pricing.render_price_cards(inputs, prices)
 
-    pricing, strategy, risk, surface, iv, methodology = st.tabs(
-        [
-            ":material/calculate: Pricing & Greeks",
-            ":material/stacked_line_chart: Strategy Builder",
-            ":material/shield: Risk & Scenarios",
-            ":material/landscape: Volatility Surface",
-            ":material/troubleshoot: Implied Volatility",
-            ":material/menu_book: Methodology",
-        ]
-    )
-    with pricing:
-        tab_pricing.render(inputs, prices)
+    # Only the open tab runs: opening a tab reruns the app, and the closed tabs stay empty (their widgets keep their
+    # values with persist_state). The exception is the Strategy tab's controls (template, strike width, position
+    # size, commission), which are drawn on every run: they are bound to the URL, and Streamlit drops the URL
+    # parameter of a widget it does not draw, so a link to any tab keeps the position. The Risk tab analyses that
+    # position (tab_strategy.build_position).
+    pricing, strategy, risk, surface, iv, methodology = st.tabs(TABS, key="tab", bind="query-params")
+    if pricing.open:
+        with pricing:
+            tab_pricing.render(inputs, prices)
     with strategy:
-        position = tab_strategy.render(inputs)
-    with risk:
-        tab_risk.render(position)
-    with surface:
-        tab_surface.render(inputs)
-    with iv:
-        tab_iv.render(inputs)
-    with methodology:
-        tab_methodology.render()
+        tab_strategy.controls(inputs)
+        if strategy.open:
+            tab_strategy.render(inputs)
+    if risk.open:
+        with risk:
+            tab_risk.render(tab_strategy.build_position(inputs))
+    if surface.open:
+        with surface:
+            tab_surface.render(inputs)
+    if iv.open:
+        with iv:
+            tab_iv.render(inputs)
+    if methodology.open:
+        with methodology:
+            tab_methodology.render()

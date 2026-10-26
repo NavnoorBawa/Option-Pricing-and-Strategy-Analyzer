@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
@@ -571,13 +572,24 @@ def app_url(chromium):
             server.wait()
 
 
+#: Streamlit marks its app view with data-test-script-state ("running" while a script run is under way).
+_RUNNING = "document.querySelector('[data-test-script-state]')?.getAttribute('data-test-script-state') === 'running'"
+#: An element of each tab that only the tab's own run draws (the browser holds the open tab's panel only, and the
+#: app leaves the closed tabs empty but for the Strategy tab's controls): once it is on the page, a click on the tab
+#: has run it. (The script-state mark does not do: a fast run can come and go between two frames.)
+TAB_READY = {
+    "Pricing": ".st-key-sensitivity_chart",
+    "Strategy": ".st-key-strategy_cards",
+    "Risk": ".st-key-var_cards",
+    "Vol surface": ".st-key-surface_cards",
+    "IV": ".st-key-iv_cards",
+    "Methodology": "[data-testid=stMarkdown]",
+}
+
+
 def _settle(page) -> None:
     """Wait until the script run is over, the fonts have loaded and the charts have drawn."""
-    page.wait_for_function(
-        "() => !(document.querySelector('[data-testid=stStatusWidget]')?.innerText ?? '').toLowerCase()"
-        ".includes('running')",
-        timeout=120_000,
-    )
+    page.wait_for_function(f"() => !({_RUNNING})", timeout=120_000)
     page.evaluate("document.fonts.ready.then(() => true)")
     page.wait_for_timeout(1000)
 
@@ -591,7 +603,9 @@ def _open(chromium, url: str, scheme: str, width: int):
 
 
 def _tab(page, name: str) -> None:
-    page.locator("[role=tab]").filter(has_text=name).click()
+    """Open a tab by clicking it, and wait until the run that this starts (only the open tab runs) has drawn it."""
+    page.get_by_role("tab", name=name, exact=True).click()
+    page.locator(f"[role=tabpanel] {TAB_READY[name]}").first.wait_for(state="visible", timeout=120_000)
     _settle(page)
 
 
@@ -617,13 +631,13 @@ _CARD_VALUES = """() => {
 
 #: The tab of every card row (the price cards sit above the tabs).
 CARD_ROW_TABS = {
-    "price_cards": "Pricing & Greeks",
-    "strategy_cards": "Strategy Builder",
-    "greek_cards": "Strategy Builder",
-    "expectation_cards": "Strategy Builder",
-    "var_cards": "Risk & Scenarios",
-    "surface_cards": "Volatility Surface",
-    "iv_cards": "Implied Volatility",
+    "price_cards": "Pricing",
+    "strategy_cards": "Strategy",
+    "greek_cards": "Strategy",
+    "expectation_cards": "Strategy",
+    "var_cards": "Risk",
+    "surface_cards": "Vol surface",
+    "iv_cards": "IV",
 }
 
 
@@ -734,6 +748,51 @@ def test_card_rows_line_up(chromium, app_url, width, query, three_up):
         page.close()
 
 
+#: A chart that each tab draws (the key given to charts.show), and the number of charts it draws, at the default URL.
+TAB_CHART = {"Pricing": ("sensitivity_chart", 3), "Strategy": ("payoff_chart", 1), "Risk": ("var_hist", 6),
+             "Vol surface": ("surf_iv", 4), "IV": ("iv_curve", 1), "Methodology": (None, 0)}  # fmt: skip
+
+
+def _query(page) -> dict[str, list[str]]:
+    return urllib.parse.parse_qs(urllib.parse.urlsplit(page.url).query)
+
+
+@pytest.mark.e2e
+@pytest.mark.slow
+def test_a_click_on_a_tab_runs_that_tab_and_puts_it_in_the_link(chromium, app_url):
+    # Only the open tab runs, so the page holds that tab's charts and no other's; the link names the tab (none for
+    # the first) and keeps the Strategy tab's position while another tab is open: it reopens the same view.
+    from options_analyzer.ui.app import TABS
+
+    page = _open(chromium, app_url, "light", 1440)
+    try:
+        for tab in (*TABS[1:], TABS[0]):
+            _tab(page, tab)
+            key, count = TAB_CHART[tab]
+            assert page.locator("[data-testid=stPlotlyChart]").count() == count, tab
+            assert key is None or page.locator(f".st-key-{key} [data-testid=stPlotlyChart]").is_visible(), tab
+            assert _query(page).get("tab") == (None if tab == TABS[0] else [tab])
+            assert not page.locator("[data-testid=stException]").count(), tab
+        _tab(page, "Strategy")
+        contracts = page.locator("[data-testid=stMain] input[aria-label=Contracts]")
+        contracts.fill("3")
+        contracts.press("Enter")
+        _settle(page)
+        _tab(page, "Risk")
+        assert _query(page) == {"contracts": ["3"], "tab": ["Risk"]}
+        analysed = "Long 1 × 100 Call, Short 1 × 110 Call · 3 × 100 multiplier"
+        assert analysed in page.get_by_text("Analysing").inner_text()
+        link = _open(chromium, page.url, "light", 1440)
+        try:
+            assert link.locator(".st-key-var_hist [data-testid=stPlotlyChart]").is_visible()
+            assert link.locator("[role=tab][aria-selected=true]").inner_text().strip() == "Risk"
+            assert analysed in link.get_by_text("Analysing").inner_text()
+        finally:
+            link.close()
+    finally:
+        page.close()
+
+
 #: Colour and background of every visible multiselect chip.
 _CHIPS = """() => [...document.querySelectorAll('[data-testid=stMultiSelect] [data-tag]')]
   .filter(e => e.getBoundingClientRect().width > 0)
@@ -745,14 +804,14 @@ _CHIPS = """() => [...document.querySelectorAll('[data-testid=stMultiSelect] [da
 def test_text_on_the_primary_colour_is_legible_in_the_app(chromium, app_url, scheme):
     page = _open(chromium, app_url, scheme, 1440)
     try:
-        _tab(page, "Volatility Surface")
+        _tab(page, "Vol surface")
         chips = page.evaluate(_CHIPS)
         assert chips  # the maturities of the smile chart
         primary = _mode(scheme)["primaryColor"]
         for text, color, background in chips:
             assert _hex(background) == primary, text
             assert contrast(_hex(color), _hex(background)) >= 4.5, (text, color, background)
-        _tab(page, "Implied Volatility")
+        _tab(page, "IV")
         step = page.locator("[data-testid=stMain] [data-testid=stNumberInputStepUp]:visible").first
         step.hover()
         page.wait_for_timeout(400)

@@ -27,42 +27,57 @@ def _key(node) -> str:
     return block_id.rsplit("-", 1)[-1] if block_id.startswith("$$ID-") else ""
 
 
-def _card_rows(at: AppTest) -> dict[str, list[list]]:
-    """Every metric of the page, by card row: ``{row key: [[metrics of group 1], ...]}``. Fails on a metric that is
-    not in a group of a keyed row (a plain ``st.metric`` or one in ``st.columns``)."""
-    rows: dict[str, list[list]] = {}
-
-    def walk(node, ancestors):
-        for child in getattr(node, "children", {}).values():
-            if getattr(child, "type", None) == "metric":
-                group, row = ancestors[-1], ancestors[-2]
-                assert _key(group) and _key(row), f"{child.label!r} is not in a card row"
-                assert all(a.type != "column" for a in ancestors), f"{child.label!r} is in st.columns"
-                groups = rows.setdefault(_key(row), [])
-                if not groups or groups[-1][0] != _key(group):
-                    groups.append([_key(group), []])
-                groups[-1][1].append(child)
-            else:
-                walk(child, [*ancestors, child])
-
-    walk(at._tree, [])
-    return {row: [metrics for _, metrics in groups] for row, groups in rows.items()}
+def _apps(at: AppTest | list[AppTest]) -> list[AppTest]:
+    return at if isinstance(at, list) else [at]
 
 
-def _styles(at: AppTest) -> list[str]:
-    return [h.proto.body for h in at.get("html")]
+def _card_rows(at: AppTest | list[AppTest]) -> dict[str, list[list]]:
+    """Every metric of the page (or of the pages, one per tab), by card row: ``{row key: [[metrics of group 1],
+    ...]}``. Fails on a metric that is not in a group of a keyed row (a plain ``st.metric`` or one in
+    ``st.columns``)."""
+    found: dict[str, list[list]] = {}
+    for page in _apps(at):
+        rows: dict[str, list[list]] = {}
+
+        def walk(node, ancestors, rows=rows):
+            for child in getattr(node, "children", {}).values():
+                if getattr(child, "type", None) == "metric":
+                    group, row = ancestors[-1], ancestors[-2]
+                    assert _key(group) and _key(row), f"{child.label!r} is not in a card row"
+                    assert all(a.type != "column" for a in ancestors), f"{child.label!r} is in st.columns"
+                    groups = rows.setdefault(_key(row), [])
+                    if not groups or groups[-1][0] != _key(group):
+                        groups.append([_key(group), []])
+                    groups[-1][1].append(child)
+                else:
+                    walk(child, [*ancestors, child])
+
+        walk(page._tree, [])
+        found |= {row: [metrics for _, metrics in groups] for row, groups in rows.items()}
+    return found
 
 
-def _app_states(new_app) -> dict[str, AppTest]:
+def _styles(at: AppTest | list[AppTest]) -> list[str]:
+    return [h.proto.body for page in _apps(at) for h in page.get("html")]
+
+
+#: The tabs with card rows (only the open tab runs; the price cards sit above the tabs, on every page).
+CARD_TABS = ("Strategy", "Risk", "Vol surface", "IV")
+
+
+def _app_states(new_app) -> dict[str, list[AppTest]]:
     """The app at its default URL (every tab's default cards), with market quotes on the surface tab, with a
     100,000-lot position (amounts in millions: "$46.62M") and with a short straddle at the input limits (the widest
-    strategy values)."""
-    default = new_app().run()
-    quotes = new_app().run()
+    strategy values): for each, one page per tab with cards."""
+
+    def pages(**query) -> list[AppTest]:
+        return [new_app(tab=tab, **query).run() for tab in CARD_TABS]
+
+    quotes = new_app(tab="Vol surface").run()
     quotes.segmented_control(key="surface_source").set_value("Market quotes (CSV)").run()
     csv = vol_surface.sample_quotes().to_csv(index=False).encode()
     quotes.file_uploader(key="quotes_file").upload("quotes.csv", csv, "text/csv").run()
-    limits = new_app(
+    limits = pages(
         spot=9999999,
         strike=9999999,
         contracts=100000,
@@ -71,11 +86,12 @@ def _app_states(new_app) -> dict[str, AppTest]:
         days=1,
         strategy_category="Volatility",
         strategy_Volatility="Short Straddle",
-    ).run()
-    large = new_app(contracts=100000).run()
-    states = {"default": default, "quotes": quotes, "large": large, "limits": limits}
-    for at in states.values():
-        _ok(at)
+    )
+    default = pages()
+    with_quotes = [quotes if tab == "Vol surface" else page for tab, page in zip(CARD_TABS, default, strict=True)]
+    states = {"default": default, "quotes": with_quotes, "large": pages(contracts=100000), "limits": limits}
+    for page in (page for state in states.values() for page in state):
+        _ok(page)
     return states
 
 

@@ -14,7 +14,7 @@ import streamlit as st
 
 from .. import vol_surface as vs
 from . import cache, charts
-from .components import card_row
+from .components import card_row, current_key
 from .inputs import Inputs
 
 SSVI = "Parametric (SSVI)"
@@ -49,6 +49,7 @@ def _ssvi_controls(inputs: Inputs) -> vs.VolSurface | None:
         max_value=hi,
         step=0.5,
         key="ssvi_short",
+        persist_state="session",
         help="ATM implied vol as maturity → 0. Starts at 1.2 × the sidebar volatility and follows it.",
     )
     long = c[1].number_input(
@@ -57,6 +58,7 @@ def _ssvi_controls(inputs: Inputs) -> vs.VolSurface | None:
         max_value=hi,
         step=0.5,
         key="ssvi_long",
+        persist_state="session",
         help="ATM implied vol as maturity → ∞. Starts at the sidebar volatility and follows it.",
     )
     kappa = c[2].number_input(
@@ -66,11 +68,19 @@ def _ssvi_controls(inputs: Inputs) -> vs.VolSurface | None:
         1.5,
         0.1,
         key="ssvi_kappa",
+        persist_state="session",
         help="How fast ATM variance moves from the short- to the long-term level (per year).",
     )
     c = st.columns(3)
     rho = c[0].slider(
-        "Skew ρ", -0.95, 0.95, -0.6, 0.05, key="ssvi_rho", help="Negative = downside skew (typical for equities)."
+        "Skew ρ",
+        -0.95,
+        0.95,
+        -0.6,
+        0.05,
+        key="ssvi_rho",
+        persist_state="session",
+        help="Negative = downside skew (typical for equities).",
     )
     eta_max = 2.0 / (1.0 + abs(rho))
     eta = c[1].slider(
@@ -80,6 +90,7 @@ def _ssvi_controls(inputs: Inputs) -> vs.VolSurface | None:
         min(1.0, round(eta_max, 2)),
         0.05,
         key="ssvi_eta",
+        persist_state="session",
         help=f"Arbitrage-free for η ≤ 2/(1+|ρ|) = {eta_max:.2f}.",
     )
     gamma = c[2].slider(
@@ -89,16 +100,23 @@ def _ssvi_controls(inputs: Inputs) -> vs.VolSurface | None:
         0.5,
         0.05,
         key="ssvi_gamma",
+        persist_state="session",
         help="How quickly the smile flattens with maturity (power-law SSVI).",
     )
     c = st.columns(2)
-    m_range = c[0].slider("Moneyness range K/S", 0.3, 2.5, (0.7, 1.3), 0.05, key="ssvi_m")
-    t_range = c[1].slider("Maturity range (years)", 0.02, 5.0, (0.08, 2.0), 0.01, key="ssvi_t")
+    m_range = c[0].slider("Moneyness range K/S", 0.3, 2.5, (0.7, 1.3), 0.05, key="ssvi_m", persist_state="session")
+    t_range = c[1].slider("Maturity range (years)", 0.02, 5.0, (0.08, 2.0), 0.01, key="ssvi_t", persist_state="session")
     if m_range[1] - m_range[0] < 0.1 or t_range[1] - t_range[0] < 0.05:
         st.warning("Widen the moneyness or maturity range to see a surface.")
         return None
     params = vs.SSVIParams(short / 100, long / 100, kappa, rho, eta, gamma)
     return cache.ssvi_surface(params, inputs.rate, inputs.dividend_yield, m_range, t_range)
+
+
+def _keep_upload() -> None:
+    """Keep the uploaded quotes file (or its removal) in the session: an uploader that is not drawn in a run, as
+    while another tab is open, forgets its file, and st.file_uploader has no persist_state."""
+    st.session_state["quotes_upload"] = st.session_state["quotes_file"]
 
 
 def _quote_controls(inputs: Inputs) -> vs.VolSurface | None:
@@ -107,6 +125,7 @@ def _quote_controls(inputs: Inputs) -> vs.VolSurface | None:
         "Option quotes (CSV)",
         type=["csv"],
         key="quotes_file",
+        on_change=_keep_upload,
         help="Columns: Strike; Days (to expiry) or Maturity (years), or another unit in brackets such as "
         "'Maturity (months)', 'Maturity (weeks)' or 'DTE (hours)'; and either ImpliedVol (decimal or %) or option "
         "prices (Price or Mid, with Bid and Ask used where it is blank). Prices need a Type column saying call or "
@@ -132,6 +151,10 @@ def _quote_controls(inputs: Inputs) -> vs.VolSurface | None:
         f"Quotes are read with the sidebar spot ({inputs.spot:,.2f}), rate ({inputs.rate:.2%}) and dividend yield "
         f"({inputs.dividend_yield:.2%}); prices are inverted with Black-Scholes-Merton (European exercise)."
     )
+    kept = st.session_state.get("quotes_upload")
+    if upload is None and kept is not None:
+        upload = kept
+        c1.caption(f"Showing {kept.name}, uploaded earlier in this session. Upload another file to replace it.")
     if upload is None:
         st.info("Upload a quotes file, or download a sample to see the expected format. " + context)
         return None
@@ -269,7 +292,8 @@ def _smiles(surface: vs.VolSurface) -> None:
         default=sorted({0, n // 2, n - 1}),
         format_func=labels.__getitem__,
         max_selections=6,
-        key=f"smile_pick_{grid_id}",
+        key=current_key("smile_pick_", f"smile_pick_{grid_id}"),
+        persist_state="session",
     )
     if not picked:
         return
@@ -292,7 +316,9 @@ def _smiles(surface: vs.VolSurface) -> None:
 
 @st.fragment
 def render(inputs: Inputs) -> None:
-    source = st.segmented_control("Surface source", [SSVI, QUOTES], default=SSVI, required=True, key="surface_source")
+    source = st.segmented_control(
+        "Surface source", [SSVI, QUOTES], default=SSVI, required=True, key="surface_source", persist_state="session"
+    )
     surface = _ssvi_controls(inputs) if source == SSVI else _quote_controls(inputs)
     if surface is None:
         return
@@ -347,7 +373,7 @@ def render(inputs: Inputs) -> None:
         st.caption("Implied volatility is left blank outside each maturity's quoted strikes (no extrapolation).")
     _contract_readout(surface, inputs)
 
-    colorscale = st.selectbox("Colour scale", COLORSCALES, key="surface_colors")
+    colorscale = st.selectbox("Colour scale", COLORSCALES, key="surface_colors", persist_state="session")
     # Side by side when both fit (1,280 px with the sidebar open), otherwise one per row; a phone shrinks them to
     # its column. Two half-width columns were 212-274 px wide at 900-1,024 px with the sidebar open, which cut off
     # the 3-D scene's axes (Plotly sizes the scene by the chart's height, so a wider chart only adds margin).

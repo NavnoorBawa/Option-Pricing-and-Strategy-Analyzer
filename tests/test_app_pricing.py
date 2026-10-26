@@ -50,6 +50,14 @@ def _binomial(at: AppTest, american: bool = False, **settings) -> AppTest:
     return at
 
 
+@pytest.fixture
+def iv_app(new_app) -> AppTest:
+    """The app with the IV tab open (only the open tab runs)."""
+    at = new_app(tab="IV").run()
+    _ok(at)
+    return at
+
+
 def _iv_style(at: AppTest):
     return next(s for s in at.segmented_control if s.key.startswith("iv_style"))
 
@@ -403,53 +411,55 @@ def test_greek_names_get_a_column_wide_enough_for_the_longest(app):
 # --- Implied Volatility tab --------------------------------------------------------------------------------------
 
 
-def test_iv_exercise_style_follows_the_sidebar_unless_chosen_in_the_tab(app):
-    assert _iv_style(app).value == "European"
-    _binomial(app, american=True)
-    assert _iv_style(app).value == "American"
-    assert any("No-arbitrage bounds for this American call" in c.value for c in app.caption)
+def test_iv_exercise_style_follows_the_sidebar_unless_chosen_in_the_tab(iv_app):
+    assert _iv_style(iv_app).value == "European"
+    _binomial(iv_app, american=True)
+    assert _iv_style(iv_app).value == "American"
+    assert any("No-arbitrage bounds for this American call" in c.value for c in iv_app.caption)
     # The user's own choice is kept while the sidebar style stays the same...
-    _iv_style(app).set_value("European").run()
-    app.sidebar.number_input(key="vol").set_value(25.0).run()
-    assert _iv_style(app).value == "European"
+    _iv_style(iv_app).set_value("European").run()
+    iv_app.sidebar.number_input(key="vol").set_value(25.0).run()
+    assert _iv_style(iv_app).value == "European"
     # ...and the sidebar takes over again when its style changes.
-    app.sidebar.segmented_control(key="style").set_value("European").run()
-    app.sidebar.segmented_control(key="style").set_value("American").run()
-    assert _iv_style(app).value == "American"
+    iv_app.sidebar.segmented_control(key="style").set_value("European").run()
+    iv_app.sidebar.segmented_control(key="style").set_value("American").run()
+    assert _iv_style(iv_app).value == "American"
 
 
-def test_iv_quote_survives_volatility_and_style_changes_and_resets_on_request(app):
-    _quote(app).set_value(12.0).run()
-    assert _metrics(app)["Implied volatility"] == "24.112%"
-    app.sidebar.number_input(key="vol").set_value(25.0).run()
-    assert _quote(app).value == 12.0
-    assert _metrics(app)["Implied volatility"] == "24.112%"
-    _iv_style(app).set_value("American").run()
-    assert _quote(app).value == 12.0
-    next(b for b in app.button if b.label == "Reset to model value").click().run()
-    assert _quote(app).value == pytest.approx(bs.price(100, 100, 1, 0.05, 0.25), abs=1e-3)  # American call = European
-    assert _metrics(app)["Implied volatility"] == "25.000%"
+def test_iv_quote_survives_volatility_and_style_changes_and_resets_on_request(iv_app):
+    _quote(iv_app).set_value(12.0).run()
+    assert _metrics(iv_app)["Implied volatility"] == "24.112%"
+    iv_app.sidebar.number_input(key="vol").set_value(25.0).run()
+    assert _quote(iv_app).value == 12.0
+    assert _metrics(iv_app)["Implied volatility"] == "24.112%"
+    _iv_style(iv_app).set_value("American").run()
+    assert _quote(iv_app).value == 12.0
+    next(b for b in iv_app.button if b.label == "Reset to model value").click().run()
+    assert _quote(iv_app).value == pytest.approx(
+        bs.price(100, 100, 1, 0.05, 0.25), abs=1e-3
+    )  # American call = European
+    assert _metrics(iv_app)["Implied volatility"] == "25.000%"
     # A different contract starts from its own model value.
-    _quote(app).set_value(12.0).run()
-    app.sidebar.number_input(key="strike").set_value(105.0).run()
-    assert _quote(app).value == pytest.approx(bs.price(100, 105, 1, 0.05, 0.25), abs=1e-3)
+    _quote(iv_app).set_value(12.0).run()
+    iv_app.sidebar.number_input(key="strike").set_value(105.0).run()
+    assert _quote(iv_app).value == pytest.approx(bs.price(100, 105, 1, 0.05, 0.25), abs=1e-3)
 
 
-def test_iv_tab_inverts_american_quotes_on_the_sidebar_tree(app):
-    _binomial(app, american=True, tree="crr")
-    headline_put = _metrics(app)["Put value"]
-    next(s for s in app.segmented_control if s.key == "iv_type").set_value("put").run()
-    _quote(app).set_value(_dollars(headline_put)).run()
-    _ok(app)
+def test_iv_tab_inverts_american_quotes_on_the_sidebar_tree(iv_app):
+    _binomial(iv_app, american=True, tree="crr")
+    headline_put = _metrics(iv_app)["Put value"]
+    next(s for s in iv_app.segmented_control if s.key == "iv_type").set_value("put").run()
+    _quote(iv_app).set_value(_dollars(headline_put)).run()
+    _ok(iv_app)
     # The 501-step CRR value inverted on a Leisen-Reimer tree used to give 20.009%.
-    assert _metrics(app)["Implied volatility"] == "20.000%"
-    assert any("501-step Cox-Ross-Rubinstein tree" in c.value for c in app.caption)
+    assert _metrics(iv_app)["Implied volatility"] == "20.000%"
+    assert any("501-step Cox-Ross-Rubinstein tree" in c.value for c in iv_app.caption)
 
 
 def test_iv_tab_accepts_an_american_put_worth_more_than_its_strike_under_a_negative_rate(new_app):
     # With a negative rate the put is worth up to K e^(-rT): the tab used to cap it at the strike, showing the
     # bounds "$114.8721 <= price < $100.0000" and rejecting its own model value $115.5045 as a quote.
-    at = new_app()
+    at = new_app(tab="IV")
     at.query_params.update(
         {"spot": "50", "strike": "100", "days": "3650", "rate": "-5", "model": "Binomial tree", "style": "American"}
     )
@@ -462,22 +472,22 @@ def test_iv_tab_accepts_an_american_put_worth_more_than_its_strike_under_a_negat
     assert _metrics(at)["Implied volatility"] == "20.000%"
 
 
-def test_iv_time_value_is_quote_minus_intrinsic_value(app):
-    assert _metrics(app)["Time value"] == "$10.4506"  # at the money: all of the premium
-    app.sidebar.number_input(key="strike").set_value(120.0).run()
-    next(s for s in app.segmented_control if s.key == "iv_type").set_value("put").run()
+def test_iv_time_value_is_quote_minus_intrinsic_value(iv_app):
+    assert _metrics(iv_app)["Time value"] == "$10.4506"  # at the money: all of the premium
+    iv_app.sidebar.number_input(key="strike").set_value(120.0).run()
+    next(s for s in iv_app.segmented_control if s.key == "iv_type").set_value("put").run()
     put = bs.price(100, 120, 1, 0.05, 0.2, 0, "put")
-    assert _dollars(_metrics(app)["Time value"]) == pytest.approx(put - 20.0, abs=1e-4)
+    assert _dollars(_metrics(iv_app)["Time value"]) == pytest.approx(put - 20.0, abs=1e-4)
 
 
-def test_iv_cards_wrap_in_pairs_like_the_price_cards(app):
+def test_iv_cards_wrap_in_pairs_like_the_price_cards(iv_app):
     # The four cards sat in st.columns(4) with no room to grow: at 1,280 px "Model check" read "$10.450…" for the
     # default contract, and with a $10,000,000 underlying every dollar card lost digits even at 1,400 px.
-    assert [m.label for m in _block(app, "iv_cards_solution").metric] == ["Implied volatility", "Model check"]
-    assert [m.label for m in _block(app, "iv_cards_option").metric] == ["Vega at IV", "Time value"]
-    style = next(h.proto.body for h in app.get("html") if ".st-key-iv_cards " in h.proto.body)
+    assert [m.label for m in _block(iv_app, "iv_cards_solution").metric] == ["Implied volatility", "Model check"]
+    assert [m.label for m in _block(iv_app, "iv_cards_option").metric] == ["Vega at IV", "Time value"]
+    style = next(h.proto.body for h in iv_app.get("html") if ".st-key-iv_cards " in h.proto.body)
     assert ".st-key-iv_cards { container: iv-cards / inline-size; }" in style
-    cards = [m for m in app.metric if m.label in ("Implied volatility", "Model check", "Vega at IV", "Time value")]
+    cards = [m for m in iv_app.metric if m.label in ("Implied volatility", "Model check", "Vega at IV", "Time value")]
     card = int(np.ceil(max(components._card_width(m.label, m.value, delta=m.proto.delta) for m in cards)))
     assert f".st-key-iv_cards_solution > *, .st-key-iv_cards_option > * {{ flex: 1 1 {card}px !important; }}" in style
     # On a phone the delta line wraps with the labels instead of being cut off.
@@ -486,18 +496,18 @@ def test_iv_cards_wrap_in_pairs_like_the_price_cards(app):
     )
 
 
-def test_iv_model_check_shows_the_quote_precision_and_the_full_value_in_its_help(app):
+def test_iv_model_check_shows_the_quote_precision_and_the_full_value_in_its_help(iv_app):
     # Six decimals did not fit the card; the full value and its distance from the quote are in the help.
-    check = next(m for m in app.metric if m.label == "Model check")
+    check = next(m for m in iv_app.metric if m.label == "Model check")
     assert check.value == "$10.4506"
     value = bs.price(100, 100, 1, 0.05, 0.2)
     assert f"\\${value:,.6f}, " in check.proto.help and "from the quote." in check.proto.help
 
 
-def test_iv_gap_to_the_sidebar_never_shows_a_negative_zero(app):
-    app.sidebar.number_input(key="strike").set_value(40.0).run()
-    _ok(app)
-    assert next(m for m in app.metric if m.label == "Implied volatility").delta == "+0.00 vol pts vs sidebar"
+def test_iv_gap_to_the_sidebar_never_shows_a_negative_zero(iv_app):
+    iv_app.sidebar.number_input(key="strike").set_value(40.0).run()
+    _ok(iv_app)
+    assert next(m for m in iv_app.metric if m.label == "Implied volatility").delta == "+0.00 vol pts vs sidebar"
 
 
 # --- Charts ---------------------------------------------------------------------------------------------------------
@@ -558,14 +568,14 @@ def test_sensitivity_chart_labels_cannot_overlap_the_axis_or_each_other():
     assert (labels["current"].xanchor, labels["strike"].xanchor) == ("right", "left")
 
 
-def test_iv_tab_explains_a_tree_too_short_for_extreme_volatility(app):
+def test_iv_tab_explains_a_tree_too_short_for_extreme_volatility(iv_app):
     # Round-3 verifier: a 15-step tree at 500% volatility over 10 years with a negative rate raised a raw
     # ValueError from the American value curve ("no arbitrage-free lattice exists"), shown as a crash.
-    app.sidebar.number_input(key="days").set_value(3650).run()
-    app.sidebar.number_input(key="rate").set_value(-5.0).run()
-    app.sidebar.number_input(key="vol").set_value(500.0).run()
-    _binomial(app, american=True, tree="lr", steps=15)
+    iv_app.sidebar.number_input(key="days").set_value(3650).run()
+    iv_app.sidebar.number_input(key="rate").set_value(-5.0).run()
+    iv_app.sidebar.number_input(key="vol").set_value(500.0).run()
+    _binomial(iv_app, american=True, tree="lr", steps=15)
     for kind in ("call", "put"):
-        app.segmented_control(key="iv_type").set_value(kind).run()
-        assert not app.exception, [e.value for e in app.exception]
-        assert all("too few steps" in e.value for e in app.error), [e.value for e in app.error]
+        iv_app.segmented_control(key="iv_type").set_value(kind).run()
+        assert not iv_app.exception, [e.value for e in iv_app.exception]
+        assert all("too few steps" in e.value for e in iv_app.error), [e.value for e in iv_app.error]
