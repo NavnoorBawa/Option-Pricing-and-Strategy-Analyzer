@@ -146,32 +146,8 @@ FILES: ['options_analyzer/ui/tab_methodology.py', 'options_analyzer/ui/app.py', 
 ACC: (1) AppTest renders every methodology file without an exception. (2) Playwright finds no raw '$$' in the DOM, so all maths is rendered. (3) With sections collapsed, the tab is at most 1,500 px tall at 1440 px and at most 2,500 px at 390 px (today 4,201 and 8,337). (4) The drawer is anchored right at full viewport height. (5) Every reference carries a URL, link-checked nightly.
 EFFORT M
 
-4
-               total        used        free      shared  buff/cache   available
-Mem:              15           0          15           0           0          15
-Swap:              0           0           0
-/dev/vda        252G   30G  7.6G  80% /
-/dev/vda        252G   30G  7.6G  80% /
-__init__.py
-__pycache__
-binomial.py
-black_scholes.py
-implied_vol.py
-monte_carlo.py
-risk.py
-scenarios.py
-strategies.py
-ui
-vol_surface.py
-# Runtime dependencies (Streamlit Community Cloud installs from this file); keep them in step with pyproject.toml.
-# Development tools are pinned in requirements-dev.txt, the independent test oracles in requirements-oracle.txt.
-streamlit>=1.65,<2
-numpy>=1.26
-pandas>=2.1
-plotly>=5.24
-scipy>=1.11
-tzdata>=2022.7; sys_platform == "win32"
-xlsxwriter>=3.1
+## Item index (effort, files)
+
 P0-1 M ['options_analyzer/ui/app.py', 'options_analyzer/ui/tab_strategy.py', 'options_analyzer/ui/tab_risk.py', 'tests/test_app.py', 'tests/test_app_strategy.py']
 P0-2 M ['options_analyzer/ui/components.py', 'options_analyzer/ui/model_config.py', 'options_analyzer/ui/inputs.py', 'options_analyzer/ui/charts.py', 'options_analyzer/ui/tab_pricing.py', 'options_analyzer/ui/tab_iv.py', 'options_analyzer/ui/tab_strategy.py', 'options_analyzer/ui/tab_risk.py', 'options_analyzer/ui/tab_surface.py', 'options_analyzer/ui/tab_methodology.py', 'options_analyzer/ui/methodology/pricing.md', 'options_analyzer/ui/methodology/surface.md', 'options_analyzer/ui/methodology/risk.md', 'options_analyzer/ui/methodology/data.md', 'options_analyzer/ui/methodology/validation.md']
 P0-3 S ['pyproject.toml', 'requirements.txt', 'requirements-dev.txt', 'requirements-oracle.txt', '.github/workflows/ci.yml', 'tests/conftest.py', 'tests/test_app.py', 'tests/test_app_pricing.py', 'tests/test_app_strategy.py', 'tests/test_app_surface.py']
