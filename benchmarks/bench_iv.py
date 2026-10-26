@@ -124,7 +124,7 @@ def main() -> None:
         total = whole(lambda: [legacy_brent(*row) for row in rows], 1)
         print(f"legacy Brent solver in a loop, {args.quotes:,} quotes: {total:8.2f} s")
     try:
-        import py_lets_be_rational as plbr
+        import py_lets_be_rational as plbr  # type: ignore[import-untyped, import-not-found, unused-ignore]
     except ImportError:
         return
     reference = per_call(plbr.implied_volatility_from_a_transformed_rational_guess, black_rows[:2_000], repeats=3)
