@@ -82,7 +82,9 @@ def main() -> None:
         for p, k, t, rr, qq, c in zip(price, K, T, r, q, kind, strict=True)
     ]
     vol = iv.implied_volatility_batch(price, 100.0, K, T, r, q, kind)
-    print(f"{args.quotes:,} quotes; batch result vs input volatility: max |error| {np.nanmax(np.abs(vol - sigma)):.2e}")
+    # The prices carry black_scholes.price's rounding, which deep in the money (large cond) moves the volatility most.
+    error = np.nanmax(np.abs(vol - sigma) / sigma)
+    print(f"{args.quotes:,} quotes; batch volatility vs the input volatility: max relative error {error:.2e}")
     print()
 
     batch = whole(lambda: iv.implied_volatility_batch(price, 100.0, K, T, r, q, kind), args.repeats)
