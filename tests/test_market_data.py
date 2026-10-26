@@ -593,26 +593,79 @@ def test_an_injected_butterfly_is_flagged(index_model, etf_chain):
     assert _price_arbitrage(etf) > 0
 
 
-@pytest.mark.parametrize("seed", [None, 0, 1, 2])
-def test_fit_recovers_the_generator_atm_vols(seed):
-    """Acceptance (3), the part the current fit can do: with the generator's rate and yield (the box rate and a
-    continuous yield on a flat curve), parse_quotes and fit_market_surface recover every expiry's ATM vol within 0.1
-    vol point, for the model mids (seed None) and noisy quotes.
+#: The liquid core of a chain: quotes whose bid-ask half-spread is at most half a vol point. A desk fits an unweighted
+#: smile to these until it weights each quote by its spread (SF-4).
+MAX_VOL_HALF_SPREAD = 0.005
+#: Valuation times for the fit: a Monday, the morning before a one-day and a six-hour expiry, and a late afternoon.
+FIT_TIMES = (AS_OF, datetime(2026, 10, 29, 10, 0), datetime(2026, 10, 30, 10, 0), datetime(2026, 12, 7, 15, 30))
 
-    The fit is the current unweighted SVI, so it is given the liquid core, |ln K/F| <= 2 ATM standard deviations.
-    On the whole chain the cheap wing quotes, worth a few ticks with vol errors of several points, pull it off by up
-    to 0.13 vol point at the model mids and 1.5 at the one-day expiry with noise (measured over valuation days and
-    seeds); spread-weighted calibration (SF-4) is what lets the wings in.
+
+def _liquid_core(parsed: pd.DataFrame, spot: float, rate: float, dividend_yield: float) -> pd.DataFrame:
+    """The parsed quotes whose half-spread in vol, the price error over the Black-Scholes vega at the quote's own
+    implied vol, is at most :data:`MAX_VOL_HALF_SPREAD`. Chosen from the quotes and the sidebar inputs alone, never
+    from the generator's forwards or vols."""
+    K, T, iv = (parsed[column].to_numpy(float) for column in ("strike", "maturity", "iv"))
+    sd = iv * np.sqrt(T)
+    d1 = (np.log(spot / K) + (rate - dividend_yield) * T) / sd + 0.5 * sd
+    vega = spot * np.exp(-dividend_yield * T) * np.exp(-0.5 * d1**2) / math.sqrt(2.0 * math.pi) * np.sqrt(T)
+    return parsed[parsed["price_error"].to_numpy(float) <= MAX_VOL_HALF_SPREAD * vega].reset_index(drop=True)
+
+
+def _atm_vol_misses(chain: synthetic.SyntheticChain, as_of: datetime, *, core: bool) -> list[str]:
+    """The expiries whose fitted ATM vol is more than 0.1 vol point from the generator's, with the error."""
+    parsed, _ = vs.parse_quotes(to_quotes(chain.quotes, as_of=as_of), SPOT, BOX, YIELD)
+    if core:
+        parsed = _liquid_core(parsed, SPOT, BOX, YIELD)
+    surface = vs.fit_market_surface(parsed, SPOT, BOX, YIELD)
+    assert len(surface.maturities) == len(chain.expiries)
+    misses = []
+    for row in chain.expiries.itertuples():
+        error = surface.implied_vol_at(row.forward / SPOT, row.maturity) - row.atm_vol
+        if not abs(error) <= 0.001:
+            misses.append(f"{as_of:%Y-%m-%d %H:%M} {row.expiry:%Y-%m-%d}: {100 * error:+.3f} vol pt")
+    return misses
+
+
+@pytest.mark.parametrize("seed", [None, 0, 1, 2])
+def test_fit_recovers_the_generator_atm_vols_from_the_liquid_core(seed):
+    """Acceptance (3), the part the current fit can do: with the generator's rate and yield (the box rate and a
+    continuous yield on a flat curve), parse_quotes and fit_market_surface on the liquid core of the chain recover
+    every expiry's ATM vol within 0.1 vol point, for the model mids (seed None) and noisy quotes.
+
+    The core (:func:`_liquid_core`) is chosen from the quotes alone. Measured over nine valuation times (these four;
+    10:00 on 27 and 28 October; an hour before the 30 October close; half an hour before the 20 November AM
+    settlement; noon on 1 March 2027) and five noise settings, the worst error is 0.038 vol point. Expiries within an
+    hour of settlement keep fewer than five strikes in the core and drop out of the fit; none of these four times has
+    one. The whole chain is the next test.
     """
-    for as_of in (AS_OF, datetime(2026, 10, 29, 10, 0), datetime(2026, 12, 7, 15, 30)):
+    misses = []
+    for as_of in FIT_TIMES:
         chain = sample_chain(SPOT, UST, YIELD, as_of=as_of, noise=seed is not None, seed=seed or 0)
-        rows = _with_expiry_data(chain)
-        sds = np.log(rows["strike"] / rows["forward"]) / (rows["atm_vol"] * np.sqrt(rows["maturity"]))
-        surface = _surface(chain.quotes[(sds.abs() <= 2).to_numpy()], as_of, BOX, YIELD)
-        assert len(surface.maturities) == len(chain.expiries)
-        for row in chain.expiries.itertuples():
-            fitted = surface.implied_vol_at(row.forward / SPOT, row.maturity)
-            assert fitted == pytest.approx(row.atm_vol, abs=0.001), (as_of, row.expiry)
+        misses += _atm_vol_misses(chain, as_of, core=True)
+    assert misses == []
+
+
+@pytest.mark.slow
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="needs spread-weighted calibration (SF-4): the unweighted SVI fit is pulled off the money by the cheap "
+    "wing quotes, worth a few ticks with vol errors of several points",
+)
+def test_fit_recovers_the_generator_atm_vols_from_the_whole_chain():
+    """Acceptance (3) on the whole chain, as uploaded: every quote with a bid, the generator's rate and yield.
+
+    Measured on the four valuation times and the noise settings of the test above: the worst errors are 0.086, 0.86,
+    1.9 and 0.095 vol point at the model mids, and 0.57, 1.4, 2.3 and 0.31 with noise, the largest at the expiries
+    one and a quarter days and six hours away; 14 of the 16 runs miss 0.1 vol point somewhere, up to 7 of 17 expiries
+    at once. Thirty minutes before an AM settlement the miss reaches 3.2 vol points.
+    """
+    misses = []
+    for as_of in FIT_TIMES:
+        for seed in (None, 0, 1, 2):
+            chain = sample_chain(SPOT, UST, YIELD, as_of=as_of, noise=seed is not None, seed=seed or 0)
+            misses += _atm_vol_misses(chain, as_of, core=False)
+    assert misses == []
 
 
 @pytest.mark.xfail(
@@ -628,11 +681,11 @@ def test_fit_recovers_the_generator_atm_vols(seed):
 )
 def test_fit_recovers_forwards_and_atm_vols_with_the_sidebar_rate(rate_curve, dividends):
     """Acceptance (3), the part that needs SF-3: parsed with the sidebar's Treasury rate and no dividend yield, the
-    surface recovers each expiry's forward within 2e-4 and its ATM vol within 0.1 vol point."""
+    surface fitted to the liquid core recovers each expiry's forward within 2e-4 and its ATM vol within 0.1 vol
+    point."""
     chain = sample_chain(SPOT, rate_curve, dividends, as_of=AS_OF)
-    rows = _with_expiry_data(chain)
-    sds = np.log(rows["strike"] / rows["forward"]) / (rows["atm_vol"] * np.sqrt(rows["maturity"]))
-    surface = _surface(chain.quotes[(sds.abs() <= 2).to_numpy()], AS_OF, UST, 0.0)
+    parsed, _ = vs.parse_quotes(to_quotes(chain.quotes, as_of=AS_OF), SPOT, UST, 0.0)
+    surface = vs.fit_market_surface(_liquid_core(parsed, SPOT, UST, 0.0), SPOT, UST, 0.0)
     log_forward = getattr(surface, "log_forward", None)  # SF-3 stores the forward of each maturity
     for i, row in enumerate(chain.expiries.itertuples()):
         forward = math.exp(log_forward[i]) if log_forward is not None else SPOT * math.exp(surface.carry * row.maturity)
