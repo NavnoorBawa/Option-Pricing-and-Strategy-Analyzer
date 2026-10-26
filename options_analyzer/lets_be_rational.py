@@ -28,7 +28,13 @@ accuracy ``(1 + |b/(s·∂b/∂s)|)·ε``, the error that rounding the price alo
 
 Every public function broadcasts over NumPy arrays (array code that evaluates each branch once on its own rows)
 and has a scalar path written with the ``math`` module, used when all inputs are scalars, which returns a Python
-``float``. :mod:`options_analyzer.implied_vol` builds the spot-model solvers on it.
+``float``. The two paths agree to rounding, and on the same rules outside the domain: a NaN or negative volatility,
+a forward or strike that is not positive and finite, or a negative expiry gives NaN. Neither raises: where ``math``
+would raise on overflow or a domain error, the scalar path recomputes on the array path, which follows IEEE
+arithmetic. NumPy's ``exp`` and ``sinh`` can differ from the C library's in the last bit, so a price within an ulp
+of the intrinsic value or the maximum may fall on different sides of it on the two paths.
+:mod:`options_analyzer.implied_vol` builds the spot-model solvers on this module and makes those decisions with
+the C library on both of its paths.
 
 Differences from the reference implementation:
 
@@ -47,7 +53,8 @@ Differences from the reference implementation:
 * Prices below the intrinsic value give NaN and prices at or above the maximum (``F`` for a call, ``K`` for a put)
   give ``inf``, where the reference returns ``-DBL_MAX`` and ``DBL_MAX``.
 * :func:`black` and :func:`implied_black_volatility` take ``ln(F/K)`` from ``log1p`` near the money, where
-  ``log(F/K)`` has an absolute error of ``ε`` that near the forward costs the volatility up to ``1e-14``.
+  ``log(F/K)`` has an absolute error of ``ε`` that near the forward costs the volatility up to ``1e-14``, and from
+  ``ln F - ln K`` where ``F/K`` under- or overflows.
 """
 
 from __future__ import annotations
@@ -542,67 +549,66 @@ def _step_highest_s(beta: float, x: float, s: float, bmax: float) -> float:
 def _lets_be_rational_s(beta: float, x: float, iterations: int = _ITERATIONS) -> tuple[float, bool]:
     """Normalised implied volatility of an out-of-the-money normalised price ``beta`` at ``x = θ·ln(F/K) ≤ 0``.
 
-    Returns ``(s, converged)``: ``s`` is 0 for ``beta == 0``, NaN below it, ``inf`` at or above ``b_max``.
+    Returns ``(s, converged)``: ``s`` is 0 for ``beta == 0``, NaN below it, ``inf`` at or above ``b_max``. Raises
+    ``ArithmeticError`` or ``ValueError`` where the ``math`` module over- or underflows on extreme inputs (the public
+    functions then take the array path, :func:`implied_vol.implied_volatility` its Brent fallback).
     """
     if not beta > 0:
         return (0.0, True) if beta == 0 else (math.nan, True)
-    try:
-        bmax = math.exp(0.5 * x)
-        if beta >= bmax:
-            return math.inf, True
-        if x == 0:  # exactly at the forward: b(0, s) = erf(s/√8)
-            return 2 * _SQRT_TWO * float(erfinv(beta)), True
-        sqrt_ax = math.sqrt(-x)
-        s_c = _SQRT_TWO * sqrt_ax
-        ome = _one_minus_erfcx_s(sqrt_ax)
-        b_c = 0.5 * bmax * ome  # b(x, s_c) = e^(x/2)/2·(1 - erfcx(√|x|))
-        step = _step_middle_s
-        if beta < b_c:
-            s_l = s_c - _SQRT_PI_OVER_TWO * ome
-            b_l = _bl_over_bmax(s_c) * bmax
-            if beta < b_l:  # lowest branch
-                f_l, fp_l, fpp_l = _f_lower_map_s(x, s_l)
-                r_ll = _rational_cubic_control_s(0.0, b_l, 0.0, f_l, 1.0, fp_l, fpp_l, True, left=False)
-                f = _rational_cubic_interpolation(beta, 0.0, b_l, 0.0, f_l, 1.0, fp_l, r_ll)
-                if not f > 0:  # round-off for extreme |x|: quadratic through f(0) = 0, f(b_l) and f'(0) = 1
-                    t = beta / b_l
-                    f = (f_l * t + b_l * (1 - t)) * t
-                s = _inverse_f_lower_map_s(x, f)
-                step = _step_lowest_s
-            else:  # lower middle
-                inv_v_l = _inv_vega_s(x, s_l)
-                inv_v_c = _SQRT_TWO_PI / bmax
-                r_lm = _rational_cubic_control_s(b_l, b_c, s_l, s_c, inv_v_l, inv_v_c, 0.0, False, left=False)
-                s = _rational_cubic_interpolation(beta, b_l, b_c, s_l, s_c, inv_v_l, inv_v_c, r_lm)
-        else:
-            s_u = s_c + _SQRT_PI_OVER_TWO * (2 - ome)
-            b_u = _bu_over_bmax(s_c) * bmax
-            if beta <= b_u:  # upper middle
-                inv_v_c = _SQRT_TWO_PI / bmax
-                inv_v_u = _inv_vega_s(x, s_u)
-                r_um = _rational_cubic_control_s(b_c, b_u, s_c, s_u, inv_v_c, inv_v_u, 0.0, False, left=True)
-                s = _rational_cubic_interpolation(beta, b_c, b_u, s_c, s_u, inv_v_c, inv_v_u, r_um)
-            else:  # highest branch
-                f_u, fp_u, fpp_u = _f_upper_map_s(x, s_u)
-                f = -_DBL_MAX
-                if -_SQRT_DBL_MAX < fpp_u < _SQRT_DBL_MAX:
-                    r_uu = _rational_cubic_control_s(b_u, bmax, f_u, 0.0, fp_u, -0.5, fpp_u, True, left=True)
-                    f = _rational_cubic_interpolation(beta, b_u, bmax, f_u, 0.0, fp_u, -0.5, r_uu)
-                if f <= 0:  # quadratic through f(b_u), f(b_max) = 0 and f'(b_max) = -1/2
-                    h = bmax - b_u
-                    t = (beta - b_u) / h
-                    f = (f_u * (1 - t) + 0.5 * h * t) * (1 - t)
-                s = -2 * float(ndtri(f))
-                if beta > 0.5 * bmax:
-                    step = _step_highest_s
-        ds = -_DBL_MAX
-        for _ in range(iterations):
-            if not abs(ds) > _EPS * s:
-                break
-            ds = step(beta, x, s, bmax)
-            s += ds
-    except (ArithmeticError, ValueError):  # math's over/underflow and domain errors on extreme inputs
-        return math.nan, False
+    bmax = math.exp(0.5 * x)
+    if beta >= bmax:
+        return math.inf, True
+    if x == 0:  # exactly at the forward: b(0, s) = erf(s/√8)
+        return 2 * _SQRT_TWO * float(erfinv(beta)), True
+    sqrt_ax = math.sqrt(-x)
+    s_c = _SQRT_TWO * sqrt_ax
+    ome = _one_minus_erfcx_s(sqrt_ax)
+    b_c = 0.5 * bmax * ome  # b(x, s_c) = e^(x/2)/2·(1 - erfcx(√|x|))
+    step = _step_middle_s
+    if beta < b_c:
+        s_l = s_c - _SQRT_PI_OVER_TWO * ome
+        b_l = _bl_over_bmax(s_c) * bmax
+        if beta < b_l:  # lowest branch
+            f_l, fp_l, fpp_l = _f_lower_map_s(x, s_l)
+            r_ll = _rational_cubic_control_s(0.0, b_l, 0.0, f_l, 1.0, fp_l, fpp_l, True, left=False)
+            f = _rational_cubic_interpolation(beta, 0.0, b_l, 0.0, f_l, 1.0, fp_l, r_ll)
+            if not f > 0:  # round-off for extreme |x|: quadratic through f(0) = 0, f(b_l) and f'(0) = 1
+                t = beta / b_l
+                f = (f_l * t + b_l * (1 - t)) * t
+            s = _inverse_f_lower_map_s(x, f)
+            step = _step_lowest_s
+        else:  # lower middle
+            inv_v_l = _inv_vega_s(x, s_l)
+            inv_v_c = _SQRT_TWO_PI / bmax
+            r_lm = _rational_cubic_control_s(b_l, b_c, s_l, s_c, inv_v_l, inv_v_c, 0.0, False, left=False)
+            s = _rational_cubic_interpolation(beta, b_l, b_c, s_l, s_c, inv_v_l, inv_v_c, r_lm)
+    else:
+        s_u = s_c + _SQRT_PI_OVER_TWO * (2 - ome)
+        b_u = _bu_over_bmax(s_c) * bmax
+        if beta <= b_u:  # upper middle
+            inv_v_c = _SQRT_TWO_PI / bmax
+            inv_v_u = _inv_vega_s(x, s_u)
+            r_um = _rational_cubic_control_s(b_c, b_u, s_c, s_u, inv_v_c, inv_v_u, 0.0, False, left=True)
+            s = _rational_cubic_interpolation(beta, b_c, b_u, s_c, s_u, inv_v_c, inv_v_u, r_um)
+        else:  # highest branch
+            f_u, fp_u, fpp_u = _f_upper_map_s(x, s_u)
+            f = -_DBL_MAX
+            if -_SQRT_DBL_MAX < fpp_u < _SQRT_DBL_MAX:
+                r_uu = _rational_cubic_control_s(b_u, bmax, f_u, 0.0, fp_u, -0.5, fpp_u, True, left=True)
+                f = _rational_cubic_interpolation(beta, b_u, bmax, f_u, 0.0, fp_u, -0.5, r_uu)
+            if f <= 0:  # quadratic through f(b_u), f(b_max) = 0 and f'(b_max) = -1/2
+                h = bmax - b_u
+                t = (beta - b_u) / h
+                f = (f_u * (1 - t) + 0.5 * h * t) * (1 - t)
+            s = -2 * float(ndtri(f))
+            if beta > 0.5 * bmax:
+                step = _step_highest_s
+    ds = -_DBL_MAX
+    for _ in range(iterations):
+        if not abs(ds) > _EPS * s:
+            break
+        ds = step(beta, x, s, bmax)
+        s += ds
     return s, bool(math.isfinite(s) and s > 0 and abs(ds) <= _CONVERGED_STEP * s)
 
 
@@ -611,6 +617,8 @@ def _normalised_intrinsic_s(x: float) -> float:  # x = θ·ln(F/K)
 
 
 def _normalised_black_s(x: float, s: float, theta: float) -> float:
+    if math.isnan(x) or not s >= 0:  # as the array path: no price for a NaN or negative volatility
+        return math.nan
     if x == 0:
         return math.erf(_HALF_OVER_SQRT_TWO * s)
     tx = -x if theta < 0 else x
@@ -840,8 +848,8 @@ def _lets_be_rational_v(
     converged = np.ones(beta.shape, dtype=bool)
     with np.errstate(all="ignore"):  # IEEE inf/NaN on extreme inputs end up as non-converged rows
         bmax_all = np.exp(0.5 * x)
-        s_out[beta == 0] = 0.0
-        above = beta >= bmax_all
+        s_out[beta == 0] = 0.0  # also where b_max underflows to 0, as on the scalar path
+        above = (beta > 0) & (beta >= bmax_all)
         s_out[above] = np.inf
         live = (beta > 0) & ~above
         atm = live & (x == 0)
@@ -896,11 +904,12 @@ def _lets_be_rational_v(
 
 
 def _normalised_black_v(x: np.ndarray, s: np.ndarray, theta: np.ndarray) -> np.ndarray:
-    out = np.full(x.shape, np.nan)
+    out = np.full(x.shape, np.nan)  # NaN where x is NaN or s is NaN or negative
     with np.errstate(all="ignore"):
-        atm = x == 0
+        valid = ~np.isnan(x) & (s >= 0)
+        atm = valid & (x == 0)
         out[atm] = erf(_HALF_OVER_SQRT_TWO * s[atm])
-        rest = ~atm & ~np.isnan(x) & ~np.isnan(s)
+        rest = valid & (x != 0)
         tx = np.where(theta < 0, -x, x)[rest]
         intrinsic = np.where(tx > 0, 2 * np.sinh(0.5 * tx), 0.0)
         xr, sr = -np.abs(x[rest]), s[rest]
@@ -912,6 +921,11 @@ def _normalised_black_v(x: np.ndarray, s: np.ndarray, theta: np.ndarray) -> np.n
 
 
 # ------------------------------------------------------------------------------------------------ public API
+# Each function takes the math path when all of its inputs are scalars. The math module raises on overflow and on
+# domain errors where NumPy's IEEE arithmetic returns inf or NaN; on such inputs the function recomputes on the
+# array path instead, so that the two paths agree on every input (and neither raises).
+
+_MATH_ERRORS = (ArithmeticError, ValueError)
 
 
 def _all_scalar(*values: Any) -> bool:
@@ -926,15 +940,30 @@ def _arrays(*values: ArrayLike) -> list[np.ndarray]:
     return list(np.broadcast_arrays(*(np.asarray(v, dtype=float) for v in values)))
 
 
+def _scalar_if_0d(value: np.ndarray) -> float | np.ndarray:
+    return float(value) if value.ndim == 0 else value
+
+
 def _log_ratio_s(F: float, K: float) -> float:
-    """``ln(F/K)`` to relative accuracy also near the money: within a factor of two ``F - K`` is exact."""
+    """``ln(F/K)`` to relative accuracy also near the money (within a factor of two ``F - K`` is exact).
+
+    Where ``F/K`` under- or overflows, ``ln F - ln K`` instead.
+    """
     ratio = F / K
-    return math.log1p((F - K) / K) if 0.5 <= ratio <= 2 else math.log(ratio)
+    if 0.5 <= ratio <= 2:
+        return math.log1p((F - K) / K)
+    return math.log(ratio) if 0 < ratio < math.inf else math.log(F) - math.log(K)
 
 
 def _log_ratio_v(F: np.ndarray, K: np.ndarray) -> np.ndarray:
     ratio = F / K
-    return np.where((ratio >= 0.5) & (ratio <= 2), np.log1p((F - K) / K), np.log(ratio))
+    far = np.where((ratio > 0) & (ratio < np.inf), np.log(ratio), np.log(F) - np.log(K))
+    return np.where((ratio >= 0.5) & (ratio <= 2), np.log1p((F - K) / K), far)
+
+
+def _valid_forward_and_strike(forward: Any, strike: Any) -> Any:
+    """Both positive and finite; a bool or a boolean array."""
+    return (forward > 0) & (forward < np.inf) & (strike > 0) & (strike < np.inf)
 
 
 def normalised_black(x: ArrayLike, s: ArrayLike, theta: ArrayLike = 1.0) -> float | np.ndarray:
@@ -948,7 +977,8 @@ def normalised_black(x: ArrayLike, s: ArrayLike, theta: ArrayLike = 1.0) -> floa
     x : array_like
         Log-moneyness ``ln(F/K)``.
     s : array_like
-        Total volatility ``σ√T`` (non-negative); ``s = 0`` gives the intrinsic value.
+        Total volatility ``σ√T`` (non-negative); ``s = 0`` gives the intrinsic value, ``s = inf`` the maximum
+        ``e^(θx/2)``, a negative or NaN ``s`` gives NaN.
     theta : array_like, default 1.0
         ``+1`` for a call, ``-1`` for a put (any negative value counts as a put).
 
@@ -967,9 +997,12 @@ def normalised_black(x: ArrayLike, s: ArrayLike, theta: ArrayLike = 1.0) -> floa
     0.005898232610535
     """
     if _all_scalar(x, s, theta):
-        return _normalised_black_s(*_floats(x, s, theta))
+        try:
+            return _normalised_black_s(*_floats(x, s, theta))
+        except _MATH_ERRORS:  # e.g. the intrinsic value 2·sinh(x/2) overflows: inf on the array path
+            pass
     xa, sa, ta = _arrays(x, s, theta)
-    return _normalised_black_v(xa.ravel(), sa.ravel(), ta.ravel()).reshape(xa.shape)
+    return _scalar_if_0d(_normalised_black_v(xa.ravel(), sa.ravel(), ta.ravel()).reshape(xa.shape))
 
 
 def normalised_vega(x: ArrayLike, s: ArrayLike) -> float | np.ndarray:
@@ -980,7 +1013,7 @@ def normalised_vega(x: ArrayLike, s: ArrayLike) -> float | np.ndarray:
     x : array_like
         Log-moneyness ``ln(F/K)``.
     s : array_like
-        Total volatility ``σ√T``; ``s ≤ 0`` gives 0 (or ``1/√(2π)`` at ``x = 0``).
+        Total volatility ``σ√T``; ``s = 0`` gives 0 (or ``1/√(2π)`` at ``x = 0``), a negative or NaN ``s`` NaN.
 
     Returns
     -------
@@ -994,13 +1027,28 @@ def normalised_vega(x: ArrayLike, s: ArrayLike) -> float | np.ndarray:
     """
     if _all_scalar(x, s):
         x0, s0 = _floats(x, s)
-        if s0 <= 0:
+        if math.isnan(x0) or not s0 >= 0:
+            return math.nan
+        if s0 == 0:
             return _ONE_OVER_SQRT_TWO_PI if x0 == 0 else 0.0
         return _vega_s(x0, s0)
     xa, sa = _arrays(x, s)
     with np.errstate(all="ignore"):
         vega = _vega_v(xa, np.where(sa > 0, sa, 1.0))
-        return np.where(sa > 0, vega, np.where(xa == 0, _ONE_OVER_SQRT_TWO_PI, 0.0))
+        vega = np.where(sa > 0, vega, np.where(xa == 0, _ONE_OVER_SQRT_TWO_PI, 0.0))
+        return np.where(np.isnan(xa) | ~(sa >= 0), np.nan, vega)
+
+
+def _black_s(F: float, K: float, sigma: float, T: float, theta: float) -> float:
+    s = sigma * math.sqrt(T) if T >= 0 else math.nan
+    if not (_valid_forward_and_strike(F, K) and s >= 0):
+        return math.nan
+    if K == F:
+        return F * math.erf(_HALF_OVER_SQRT_TWO * s)
+    intrinsic = max(K - F if theta < 0 else F - K, 0.0)
+    if s == 0:
+        return intrinsic
+    return intrinsic + math.sqrt(F) * math.sqrt(K) * _normalised_black_otm_s(-abs(_log_ratio_s(F, K)), s)
 
 
 def black(F: ArrayLike, K: ArrayLike, sigma: ArrayLike, T: ArrayLike, theta: ArrayLike = 1.0) -> float | np.ndarray:
@@ -1009,9 +1057,9 @@ def black(F: ArrayLike, K: ArrayLike, sigma: ArrayLike, T: ArrayLike, theta: Arr
     Parameters
     ----------
     F, K : array_like
-        Forward and strike (positive).
+        Forward and strike (positive and finite).
     sigma : array_like
-        Volatility per square-root year (decimal, 0.2 = 20 %).
+        Volatility per square-root year (decimal, 0.2 = 20 %; non-negative).
     T : array_like
         Time to expiry in years (non-negative).
     theta : array_like, default 1.0
@@ -1020,8 +1068,8 @@ def black(F: ArrayLike, K: ArrayLike, sigma: ArrayLike, T: ArrayLike, theta: Arr
     Returns
     -------
     float or numpy.ndarray
-        ``max(θ(F - K), 0) + √(FK)·b(-|ln(F/K)|, σ√T)``, accurate in relative terms also far out of the money; a
-        float when all inputs are scalars.
+        ``max(θ(F - K), 0) + √(FK)·b(-|ln(F/K)|, σ√T)``, accurate in relative terms also far out of the money, and
+        NaN outside the domain above (or where ``σ√T`` is NaN); a float when all inputs are scalars.
 
     Examples
     --------
@@ -1029,21 +1077,22 @@ def black(F: ArrayLike, K: ArrayLike, sigma: ArrayLike, T: ArrayLike, theta: Arr
     4.2920109414
     """
     if _all_scalar(F, K, sigma, T, theta):
-        f, k, vol, t, th = _floats(F, K, sigma, T, theta)
-        s = vol * math.sqrt(t)
-        if k == f:
-            return f * math.erf(_HALF_OVER_SQRT_TWO * s)
-        intrinsic = max(k - f if th < 0 else f - k, 0.0)
-        if s <= 0:
-            return intrinsic
-        return intrinsic + math.sqrt(f) * math.sqrt(k) * _normalised_black_otm_s(-abs(_log_ratio_s(f, k)), s)
+        try:
+            return _black_s(*_floats(F, K, sigma, T, theta))
+        except _MATH_ERRORS:
+            pass
     fa, ka, va, tma, tha = _arrays(F, K, sigma, T, theta)
     with np.errstate(all="ignore"):
         sa = va * np.sqrt(tma)
         intrinsic_a = np.maximum(np.where(tha < 0, ka - fa, fa - ka), 0.0)
         xa = -np.abs(_log_ratio_v(fa, ka))
         b = _normalised_black_v(xa.ravel(), sa.ravel(), np.ones(xa.size)).reshape(xa.shape)
-        return np.where(ka == fa, fa * erf(_HALF_OVER_SQRT_TWO * sa), intrinsic_a + np.sqrt(fa) * np.sqrt(ka) * b)
+        price = np.where(ka == fa, fa * erf(_HALF_OVER_SQRT_TWO * sa), intrinsic_a + np.sqrt(fa) * np.sqrt(ka) * b)
+        return _scalar_if_0d(np.where(_valid_forward_and_strike(fa, ka) & (sa >= 0), price, np.nan))
+
+
+def _normalised_implied_volatility_s(beta: float, x: float, theta: float) -> tuple[float, bool]:
+    return _lets_be_rational_s(beta - _normalised_intrinsic_s(-x if theta < 0 else x), -abs(x))
 
 
 def normalised_implied_volatility(
@@ -1077,16 +1126,30 @@ def normalised_implied_volatility(
     nan
     """
     if _all_scalar(beta, x, theta):
-        b0, x0, th = _floats(beta, x, theta)
-        s, converged = _lets_be_rational_s(b0 - _normalised_intrinsic_s(-x0 if th < 0 else x0), -abs(x0))
-        return (s, converged) if full_output else s
+        try:
+            s, converged = _normalised_implied_volatility_s(*_floats(beta, x, theta))
+        except _MATH_ERRORS:
+            pass
+        else:
+            return (s, converged) if full_output else s
     ba, xa, tha = _arrays(beta, x, theta)
     with np.errstate(all="ignore"):
         tx = np.where(tha < 0, -xa, xa)
         otm = ba - np.where(tx > 0, 2 * np.sinh(0.5 * tx), 0.0)
     sa, ca = _lets_be_rational_v(otm.ravel(), -np.abs(xa.ravel()))
-    sa, ca = sa.reshape(ba.shape), ca.reshape(ba.shape)
-    return (sa, ca) if full_output else sa
+    s_out, flags = _scalar_if_0d(sa.reshape(ba.shape)), ca.reshape(ba.shape)
+    return (s_out, bool(flags) if flags.ndim == 0 else flags) if full_output else s_out
+
+
+def _implied_black_volatility_s(price: float, F: float, K: float, T: float, theta: float) -> tuple[float, bool]:
+    if not (_valid_forward_and_strike(F, K) and 0 < T < math.inf):
+        return math.nan, True
+    if price >= (K if theta < 0 else F):
+        return math.inf, True
+    intrinsic = K - F if theta < 0 else F - K
+    beta = (price - intrinsic if intrinsic > 0 else price) / (math.sqrt(F) * math.sqrt(K))
+    s, converged = _lets_be_rational_s(beta, -abs(_log_ratio_s(F, K)))
+    return s / math.sqrt(T), converged
 
 
 def implied_black_volatility(
@@ -1099,9 +1162,9 @@ def implied_black_volatility(
     price : array_like
         Undiscounted option price (the premium divided by the discount factor).
     F, K : array_like
-        Forward and strike (positive).
+        Forward and strike (positive and finite).
     T : array_like
-        Time to expiry in years (positive).
+        Time to expiry in years (positive and finite).
     theta : array_like, default 1.0
         ``+1`` for a call, ``-1`` for a put.
     full_output : bool, default False
@@ -1110,8 +1173,9 @@ def implied_black_volatility(
     Returns
     -------
     float or numpy.ndarray, or a tuple ``(sigma, converged)``
-        Volatility per square-root year: 0 at the intrinsic value, NaN below it or for ``T ≤ 0``, ``inf`` at or above
-        the maximum price (``F`` for a call, ``K`` for a put); a float when all inputs are scalars.
+        Volatility per square-root year: 0 at the intrinsic value, NaN below it or outside the domain above,
+        ``inf`` at or above the maximum price (``F`` for a call, ``K`` for a put); a float when all inputs are
+        scalars.
 
     Examples
     --------
@@ -1120,21 +1184,20 @@ def implied_black_volatility(
     0.2
     """
     if _all_scalar(price, F, K, T, theta):
-        p, f, k, t, th = _floats(price, F, K, T, theta)
-        if p >= (k if th < 0 else f):
-            s, converged = math.inf, True
+        try:
+            vol, converged = _implied_black_volatility_s(*_floats(price, F, K, T, theta))
+        except _MATH_ERRORS:
+            pass
         else:
-            intrinsic = k - f if th < 0 else f - k
-            beta = (p - intrinsic if intrinsic > 0 else p) / (math.sqrt(f) * math.sqrt(k))
-            s, converged = _lets_be_rational_s(beta, -abs(_log_ratio_s(f, k)))
-        vol = s / math.sqrt(t) if t > 0 else math.nan
-        return (vol, converged) if full_output else vol
+            return (vol, converged) if full_output else vol
     pa, fa, ka, ta, tha = _arrays(price, F, K, T, theta)
     with np.errstate(all="ignore"):
+        valid = _valid_forward_and_strike(fa, ka) & (ta > 0) & (ta < np.inf)
         intrinsic_a = np.where(tha < 0, ka - fa, fa - ka)
         beta_a = np.where(intrinsic_a > 0, pa - intrinsic_a, pa) / (np.sqrt(fa) * np.sqrt(ka))
         sa, ca = _lets_be_rational_v(beta_a.ravel(), -np.abs(_log_ratio_v(fa, ka)).ravel())
-        sa = np.where(pa >= np.where(tha < 0, ka, fa), np.inf, sa.reshape(pa.shape))
-        vol_a = np.where(ta > 0, sa / np.sqrt(ta), np.nan)
-    ca = ca.reshape(pa.shape)
-    return (vol_a, ca) if full_output else vol_a
+        at_maximum = pa >= np.where(tha < 0, ka, fa)
+        sa = np.where(at_maximum, np.inf, sa.reshape(pa.shape))
+        vol_a = _scalar_if_0d(np.where(valid, sa / np.sqrt(ta), np.nan))
+    ca = ca.reshape(pa.shape) | at_maximum | ~valid  # as the scalar path: nothing to converge
+    return (vol_a, bool(ca) if ca.ndim == 0 else ca) if full_output else vol_a

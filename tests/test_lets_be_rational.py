@@ -14,6 +14,7 @@ last place, or is NaN when the rounded quote is already below the rounded intrin
 
 from __future__ import annotations
 
+import itertools
 import math
 import warnings
 
@@ -359,3 +360,115 @@ def test_extreme_inputs_raise_no_warnings():
             lbr.normalised_implied_volatility(*args)
         lbr.normalised_implied_volatility(np.full(3, 1e-310), np.array([-0.1, -1.0, -10.0]))
     assert np.all(np.isfinite(vol) | np.isnan(vol) | np.isinf(vol))
+
+
+# Values outside the domain or at the edge of double precision, for every argument of the public functions.
+_SPECIAL = [math.nan, -math.inf, -1e300, -1500.0, -1.0, -0.0, 0.0, 1e-300, 0.3, 1.0, 1500.0, 1e300, math.inf]
+
+
+# The functions of F and K take ln(F/K) from log or log1p, where NumPy's last bit can differ from libm's (NumPy
+# 1.26 here); far from the money that ulp of x moves the price by up to |x|·ε/2 (measured 2.3e-13 at |x| = 690).
+@pytest.mark.parametrize(
+    ("name", "special_arguments", "has_theta", "full_output", "rtol"),
+    [
+        ("normalised_black", 2, True, False, 4 * EPS),
+        ("normalised_vega", 2, False, False, 4 * EPS),
+        ("black", 4, True, False, 1e-12),
+        ("normalised_implied_volatility", 2, True, True, 4 * EPS),
+        ("implied_black_volatility", 4, True, True, 1e-12),
+    ],
+)
+def test_scalar_and_array_paths_agree_on_special_inputs(name, special_arguments, has_theta, full_output, rtol):
+    # Every combination of NaN, signed zeros, negative, tiny, huge and infinite arguments (theta ±1): the math path
+    # must neither raise nor warn, and must return what the array path returns: the same NaN, the same inf, the
+    # same value to rounding (measured: at most 2 ulps apart with NumPy 2) and the same convergence flag.
+    function = getattr(lbr, name)
+    options = {"full_output": True} if full_output else {}
+    cases = list(itertools.product(*[_SPECIAL] * special_arguments, *([[1.0, -1.0]] if has_theta else [])))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        vector = function(*(np.array(column) for column in zip(*cases, strict=True)), **options)
+        scalar = [function(*case, **options) for case in cases]
+    if full_output:
+        vector, vector_flags = vector
+        scalar, scalar_flags = zip(*scalar, strict=True)
+        assert all(type(flag) is bool for flag in scalar_flags)
+        np.testing.assert_array_equal(scalar_flags, vector_flags)
+    assert all(type(value) is float for value in scalar)
+    scalar = np.array(scalar)
+    np.testing.assert_array_equal(np.isnan(scalar), np.isnan(vector))
+    infinite = np.isinf(vector)
+    np.testing.assert_array_equal(scalar[infinite], vector[infinite])
+    finite = np.isfinite(vector)
+    np.testing.assert_allclose(scalar[finite], vector[finite], rtol=rtol, atol=0)
+
+
+def test_invalid_inputs_give_nan_on_both_paths():
+    # The cases where the math path used to return a number or raise, while the array path returned NaN.
+    nan_cases = [
+        (lbr.normalised_black, (0.4, math.nan)),  # was the intrinsic value 0.40267
+        (lbr.normalised_black, (-0.4, math.nan)),  # was 0
+        (lbr.normalised_black, (-0.4, -0.1)),  # a negative volatility
+        (lbr.normalised_black, (0.0, -0.1)),  # was erf(-0.1/√8) < 0
+        (lbr.normalised_vega, (0.0, math.nan)),  # the array path gave 1/√(2π)
+        (lbr.normalised_vega, (-0.4, -0.1)),
+        (lbr.black, (100.0, 110.0, 0.2, -1.0)),  # negative expiry: was ValueError
+        (lbr.black, (-100.0, 110.0, 0.2, 1.0)),  # negative forward: was ValueError
+        (lbr.black, (100.0, 100.0, -0.2, 1.0)),  # was F·erf(-0.2/√8) < 0
+        (lbr.black, (100.0, math.inf, 0.2, 1.0)),
+        (lbr.implied_black_volatility, (5.0, 100.0, 0.0, 1.0)),  # zero strike: was ZeroDivisionError
+        (lbr.implied_black_volatility, (5.0, -100.0, 90.0, 1.0)),
+        (lbr.implied_black_volatility, (5.0, 100.0, 90.0, math.inf)),
+        (lbr.normalised_implied_volatility, (2.0, 1500.0)),  # intrinsic 2·sinh(750) overflows: was OverflowError
+    ]
+    for function, args in nan_cases:
+        assert math.isnan(function(*args)), (function.__name__, args)
+        assert np.isnan(function(*(np.array([a]) for a in args))[0]), (function.__name__, args)
+    # A put with ln(F/K) = -1e300 is worth the infinite intrinsic value 2·sinh(5e299): was OverflowError.
+    assert lbr.normalised_black(-1e300, 1.0, -1.0) == math.inf
+    # F/K underflows: ln F - ln K = -921 instead of ln 0 (was ValueError on the math path, NaN on the array path).
+    assert lbr.black(1e-200, 1e200, 0.2, 1.0, 1.0) == 0.0
+    assert lbr.black(1e-200, 1e200, 0.2, 1.0, -1.0) == 1e200
+    with mp.workdps(60):
+        x = mp.log(mp.mpf(1e-200)) - mp.log(mp.mpf(1e200))
+        exact, _ = _exact_black(float(x), 40.0, 1.0)
+    vol, converged = lbr.implied_black_volatility(float(exact), 1e-200, 1e200, 4.0, full_output=True)  # √(FK) = 1
+    assert converged and vol == pytest.approx(20.0, rel=1e-14, abs=0)  # σ√T = 40; measured 2e-16
+
+
+def test_scalar_and_array_paths_agree_on_random_extreme_inputs():
+    # |x| and s log-uniform up to 10^3.5 and down to 1e-300, half the prices random: the two paths classify every
+    # case the same way (NaN, inf, finite and the convergence flag), except within a few ulps of the intrinsic
+    # value or of the maximum, where NumPy's sinh and exp, a last bit away from libm's, can tip the comparison.
+    rng = np.random.default_rng(1)
+    n = 4_000
+    x = rng.choice([-1.0, 1.0], n) * 10 ** rng.uniform(-300, 3.5, n)
+    s = 10 ** rng.uniform(-300, 3.5, n)
+    theta = rng.choice([-1.0, 1.0], n)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        beta = lbr.normalised_black(x, s, theta)
+        np.testing.assert_allclose(
+            [lbr.normalised_black(*case) for case in zip(x, s, theta, strict=True)], beta, rtol=1e-13, atol=0
+        )
+        beta = np.where(rng.random(n) < 0.5, beta, 10 ** rng.uniform(-320, 3, n))
+        vector, vector_flags = lbr.normalised_implied_volatility(beta, x, theta, full_output=True)
+        scalar, scalar_flags = (
+            np.array(column)
+            for column in zip(
+                *(
+                    lbr.normalised_implied_volatility(*case, full_output=True)
+                    for case in zip(beta, x, theta, strict=True)
+                ),
+                strict=True,
+            )
+        )
+    with np.errstate(over="ignore"):
+        tx = theta * x
+        intrinsic = np.where(tx > 0, 2 * np.sinh(0.5 * tx), 0.0)
+        maximum = intrinsic + np.exp(-0.5 * np.abs(x))
+    near_an_edge = np.minimum(np.abs(beta - intrinsic), np.abs(beta - maximum)) <= 8 * np.spacing(beta)
+    differ = (np.isnan(scalar) != np.isnan(vector)) | (np.isinf(scalar) != np.isinf(vector))
+    differ |= scalar_flags != vector_flags
+    assert not np.any(differ & ~near_an_edge), np.flatnonzero(differ & ~near_an_edge)[:5]
+    assert np.sum(differ) <= 0.01 * n  # measured: 5 of 4,000, all within an ulp of the intrinsic value
