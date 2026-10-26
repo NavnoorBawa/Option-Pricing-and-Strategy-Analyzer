@@ -54,8 +54,9 @@ def _styles(at: AppTest) -> list[str]:
 
 
 def _app_states(new_app) -> dict[str, AppTest]:
-    """The app at its default URL (every tab's default cards), with market quotes on the surface tab, and with a
-    short straddle at the input limits (the widest strategy values)."""
+    """The app at its default URL (every tab's default cards), with market quotes on the surface tab, with a
+    100,000-lot position (amounts in millions: "$46.62M") and with a short straddle at the input limits (the widest
+    strategy values)."""
     default = new_app().run()
     quotes = new_app().run()
     quotes.segmented_control(key="surface_source").set_value("Market quotes (CSV)").run()
@@ -71,7 +72,8 @@ def _app_states(new_app) -> dict[str, AppTest]:
         strategy_category="Volatility",
         strategy_Volatility="Short Straddle",
     ).run()
-    states = {"default": default, "quotes": quotes, "limits": limits}
+    large = new_app(contracts=100000).run()
+    states = {"default": default, "quotes": quotes, "large": large, "limits": limits}
     for at in states.values():
         _ok(at)
     return states
@@ -85,9 +87,9 @@ THREE = [("VaR 99.0%", "$1,234"), ("Expected Shortfall 99.0%", "$1,456"), ("Delt
 GAP, CHROME = 14, 28  # px between cards; padding and border of a card
 
 
-def _width(cards, value_px: float = 22.75, wrap: bool = False) -> int:
+def _width(cards, value_px: float = 22.75, label_lines: int | None = 1) -> int:
     """The row's card width in the model: its widest card, rounded up to whole px."""
-    return int(-(-max(components._card_width(*card[:2], value_px, wrap, *card[2:]) for card in cards) // 1))
+    return int(-(-max(components._card_width(*card[:2], value_px, label_lines, *card[2:]) for card in cards) // 1))
 
 
 def _layout(style: str, row: float) -> tuple[int, float] | None:
@@ -106,7 +108,7 @@ def _layout(style: str, row: float) -> tuple[int, float] | None:
 
 def test_four_cards_in_two_pairs_wrap_by_pairs():
     style = components._cards_style(FOUR, "row", ("row_a", "row_b"))
-    card, compact = _width(FOUR), _width(FOUR, 16, True)
+    card, compact = _width(FOUR), _width(FOUR, 16, None)
     pair = 2 * card + GAP
     assert f".st-key-row > :has(> .st-key-row_a, > .st-key-row_b) {{ flex: 1 1 {pair}px !important; }}" in style
     assert f".st-key-row_a > *, .st-key-row_b > * {{ flex: 1 1 {card}px !important; }}" in style
@@ -126,10 +128,11 @@ def test_four_cards_in_two_pairs_wrap_by_pairs():
 def test_three_cards_go_two_and_one_with_the_third_card_as_wide_as_the_others():
     # In one flex group the third card wrapped onto a line of its own and stretched across the whole row, next to
     # two half-width cards, with its value still sized for a third of the row. The compact group is a grid: three
-    # columns while three compact cards fit, then two (the third card takes one column, as wide as the others),
-    # then one; the values are sized for the column width.
+    # columns while every card has room for its value at full size and its label on two lines, then two (the third
+    # card takes one column, as wide as the others) while two compact cards fit, then one; the values are sized for
+    # the column width.
     style = components._cards_style(THREE, "var", ("var_all",))
-    card, compact = _width(THREE), _width(THREE, 16, True)
+    card, three_up, compact = _width(THREE), _width(THREE, 22.75, 2), _width(THREE, 16, None)
     group = 3 * card + 2 * GAP
     assert f".st-key-var > :has(> .st-key-var_all) {{ flex: 1 1 {group}px !important; }}" in style
     assert f".st-key-var_all > * {{ flex: 1 1 {card}px !important; }}" in style
@@ -138,19 +141,38 @@ def test_three_cards_go_two_and_one_with_the_third_card_as_wide_as_the_others():
     assert "grid-column" not in style  # every card takes one column
     em = max(components._value_em(value) for _, value in THREE)
     assert f"calc((33.3333cqw - 37.3333px) / {em:g})" in style  # a third of the row, less 2/3 of a gap and padding
-    assert f"@container var (width < {3 * compact + 2 * GAP}px) {{" in style
+    assert f"@container var (width < {3 * three_up + 2 * GAP}px) {{" in style
     # The cards after the first line keep the gap above them (the grid has no row gap, see the next test).
     assert ".st-key-var_all > :nth-child(n + 3) { margin-top: 14px; }" in style
     assert f"@container var (width < {2 * compact + GAP}px) {{" in style
     assert ".st-key-var_all > :nth-child(n + 2) { margin-top: 14px; }" in style
     assert _layout(style, group) is None
     # At every row width of a phone or a narrow window, each card is at least its compact width, and the widest
-    # value at its clamped size fits the card.
+    # value at its clamped size fits the card; on a line of three, the values are at full size.
     for row in range(compact, group):
         per_line, font = _layout(style, row)
         width = (row - (per_line - 1) * GAP) / per_line
-        assert per_line == min(3, (row + GAP) // (compact + GAP)), row
+        assert per_line == (3 if row >= 3 * three_up + 2 * GAP else 2 if row >= 2 * compact + GAP else 1), row
         assert width >= compact and font * em <= width - CHROME + 1e-6, row
+        if per_line == 3:
+            assert width >= three_up and font == 22.75, row
+
+
+def test_a_label_on_two_lines_breaks_at_the_best_space():
+    # The longest line of the best two-line break, in characters: "Expected Shortfall" | "99.0%" is 18, "Expected" |
+    # "Shortfall 99.0%" 15; and one word per line, the longest word.
+    label_px = components._LABEL_PX * components._LABEL_EM
+    chrome = components._HELP_ICON_PX + components._CARD_CHROME_PX
+    for label, lines, characters in [
+        ("Expected Shortfall 99.0%", 1, 24),
+        ("Expected Shortfall 99.0%", 2, 15),
+        ("Expected Shortfall 99.0%", None, 9),
+        ("Expected P&L at expiry", 2, 12),
+        ("Gamma", 2, 5),
+        ("Gamma", None, 5),
+    ]:
+        width = components._card_width(label, "1", 16, lines)
+        assert width == pytest.approx(label_px * characters + chrome), (label, lines)
 
 
 def test_the_cards_of_a_line_share_their_label_value_and_delta_rows():
@@ -169,6 +191,16 @@ def test_the_cards_of_a_line_share_their_label_value_and_delta_rows():
     assert "white-space: normal;" in compact
     # At full size the labels stay on one line, so no rule is needed there.
     assert "subgrid" not in style.split("@container ")[0]
+
+
+def test_the_cards_of_a_line_are_as_tall_as_the_tallest():
+    # At full size a card with a delta line ("debit (paid)") was 23 px taller than the cards next to it. The groups
+    # now stretch to their line, the cards to their group and the bordered box to its card, at every size (in a
+    # compact row the subgrid makes them equal too).
+    style = components._cards_style(FOUR, "row", ("row_a", "row_b"))
+    full_size = style.split("@container ")[0]
+    assert ".st-key-row, .st-key-row_a, .st-key-row_b { align-items: stretch; }" in full_size
+    assert ".st-key-row [data-testid='stMetric'] { height: 100%; }" in full_size
 
 
 def test_rows_sized_with_each_other_get_the_same_sizes():
@@ -277,25 +309,35 @@ def test_the_four_card_rows_stay_two_by_two_on_a_phone(states):
 
 @pytest.mark.parametrize(
     ("phone", "expected"),
-    # Cards per line of the three-card rows at the default URL, and their value size, on the most common Android
-    # (360 px) and iPhone (390 px) widths. The expected-P&L cards go 3 across from a 343 px row (phones of 371 px
-    # and up); the VaR cards need a 400 px row ("Delta-normal" and its help icon), so they go 2 + 1 on both.
-    [(360, {"expectation_cards": (2, 22.75), "var_cards": (2, 22.75)}), (390, {"expectation_cards": (3, 20.9)})],
+    # Cards per line of the three-card rows at the default URL on common phone widths (360 px Android, 375 and 390
+    # px iPhone, 412 and 430 px large phones). The expected-P&L cards go 3 across from a 400 px row (phones of 428
+    # px and up), where each card has room for its value at full size and "Expected P&L at expiry" on two lines;
+    # the VaR cards need a 457 px row ("Expected" over "Shortfall 99.0%"), so they go 2 + 1 on every phone.
+    [
+        (360, {"expectation_cards": 2, "var_cards": 2}),
+        (375, {"expectation_cards": 2, "var_cards": 2}),
+        (390, {"expectation_cards": 2, "var_cards": 2}),
+        (412, {"expectation_cards": 2, "var_cards": 2}),
+        (430, {"expectation_cards": 3, "var_cards": 2}),
+    ],
 )
 def test_the_three_card_rows_on_a_phone(states, phone, expected):
+    # At 375 and 390 px the expected-P&L cards were 3 across with values shrunk to 19.6 and 20.9 px under labels on
+    # three lines, next to rows of 22.75 px values on the same screen.
     row = phone - 2 * 14  # the page's side margins on a phone
-    default = states["default"]
-    price = next(s for s in _styles(default) if ".st-key-price_cards {" in s)
-    for key in ("expectation_cards", "var_cards"):
-        style = next(s for s in _styles(default) if f".st-key-{key} {{ container:" in s)
-        per_line, font = _layout(style, row)
-        want = expected.get(key, (2, 22.75))
-        assert per_line == want[0] and font == pytest.approx(want[1], abs=0.05), (key, per_line, font)
-        if per_line == 2:
-            # 2 + 1: the third card has its own line but one column of the grid, the width of the cards above it;
-            # and the values are as large as those of the price cards above, which are 2 per line too (at full size,
-            # 22.75 px, when no query applies).
-            assert font == (_layout(price, row) or (2, 22.75))[1]
+    for key, per_line in expected.items():
+        style = next(s for s in _styles(states["default"]) if f".st-key-{key} {{ container:" in s)
+        assert _layout(style, row) == (per_line, 22.75), key
+
+
+@pytest.mark.parametrize("phone", [360, 375, 390, 412, 430])
+def test_every_card_value_of_a_phone_screen_has_one_size(states, phone):
+    # Every row of every tab at the default URL shows its values at the theme's full size on a phone, so the type
+    # does not change from row to row on one screen (no query applies: full size). On a 320 px phone the price
+    # cards' values shrink to 21.4 px so that each pair stays side by side.
+    row = phone - 2 * 14
+    for key, style in ((k, s) for s in _styles(states["default"]) for k in ROWS if f".st-key-{k} {{ container:" in s):
+        assert (_layout(style, row) or (0, 22.75))[1] == 22.75, (key, _layout(style, row))
 
 
 def test_the_strategy_summary_and_greek_rows_wrap_together(states):
@@ -322,23 +364,44 @@ def _advances(weight: str) -> dict[str, float]:
 def test_the_card_width_model_covers_every_card_row_in_plex_sans(states):
     # Every card of a row is based on the row's widest card in the model. It must not be narrower than the widest
     # card's real text (Plex Sans advance widths): the value in Medium at 22.75 px and the label (plus its help
-    # icon) and delta in Regular at 12.25 px, and on a phone the value at 16 px with the label one word per line.
+    # icon) and delta in Regular at 12.25 px on one line, or on two (a line of three cards on a phone), and the value
+    # at 16 px with the label one word per line (a pair on a phone). And no value is modelled narrower than it is,
+    # as the compact rows size their values from the model: "$46.62M" was modelled 0.11 em too narrow ("M" is 0.814
+    # em wide), so on a 390 px phone it ran 2.6 px into its card's padding.
     medium, regular = _advances("Medium"), _advances("Regular")
 
     def text(chars: str, table: dict[str, float], px: float) -> float:
         return sum(table[c] for c in chars) * px
 
-    def real(metric, value_px: float, wrap: bool) -> float:
-        def words(chars: str) -> float:
-            parts = chars.split() if wrap else [chars]
-            return max((text(p, regular, components._LABEL_PX) for p in parts), default=0.0)
+    def real(metric, value_px: float, lines: int | None) -> float:
+        def wrapped(chars: str) -> float:
+            """Width of the longest line of ``chars`` at its best break onto ``lines`` lines."""
+            words = chars.split()
+            if not words:
+                return 0.0
+            if lines is None:
+                breaks = [words]  # one word per line
+            elif lines == 2 and len(words) > 1:
+                breaks = [[" ".join(words[:i]), " ".join(words[i:])] for i in range(1, len(words))]
+            else:
+                breaks = [[chars]]
+            return min(max(text(line, regular, components._LABEL_PX) for line in parts) for parts in breaks)
 
-        label = words(metric.label) + components._HELP_ICON_PX
-        return max(text(metric.value, medium, value_px), label, words(metric.proto.delta)) + components._CARD_CHROME_PX
+        label = wrapped(metric.label) + components._HELP_ICON_PX
+        return (
+            max(text(metric.value, medium, value_px), label, wrapped(metric.proto.delta)) + components._CARD_CHROME_PX
+        )
 
     for at in states.values():
         for row, groups in _card_rows(at).items():
             metrics = [m for group in groups for m in group]
-            for value_px, wrap in ((components._VALUE_PX, False), (components._MIN_VALUE_PX, True)):
-                model = max(components._card_width(m.label, m.value, value_px, wrap, m.proto.delta) for m in metrics)
-                assert model >= max(real(m, value_px, wrap) for m in metrics), (row, value_px)
+            for value_px, lines in (
+                (components._VALUE_PX, 1),
+                (components._VALUE_PX, 2),
+                (components._MIN_VALUE_PX, None),
+            ):
+                model = max(components._card_width(m.label, m.value, value_px, lines, m.proto.delta) for m in metrics)
+                assert model >= max(real(m, value_px, lines) for m in metrics), (row, value_px, lines)
+            for m in metrics:
+                modelled = components._value_em(m.value) - components._VALUE_SPARE_EM
+                assert modelled >= text(m.value, medium, 1) - 1e-9, m.value  # (the widths are whole 1/1000 em)

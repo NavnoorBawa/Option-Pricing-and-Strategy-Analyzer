@@ -3,8 +3,8 @@
 Every metric row of the app is a :func:`card_row`. On its own, Streamlit bases each card on its own content and each
 container on a fixed 8rem, so a row of four cards wraps 3 + 1, and ``st.columns`` stack every card at full width on
 a phone. :func:`card_row` instead sizes all the cards of a row from a model of their text in the theme's IBM Plex
-Sans and groups them, so that the row wraps whole groups, the cards of a line have one width and their values one
-baseline, and no value is ever cut off.
+Sans and groups them, so that the row wraps whole groups, the cards of a line have one width and height and their
+values one baseline, and no value is ever cut off.
 """
 
 from __future__ import annotations
@@ -17,11 +17,12 @@ import streamlit as st
 
 #: Card text in the theme's IBM Plex Sans: values in Medium at 22.75 px (the theme's metricValueFontSize, 1.625rem
 #: of its 14 px base), labels (and deltas) in Regular at 12.25 px. Digits (tabular), "$", "+" and "−" are 0.6 em
-#: wide in Plex Sans Medium; the narrower and wider characters are listed. Labels average at most 0.517 em per
-#: character.
+#: wide in Plex Sans Medium; the other characters of amounts and percentages are listed, with the "M", "B", "T" and
+#: "e" of the shortened amounts ("$46.62M", "$1.2e+15"). The words a card can show instead ("Unlimited", "No
+#: profit") are modelled at 0.6 em a character, wider than they are. Labels average at most 0.517 em per character.
 _VALUE_PX, _LABEL_PX, _LABEL_EM = 22.75, 12.25, 0.517
 _DIGIT_EM = 0.6
-_CHAR_EM = {",": 0.29, ".": 0.29, " ": 0.236, "-": 0.401, "%": 0.947}
+_CHAR_EM = {",": 0.29, ".": 0.29, " ": 0.236, "-": 0.401, "%": 0.947, "M": 0.814, "B": 0.659, "T": 0.577, "e": 0.556}
 #: Room to spare on every value (about 2 px on a desktop), for browsers that round the glyph widths differently.
 _VALUE_SPARE_EM = 0.1
 #: Card padding and border, the label's help icon and its margin, and the gap between cards (gap="small").
@@ -41,13 +42,19 @@ def _value_em(value: str) -> float:
 
 
 def _card_width(
-    label: str, value: str, value_px: float = _VALUE_PX, wrap_label: bool = False, delta: str = ""
+    label: str, value: str, value_px: float = _VALUE_PX, label_lines: int | None = 1, delta: str = ""
 ) -> float:
-    """Width in px a card needs to show its value on one line and its label and delta (the small line under the
-    value, if any) on one line each (or, with ``wrap_label``, one word per line)."""
+    """Width in px a card needs to show its value on one line, at ``value_px``, and its label and delta (the small
+    line under the value, if any) on at most ``label_lines`` lines each: 1 or 2, or None for one word per line."""
 
     def characters(text: str) -> int:
-        return max((len(word) for word in text.split()), default=0) if wrap_label else len(text)
+        """Characters on the longest line of ``text`` wrapped at spaces onto ``label_lines`` lines."""
+        words = text.split()
+        if label_lines is None:
+            return max(map(len, words), default=0)
+        if label_lines == 2 and len(words) > 1:
+            return min(max(len(" ".join(words[:i])), len(" ".join(words[i:]))) for i in range(1, len(words)))
+        return len(text)
 
     label_px = _LABEL_PX * _LABEL_EM * characters(label) + _HELP_ICON_PX
     delta_px = _LABEL_PX * _LABEL_EM * characters(delta)
@@ -75,27 +82,31 @@ def _cards_style(
 
     At full size every card is based on the widest card's width, and each group on its cards side by side, so the
     row moves a whole group to its own line before any group has to wrap its cards: four cards in two pairs go 4
-    across, then 2 + 2 (never 3 + 1).
+    across, then 2 + 2 (never 3 + 1). The cards of a line are as tall as the tallest (one with a delta line).
 
     Where the row is narrower than one group at full size (a phone, or a narrow window with the sidebar open), it is
     compact: each group takes a line of its own as a grid of equal columns, the labels and deltas wrap, and the
-    values shrink to fit their card, down to 16 px (they never grow beyond their desktop size). A group keeps all
-    its cards on one line while each has room for its compact width (labels one word per line, 16 px values), then
-    puts one card fewer on each line, down to one: a pair stays side by side on any phone, and three cards go 2 + 1
-    on a row narrower than three compact cards, with the third card as wide as the others rather than stretched
-    across the row. The values are sized for the cards' actual width. The cards of a line share their label, value
-    and delta rows (CSS subgrid), so their values sit on one baseline however many lines their labels take. The
-    sizes follow the row's own width (a container query), so an open sidebar on a narrow window is covered too.
+    values shrink to fit their card, down to 16 px (they never grow beyond their desktop size). A line of three or
+    more cards needs room for every card's value at full size and its label on two lines at most; with less room,
+    the group puts one card fewer on each line, so that a phone never shows a line of shrunken values under three
+    lines of label. A pair stays side by side while its cards have their compact width (labels one word per line,
+    16 px values), then stacks. Three cards thus go 3 across, then 2 + 1 with the third card as wide as the others
+    rather than stretched across the row, then one per line. The values are sized for the cards' actual width. The
+    cards of a line share their label, value and delta rows (CSS subgrid), so their values sit on one baseline
+    however many lines their labels take. The sizes follow the row's own width (a container query), so an open
+    sidebar on a narrow window is covered too.
     """
 
-    def width(card: tuple[str, ...], value_px: float = _VALUE_PX, wrap: bool = False) -> float:
+    def width(card: tuple[str, ...], value_px: float = _VALUE_PX, label_lines: int | None = 1) -> float:
         label, value, *delta = card
-        return _card_width(label, value, value_px, wrap, *delta)
+        return _card_width(label, value, value_px, label_lines, *delta)
 
     sized = [*cards, *size_with]
     per_group, gap = len(cards) // len(group_keys), int(_CARD_GAP_PX)
     card = int(np.ceil(max(width(c) for c in sized)))
-    compact = int(np.ceil(max(width(c, _MIN_VALUE_PX, True) for c in sized)))
+    # The narrowest card of a line of three or more, and of a pair.
+    three_up = int(np.ceil(max(width(c, _VALUE_PX, 2) for c in sized)))
+    compact = int(np.ceil(max(width(c, _MIN_VALUE_PX, None) for c in sized)))
     em = max(_value_em(c[1]) for c in sized)
     group = per_group * card + (per_group - 1) * gap
     row, name = f".st-key-{key}", key.replace("_", "-")
@@ -123,6 +134,10 @@ def _cards_style(
         f"{row} {{ container: {name} / inline-size; }}",
         f"{group_items} {{ flex: 1 1 {group}px !important; }}",
         f"{each_card} {{ flex: 1 1 {card}px !important; }}",
+        # Every card as tall as its line: the groups stretch to the line (a row of four on one line), the cards to
+        # their group, and the bordered box to its card (as Streamlit's own style has it too).
+        f"{row}, {', '.join(groups)} {{ align-items: stretch; }}",
+        f"{row} [data-testid='stMetric'] {{ height: 100%; }}",
         f"@container {name} (width < {group}px) {{ "
         f"{group_items} {{ flex-basis: 100% !important; }} "
         f"{', '.join(groups)} {{ display: grid !important; row-gap: 0 !important; }} "
@@ -132,9 +147,10 @@ def _cards_style(
         ":is([data-testid='stMarkdownContainer'], p) { white-space: normal; } "
         f"{per_line(per_group)}}}",
     ]
-    # Narrower still: one card fewer per line each time a line can no longer hold its cards at their compact width.
+    # Narrower still: one card fewer per line each time a line can no longer hold its cards (k + 1 of them, each at
+    # least ``three_up`` wide when k + 1 >= 3 and ``compact`` wide in a pair).
     rules += [
-        f"@container {name} (width < {(k + 1) * compact + k * gap}px) {{ {per_line(k)}}}"
+        f"@container {name} (width < {(k + 1) * (three_up if k >= 2 else compact) + k * gap}px) {{ {per_line(k)}}}"
         for k in range(per_group - 1, 0, -1)
     ]
     return f"<style>{' '.join(rules)}</style>"
@@ -146,11 +162,11 @@ def card_row(key: str, group_keys: Sequence[str], cards: Sequence[Card], *, size
     The cards are dealt in order into equal groups, one per key of ``group_keys``. Four cards in two pairs go 4
     across, then 2 + 2, and on a phone stay 2 + 2 with smaller values (16 to 22.75 px); a pair stacks only when its
     cards no longer fit side by side even so (seven-digit prices). Three cards in one group go 3 across while each
-    card has room for its label wrapped one word per line and a 16 px value, then 2 + 1 with the third card as wide
-    as the others, then one per line: the default expected-P&L cards of the Strategy tab stay 3 across on phones
-    371 px wide and up, and go 2 + 1 on a 360 px phone. Every card of a line has the same width (that of the widest
-    card's text, from a model of the theme's IBM Plex Sans), and their values sit on one baseline. The stylesheet
-    that sets these sizes is scoped to the row's key.
+    card has room for its value at full size (22.75 px) and its label on two lines at most, then 2 + 1 with the
+    third card as wide as the others, then one per line: the default expected-P&L cards of the Strategy tab go 3
+    across on a row of 400 px and up (phones 428 px wide and up), and 2 + 1 on 360 to 414 px phones. Every card of
+    a line has the same width (that of the widest card's text, from a model of the theme's IBM Plex Sans) and
+    height, and their values sit on one baseline. The stylesheet that sets these sizes is scoped to the row's key.
 
     Parameters
     ----------
