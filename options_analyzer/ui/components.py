@@ -5,11 +5,15 @@ container on a fixed 8rem, so a row of four cards wraps 3 + 1, and ``st.columns`
 a phone. :func:`card_row` instead sizes all the cards of a row from a model of their text in the theme's IBM Plex
 Sans and groups them, so that the row wraps whole groups, the cards of a line have one width and height and their
 values one baseline, and no value is ever cut off.
+
+:func:`current_key` serves the widgets that keep their values while their tab is closed but whose keys change on
+purpose, and :func:`link_match` reads the names in a hand-typed link.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import re
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -210,3 +214,80 @@ def card_row(key: str, group_keys: Sequence[str], cards: Sequence[Card], *, size
     per_group = len(cards) // len(groups)
     for i, (label, value, options) in enumerate(cards):
         groups[i // per_group].metric(label, value, border=True, **options)
+
+
+def current_key(family: str, key: str) -> str:
+    """Return ``key`` after forgetting the values kept under the other keys of its ``family``.
+
+    For a widget that keeps its value while its tab is closed (``persist_state="session"``) and whose key changes on
+    purpose, because it holds what the value belongs to (a contract, a range, a grid): the value is then kept only
+    while the key stays the same, and a key used before starts from the widget's default again, as it did before
+    the tabs ran lazily (a widget that is not drawn in a run loses its value).
+
+    Parameters
+    ----------
+    family : str
+        The prefix that the widget's keys share, such as ``"smile_pick_"``.
+    key : str
+        The widget's key in this run, which starts with ``family``.
+
+    Returns
+    -------
+    str
+        ``key``, for the widget's ``key`` argument.
+
+    Examples
+    --------
+    Outside a running app the session state is a plain store (Streamlit logs a warning):
+
+    >>> st.session_state["smile_pick_1"] = [0, 2]
+    >>> current_key("smile_pick_", "smile_pick_2")
+    'smile_pick_2'
+    >>> "smile_pick_1" in st.session_state
+    False
+    """
+    for other in [k for k in st.session_state if k.startswith(family) and k != key]:
+        del st.session_state[other]
+    return key
+
+
+def _plain(text: str) -> str:
+    """``text`` in lower case, with each run of characters other than letters and digits read as one space."""
+    return " ".join(re.findall(r"[^\W_]+", text.casefold()))
+
+
+def link_match(value: str, names: Iterable[str], *, aliases: Mapping[str, str] | None = None) -> str | None:
+    """Return the name in ``names`` that a hand-typed link value stands for, or None.
+
+    A widget bound to the URL accepts only its option, verbatim: ``?tab=risk`` or ``?strategy=iron-condor`` would
+    be dropped. Here ``value`` is matched without case and with each run of characters other than letters and
+    digits read as one space, first against ``names`` and then against the keys of ``aliases``.
+
+    Parameters
+    ----------
+    value : str
+        The value in the link, as ``st.query_params`` gives it (``+`` and ``%20`` already read as spaces).
+    names : iterable of str
+        The options, such as a widget's labels.
+    aliases : mapping of str to str, optional
+        Other names a link may use, each mapped to the name of ``names`` it stands for.
+
+    Returns
+    -------
+    str or None
+        The matching name, as written in ``names`` (or the alias's target), or None when nothing matches.
+
+    Examples
+    --------
+    >>> link_match("iron-condor", ["Iron Butterfly", "Iron Condor"])
+    'Iron Condor'
+    >>> link_match("Vol+Surface", ["Pricing", "Surface"], aliases={"vol surface": "Surface"})
+    'Surface'
+    >>> link_match("XYZ", ["Pricing", "Surface"]) is None
+    True
+    """
+    wanted = _plain(value)
+    if not wanted:
+        return None
+    candidates = [(name, name) for name in names] + list((aliases or {}).items())
+    return next((name for spelling, name in candidates if _plain(spelling) == wanted), None)

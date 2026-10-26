@@ -1,8 +1,9 @@
-"""Strategy Builder and Risk & Scenarios tabs: app behaviour (streamlit.testing) and their display helpers."""
+"""Strategy and Risk tabs: app behaviour (streamlit.testing) and their display helpers."""
 
 import base64
 import json
 import re
+import urllib.parse
 
 import numpy as np
 import pytest
@@ -12,8 +13,10 @@ from streamlit.proto.WidgetStates_pb2 import WidgetState
 from streamlit.testing.v1 import AppTest
 
 from options_analyzer import black_scholes as bs
+from options_analyzer import risk
 from options_analyzer import strategies as strat
 from options_analyzer.ui import charts, tab_risk, tab_strategy
+from options_analyzer.ui.app import TABS
 
 NO_EDITS = {"edited_rows": {}, "added_rows": [], "deleted_rows": []}
 
@@ -23,42 +26,69 @@ def _ok(at: AppTest) -> None:
     assert not at.error, [e.value for e in at.error]
 
 
-def _app(**query) -> AppTest:
-    at = make_app(**query)
+def _app(tab: str = "Strategy", **query) -> AppTest:
+    """The app opened at ``?tab=<tab>`` and the other query parameters (only the open tab runs)."""
+    at = make_app(tab=tab, **query)
     at.run()
     _ok(at)
     return at
 
 
-def _walk(node):
-    yield node
-    children = getattr(node, "children", None)
-    for child in (children.values() if isinstance(children, dict) else children) or ():
-        yield from _walk(child)
+def _nodes(node):
+    for child in getattr(node, "children", {}).values():
+        yield child
+        yield from _nodes(child)
 
 
-def _editor_id(at: AppTest) -> str:
+def _open(at: AppTest, tab: str, *also: WidgetState) -> AppTest:
+    """Open ``tab`` as a click on it does: the browser sends the tabs' new value with the rerun (and ``also``, other
+    widget values that arrive with it) and sets the URL's ``tab`` parameter (none for the first tab)."""
+    container = next(node for node in _nodes(at._tree) if getattr(node, "type", None) == "tab_container")
+    states = at._tree.get_widget_states()
+    states.widgets.extend([WidgetState(id=container.proto.tab_container.id, string_value=tab), *also])
+    if tab == TABS[0]:
+        at.query_params.pop("tab", None)
+    else:
+        at.query_params["tab"] = tab
+    at._run(states)
+    _ok(at)
+    return at
+
+
+def _editor_id(at: AppTest) -> str | None:
+    """The element id of the legs editor on the page, or None when it is not there (another tab is open)."""
     ids = [
         node.proto.id
-        for node in _walk(at._tree)
+        for node in _nodes(at._tree)
         if type(getattr(node, "proto", None)).__name__ == "Dataframe" and "legs::" in node.proto.id
     ]
-    assert len(ids) == 1, ids
-    return ids[0]
+    assert len(ids) <= 1, ids
+    return ids[0] if ids else None
 
 
 class LegsEditor:
     """Edits the legs table the way the browser does (AppTest has no data-editor API).
 
-    The browser keeps an editor's edits and re-sends them with every rerun for as long as the editor keeps its
-    identity; when the app gives it a new identity, the edits are gone.
+    The browser keeps an editor's edits and re-sends them with every rerun for as long as the editor stays on the
+    page with the same identity. When a run leaves it out (another tab is open) or gives it a new identity, the
+    edits are gone: every run of the app, also one that opens another tab, is watched for that.
     """
 
     def __init__(self, at: AppTest):
         self.at, self.id, self.state = at, None, None
+        run = at._run
+
+        def watched(*args, **kwargs) -> AppTest:
+            result = run(*args, **kwargs)
+            if self.id is not None and _editor_id(result) != self.id:
+                self.id = None
+            return result
+
+        at._run = watched
 
     def edit(self, edited_rows=None, added_rows=(), deleted_rows=()) -> AppTest:
         self.id = _editor_id(self.at)
+        assert self.id is not None, "the legs editor is not on the page"
         self.state = {
             "edited_rows": edited_rows or {},
             "added_rows": list(added_rows),
@@ -75,8 +105,18 @@ class LegsEditor:
         return self.at
 
 
-def _position(at: AppTest) -> str:
+def _analysed(at: AppTest) -> str:
+    """The Risk tab's description of the position it analyses."""
     return next(m.value for m in at.markdown if m.value.startswith("Analysing"))
+
+
+def _position(at: AppTest) -> str:
+    """The position the Risk tab analyses. It opens the Risk tab, which builds the position from the Strategy tab's
+    session state (tab_strategy.build_position), and goes back to the Strategy tab, as a user who checks the risk of
+    the legs they just edited does."""
+    text = _analysed(_open(at, "Risk"))
+    _open(at, "Strategy")
+    return text
 
 
 def _metric(at: AppTest, label: str):
@@ -211,6 +251,248 @@ def test_editor_identity_does_not_depend_on_sidebar_values():
         assert _editor_id(at) == before
 
 
+# --- The Risk tab's position while the Strategy tab is closed (tab_strategy.build_position) ----------------------
+
+CONDOR_LINK = {"strategy_category": "Range-bound", "strategy_Range-bound": "Iron Condor"}
+
+
+def _legs_value(units: float, legs, spot: float, vol: float) -> float:
+    """Black-Scholes-Merton value ($) of one-year option ``legs`` ``(kind, quantity, strike)`` at the default rate."""
+    return units * sum(q * bs.price(spot, k, 1.0, 0.05, vol, 0.0, kind) for kind, q, k in legs)
+
+
+def _assert_heatmap_of(at: AppTest, units: float, legs) -> None:
+    """The Risk tab's spot x IV grid is the P&L of ``legs``, priced here leg by leg."""
+    z = _array(_chart(at, "risk_heatmap")["data"][0]["z"])
+    today = _legs_value(units, legs, 100, 0.2)
+    for (row, col), spot, vol in (((0, 0), 70, 0.1), ((-1, -1), 130, 0.4), ((0, -1), 70, 0.4), ((6, 2), 100, 0.2)):
+        assert z[row, col] == pytest.approx(_legs_value(units, legs, spot, vol) - today, abs=1e-6)
+
+
+def test_a_link_to_the_risk_tab_analyses_the_linked_template():
+    # A cold deep link: the Strategy tab never opens in this session, so its legs editor never runs and the Risk tab
+    # builds the position from the link's parameters.
+    at = _app("Risk", contracts=2, commission=0.65, **CONDOR_LINK)
+    assert _analysed(at) == (
+        "Analysing **Iron Condor** — Long 1 × 80 Put, Short 1 × 90 Put, Short 1 × 110 Call, Long 1 × 120 Call · 2 × "
+        "100 multiplier"
+    )
+    assert _editor_id(at) is None and _chart(at, "var_hist")
+    condor = [("put", 1, 80), ("put", -1, 90), ("call", -1, 110), ("call", 1, 120)]
+    _assert_heatmap_of(at, 200, condor)
+    strategy = strat.Strategy("Iron Condor", strat.build_template("Iron Condor", 100, 10, 1.0).legs, fees=4 * 0.0065)
+    config = risk.VaRConfig(confidence=0.99, horizon_days=1, n_paths=100_000, seed=7)
+    var = risk.value_at_risk(strategy, strat.Market(100, 0.05, 0.2, 1.0), config, 200)
+    assert _metric(at, "VaR 99.0%").value == tab_strategy.money_short(var.var)
+    assert _metric(at, "Expected Shortfall 99.0%").value == tab_strategy.money_short(var.expected_shortfall)
+
+
+CONDOR = "**Iron Condor** — Long 1 × 80 Put, Short 1 × 90 Put, Short 1 × 110 Call, Long 1 × 120 Call"
+
+
+def test_the_short_link_to_a_template_analyses_it_on_the_risk_tab():
+    # The link of the acceptance criterion, exactly: AppTest sends its query parameters URL-encoded, as a browser does.
+    query = {"tab": "Risk", "strategy": "Iron Condor"}
+    assert urllib.parse.urlencode(query) == "tab=Risk&strategy=Iron+Condor"
+    at = _app(**query)
+    assert _analysed(at) == f"Analysing {CONDOR} · 1 × 100 multiplier"
+    assert _editor_id(at) is None and _chart(at, "var_hist")
+    _assert_heatmap_of(at, 100, [("put", 1, 80), ("put", -1, 90), ("call", -1, 110), ("call", 1, 120)])
+    # The link now holds the parameters the Strategy tab's menus are bound to, so a copy of it reopens the same view.
+    assert at.query_params == {"tab": "Risk", **CONDOR_LINK}
+    assert not at.warning
+    _open(at, "Strategy")
+    assert at.selectbox(key="strategy_category").value == "Range-bound"
+    assert at.selectbox(key="strategy_Range-bound").value == "Iron Condor"
+
+
+@pytest.mark.parametrize(
+    ("name", "query", "analysed"),
+    [
+        ("iron-condor", {}, f"{CONDOR} · 1 × 100 multiplier"),
+        ("JADE LIZARD", {"contracts": 3}, "**Jade Lizard** — Short 1 × 90 Put, Short 1 × 110 Call, Long 1 × 120 Call"),
+        ("custom", {}, "**Custom** — Long 1 × 100 Call · 1 × 100 multiplier"),
+        # The short form wins over the two-parameter form, which it replaces.
+        (
+            "Iron Condor",
+            {"strategy_category": "Vertical spread", "strategy_Vertical spread": "Bear Put Spread"},
+            CONDOR,
+        ),
+    ],
+)
+def test_the_short_link_names_a_template_without_case_or_punctuation(name, query, analysed):
+    at = _app("Risk", strategy=name, **query)
+    assert analysed in _analysed(at)
+    assert "strategy" not in at.query_params and "strategy_Vertical spread" not in at.query_params
+    assert not at.warning
+
+
+@pytest.mark.parametrize(
+    ("name", "notes"),
+    [
+        ("Iron Condr", ["This link asks for a strategy named `Iron Condr`, which is not one of the templates, so it "
+                        "was ignored."]),
+        ("", []),  # asks for nothing
+    ],
+)  # fmt: skip
+def test_a_short_link_to_a_strategy_that_is_not_a_template_is_ignored_with_a_note(name, notes):
+    at = _app("Risk", strategy=name)
+    assert (
+        _analysed(at) == "Analysing **Bull Call Spread** — Long 1 × 100 Call, Short 1 × 110 Call · 1 × 100 multiplier"
+    )
+    assert at.query_params == {"tab": "Risk"}
+    assert [w.value for w in at.warning] == notes
+    at.number_input(key="contracts").set_value(2).run()  # the note is shown once
+    assert not at.warning
+
+
+#: A script that builds the position without drawing the Strategy tab's controls, as another page or a report would.
+WITHOUT_CONTROLS = """
+import streamlit as st
+from options_analyzer.ui import inputs, tab_strategy
+st.session_state["position"] = tab_strategy.build_position(inputs.sidebar())
+"""
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        {},
+        {**CONDOR_LINK, "contracts": "2", "multiplier": "50", "commission": "0.65", "strategy_width_pct": "5"},
+        {"strategy_category": "Custom", "contracts": "2.5"},
+        {"strategy_category": "Time spread", "strike": "120", "days": "200"},
+        # Values the controls would not take: each is replaced by the control's default.
+        {"strategy_category": "Range-bound", "strategy_Range-bound": "Bull Call Spread", "contracts": "0"},
+        {"strategy_category": "range-bound", "multiplier": "x", "commission": "-1", "strategy_width_pct": "50"},
+        {"strategy_width_pct": "nan", "contracts": "1e9", "commission": "inf"},
+    ],
+    ids=["defaults", "condor", "custom", "calendar", "out of range", "invalid", "not finite"],
+)
+def test_build_position_reads_a_link_as_the_controls_do(monkeypatch, query):
+    # Without controls() in the run, build_position reads the controls' URL parameters itself; the position must be
+    # the one the app builds (with the controls drawn) for the same link.
+    analysed = []
+    real = tab_risk.render
+    monkeypatch.setattr(tab_risk, "render", lambda position: analysed.append(position) or real(position))
+    _app("Risk", **query)
+    page = AppTest.from_string(WITHOUT_CONTROLS)
+    page.query_params.update(query)
+    page.run()
+    assert not page.exception, [e.value for e in page.exception]
+    assert not page.main.children  # nothing drawn in the main area
+    assert page.session_state["position"] == analysed[-1]
+    assert analysed[-1] is not None
+
+
+def test_leg_edits_survive_a_visit_to_the_risk_tab():
+    editor = LegsEditor(_app())
+    at = editor.edit({"1": {"Strike": 115.0}}, added_rows=[{"Type": "put", "Quantity": -1, "Strike": 90}])
+    cards = {m.label: m.value for m in at.metric}
+    _open(at, "Risk")
+    edited = "**Bull Call Spread (modified)** — Long 1 × 100 Call, Short 1 × 115 Call, Short 1 × 90 Put"
+    assert _analysed(at) == f"Analysing {edited} · 1 × 100 multiplier"
+    _assert_heatmap_of(at, 100, [("call", 1, 100), ("call", -1, 115), ("put", -1, 90)])
+    _open(at, "Strategy")
+    # The browser drew a new, empty editor; it starts from the edited legs, and the analysis is that of them.
+    assert editor.id is None
+    shown = next(d.value for d in at.dataframe if "legs::" in d.proto.id)
+    assert shown["Type"].tolist() == ["call", "call", "put"] and shown["Strike"].tolist() == [100.0, 115.0, 90.0]
+    assert {m.label: m.value for m in at.metric} == cards
+    assert edited in _position(at)  # and again
+
+
+@pytest.mark.parametrize("strike_change", [False, True], ids=["straight back", "after a strike change"])
+@pytest.mark.parametrize("tab", [tab for tab in TABS if tab != "Strategy"])
+def test_an_edit_sent_with_the_click_on_another_tab_is_kept(tab, strike_change):
+    # The legs editor commits a cell edit when it loses the focus, as it does when the user clicks another tab, so
+    # the edit arrives with the run that opens that tab, where the editor is not drawn to apply it, and Streamlit
+    # drops the editor's state at the end of that run. Every tab keeps it, not only the Risk tab that analyses it;
+    # once kept, the edited legs stay as they are when the sidebar strike changes (unedited legs would follow it).
+    at = _app()
+    edit = {**NO_EDITS, "edited_rows": {"0": {"Quantity": 3}}}
+    _open(at, tab, WidgetState(id=_editor_id(at), string_value=json.dumps(edit)))
+    assert _editor_id(at) is None
+    modified = "**Bull Call Spread (modified)** — Long 3 × 100 Call, Short 1 × 110 Call"
+    if tab == "Risk":
+        assert modified in _analysed(at)
+    if strike_change:
+        at.sidebar.number_input(key="strike").set_value(105.0).run()
+        _ok(at)
+    _open(at, "Strategy")
+    shown = next(d.value for d in at.dataframe if "legs::" in d.proto.id)
+    assert shown["Quantity"].tolist() == [3.0, -1.0] and shown["Strike"].tolist() == [100.0, 110.0]
+    # Net premium: 3 x 100 call - 1 x 110 call at their Black-Scholes-Merton values (one year, 5 %, 20 %), for 100
+    # shares; the card shows whole dollars from $1,000 and the exact amount in its help.
+    call = {strike: bs.price(100.0, strike, 1.0, 0.05, 0.2, 0.0, "call") for strike in (100.0, 110.0)}
+    premium = _metric(at, "Net premium")
+    assert premium.value == f"${100 * (3 * call[100.0] - call[110.0]):,.0f}" == "$2,531"
+    assert f"${100 * (3 * call[100.0] - call[110.0]):,.2f}" in premium.help
+    assert modified in _position(at)
+
+
+@pytest.mark.parametrize(
+    "edits",
+    [
+        {"edited_rows": {"0": {"Quantity": 2, "Strike": None}, "3": {"IV (%)": 25.0, "Premium": 1.5}}},
+        {"deleted_rows": [1, 2]},
+        {"added_rows": [{"Type": "stock", "Quantity": 1}, {"Type": "put", "Strike": 95.5, "Days": 30}]},
+        {
+            "edited_rows": {"2": {"Type": "put"}},
+            "deleted_rows": [0, 3],
+            "added_rows": [{"Type": "call", "Quantity": -2}],
+        },
+    ],
+    ids=["cells", "deletions", "additions", "all"],
+)
+# Streamlit's data editor deletes rows with DataFrame.drop(inplace=True), which pandas 3.1 deprecates.
+@pytest.mark.filterwarnings("ignore:The inplace keyword in DataFrame.drop is deprecated")
+def test_edits_are_applied_as_the_legs_editor_applies_them(edits):
+    # tab_strategy._apply_edits stands in for the editor when an edit arrives with a switch to another tab: it must
+    # give the legs that st.data_editor itself returns for the same edits.
+    editor = LegsEditor(_app(**CONDOR_LINK))
+    editor.edit(edits.get("edited_rows"), edits.get("added_rows", ()), edits.get("deleted_rows", ()))
+    legs = editor.at.session_state["strategy_legs"]["Iron Condor"]
+    assert not tab_strategy._same(legs["edited"], legs["seed"])
+    assert tab_strategy._same(tab_strategy._apply_edits(legs["seed"], {**NO_EDITS, **edits}), legs["edited"])
+
+
+def _condor_frame():
+    return tab_strategy._template_frame(strat.build_template("Iron Condor", 100.0, 10.0, 1.0))
+
+
+def _changed(**cells):
+    """The condor's legs with cells changed: ``Strike=(0, 95.0)`` sets the first row's strike."""
+    frame = _condor_frame()
+    for column, (row, value) in cells.items():
+        frame.loc[row, column] = value
+    return frame
+
+
+@pytest.mark.parametrize(
+    ("other", "same"),
+    [
+        (lambda f: f.astype(object), True),
+        (lambda f: f.astype({"Quantity": int, "Days": "Int64", "Type": "string"}), True),
+        (lambda f: f.set_axis([5, 6, 7, 8]), True),  # the editor's index does not matter
+        (lambda f: f[["Type", "Quantity", "Strike"]], True),  # missing columns are blank, as Days, IV and Premium
+        (lambda f: _changed(Type=(1, None)), False),
+        (lambda f: _changed(Strike=(0, np.nan)), False),
+        (lambda f: _changed(Premium=(2, 1.5)), False),
+        (lambda f: f.iloc[:3], False),
+    ],
+    ids=["object", "other dtypes", "index", "missing blank columns", "blank type", "blank strike", "premium", "row"],
+)
+def test_legs_compare_equal_whatever_dtypes_the_editor_returns(other, same):
+    # tab_strategy._same decides whether legs follow the template; it runs on every run of the app.
+    frame = _condor_frame()
+    assert tab_strategy._same(frame, other(frame)) is same
+
+
+def test_blank_cells_and_signed_zeros_compare_equal():
+    assert tab_strategy._same(_changed(Type=(1, None)), _changed(Type=(1, np.nan)))
+    assert tab_strategy._same(_changed(Quantity=(0, -0.0)), _changed(Quantity=(0, 0.0)))
+
+
 # --- Strike width and defaults --------------------------------------------------------------------------------
 
 
@@ -266,7 +548,7 @@ def test_sub_cent_strikes_are_shown_in_full():
     _ok(at)
     assert "Long 1 × 0.95 Put, Short 1 × 0.975 Put, Short 1 × 1.025 Call, Long 1 × 1.05 Call" in _position(at)
     assert "w = \\$0.025 (2.50% of the strike, automatic)" in _caption(at, "Width")
-    editor = next(n.proto for n in _walk(at._tree) if "legs::" in getattr(getattr(n, "proto", None), "id", ""))
+    editor = next(n.proto for n in _nodes(at._tree) if "legs::" in getattr(getattr(n, "proto", None), "id", ""))
     assert json.loads(editor.columns)["Strike"]["type_config"]["format"] == tab_strategy.STRIKE_FORMAT
     # The format is printf-style and the browser applies it the way Python's % operator does.
     shown = [tab_strategy.STRIKE_FORMAT % k for k in (0.95, 0.975, 1.025, 1.05, 100.0, 111.51, 1 - 2 * 0.025)]
@@ -769,14 +1051,14 @@ def test_american_note_reports_the_same_premium_as_the_pricing_tab():
     assert any(f"put +\\${premium:.4f} (against the same tree" in c.value for c in at.caption)
     assert "The strategy values it at \\$6.7309" in note
     assert _metric(at, "Net premium").value == "$673.09"
-    assert any("whatever the sidebar pricing model" in c.value for c in at.caption)
+    assert any("whatever the sidebar pricing model" in c.value for c in _open(at, "Risk").caption)
 
 
 # --- Risk tab ------------------------------------------------------------------------------------------------------
 
 
 def test_risk_heatmap_labels_show_the_exact_spot_shocks():
-    at = _app()
+    at = _app("Risk")
     at.slider(key="grid_span").set_value(25).run()
     spec = _chart(at, "risk_heatmap")["data"][0]
     assert spec["y"][:4] == ["-25%", "-20.8%", "-16.7%", "-12.5%"]
@@ -788,7 +1070,7 @@ def test_spot_iv_heatmap_cells_stay_wide_enough_for_a_phone():
     # Final review: with the 13 spot shocks as columns next to a colour bar, the cell values were 4 px tall on a
     # 390 px phone. Like the spot x date grid, the 6 implied-vol shocks are now the columns and the spot shocks the
     # rows (highest at the top), and the colour bar is left out: the cell values already say it.
-    heat = _chart(_app(), "risk_heatmap")["data"][0]
+    heat = _chart(_app("Risk"), "risk_heatmap")["data"][0]
     assert heat["showscale"] is False
     assert heat["x"] == ["IV -50%", "IV -25%", "IV 0%", "IV +25%", "IV +50%", "IV +100%"]
     assert heat["y"][0] == "-30%" and heat["y"][6] == "0%" and heat["y"][-1] == "+30%"
@@ -805,7 +1087,7 @@ def test_spot_iv_heatmap_cells_stay_wide_enough_for_a_phone():
 
 
 def test_spot_date_grid_steps_in_standard_deviations():
-    at = _app()
+    at = _app("Risk")
     heat = _chart(at, "date_heatmap")["data"][0]
     # Dates are the (at most 8) columns and prices the rows, lowest first so that the highest is at the top: the
     # 13 price columns were unreadable on a phone.
@@ -825,12 +1107,12 @@ def test_spot_date_grid_steps_in_standard_deviations():
 @pytest.mark.parametrize("query", [{"vol": 500, "days": 3650}, {"spot": 0.01, "strike": 0.01, "days": 1, "vol": 0.1}])
 def test_spot_date_grid_labels_stay_distinct_at_the_sidebar_limits(query):
     # Round-1 verifier: at these sidebar limits the price labels repeated and Plotly merged the rows.
-    heat = _chart(_app(**query), "date_heatmap")["data"][0]
+    heat = _chart(_app("Risk", **query), "date_heatmap")["data"][0]
     assert len(set(heat["y"])) == len(heat["y"]) == 13
 
 
 def test_time_decay_moves_scale_with_volatility():
-    names = [trace["name"] for trace in _chart(_app(vol=40), "time_decay")["data"]]
+    names = [trace["name"] for trace in _chart(_app("Risk", vol=40), "time_decay")["data"]]
     assert names == [
         "Spot -1σ (-33.0%)",
         "Spot -0.5σ (-18.1%)",
@@ -841,7 +1123,7 @@ def test_time_decay_moves_scale_with_volatility():
 
 
 def test_position_greek_profiles():
-    at = _app()
+    at = _app("Risk")
     data = _chart(at, "greek_profiles")["data"]
     assert [trace["name"] for trace in data] == ["Today", "In 182 days", "In 364 days"]
     spots = _array(data[0]["x"])
@@ -856,7 +1138,7 @@ def test_position_greek_profiles():
 
 def test_stress_table_headers_are_short_with_the_full_name_in_the_help():
     # Round-1 verifier: in the narrow columns 'Rate change (bp)' was cut to 'Rate change (bp', losing its unit.
-    at = _app()
+    at = _app("Risk")
     at.toggle(key="stress_elapsed").set_value(True).run()
     _ok(at)
     frame = next(df for df in at.dataframe if "Scenario" in df.value.columns)
@@ -877,7 +1159,7 @@ def test_stress_table_headers_are_short_with_the_full_name_in_the_help():
 
 
 def test_stress_table_and_var_cards():
-    at = _app()
+    at = _app("Risk")
     labels = [m.label for m in at.metric]
     assert "VaR 95% CI (simulation)" not in labels
     assert any("95% confidence interval of the VaR estimate" in c.value for c in at.caption)
@@ -898,9 +1180,9 @@ def _note(fig):
 def test_var_caption_counts_legs_that_expire_on_the_horizon_day():
     # Final review: a 1-day bull call spread expires 0.69 trading days in, before a 1-day horizon, but its legs
     # settle on day 1, the horizon itself, so the caption left them out.
-    at = _app(days=1)
+    at = _app("Risk", days=1)
     assert any("2 option leg(s) expire before the horizon" in c.value for c in at.caption)
-    assert not any("expire before the horizon" in c.value for c in _app(days=2).caption)  # 1.38 trading days
+    assert not any("expire before the horizon" in c.value for c in _app("Risk", days=2).caption)  # 1.38 trading days
 
 
 def test_histogram_does_not_pile_the_tails_into_the_end_bins():
@@ -968,7 +1250,7 @@ def test_pnl_cell_text_stays_short(value, bound, text):
 
 
 def test_risk_heatmaps_give_the_colour_scale_width_to_their_cells():
-    at = _app()
+    at = _app("Risk")
     assert _chart(at, "date_heatmap")["data"][0]["showscale"] is False  # the cell values already say it
     assert _chart(at, "risk_heatmap")["data"][0]["showscale"] is False
 
@@ -1001,6 +1283,6 @@ def test_payoff_range_keeps_the_strikes_readable():
 
 def test_time_decay_scenarios_use_the_ordered_ramp_not_categorical_colours():
     # The ordered spot scenarios (-1σ ... +1σ) were drawn in five unrelated categorical colours, all solid.
-    traces = _chart(_app(), "time_decay")["data"]
+    traces = _chart(_app("Risk"), "time_decay")["data"]
     styles = [(trace["line"].get("color"), trace["line"].get("dash")) for trace in traces]
     assert styles == charts.scenario_styles(len(traces))

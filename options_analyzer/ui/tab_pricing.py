@@ -1,4 +1,4 @@
-"""Pricing & Greeks tab and the headline price cards."""
+"""Pricing tab and the headline price cards."""
 
 from __future__ import annotations
 
@@ -201,8 +201,8 @@ def _sensitivity(inputs: Inputs) -> None:
     }
     axes = {"Spot price": "spot", "Volatility": "vol", "Days to expiry": "days"}
     c1, c2 = st.columns(2)
-    quantity = c1.selectbox("Quantity", list(quantities), key="sens_quantity")
-    axis = c2.selectbox("Against", list(axes), key="sens_axis")
+    quantity = c1.selectbox("Quantity", list(quantities), key="sens_quantity", persist_state="session")
+    axis = c2.selectbox("Against", list(axes), key="sens_axis", persist_state="session")
     name, scale, y_title = quantities[quantity]
 
     S, K, T, r, sigma, q = (
@@ -239,8 +239,8 @@ def _sensitivity(inputs: Inputs) -> None:
 
 def _heatmaps(inputs: Inputs) -> None:
     c1, c2 = st.columns(2)
-    spot_span = c1.slider("Spot range (±%)", 5, 50, 20, 5, key="hm_spot") / 100
-    vol_span = c2.slider("Volatility range (±%)", 10, 90, 50, 10, key="hm_vol") / 100
+    spot_span = c1.slider("Spot range (±%)", 5, 50, 20, 5, key="hm_spot", persist_state="session") / 100
+    vol_span = c2.slider("Volatility range (±%)", 10, 90, 50, 10, key="hm_vol", persist_state="session") / 100
     spots = inputs.spot * np.linspace(1 - spot_span, 1 + spot_span, 9)
     vols = np.maximum(inputs.volatility * np.linspace(1 - vol_span, 1 + vol_span, 9), 1e-4)
     grid_s, grid_v = np.meshgrid(spots, vols)
@@ -489,7 +489,7 @@ def _model_diagnostics(inputs: Inputs, prices: Prices) -> None:
 
 def render(inputs: Inputs, prices: Prices) -> None:
     st.subheader("Greeks")
-    higher = st.toggle("Show second- and third-order Greeks", value=False, key="higher_greeks")
+    higher = st.toggle("Show second- and third-order Greeks", value=False, key="higher_greeks", persist_state="session")
     table = _greeks_table(inputs, higher)
     st.dataframe(
         table.drop(columns="Order"),

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import datetime as dt
 import math
+import re
 
 from .. import black_scholes as bs
 
@@ -96,6 +97,37 @@ def pct(value: float, decimals: int = 2, signed: bool = False) -> str:
 def md(text: str) -> str:
     """Escape dollar signs so Markdown does not render ``$a ... $b`` as LaTeX math."""
     return text.replace("$", r"\$")
+
+
+def md_code(text: str) -> str:
+    """``text`` as inline code, so that Streamlit's Markdown shows it as typed.
+
+    For text the user supplies, such as a file name or a value in a link. Escaping its Markdown characters would not
+    do: Streamlit still turns ``http://...`` and ``www....`` into links and ``:material/...:`` into icons. Inside a
+    code span nothing is formatted. The span's fence is one backtick longer than any run of backticks in ``text``
+    (CommonMark), and every run of whitespace is one space, since a blank line would end the span.
+
+    Parameters
+    ----------
+    text : str
+        Plain text.
+
+    Returns
+    -------
+    str
+        Markdown for ``text`` in a code span.
+
+    Examples
+    --------
+    >>> md_code("quotes.csv")
+    '`quotes.csv`'
+    >>> md_code("[x](http://a.b) `y`")
+    '`` [x](http://a.b) `y` ``'
+    """
+    text = " ".join(text.split())
+    fence = "`" * (max(map(len, re.findall("`+", text)), default=0) + 1)
+    pad = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{fence}{pad}{text}{pad}{fence}"
 
 
 # --- Desk number-format standard ---------------------------------------------------------------------------------

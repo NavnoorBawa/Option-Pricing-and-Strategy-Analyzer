@@ -39,8 +39,9 @@ def test_the_files_join_with_one_blank_line_between_sections():
     assert headings[0] == "Conventions" and headings[-1] == "References"
 
 
-def test_the_tab_renders_the_files_verbatim(app):
-    methodology = next(tab for tab in app.tabs if "Methodology" in tab.label)
+def test_the_tab_renders_the_files_verbatim(new_app):
+    app = new_app(tab="Methodology").run()
+    methodology = next(tab for tab in app.tabs if tab.label == "Methodology")
     assert [m.value for m in methodology.markdown] == [tab_methodology.methodology_markdown()]
 
 

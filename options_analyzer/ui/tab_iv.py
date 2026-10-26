@@ -1,4 +1,4 @@
-"""Implied Volatility tab: invert a market price with a robust bracketed solver."""
+"""IV tab: invert a market price to its implied volatility with a robust bracketed solver."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from ..implied_vol import (
     no_arbitrage_bounds,
 )
 from . import cache, charts
-from .components import card_row
+from .components import card_row, current_key
 from .format import md, money, pct
 from .inputs import Inputs
 
@@ -52,7 +52,13 @@ def render(inputs: Inputs) -> None:
     )
     c1, c2, c3 = st.columns([1, 1, 2])
     option_type = c1.segmented_control(
-        "Option", ["call", "put"], default="call", required=True, format_func=str.capitalize, key="iv_type"
+        "Option",
+        ["call", "put"],
+        default="call",
+        required=True,
+        format_func=str.capitalize,
+        key="iv_type",
+        persist_state="session",
     )
     # Follow the sidebar's exercise style until the user picks one here; the choice lasts until the sidebar
     # style changes again (the key, and so the widget, changes with it).
@@ -62,7 +68,8 @@ def render(inputs: Inputs) -> None:
         ["European", "American"],
         default=sidebar_style,
         required=True,
-        key=f"iv_style_{sidebar_style.lower()}",
+        key=current_key("iv_style_", f"iv_style_{sidebar_style.lower()}"),
+        persist_state="session",
         help="Follows the sidebar's pricing model unless you choose here. European quotes are inverted with "
         f"Black-Scholes-Merton; American quotes (listed single-stock options) on a {tree_name}"
         + (" (the sidebar's tree)." if model.kind == "binomial" else "."),
@@ -83,9 +90,15 @@ def render(inputs: Inputs) -> None:
     # The quote belongs to the contract: its widget key holds the contract (not the volatility or the exercise
     # style), so the typed quote survives those changes and the reset button starts a fresh widget.
     generation = st.session_state.get("iv_quote_generation", 0)
-    quote_key = f"iv_quote|{S!r}|{K!r}|{inputs.days}|{r!r}|{q!r}|{option_type}|{generation}"
+    quote_key = current_key("iv_quote|", f"iv_quote|{S!r}|{K!r}|{inputs.days}|{r!r}|{q!r}|{option_type}|{generation}")
     price = c3.number_input(
-        "Market price", min_value=0.0, value=float(model_value), step=0.05, format="%.4f", key=quote_key
+        "Market price",
+        min_value=0.0,
+        value=float(model_value),
+        step=0.05,
+        format="%.4f",
+        key=quote_key,
+        persist_state="session",
     )
     c3.button(
         "Reset to model value",

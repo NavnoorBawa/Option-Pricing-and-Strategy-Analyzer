@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
@@ -240,12 +241,13 @@ WHITE_ON_PRIMARY = {"multiselect": "stMultiSelect", "number_input": "stNumberInp
 
 def test_text_on_the_primary_colour_is_legible():
     # Streamlit also writes white on the primary colour in multiselect chips and in a number input's step buttons
-    # while they are hovered: the dark Volatility Surface tab showed its maturities ('29d', '1.07y') at 2.16:1.
+    # while they are hovered: the dark Surface tab showed its maturities ('29d', '1.07y') at 2.16:1.
     for kind in theme.MODES:
         assert contrast(theme.ON_PRIMARY[kind], _mode(kind)["primaryColor"]) >= 4.5, kind
     assert theme.ON_PRIMARY["dark"] == _mode("dark")["backgroundColor"]
     assert theme.ON_PRIMARY["light"] == "#FFFFFF"  # Streamlit's own colour, kept where it is legible
-    rule = re.fullmatch(r"(.+) \{ color: light-dark\((#[0-9A-F]{6}), (#[0-9A-F]{6})\); \}", theme.STYLESHEET)
+    rule = re.fullmatch(r"(.+) \{ color: light-dark\((#[0-9A-F]{6}), (#[0-9A-F]{6})\); \}", theme.ON_PRIMARY_RULE)
+    assert theme.ON_PRIMARY_RULE in theme.STYLESHEET
     assert rule and rule[1] == ", ".join(theme.ON_PRIMARY_SELECTORS)
     assert (rule[2], rule[3]) == (theme.ON_PRIMARY["light"], theme.ON_PRIMARY["dark"])
     # Every widget the app uses that Streamlit fills with the primary colour and writes white on is covered.
@@ -425,7 +427,7 @@ def test_both_static_folders_are_identical():
         assert (STATIC_FOLDERS[0] / path).read_bytes() == (STATIC_FOLDERS[1] / path).read_bytes(), path
 
 
-#: Labels of the headline cards (Pricing and Implied Volatility tabs), whose widths ui/components.py estimates. (The
+#: Labels of the headline cards (Pricing and IV tabs), whose widths ui/components.py estimates. (The
 #: other card rows are checked as whole rows in tests/test_app_components.py.)
 CARD_LABELS = (
     "Call value", "Put value", "Forward price", "Call ITM probability", "Exercise premium", "Tree error vs BSM",
@@ -571,13 +573,24 @@ def app_url(chromium):
             server.wait()
 
 
+#: Streamlit marks its app view with data-test-script-state ("running" while a script run is under way).
+_RUNNING = "document.querySelector('[data-test-script-state]')?.getAttribute('data-test-script-state') === 'running'"
+#: An element of each tab that only the tab's own run draws (the browser holds the open tab's panel only, and the
+#: app leaves the closed tabs empty but for the Strategy tab's controls): once it is on the page, a click on the tab
+#: has run it. (The script-state mark does not do: a fast run can come and go between two frames.)
+TAB_READY = {
+    "Pricing": ".st-key-sensitivity_chart",
+    "Strategy": ".st-key-strategy_cards",
+    "Risk": ".st-key-var_cards",
+    "Surface": ".st-key-surface_cards",
+    "IV": ".st-key-iv_cards",
+    "Methodology": "[data-testid=stMarkdown]",
+}
+
+
 def _settle(page) -> None:
     """Wait until the script run is over, the fonts have loaded and the charts have drawn."""
-    page.wait_for_function(
-        "() => !(document.querySelector('[data-testid=stStatusWidget]')?.innerText ?? '').toLowerCase()"
-        ".includes('running')",
-        timeout=120_000,
-    )
+    page.wait_for_function(f"() => !({_RUNNING})", timeout=120_000)
     page.evaluate("document.fonts.ready.then(() => true)")
     page.wait_for_timeout(1000)
 
@@ -591,7 +604,9 @@ def _open(chromium, url: str, scheme: str, width: int):
 
 
 def _tab(page, name: str) -> None:
-    page.locator("[role=tab]").filter(has_text=name).click()
+    """Open a tab by clicking it, and wait until the run that this starts (only the open tab runs) has drawn it."""
+    page.get_by_role("tab", name=name, exact=True).click()
+    page.locator(f"[role=tabpanel] {TAB_READY[name]}").first.wait_for(state="visible", timeout=120_000)
     _settle(page)
 
 
@@ -617,13 +632,13 @@ _CARD_VALUES = """() => {
 
 #: The tab of every card row (the price cards sit above the tabs).
 CARD_ROW_TABS = {
-    "price_cards": "Pricing & Greeks",
-    "strategy_cards": "Strategy Builder",
-    "greek_cards": "Strategy Builder",
-    "expectation_cards": "Strategy Builder",
-    "var_cards": "Risk & Scenarios",
-    "surface_cards": "Volatility Surface",
-    "iv_cards": "Implied Volatility",
+    "price_cards": "Pricing",
+    "strategy_cards": "Strategy",
+    "greek_cards": "Strategy",
+    "expectation_cards": "Strategy",
+    "var_cards": "Risk",
+    "surface_cards": "Surface",
+    "iv_cards": "IV",
 }
 
 
@@ -734,6 +749,153 @@ def test_card_rows_line_up(chromium, app_url, width, query, three_up):
         page.close()
 
 
+#: A chart that each tab draws (the key given to charts.show), and the number of charts it draws, at the default URL.
+TAB_CHART = {"Pricing": ("sensitivity_chart", 3), "Strategy": ("payoff_chart", 1), "Risk": ("var_hist", 6),
+             "Surface": ("surf_iv", 4), "IV": ("iv_curve", 1), "Methodology": (None, 0)}  # fmt: skip
+
+
+def _query(page) -> dict[str, list[str]]:
+    return urllib.parse.parse_qs(urllib.parse.urlsplit(page.url).query)
+
+
+@pytest.mark.e2e
+@pytest.mark.slow
+def test_a_click_on_a_tab_runs_that_tab_and_puts_it_in_the_link(chromium, app_url):
+    # Only the open tab runs, so the page holds that tab's charts and no other's; the link names the tab (none for
+    # the first) and keeps the Strategy tab's position while another tab is open: it reopens the same view.
+    from options_analyzer.ui.app import TABS
+
+    page = _open(chromium, app_url, "light", 1440)
+    try:
+        for tab in (*TABS[1:], TABS[0]):
+            _tab(page, tab)
+            key, count = TAB_CHART[tab]
+            assert page.locator("[data-testid=stPlotlyChart]").count() == count, tab
+            if key is not None:  # Plotly draws a chart some time after the run (on a busy machine, seconds)
+                page.locator(f".st-key-{key} [data-testid=stPlotlyChart]").wait_for(state="visible", timeout=60_000)
+            assert _query(page).get("tab") == (None if tab == TABS[0] else [tab])
+            assert not page.locator("[data-testid=stException]").count(), tab
+        _tab(page, "Strategy")
+        contracts = page.locator("[data-testid=stMain] input[aria-label=Contracts]")
+        contracts.fill("3")
+        contracts.press("Enter")
+        _settle(page)
+        _tab(page, "Risk")
+        assert _query(page) == {"contracts": ["3"], "tab": ["Risk"]}
+        analysed = "Long 1 × 100 Call, Short 1 × 110 Call · 3 × 100 multiplier"
+        assert analysed in page.get_by_text("Analysing").inner_text()
+        link = _open(chromium, page.url, "light", 1440)
+        try:
+            link.locator(".st-key-var_hist [data-testid=stPlotlyChart]").wait_for(state="visible", timeout=60_000)
+            assert link.locator("[role=tab][aria-selected=true]").inner_text().strip() == "Risk"
+            assert analysed in link.get_by_text("Analysing").inner_text()
+        finally:
+            link.close()
+    finally:
+        page.close()
+
+
+@pytest.mark.e2e
+@pytest.mark.slow
+def test_a_hand_typed_link_opens_the_tab_and_template_it_names(chromium, app_url):
+    # Streamlit reads a bound parameter verbatim and drops any other value; the app rewrites such a link before any
+    # widget reads it, in one step: the address bar then shows the app's own link, one history entry later.
+    plain = _open(chromium, f"{app_url}/?tab=Risk", "light", 1440)
+    entries = plain.evaluate("history.length")
+    plain.close()
+    page = _open(chromium, f"{app_url}/?tab=risk&strategy=Iron+Condor", "light", 1440)
+    try:
+        page.locator(".st-key-var_hist [data-testid=stPlotlyChart]").wait_for(state="visible", timeout=120_000)
+        assert page.locator("[role=tab][aria-selected=true]").inner_text().strip() == "Risk"
+        condor = "Iron Condor — Long 1 × 80 Put, Short 1 × 90 Put, Short 1 × 110 Call, Long 1 × 120 Call"
+        assert condor in page.get_by_text("Analysing").inner_text()
+        assert _query(page) == {"tab": ["Risk"], "strategy_category": ["Range-bound"],
+                                "strategy_Range-bound": ["Iron Condor"]}  # fmt: skip
+        assert page.evaluate("history.length") == entries + 1
+        assert not page.locator("[data-testid=stAlertContentWarning]").count()
+    finally:
+        page.close()
+    page = _open(chromium, f"{app_url}/?tab=Risk&tab=IV&strategy=Iron+Condr", "light", 1440)
+    try:
+        assert page.locator("[role=tab][aria-selected=true]").inner_text().strip() == "IV"
+        assert _query(page) == {"tab": ["IV"]}
+        note = page.locator("[data-testid=stAlertContentWarning]")
+        assert "a strategy named Iron Condr, which is not one of the templates" in note.inner_text()
+        assert note.locator("code").inner_text() == "Iron Condr" and not note.locator("a").count()
+    finally:
+        page.close()
+
+
+def _net_premium(page) -> str:
+    card = page.locator("[data-testid=stMetric]").filter(has_text="Net premium")
+    return card.locator("[data-testid=stMetricValue]").inner_text()
+
+
+@pytest.mark.e2e
+@pytest.mark.slow
+@pytest.mark.parametrize("tab", ["Pricing", "Risk"])
+def test_a_leg_edit_is_kept_when_another_tab_is_clicked_before_enter(chromium, app_url, tab):
+    # The legs editor commits a cell when it loses the focus: a value typed into a cell and left by clicking another
+    # tab arrives with the run that opens that tab, where the editor is not drawn. Clicking Pricing lost it.
+    page = _open(chromium, f"{app_url}/?tab=Strategy", "light", 1440)
+    try:
+        assert _net_premium(page) == "$441.05"  # long the 100 call, short the 110 call, for 100 shares
+        grid = page.locator("[data-testid=stMain] [data-testid=stDataFrame]").first
+        box = grid.bounding_box()
+        # The grid draws on a canvas: click the first row's Type cell (the header and each row are 35 px high),
+        # step to Quantity and type into it, which opens the cell's editor (an input over the grid) a moment later.
+        page.mouse.click(box["x"] + 40, box["y"] + 35 + 17)
+        page.keyboard.press("ArrowRight")
+        page.keyboard.type("3")
+        page.wait_for_function(
+            "() => document.activeElement?.matches('input.gdg-input') && document.activeElement.value === '3'"
+        )
+        _tab(page, tab)
+        if tab == "Risk":
+            assert "Long 3 × 100 Call, Short 1 × 110 Call" in page.get_by_text("Analysing").inner_text()
+        _tab(page, "Strategy")
+        assert _net_premium(page) == "$2,531"  # 3 x $10.4506 - $6.0401, for 100 shares
+    finally:
+        page.close()
+
+
+#: Font of the kept quotes file's name (a code span) and of the words of its caption, in the row under the uploader.
+_KEPT_FILE = """() => {
+  const row = document.querySelector('.st-key-quotes_kept');
+  const code = getComputedStyle(row.querySelector('code')), words = getComputedStyle(row.querySelector('p'));
+  return {name: row.querySelector('code').innerText, size: parseFloat(code.fontSize), family: code.fontFamily,
+          wordSize: parseFloat(words.fontSize)};
+}"""
+
+
+@pytest.mark.e2e
+@pytest.mark.slow
+@pytest.mark.parametrize("scheme", ["dark", "light"])
+def test_the_kept_quotes_file_is_named_at_the_size_of_its_caption(chromium, app_url, tmp_path, scheme):
+    # Streamlit draws inline code at 0.75 em: in the caption that names the kept file, the name was 9.2 px.
+    from options_analyzer import vol_surface
+
+    quotes = tmp_path / "quotes.csv"
+    quotes.write_text(vol_surface.sample_quotes().to_csv(index=False), encoding="utf-8")
+    page = _open(chromium, f"{app_url}/?tab=Surface", scheme, 1440)
+    try:
+        page.get_by_text("Market quotes (CSV)", exact=True).click()
+        _settle(page)
+        page.locator("[data-testid=stFileUploader] input[type=file]").set_input_files(quotes)
+        fitted = page.locator("[data-testid=stMetric]").filter(has_text="Calendar arbitrage")  # a card of the fit
+        fitted.wait_for(state="visible", timeout=120_000)
+        _settle(page)
+        _tab(page, "IV")
+        _tab(page, "Surface")
+        page.locator(".st-key-quotes_kept code").wait_for(state="visible", timeout=60_000)
+        kept = page.evaluate(_KEPT_FILE)
+        assert kept["name"] == "quotes.csv"
+        assert kept["wordSize"] == pytest.approx(12.25, abs=0.01)  # a caption: 0.875 of the 14 px base size
+        assert kept["size"] == kept["wordSize"] and kept["family"].startswith('"IBM Plex Mono"'), kept
+    finally:
+        page.close()
+
+
 #: Colour and background of every visible multiselect chip.
 _CHIPS = """() => [...document.querySelectorAll('[data-testid=stMultiSelect] [data-tag]')]
   .filter(e => e.getBoundingClientRect().width > 0)
@@ -745,14 +907,14 @@ _CHIPS = """() => [...document.querySelectorAll('[data-testid=stMultiSelect] [da
 def test_text_on_the_primary_colour_is_legible_in_the_app(chromium, app_url, scheme):
     page = _open(chromium, app_url, scheme, 1440)
     try:
-        _tab(page, "Volatility Surface")
+        _tab(page, "Surface")
         chips = page.evaluate(_CHIPS)
         assert chips  # the maturities of the smile chart
         primary = _mode(scheme)["primaryColor"]
         for text, color, background in chips:
             assert _hex(background) == primary, text
             assert contrast(_hex(color), _hex(background)) >= 4.5, (text, color, background)
-        _tab(page, "Implied Volatility")
+        _tab(page, "IV")
         step = page.locator("[data-testid=stMain] [data-testid=stNumberInputStepUp]:visible").first
         step.hover()
         page.wait_for_timeout(400)

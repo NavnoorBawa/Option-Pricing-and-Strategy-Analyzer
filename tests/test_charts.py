@@ -94,7 +94,7 @@ def test_style_sets_grid_and_axis_colours_explicitly(palette):
 
 @pytest.mark.parametrize("palette", [DARK, LIGHT], ids=["dark", "light"])
 def test_every_builder_writes_its_axis_text_in_the_muted_colour(palette):
-    # Also labels without a colour of their own (the Implied Volatility tab's "market price" and "lower bound" were
+    # Also labels without a colour of their own (the IV tab's "market price" and "lower bound" were
     # 3.62:1 in light mode) and the 3-D surface's axes and colour bar.
     for name, fig in _builders(palette).items():
         assert fig.layout.font.color == palette["muted"], name
