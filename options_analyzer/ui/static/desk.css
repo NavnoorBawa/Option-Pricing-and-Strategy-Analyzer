@@ -1,0 +1,180 @@
+/* The desk stylesheet: all of the app's own CSS but the sizes that depend on the text on screen, which the code
+   that draws it adds on every run: the width of the header's two-line ticker (ui/header.py: two custom properties,
+   the width and, from that width of the strip on, the hanging indent) and the per-row sizes of the card rows
+   (ui/components.py). ui/theme.py apply_stylesheet() adds it to the page once per script run, with st.html.
+
+   Selectors use stable hooks only: the class that Streamlit gives an element with a key (.st-key-KEY) and the
+   data-testid values listed in tests/test_theme.py, which checks every selector here against that list.
+   No angle bracket opening a tag may appear in this file, not even in a comment: the browser's HTML sanitiser
+   would then drop the whole stylesheet. */
+
+/* --- Page ---------------------------------------------------------------------------------------------------- */
+
+/* Start the content just under Streamlit's toolbar band (3.75rem) instead of 6rem down. */
+[data-testid='stMainBlockContainer'] {
+  padding-top: 4rem;
+}
+
+/* Half of Streamlit's 1rem between the page's own rows (header strip, price cards, their caption, the tabs), and
+   between the tab bar and the open tab's content. The tabs' content keeps its own spacing. */
+[data-testid='stMainBlockContainer'] > [data-testid='stVerticalBlock'] {
+  gap: 0.5rem;
+}
+
+[data-testid='stTabPanel'] {
+  padding-top: 0.5rem;
+}
+
+/* --- Header strip (ui/header.py) ----------------------------------------------------------------------------- */
+
+/* Two items: the identity block (brand and ticker in one paragraph) and the action group. Streamlit wraps each in
+   a layout box, which is the flex item. The identity block takes the room the actions leave, but never less than
+   --desk-identity-min, the width in which the ticker's lines, one under the other beside the brand, are two at
+   most (ui/header.py sets it on every run, from the ticker's text). Below that, the action group moves under the
+   ticker as a whole, on the right, and the identity block takes the full width. So the ticker never needs more
+   than two lines beside the actions, and while the ticker is at its full size (a strip of 406px and more) the
+   strip never gets taller as it widens. */
+.st-key-desk_header {
+  container: desk-header / inline-size;
+  row-gap: 0.25rem;
+}
+
+.st-key-desk_header > :has(> .st-key-desk_identity) {
+  flex: 1 1 0 !important;
+  min-width: min(100%, var(--desk-identity-min, 30rem));
+}
+
+.st-key-desk_header > :has(> .st-key-desk_actions) {
+  flex: 0 1 auto !important;
+  max-width: 100%;
+  margin-left: auto;
+}
+
+.st-key-desk_actions {
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+/* Plex Mono has no Greek: σ comes from Plex Sans. The size follows the strip's width down to 0.72rem (the card
+   labels' size), so that a 390px phone needs two lines for the brand and the ticker; ui/header.py models the
+   width at the full 0.8125rem. Balanced lines: no item is left alone on a last line.
+   A hanging indent of the brand's box and the space after it starts the ticker's second line under its first
+   item, S. ui/header.py sets --desk-hang to 1 where the strip is wide enough for the ticker's two lines beside
+   the brand (--desk-identity-min); on a narrower strip (a phone) the column beside the brand would need three
+   lines, so the second line starts under the brand. */
+.st-key-desk_identity p {
+  line-height: 1.4;
+  padding-left: calc(var(--desk-hang, 0) * (9.35rem + 0.6em));
+  text-indent: calc(var(--desk-hang, 0) * (-9.35rem - 0.6em));
+  font-family: 'IBM Plex Mono', 'IBM Plex Sans', monospace;
+  font-size: clamp(0.72rem, 2.8cqi, 0.8125rem);
+  font-variant-numeric: tabular-nums slashed-zero;
+  text-wrap: balance;
+}
+
+/* The brand, in small capitals (Plex has no small-caps glyphs: capitals at a small size, spaced out), in a box of
+   fixed width: its glyphs (8.6rem) and a 0.75rem gap, so that the hanging indent above matches it whether or not
+   the font has loaded. ui/header.py counts its width from these values. (An inline block inherits the
+   paragraph's text-indent for its own text, hence the reset.) */
+.st-key-desk_identity strong {
+  display: inline-block;
+  width: 9.35rem;
+  text-indent: 0;
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* Compact buttons, a little shorter than the default 2.5rem. */
+.st-key-desk_actions button {
+  min-height: 2rem;
+  padding: 0 0.625rem;
+}
+
+/* On a phone (a strip under 30rem: the longest badge, "CRR tree · 2,000 steps · European", and the two labelled
+   buttons take 405px) the Share and Methodology buttons show their icons only, so that the group stays on one line
+   down to a 360px screen. The labels stay in the page, out of sight, as the buttons' accessible names. */
+@container desk-header (width < 30rem) {
+  .st-key-desk_actions button {
+    padding: 0 0.5rem;
+  }
+
+  .st-key-desk_actions button [data-testid='stMarkdownContainer'] {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+
+/* --- Metric cards ------------------------------------------------------------------------------------------- */
+
+/* Dense cards: 0.625rem above and below the text instead of 13px. The sides keep Streamlit's padding, which the
+   card width model in ui/components.py counts. */
+[data-testid='stMetric'] > div {
+  padding-block: 0.625rem;
+}
+
+/* Every card as tall as its line (the card rows stretch their cards to the line). */
+[data-testid='stMetric'] {
+  height: 100%;
+}
+
+/* Labels in small capitals: 0.72rem capitals, spaced out (ui/components.py models their width from these
+   values). A label is a line of text at the size of its words, as tall as its lines (not Streamlit's 1.5rem row),
+   with its parts inline, so that the help icon follows the last word, centred on the middle of the capitals, also
+   where the label wraps: Streamlit's grid set the icon at the card's right edge then, 46 to 54px from the text of
+   "Call ITM probability" on a 360 to 375px phone. The label's own nowrap keeps the icon on the line of the last
+   word; the words themselves wrap where the card rows of ui/components.py let them. */
+[data-testid='stMetricLabel'] {
+  display: block;
+  min-height: 0;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+[data-testid='stMetricLabel'] > *,
+[data-testid='stMetricLabel'] [data-testid='stMarkdownContainer'] {
+  display: inline;
+  font-size: inherit;
+}
+
+[data-testid='stMetricLabel'] [data-testid='stTooltipIcon'] {
+  display: inline-flex;
+  vertical-align: middle;
+}
+
+[data-testid='stMetricLabel'] p {
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* Digits are tabular in Plex already; the slashed zero tells 0 from O in figures such as $10.0500. */
+[data-testid='stMetricValue'] {
+  font-variant-numeric: tabular-nums slashed-zero;
+}
+
+/* --- Text on the primary colour (ui/theme.py ON_PRIMARY) ------------------------------------------------------ */
+
+/* Streamlit writes white on the primary colour in the chips of a multiselect and the step buttons of a number input
+   while hovered or focused: 2.16:1 on the dark theme's amber. light-dark() follows the color-scheme that Streamlit
+   sets for the theme it draws, so the rule switches with the theme at once. */
+[data-testid='stMultiSelect'] [data-tag],
+[data-testid='stNumberInput'] :is([data-testid='stNumberInputStepUp'], [data-testid='stNumberInputStepDown']):is(:hover, :focus):enabled {
+  color: light-dark(#FFFFFF, #0B0F16);
+}
+
+/* --- Surface tab --------------------------------------------------------------------------------------------- */
+
+/* The name of the kept quotes file is a code span in a caption, which Streamlit draws at 0.75em (9.2 px against
+   the caption's 12.25 px): the one piece of the user's data in the row was the hardest to read. */
+.st-key-quotes_kept code {
+  font-size: inherit;
+}

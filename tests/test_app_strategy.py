@@ -1033,7 +1033,7 @@ def test_american_note_measures_early_exercise_on_one_tree(method, steps, days):
     assert "early exercise adds \\$0.0000 per share on this tree" in note
     american, european = _dollars(note, " American"), _dollars(note, " European")
     assert american == european == float(_metric(at, "Call value").value.lstrip("$"))
-    assert any("early-exercise premium: call \\$0.0000," in c.value for c in at.caption)  # the Pricing caption
+    assert any("Early-exercise premium: call \\$0.0000," in c.value for c in at.caption)  # the Pricing caption
     bsm = bs.price(100, 100, days / 365, 0.05, 0.2, 0.0, "call")
     assert f"The strategy values it at \\${bsm:.4f}" in note  # the leg's Black-Scholes-Merton value
 

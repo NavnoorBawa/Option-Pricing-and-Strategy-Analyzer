@@ -173,7 +173,9 @@ def test_price_cards_wrap_in_pairs_of_equal_width(app):
     cards_rule = f".st-key-price_cards_prices > *, .st-key-price_cards_model > * {{ flex: 1 1 {card}px !important; }}"
     assert cards_rule in style
     assert f"{{ flex: 1 1 {2 * card + 14}px !important; }}" in style  # each pair: two cards and the gap
-    assert card == 174  # the ITM card's label is the widest
+    # The ITM card's label, in small capitals, is the widest: 170 px (a golden value, which a change of the width
+    # model must update on purpose).
+    assert card == int(np.ceil(components._card_width("Call ITM probability", "55.96%"))) == 170
 
 
 @pytest.mark.parametrize(
@@ -191,7 +193,9 @@ def test_price_cards_stay_two_by_two_on_a_phone(app, values, phone):
     # values also never grow beyond their desktop size of 22.75 px: at 36 px on a phone they were cut to '$10.45…'.
     style = _price_card_style(app)
     assert ".st-key-price_cards { container: price-cards / inline-size; }" in style
-    assert "@container price-cards (width < 362px) {" in style
+    # Compact below one full-size pair: two of the widest card (the ITM card's label) and the gap, 354 px (golden).
+    pair = 2 * int(np.ceil(components._card_width("Call ITM probability", "55.96%"))) + 14
+    assert pair == 354 and "@container price-cards (width < 354px) {" in style
     assert "white-space: normal;" in style
     # 5.19 em: "$105.1271" and a tenth of an em to spare
     assert "font-size: clamp(16px, calc((50cqw - 35px) / 5.19), 22.75px);" in style

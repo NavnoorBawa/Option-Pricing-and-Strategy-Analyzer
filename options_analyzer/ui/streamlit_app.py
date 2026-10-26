@@ -6,13 +6,11 @@ script it runs, so both ship beside this file as package data. Streamlit execute
 so this file uses absolute imports only.
 """
 
-from options_analyzer.ui import theme
 from options_analyzer.ui.app import run
 
 
 def main() -> None:
-    """One script run: the desk stylesheet, then the app."""
-    theme.apply_stylesheet()
+    """One script run of the app (:func:`options_analyzer.ui.app.run`)."""
     run()
 
 

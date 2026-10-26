@@ -9,6 +9,8 @@ Colour never carries meaning alone: profit and loss also have a sign, and every 
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import streamlit as st
 
 #: The two colour modes. The configured ``theme.base`` is dark, so dark is the fallback.
@@ -73,7 +75,7 @@ FILL_OPACITY = 0.18
 
 #: Text and icons on a fill of the primary colour, in each mode. Streamlit draws them in white, which is 5.13:1 on
 #: the light theme's dark amber but only 2.16:1 on the dark theme's amber, so dark mode takes its background colour
-#: instead (8.90:1).
+#: instead (8.90:1). The rule is in the desk stylesheet (:data:`STYLESHEET`).
 ON_PRIMARY = {"dark": SEMANTIC["dark"]["surface"], "light": "#FFFFFF"}
 
 #: Where Streamlit (1.65 and 1.66) writes white on the primary colour in the widgets the app uses: the chips of a
@@ -85,19 +87,10 @@ ON_PRIMARY_SELECTORS = (
     ":is(:hover, :focus):enabled",
 )
 
-#: Text on the primary colour. ``light-dark()`` follows the ``color-scheme`` that Streamlit sets on the app for the
-#: theme it draws, so the rule switches with the theme at once, without waiting for a rerun.
-ON_PRIMARY_RULE = (
-    f"{', '.join(ON_PRIMARY_SELECTORS)} {{ color: light-dark({ON_PRIMARY['light']}, {ON_PRIMARY['dark']}); }}"
-)
-
-#: The name of the quotes file that the Surface tab keeps (its row has the key ``quotes_kept``) is a code span in a
-#: caption, so that Markdown shows it as typed. Streamlit draws inline code at 0.75 em, which in a caption is 9.2 px
-#: against the 12.25 px of the words around it: the one piece of the user's data in the row was the hardest to read.
-KEPT_FILE_RULE = ".st-key-quotes_kept code { font-size: inherit; }"
-
-#: The desk stylesheet (see :func:`apply_stylesheet`).
-STYLESHEET = f"{ON_PRIMARY_RULE} {KEPT_FILE_RULE}"
+#: The desk stylesheet, all of the app's own CSS but the sizes that depend on the text on screen: the header's
+#: two-line width (ui/header.py) and the per-row sizes of the card rows (ui/components.py). See
+#: :func:`apply_stylesheet`.
+STYLESHEET = Path(__file__).with_name("static") / "desk.css"
 
 
 def mode() -> str:
@@ -132,6 +125,9 @@ def categorical(colors: dict[str, str] | None = None) -> tuple[str, ...]:
 
 
 def apply_stylesheet() -> None:
-    """Add :data:`STYLESHEET` to the page. Call it on every run; Streamlit sends HTML that holds only a stylesheet
-    to the page without giving it any room in the layout."""
-    st.html(f"<style>{STYLESHEET}</style>")
+    """Add the desk stylesheet (:data:`STYLESHEET`) to the page, once per script run.
+
+    Streamlit wraps a ``.css`` file in a ``<style>`` element and sends HTML that holds only a stylesheet to the page
+    without giving it any room in the layout.
+    """
+    st.html(STYLESHEET)
