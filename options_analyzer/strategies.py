@@ -30,6 +30,7 @@ import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import pairwise
+from typing import Any
 
 import numpy as np
 from scipy.optimize import brentq
@@ -64,10 +65,13 @@ __all__ = [
 LEG_KINDS = ("call", "put", "stock")
 
 
-def _require_finite(owner: str, **values: float | None) -> None:
-    """Raise ``ValueError`` naming the first field that is NaN, infinite or not a number (``None`` is allowed)."""
+def _require_finite(owner: str, *, optional: tuple[str, ...] = (), **values: Any) -> None:
+    """Raise ``ValueError`` naming the first field that is NaN, infinite or not a number.
+
+    The fields named in ``optional`` may also be ``None`` (meaning "use the market default").
+    """
     for name, value in values.items():
-        if value is None:
+        if value is None and name in optional:
             continue
         try:
             finite = math.isfinite(value)
@@ -132,6 +136,7 @@ class Leg:
         object.__setattr__(self, "kind", kind)
         _require_finite(
             "leg",
+            optional=("expiry", "volatility", "premium"),
             quantity=self.quantity,
             strike=self.strike,
             expiry=self.expiry,
@@ -320,7 +325,7 @@ def pnl(strategy: Strategy, market: Market, spot=None, t=0.0, carry: bool = Fals
     at the market volatility and there are no fees; any premium override, leg
     IV different from the market volatility or fee shows up as the edge.
     """
-    cost = entry_cost(strategy, market)
+    cost: float | np.ndarray = entry_cost(strategy, market)
     if carry:
         cost = cost * np.exp(market.rate * np.asarray(t, dtype=float))
     return position_value(strategy, market, spot, t, **shocks) - cost
@@ -821,7 +826,8 @@ def analyze(strategy: Strategy, market: Market, drift: float | None = None, carr
 
     i_max, i_min = int(np.argmax(values)), int(np.argmin(values))
     max_profit, max_loss = float(values[i_max]), float(-values[i_min])
-    max_profit_spot, max_loss_spot = float(grid[i_max]), float(grid[i_min])
+    max_profit_spot: float | None = float(grid[i_max])
+    max_loss_spot: float | None = float(grid[i_min])
     if slope > slope_tol:
         max_profit, max_profit_spot = np.inf, None
     elif slope < -slope_tol:

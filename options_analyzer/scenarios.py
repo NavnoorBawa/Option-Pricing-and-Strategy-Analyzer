@@ -277,9 +277,9 @@ def pnl_grid(
         values = position_value(strategy, market, spots, t, **_vol_shock(shocks, vol_mode, vol_tenor_decay))
         shape = (shocks.shape[0], spots.shape[1])
     else:
-        t = np.atleast_1d(np.asarray(days, dtype=float))[:, None] / DAYS_PER_YEAR
-        values = position_value(strategy, market, spots, t)
-        shape = (t.shape[0], spots.shape[1])
+        times = np.atleast_1d(np.asarray(days, dtype=float))[:, None] / DAYS_PER_YEAR
+        values = position_value(strategy, market, spots, times)
+        shape = (times.shape[0], spots.shape[1])
     # Shares do not depend on implied vol: a stock-only position still fills every row of the grid.
     return multiplier * (np.broadcast_to(np.asarray(values, dtype=float), shape) - base)
 
