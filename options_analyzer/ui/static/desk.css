@@ -94,6 +94,18 @@
   padding: 0 0.625rem;
 }
 
+/* The Methodology button's shortcut (Alt+Shift+M) is named in its tooltip: Streamlit's hint inside the button made
+   it 86px wider, which took the ticker to two lines at 1440px. The hint stays in the page, out of sight, for
+   screen readers. */
+.st-key-desk_actions button kbd {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 /* On a phone (a strip under 30rem: the longest badge, "CRR tree · 2,000 steps · European", and the two labelled
    buttons take 405px) the Share and Methodology buttons show their icons only, so that the group stays on one line
    down to a 360px screen. The labels stay in the page, out of sight, as the buttons' accessible names. */
@@ -177,4 +189,50 @@
    the caption's 12.25 px): the one piece of the user's data in the row was the hardest to read. */
 .st-key-quotes_kept code {
   font-size: inherit;
+}
+
+/* --- Methodology (ui/tab_methodology.py) --------------------------------------------------------------------- */
+
+/* Subsection headings at the size of the text, in the drawer as in the tab: Streamlit draws the headings of a
+   dialog at three quarters of their size (10.5px against the text's 14px). */
+.st-key-methodology_drawer h3 {
+  font-size: 1rem;
+}
+
+/* The anchors that the tab's contents link to stop under Streamlit's toolbar band (3.75rem), not behind it. */
+.st-key-methodology [id] {
+  scroll-margin-top: 4rem;
+}
+
+/* A display formula wider than its column (the local-variance formula on a phone) scrolls on its own, so that the
+   page never scrolls sideways. */
+:is(.st-key-methodology, .st-key-methodology_drawer) .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* A link never breaks across lines: a reference's DOI, arXiv ID or host reads whole, and copies whole. */
+:is(.st-key-methodology, .st-key-methodology_drawer) a {
+  white-space: nowrap;
+}
+
+/* Printing the Methodology tab (the UI spec's print surface, 3.6) prints every section, open, on as many pages as it
+   takes: the boxes that hold the page at the window's height (stApp, stAppViewContainer, the box around stMain and
+   stMain, which scrolls) grow to their content, the closed sections show their text (in Chromium 131, Safari 18.4
+   and Firefox 143 on: the browsers that let a page style a closed section's content), and the sidebar is left out.
+   Only while the Methodology tab is open: printing the other tabs is unchanged. */
+@media print {
+  :is([data-testid='stApp'], [data-testid='stAppViewContainer'], :has(> [data-testid='stMain']), [data-testid='stMain']):has(.st-key-methodology) {
+    position: static;
+    height: auto;
+    overflow: visible;
+  }
+
+  [data-testid='stApp']:has(.st-key-methodology) [data-testid='stSidebar'] {
+    display: none;
+  }
+
+  .st-key-methodology details::details-content {
+    content-visibility: visible;
+  }
 }

@@ -22,7 +22,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from options_analyzer.ui import charts, theme
+from options_analyzer.ui import charts, tab_methodology, theme
 
 try:
     import tomllib
@@ -268,19 +268,22 @@ def test_apply_stylesheet_sends_the_desk_stylesheet(monkeypatch):
 
 # --- The desk stylesheet (ui/static/desk.css) ----------------------------------------------------------------------
 
-#: The data-testid values the desk stylesheet may select: Streamlit's test ids of the page container and its main
-#: block, and of the elements the stylesheet styles. (No "section[data-testid=...]" or emotion class: those change
-#: between Streamlit releases.)
+#: The data-testid values the desk stylesheet may select: Streamlit's test ids of the page's boxes (which the print
+#: rules let grow) and its main block, and of the elements the stylesheet styles. (No "section[data-testid=...]" or
+#: emotion class: those change between Streamlit releases.)
 DESK_TESTIDS = {
-    "stMainBlockContainer", "stVerticalBlock", "stTabPanel", "stMetric", "stMetricLabel", "stMetricValue",
-    "stMarkdownContainer", "stTooltipIcon", "stMultiSelect", "stNumberInput", "stNumberInputStepUp",
-    "stNumberInputStepDown",
+    "stApp", "stAppViewContainer", "stMain", "stSidebar", "stMainBlockContainer", "stVerticalBlock", "stTabPanel",
+    "stMetric", "stMetricLabel", "stMetricValue", "stMarkdownContainer", "stTooltipIcon", "stMultiSelect",
+    "stNumberInput", "stNumberInputStepUp", "stNumberInputStepDown",
 }  # fmt: skip
-#: Attributes other than data-testid: a multiselect's chips have no test id of their own.
-DESK_ATTRIBUTES = {"data-tag"}
-#: HTML elements and pseudo-classes a selector may name after its hook.
-DESK_ELEMENTS = {"p", "strong", "code", "button", "div"}
-DESK_PSEUDO_CLASSES = {"is", "has", "hover", "focus", "enabled"}
+#: Attributes other than data-testid: a multiselect's chips have no test id of their own, and the Methodology's
+#: anchors are elements with an id.
+DESK_ATTRIBUTES = {"data-tag", "id"}
+#: Classes other than .st-key-KEY: KaTeX's box of a display formula (KaTeX's documented class, not Streamlit's).
+DESK_CLASSES = {"katex-display"}
+#: HTML elements, pseudo-classes and pseudo-elements a selector may name after its hook.
+DESK_ELEMENTS = {"p", "strong", "code", "button", "div", "h3", "kbd", "a", "details"}
+DESK_PSEUDO_CLASSES = {"is", "has", "hover", "focus", "enabled", "details-content"}
 
 
 def _css_rules(css: str) -> list[tuple[str, str]]:
@@ -326,7 +329,7 @@ def test_the_desk_stylesheet_selects_only_stable_hooks():
     for selector in selectors:
         classes = re.findall(r"\.([\w-]+)", selector)
         attributes = [a.split("=") for a in re.findall(r"\[([^\]]+)\]", selector)]
-        assert all(c.startswith("st-key-") for c in classes), selector
+        assert all(c.startswith("st-key-") or c in DESK_CLASSES for c in classes), selector
         for name, *value in attributes:
             if name == "data-testid":
                 assert value and value[0].strip("'\"") in DESK_TESTIDS, selector
@@ -730,8 +733,17 @@ TAB_READY = {
     "Risk": ".st-key-var_cards",
     "Surface": ".st-key-surface_cards",
     "IV": ".st-key-iv_cards",
-    "Methodology": "[data-testid=stMarkdown]",
+    "Methodology": ".st-key-methodology",
 }
+
+
+#: Counts the script runs that start from now on in window.__runs.
+_COUNT_RUNS = """() => {
+  window.__runs = 0;
+  const app = document.querySelector('[data-test-script-state]');
+  new MutationObserver(() => { if (app.getAttribute('data-test-script-state') === 'running') window.__runs++; })
+    .observe(app, {attributes: true, attributeFilter: ['data-test-script-state']});
+}"""
 
 
 def _settle(page) -> None:
@@ -1284,7 +1296,7 @@ def test_the_header_wraps_cleanly_on_a_laptop(chromium, app_url, inputs):
 
 @pytest.mark.e2e
 @pytest.mark.slow
-def test_the_share_link_reopens_this_view_and_the_methodology_button_opens_its_tab(chromium, app_url):
+def test_the_share_link_reopens_this_view(chromium, app_url):
     page = _open(chromium, f"{app_url}/?tab=Risk", "dark", 1440)
     try:
         page.locator("[data-testid=stSidebar] [data-testid=stNumberInputStepUp]").first.click()
@@ -1302,10 +1314,207 @@ def test_the_share_link_reopens_this_view_and_the_methodology_button_opens_its_t
             assert "S 101.00 · K 100.00 · " in ticker.replace("\xa0", " ")
         finally:
             other.close()
+    finally:
+        page.close()
+
+
+def _formulas(markdown: str) -> tuple[int, int]:
+    """The display and the inline formulas of a Markdown text: its pairs of $$ and of $ (but no literal \\$)."""
+    text = markdown.replace(r"\$", "")
+    return text.count("$$") // 2, text.replace("$$", "").count("$") // 2
+
+
+#: The display formulas of the Methodology, and its inline ones, which KaTeX must all render.
+DISPLAY, INLINE = (sum(n) for n in zip(*(_formulas(s.body) for s in tab_methodology.sections()), strict=True))
+#: The Methodology in the tab (ROOT .st-key-methodology) or the drawer: its height, the maths that KaTeX rendered and
+#: any $$ left as text, the ids on the page that are not unique, its sections, and what may be too wide: a display
+#: formula wider than its column, an inline formula that KaTeX could break inside (more than one .base box) or that
+#: runs past its line, a link on two lines or past its line, and a page that scrolls sideways.
+_METHODOLOGY = """(root) => {
+  const main = document.querySelector('[data-testid=stMain]');
+  const r = document.querySelector(root);
+  const ids = [...document.querySelectorAll('[id]')].map(e => e.id);
+  const tex = k => k.querySelector('annotation').textContent;
+  const past = e => e.getBoundingClientRect().right > e.closest('p, li').getBoundingClientRect().right + 0.5;
+  const inline = [...r.querySelectorAll('.katex')].filter(k => !k.closest('.katex-display'));
+  return {
+    height: Math.max(document.documentElement.scrollHeight, main.scrollHeight),
+    katex: r.querySelectorAll('.katex').length, display: r.querySelectorAll('.katex-display').length,
+    errors: document.querySelectorAll('.katex-error').length,
+    raw: (document.body.textContent.match(/\\$\\$/g) || []).length,
+    duplicates: ids.filter((id, i) => ids.indexOf(id) !== i),
+    sections: [...r.querySelectorAll('details')]
+      .map(d => [d.querySelector('summary').innerText.split('\\n').pop().trim(), d.open]),
+    column: Math.round(r.getBoundingClientRect().width),
+    wideDisplay: [...r.querySelectorAll('.katex-display')].filter(d => d.scrollWidth > d.clientWidth).map(tex),
+    breakable: inline.filter(k => k.querySelectorAll(':scope > .katex-html > .base').length > 1).map(tex),
+    pastLine: inline.filter(past).map(tex),
+    links: [...r.querySelectorAll('a')]
+      .filter(a => new Set([...a.getClientRects()].map(x => Math.round(x.top))).size > 1 || past(a))
+      .map(a => a.textContent),
+    sideways: document.documentElement.scrollWidth > innerWidth || main.scrollWidth > main.clientWidth,
+  };
+}"""
+
+
+def _open_all(page, root: str) -> None:
+    """Open every section of the Methodology (ROOT .st-key-methodology or the drawer's), and wait for the animation."""
+    page.evaluate(f"() => document.querySelectorAll('{root} details:not([open]) summary').forEach(s => s.click())")
+    page.wait_for_timeout(1000)
+
+
+@pytest.mark.e2e
+@pytest.mark.slow
+@pytest.mark.parametrize(("width", "height", "limit"), [(1440, 900, 1500), (390, 844, 2500)])
+def test_the_methodology_renders_all_its_maths_and_fits_collapsed(chromium, app_url, width, height, limit):
+    # DK-6 acceptance: no raw '$$' in the page (every formula rendered: KaTeX draws them in the collapsed sections
+    # too, and keeps their TeX without the dollars), and with its sections collapsed the page is at most 1,500 px tall
+    # at 1440 px and 2,500 px at 390 px (the single long page was 4,201 and 8,337 px; this one, 929 and 1,084 px).
+    # The display formulas are display maths (centred, at full size), each inside its column; no inline formula can
+    # break inside, none runs past its line, and no link is cut over two lines.
+    page = chromium.new_page(viewport={"width": width, "height": height})
+    try:
+        page.goto(f"{app_url}/?tab=Methodology")
+        page.locator(f"[role=tabpanel] {TAB_READY['Methodology']}").wait_for(state="visible", timeout=120_000)
+        _settle(page)
+        found = page.evaluate(_METHODOLOGY, ".st-key-methodology")
+        assert found["sections"] == [[s.title, False] for s in tab_methodology.sections()]
+        assert found["katex"] == DISPLAY + INLINE and found["display"] == DISPLAY == 4, found
+        assert found["errors"] == 0 and found["raw"] == 0 and found["duplicates"] == [], found
+        assert found["height"] <= limit, found
+        _open_all(page, ".st-key-methodology")
+        found = page.evaluate(_METHODOLOGY, ".st-key-methodology")
+        assert all(is_open for _, is_open in found["sections"]) and found["display"] == 4, found
+        assert found["wideDisplay"] == found["breakable"] == found["pastLine"] == found["links"] == [], found
+        assert not found["sideways"], found
+    finally:
+        page.close()
+
+
+#: The section that the anchor ID opens: whether it is open, where its anchor is in the viewport, the open sections
+#: and the address.
+_SECTION = """(id) => {
+  const anchor = document.getElementById(id);
+  return {open: anchor.closest('[data-testid=stVerticalBlock]').querySelector('details').open,
+          top: anchor.getBoundingClientRect().top, href: location.href,
+          opened: [...document.querySelectorAll('.st-key-methodology details[open]')].length};
+}"""
+
+
+@pytest.mark.e2e
+@pytest.mark.slow
+@pytest.mark.parametrize("width", [1440, 390])
+def test_a_link_to_a_section_opens_it_at_the_top(chromium, app_url, width):
+    # UI spec 3.6: the contents' anchors serve links. On a 600 px screen, so that the page is taller than the screen.
+    # A link from another page opens its section at the top of the page, under Streamlit's toolbar band (52.5 px).
+    page = chromium.new_page(viewport={"width": width, "height": 600})
+    try:
+        page.goto(f"{app_url}/?tab=Methodology#references")
+        page.locator(f"[role=tabpanel] {TAB_READY['Methodology']}").wait_for(state="visible", timeout=120_000)
+        _settle(page)
+        found = page.evaluate(_SECTION, "references")
+        assert found["open"] and found["opened"] == 1 and 52 <= found["top"] <= 72, found
+        assert found["href"] == f"{app_url}/?tab=Methodology", found  # the anchor is used once, then removed
+        # A link of the contents does the same, without a script run and without changing the address.
+        page.evaluate(_COUNT_RUNS)
+        page.locator(".st-key-methodology a", has_text="Validation").click()
+        page.wait_for_timeout(1500)
+        found = page.evaluate(_SECTION, "validation")
+        assert found["open"] and found["opened"] == 2 and 52 <= found["top"] <= 72, found
+        assert found["href"] == f"{app_url}/?tab=Methodology", found
+        assert page.evaluate("() => window.__runs") == 0
+        # So the address carries no anchor to the other tabs.
+        _tab(page, "Pricing")
+        assert "#" not in page.evaluate("() => location.href")
+    finally:
+        page.close()
+
+
+#: The PDF pages that Chromium prints: one "/Type /Page" object each (and one "/Type /Pages" for their list).
+_PDF_PAGE = re.compile(rb"/Type\s*/Page(?![a-z])")
+
+
+@pytest.mark.e2e
+@pytest.mark.slow
+def test_printing_the_methodology_prints_every_section(chromium, app_url):
+    # UI spec 3.6 and 2.4: the tab is the print surface. Printed, every section is open and the page runs on for as
+    # many sheets as it takes (it printed one sheet: the header and three section titles), without the sidebar.
+    page = chromium.new_page(viewport={"width": 1440, "height": 900})
+    try:
+        page.goto(f"{app_url}/?tab=Methodology")
+        page.locator(f"[role=tabpanel] {TAB_READY['Methodology']}").wait_for(state="visible", timeout=120_000)
+        _settle(page)
+        page.emulate_media(media="print")
+        shown = page.evaluate("""() => ({
+          sections: [...document.querySelectorAll('.st-key-methodology [data-testid=stExpanderDetails]')]
+            .map(d => d.getBoundingClientRect().height),
+          sidebar: document.querySelector('[data-testid=stSidebar]').getBoundingClientRect().width,
+          main: getComputedStyle(document.querySelector('[data-testid=stMain]')).overflow,
+        })""")
+        assert len(shown["sections"]) == len(tab_methodology.SECTIONS) and min(shown["sections"]) > 30, shown
+        assert shown["sidebar"] == 0 and shown["main"] == "visible", shown
+        pages = len(_PDF_PAGE.findall(page.pdf(format="A4")))
+        assert pages >= 4, pages  # A4 sheets: six in Chromium 153
+    finally:
+        page.close()
+
+
+#: The drawer: its box in the viewport, its sections (label, open), the selected tab, the link, and any raw $$.
+_DRAWER = """() => {
+  const d = document.querySelector('[role=dialog]');
+  if (!d) return null;
+  const r = d.getBoundingClientRect();
+  return {
+    box: [r.left, r.top, r.right, r.bottom].map(Math.round), viewport: [innerWidth, innerHeight],
+    sections: [...d.querySelectorAll('details')]
+      .map(x => [x.querySelector('summary').innerText.split('\\n').pop().trim(), x.open]),
+    tab: document.querySelector('[role=tab][aria-selected=true]').innerText, search: location.search,
+    raw: (d.textContent.match(/\\$\\$/g) || []).length,
+  };
+}"""
+
+
+@pytest.mark.e2e
+@pytest.mark.slow
+@pytest.mark.parametrize(("width", "height", "drawer"), [(1440, 900, 1120), (390, 844, 369)])
+def test_the_methodology_drawer_opens_on_the_right_over_the_open_tab(chromium, app_url, width, height, drawer):
+    # DK-6 acceptance: the drawer is anchored right at full viewport height, and starts with the open tab's section,
+    # open (UI spec 3.6). It is Streamlit's large dialog (1,120 px from a 1,280 px screen up, the screen less 21 px
+    # on a phone), and its text keeps the tab's 760 px measure. Closing it leaves the tab as it was.
+    page = chromium.new_page(viewport={"width": width, "height": height})
+    try:
+        page.goto(f"{app_url}/?tab=Risk")
+        page.locator(f"[role=tabpanel] {TAB_READY['Risk']}").first.wait_for(state="visible", timeout=120_000)
+        _settle(page)
         page.get_by_role("button", name="Methodology").click()
-        page.wait_for_function("() => location.search.includes('tab=Methodology')", timeout=60_000)
-        page.locator(f"[role=tabpanel] {TAB_READY['Methodology']}").first.wait_for(state="visible", timeout=60_000)
-        assert page.locator("[role=tab][aria-selected=true]").inner_text() == "Methodology"
+        page.locator("[role=dialog] .st-key-methodology_drawer").wait_for(state="visible", timeout=60_000)
+        _settle(page)
+        found = page.evaluate(_DRAWER)
+        left, top, right, bottom = found["box"]
+        assert (right, top, bottom) == (width, 0, height) and abs(right - left - drawer) <= 2, found
+        titles = [s.title for s in tab_methodology.sections()]
+        assert found["sections"] == [["Risk", True], *([title, False] for title in titles if title != "Risk")]
+        assert found["raw"] == 0 and found["tab"] == "Risk" and found["search"] == "?tab=Risk", found
+        # Every section open: the maths and the links fit the drawer's column as they fit the tab's (on a phone the
+        # local-variance and SVI formulas, 322 and 324 px wide, scroll inside the 297 px column, not the page).
+        _open_all(page, ".st-key-methodology_drawer")
+        text = page.evaluate(_METHODOLOGY, ".st-key-methodology_drawer")
+        assert text["column"] <= 760 and text["display"] == DISPLAY and not text["sideways"], text
+        assert text["breakable"] == text["pastLine"] == text["links"] == [], text
+        assert len(text["wideDisplay"]) <= (0 if width > 760 else 2), text
+        # Escape closes it without a script run: the tab stays as it was.
+        page.evaluate(_COUNT_RUNS)
+        page.keyboard.press("Escape")
+        page.locator("[role=dialog]").wait_for(state="detached", timeout=30_000)
+        page.wait_for_timeout(1000)
+        assert page.evaluate("() => window.__runs") == 0
+        assert page.locator("[role=tab][aria-selected=true]").inner_text() == "Risk"
+        assert page.locator(f"[role=tabpanel] {TAB_READY['Risk']}").first.is_visible()
+        # Alt+Shift+M opens it again (UI spec 2.4), as the button does.
+        page.keyboard.press("Alt+Shift+M")
+        page.locator("[role=dialog] .st-key-methodology_drawer").wait_for(state="visible", timeout=60_000)
+        _settle(page)
+        assert page.evaluate(_DRAWER)["sections"][0] == ["Risk", True]
     finally:
         page.close()
 
