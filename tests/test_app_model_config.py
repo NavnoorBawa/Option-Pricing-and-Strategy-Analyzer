@@ -84,23 +84,25 @@ def test_the_model_section_follows_the_market_inputs(new_app, query, widgets):
 
 
 @pytest.mark.parametrize(
-    ("query", "caption"),
+    ("query", "label"),
     [
         (
             {"model": "Binomial tree", "tree": "Cox-Ross-Rubinstein", "steps": 1001, "style": "American"},
-            "Cox-Ross-Rubinstein tree · 1001 steps · American · ",
+            "Cox-Ross-Rubinstein tree · 1001 steps · American",
         ),
         (
             {"model": "Monte Carlo", "paths": "250,000", "seed": 7, "antithetic": "false"},
-            "Monte Carlo · 250,000 paths · control variate · ",
+            "Monte Carlo · 250,000 paths · control variate",
         ),
     ],
 )
-def test_a_shared_link_reopens_the_same_model(new_app, query, caption):
-    # Every model widget is bound to the URL (shown values, as a shared link carries them).
+def test_a_shared_link_reopens_the_same_model(new_app, query, label):
+    # Every model widget is bound to the URL (shown values, as a shared link carries them). The header's model
+    # badge names the model in full in its tooltip.
     at = new_app(**query).run()
     _ok(at)
-    assert any(c.value.startswith(caption) for c in at.caption), [c.value for c in at.caption]
+    [badge] = [m for m in at.markdown if m.value.startswith(":gray-badge[")]
+    assert badge.proto.help == f"Pricing model of the price cards: {label}."
 
 
 def test_every_model_has_a_sidebar_label():
