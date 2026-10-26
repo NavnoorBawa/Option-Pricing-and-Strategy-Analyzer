@@ -21,9 +21,10 @@ revision 1520 (2024-02-16, www.jaeckel.org). The notation follows the paper: ``x
     b(x, s, θ) = θ·[e^(x/2)·Φ(θ·(x/s + s/2)) - e^(-x/2)·Φ(θ·(x/s - s/2))]
 
 is the undiscounted Black price divided by ``√(FK)``. Inversion maps the quote to the out-of-the-money side
-(``θx ≤ 0``), picks one of four branches, starts from a rational-function guess that is already accurate to a few
-digits and takes two third-order Householder steps on an objective chosen per branch, which reaches the attainable
-accuracy ``(1 + |b/(s·∂b/∂s)|)·ε`` for every input.
+(``θx ≤ 0``), picks one of four branches by the price, starts from a rational-cubic interpolation of a transformed
+price in that branch (within 13 % of the answer in every test, usually far closer) and takes two Householder(3)
+steps on an objective chosen per branch (Householder(4) for ``|x|`` above 190 or 580). That reaches the attainable
+accuracy ``(1 + |b/(s·∂b/∂s)|)·ε``, the error that rounding the price alone causes.
 
 Every public function broadcasts over NumPy arrays (array code that evaluates each branch once on its own rows)
 and has a scalar path written with the ``math`` module, used when all inputs are scalars, which returns a Python
@@ -41,7 +42,8 @@ Differences from the reference implementation:
   and positive and its last Householder step was below ``1e-4`` of the volatility. The steps converge with
   fourth order, the next error being about ``C·δ⁴`` after a step ``δ`` with ``C ≤ 2`` measured, so after such a
   step the result is accurate to ``ε``. On ``|x| ≤ 80·s`` and ``s ≤ 20`` the second step is at most ``4.4e-5``;
-  only moneyness beyond about ``e^±200`` gets flagged. Callers fall back to a bracketing solver on flagged rows.
+  in a sample up to ``|x| = 700`` and ``s = 100`` only ``|x| > 182`` with ``24 < s < 41`` was flagged. Callers fall
+  back to a bracketing solver on flagged rows.
 * Prices below the intrinsic value give NaN and prices at or above the maximum (``F`` for a call, ``K`` for a put)
   give ``inf``, where the reference returns ``-DBL_MAX`` and ``DBL_MAX``.
 """
@@ -274,28 +276,15 @@ def _piecewise(x: Any, edges: Sequence[float], pieces: Sequence[Callable[[Any], 
 
 
 def _householder3_factor(nu: Any, h2: Any, h3: Any) -> Any:
+    """The step is ν times this, with ν = -g/g′, h₂ = g″/g′ and h₃ = g‴/g′ (fourth-order convergence)."""
     return (1 + 0.5 * h2 * nu) / (1 + nu * (h2 + h3 * nu * (1.0 / 6.0)))
 
 
 def _householder4_factor(nu: Any, h2: Any, h3: Any, h4: Any) -> Any:
+    """As :func:`_householder3_factor`, with h₄ = g⁗/g′ as well (fifth-order convergence)."""
     return (1 + nu * (h2 + nu * h3 * (1.0 / 6.0))) / (
         1 + nu * (1.5 * h2 + nu * (h2 * h2 * 0.25 + h3 * (1.0 / 3.0) + nu * h4 * (1.0 / 24.0)))
     )
-
-
-def _rational_cubic_interpolation(x, x_l, x_r, y_l, y_r, d_l, d_r, r):  # floats only
-    h = x_r - x_l
-    if abs(h) <= 0:
-        return 0.5 * (y_l + y_r)
-    t = (x - x_l) / h
-    if not r >= _MAXIMUM_RATIONAL_CUBIC_CONTROL:
-        omt = 1 - t
-        t2 = t * t
-        omt2 = omt * omt
-        return (y_r * t2 * t + (r * y_r - h * d_r) * t2 * omt + (r * y_l + h * d_l) * t * omt2 + y_l * omt2 * omt) / (
-            1 + (r - 3) * t * omt
-        )
-    return y_r * t + y_l * (1 - t)  # linear interpolation without over- or underflow
 
 
 # ------------------------------------------------------------------------------------- scalar path (math)
@@ -393,6 +382,24 @@ def _one_minus_erfcx_s(x: float) -> float:
     if x < -1.0 / 5.0 or x > 1.0 / 3.0:
         return 1 - _erfcx(x)
     return _one_minus_erfcx_rational(x)
+
+
+def _rational_cubic_interpolation(
+    x: float, x_l: float, x_r: float, y_l: float, y_r: float, d_l: float, d_r: float, r: float
+) -> float:
+    """Delbourgo-Gregory rational cubic through (x_l, y_l), (x_r, y_r) with end slopes d_l, d_r and control r."""
+    h = x_r - x_l
+    if abs(h) <= 0:
+        return 0.5 * (y_l + y_r)
+    t = (x - x_l) / h
+    if not r >= _MAXIMUM_RATIONAL_CUBIC_CONTROL:
+        omt = 1 - t
+        t2 = t * t
+        omt2 = omt * omt
+        return (y_r * t2 * t + (r * y_r - h * d_r) * t2 * omt + (r * y_l + h * d_l) * t * omt2 + y_l * omt2 * omt) / (
+            1 + (r - 3) * t * omt
+        )
+    return y_r * t + y_l * (1 - t)  # linear interpolation without over- or underflow
 
 
 def _rational_cubic_control_s(x_l, x_r, y_l, y_r, d_l, d_r, second_derivative, prefer_shape, *, left):
@@ -623,6 +630,12 @@ def _inv_vega_v(x: np.ndarray, s: np.ndarray) -> np.ndarray:
     return _SQRT_TWO_PI * np.exp(0.5 * (h * h + t * t))
 
 
+def _ln_vega_v(x: np.ndarray, s: np.ndarray) -> np.ndarray:
+    h = x / s
+    t = 0.5 * s
+    return -(_LN_TWO_PI * 0.5) - 0.5 * (h * h + t * t)
+
+
 def _yprime_v(h: np.ndarray) -> np.ndarray:
     out = np.empty_like(h)
     tail = h < -4
@@ -678,7 +691,7 @@ def _scaled_black_v(x: np.ndarray, s: np.ndarray, *, scaled: bool) -> np.ndarray
     if r3.any():
         xr, sr = x[r3], s[r3]
         b = _black_region_iii_v(xr, sr)
-        out[r3] = b * np.exp(0.5 * _LN_TWO_PI + 0.5 * ((xr / sr) ** 2 + (0.5 * sr) ** 2)) if scaled else b
+        out[r3] = b * np.exp(-_ln_vega_v(xr, sr)) if scaled else b
     return out
 
 
@@ -773,9 +786,8 @@ def _step_middle_v(beta, x, s, bmax):
 
 def _step_lowest_v(beta, x, s, bmax):
     bx = _scaled_black_v(x, s, scaled=True)
+    ln_b = np.log(bx) + _ln_vega_v(x, s)
     h = x / s
-    t = 0.5 * s
-    ln_b = np.log(bx) + (-(_LN_TWO_PI * 0.5) - 0.5 * (h * h + t * t))
     ln_beta = np.log(beta)
     bpob = 1 / bx
     x2_over_s3 = h * h / s
@@ -904,11 +916,19 @@ def _all_scalar(*values: Any) -> bool:
     return all(np.ndim(v) == 0 for v in values)
 
 
+def _floats(*values: Any) -> list[float]:
+    return [float(v) for v in values]
+
+
+def _arrays(*values: ArrayLike) -> list[np.ndarray]:
+    return list(np.broadcast_arrays(*(np.asarray(v, dtype=float) for v in values)))
+
+
 def normalised_black(x: ArrayLike, s: ArrayLike, theta: ArrayLike = 1.0) -> float | np.ndarray:
     """Normalised Black price ``b(x, s, θ) = θ·[e^(x/2)·Φ(θ(x/s + s/2)) - e^(-x/2)·Φ(θ(x/s - s/2))]``.
 
-    Accurate to ``(1 + |s·∂b/∂s / b|)·ε`` relative, also where the price underflows the naive formula (far out of
-    the money, very low or very high volatility).
+    Accurate to a few times ``(1 + |s·∂b/∂s / b|)·ε`` relative (the error that rounding ``s`` alone causes), also
+    where the naive formula cancels or underflows: far out of the money, very low or very high volatility.
 
     Parameters
     ----------
@@ -934,9 +954,9 @@ def normalised_black(x: ArrayLike, s: ArrayLike, theta: ArrayLike = 1.0) -> floa
     0.005898232610535
     """
     if _all_scalar(x, s, theta):
-        return _normalised_black_s(float(x), float(s), float(theta))
-    x, s, theta = np.broadcast_arrays(*(np.asarray(v, dtype=float) for v in (x, s, theta)))
-    return _normalised_black_v(x.ravel(), s.ravel(), theta.ravel()).reshape(x.shape)
+        return _normalised_black_s(*_floats(x, s, theta))
+    xa, sa, ta = _arrays(x, s, theta)
+    return _normalised_black_v(xa.ravel(), sa.ravel(), ta.ravel()).reshape(xa.shape)
 
 
 def normalised_vega(x: ArrayLike, s: ArrayLike) -> float | np.ndarray:
@@ -960,14 +980,14 @@ def normalised_vega(x: ArrayLike, s: ArrayLike) -> float | np.ndarray:
     0.398942280401433
     """
     if _all_scalar(x, s):
-        x, s = float(x), float(s)
-        if s <= 0:
-            return _ONE_OVER_SQRT_TWO_PI if x == 0 else 0.0
-        return _vega_s(x, s)
-    x, s = np.broadcast_arrays(np.asarray(x, dtype=float), np.asarray(s, dtype=float))
+        x0, s0 = _floats(x, s)
+        if s0 <= 0:
+            return _ONE_OVER_SQRT_TWO_PI if x0 == 0 else 0.0
+        return _vega_s(x0, s0)
+    xa, sa = _arrays(x, s)
     with np.errstate(all="ignore"):
-        positive = np.where(s > 0, s, 1.0)
-        return np.where(s > 0, _vega_v(x, positive), np.where(x == 0, _ONE_OVER_SQRT_TWO_PI, 0.0))
+        vega = _vega_v(xa, np.where(sa > 0, sa, 1.0))
+        return np.where(sa > 0, vega, np.where(xa == 0, _ONE_OVER_SQRT_TWO_PI, 0.0))
 
 
 def black(F: ArrayLike, K: ArrayLike, sigma: ArrayLike, T: ArrayLike, theta: ArrayLike = 1.0) -> float | np.ndarray:
@@ -996,21 +1016,21 @@ def black(F: ArrayLike, K: ArrayLike, sigma: ArrayLike, T: ArrayLike, theta: Arr
     4.2920109414
     """
     if _all_scalar(F, K, sigma, T, theta):
-        F, K, sigma, T, theta = (float(v) for v in (F, K, sigma, T, theta))
-        s = sigma * math.sqrt(T)
-        if K == F:
-            return F * math.erf(_HALF_OVER_SQRT_TWO * s)
-        intrinsic = max(K - F if theta < 0 else F - K, 0.0)
+        f, k, vol, t, th = _floats(F, K, sigma, T, theta)
+        s = vol * math.sqrt(t)
+        if k == f:
+            return f * math.erf(_HALF_OVER_SQRT_TWO * s)
+        intrinsic = max(k - f if th < 0 else f - k, 0.0)
         if s <= 0:
             return intrinsic
-        return intrinsic + math.sqrt(F) * math.sqrt(K) * _normalised_black_otm_s(-abs(math.log(F / K)), s)
-    F, K, sigma, T, theta = np.broadcast_arrays(*(np.asarray(v, dtype=float) for v in (F, K, sigma, T, theta)))
+        return intrinsic + math.sqrt(f) * math.sqrt(k) * _normalised_black_otm_s(-abs(math.log(f / k)), s)
+    fa, ka, va, tma, tha = _arrays(F, K, sigma, T, theta)
     with np.errstate(all="ignore"):
-        s = sigma * np.sqrt(T)
-        intrinsic = np.maximum(np.where(theta < 0, K - F, F - K), 0.0)
-        x = -np.abs(np.log(F / K))
-        b = _normalised_black_v(x.ravel(), s.ravel(), np.ones(x.size)).reshape(x.shape)
-        return np.where(K == F, F * erf(_HALF_OVER_SQRT_TWO * s), intrinsic + np.sqrt(F) * np.sqrt(K) * b)
+        sa = va * np.sqrt(tma)
+        intrinsic_a = np.maximum(np.where(tha < 0, ka - fa, fa - ka), 0.0)
+        xa = -np.abs(np.log(fa / ka))
+        b = _normalised_black_v(xa.ravel(), sa.ravel(), np.ones(xa.size)).reshape(xa.shape)
+        return np.where(ka == fa, fa * erf(_HALF_OVER_SQRT_TWO * sa), intrinsic_a + np.sqrt(fa) * np.sqrt(ka) * b)
 
 
 def normalised_implied_volatility(
@@ -1044,17 +1064,16 @@ def normalised_implied_volatility(
     nan
     """
     if _all_scalar(beta, x, theta):
-        beta, x, theta = float(beta), float(x), float(theta)
-        tx = -x if theta < 0 else x
-        s, converged = _lets_be_rational_s(beta - _normalised_intrinsic_s(tx), -abs(x))
+        b0, x0, th = _floats(beta, x, theta)
+        s, converged = _lets_be_rational_s(b0 - _normalised_intrinsic_s(-x0 if th < 0 else x0), -abs(x0))
         return (s, converged) if full_output else s
-    beta, x, theta = np.broadcast_arrays(*(np.asarray(v, dtype=float) for v in (beta, x, theta)))
+    ba, xa, tha = _arrays(beta, x, theta)
     with np.errstate(all="ignore"):
-        tx = np.where(theta < 0, -x, x)
-        otm = beta - np.where(tx > 0, 2 * np.sinh(0.5 * tx), 0.0)
-    s, converged = _lets_be_rational_v(otm.ravel(), -np.abs(x.ravel()))
-    s, converged = s.reshape(beta.shape), converged.reshape(beta.shape)
-    return (s, converged) if full_output else s
+        tx = np.where(tha < 0, -xa, xa)
+        otm = ba - np.where(tx > 0, 2 * np.sinh(0.5 * tx), 0.0)
+    sa, ca = _lets_be_rational_v(otm.ravel(), -np.abs(xa.ravel()))
+    sa, ca = sa.reshape(ba.shape), ca.reshape(ba.shape)
+    return (sa, ca) if full_output else sa
 
 
 def implied_black_volatility(
@@ -1088,21 +1107,21 @@ def implied_black_volatility(
     0.2
     """
     if _all_scalar(price, F, K, T, theta):
-        price, F, K, T, theta = (float(v) for v in (price, F, K, T, theta))
-        if price >= (K if theta < 0 else F):
+        p, f, k, t, th = _floats(price, F, K, T, theta)
+        if p >= (k if th < 0 else f):
             s, converged = math.inf, True
         else:
-            intrinsic = K - F if theta < 0 else F - K
-            beta = (price - intrinsic if intrinsic > 0 else price) / (math.sqrt(F) * math.sqrt(K))
-            s, converged = _lets_be_rational_s(beta, -abs(math.log(F / K)))
-        vol = s / math.sqrt(T) if T > 0 else math.nan
+            intrinsic = k - f if th < 0 else f - k
+            beta = (p - intrinsic if intrinsic > 0 else p) / (math.sqrt(f) * math.sqrt(k))
+            s, converged = _lets_be_rational_s(beta, -abs(math.log(f / k)))
+        vol = s / math.sqrt(t) if t > 0 else math.nan
         return (vol, converged) if full_output else vol
-    price, F, K, T, theta = np.broadcast_arrays(*(np.asarray(v, dtype=float) for v in (price, F, K, T, theta)))
+    pa, fa, ka, ta, tha = _arrays(price, F, K, T, theta)
     with np.errstate(all="ignore"):
-        intrinsic = np.where(theta < 0, K - F, F - K)
-        beta = np.where(intrinsic > 0, price - intrinsic, price) / (np.sqrt(F) * np.sqrt(K))
-        s, converged = _lets_be_rational_v(beta.ravel(), -np.abs(np.log(F / K)).ravel())
-        s = np.where(price >= np.where(theta < 0, K, F), np.inf, s.reshape(price.shape))
-        vol = np.where(T > 0, s / np.sqrt(T), np.nan)
-    converged = converged.reshape(price.shape)
-    return (vol, converged) if full_output else vol
+        intrinsic_a = np.where(tha < 0, ka - fa, fa - ka)
+        beta_a = np.where(intrinsic_a > 0, pa - intrinsic_a, pa) / (np.sqrt(fa) * np.sqrt(ka))
+        sa, ca = _lets_be_rational_v(beta_a.ravel(), -np.abs(np.log(fa / ka)).ravel())
+        sa = np.where(pa >= np.where(tha < 0, ka, fa), np.inf, sa.reshape(pa.shape))
+        vol_a = np.where(ta > 0, sa / np.sqrt(ta), np.nan)
+    ca = ca.reshape(pa.shape)
+    return (vol_a, ca) if full_output else vol_a

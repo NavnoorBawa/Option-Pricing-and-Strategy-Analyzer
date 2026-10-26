@@ -102,7 +102,7 @@ def no_arbitrage_bounds(S: float, K: float, T: float, r: float, q: float = 0.0, 
 
 def _check_contract(price, S, K, T, r, q) -> tuple[float, float, float, float, float, float]:
     """The checks every solver makes before looking at bounds; returns the inputs as floats."""
-    values = tuple(float(v) for v in (price, S, K, T, r, q))
+    values = (float(price), float(S), float(K), float(T), float(r), float(q))
     names = ("price", "spot", "strike", "time to expiry", "rate", "dividend yield")
     for name, value in zip(names, values, strict=True):
         if not math.isfinite(value):
@@ -372,9 +372,9 @@ def implied_volatility_batch(
             code[i] = _CODES.index(error.reason)
             messages[i] = str(error)
 
-    vol = vol.reshape(shape)
+    vol_shaped = vol.reshape(shape)
     if not return_reasons:
-        return vol
+        return vol_shaped
     message = np.full(price.size, "", dtype=object)
     for i in np.flatnonzero(code).tolist():
         if i in messages:
@@ -387,7 +387,7 @@ def implied_volatility_batch(
         else:
             message[i] = _ABOVE_MAX_VOL
     reason = np.asarray(_CODES, dtype=object)[code]
-    return ImpliedVolBatch(vol, reason.reshape(shape), message.reshape(shape))
+    return ImpliedVolBatch(vol_shaped, reason.reshape(shape), message.reshape(shape))
 
 
 def american_bounds(S: float, K: float, T: float, r: float, q: float = 0.0, option_type: str = "call"):
