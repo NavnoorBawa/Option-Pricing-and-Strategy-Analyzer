@@ -2,6 +2,7 @@
 
 import base64
 import json
+import re
 
 import numpy as np
 import pytest
@@ -484,12 +485,30 @@ def test_iv_cards_wrap_in_pairs_like_the_price_cards(app):
     )
 
 
+def _model_check(at: AppTest) -> tuple[str, str, float]:
+    """The Model check card's value, the full value in its help and the distance from the quote the help states."""
+    check = next(m for m in at.metric if m.label == "Model check")
+    match = re.fullmatch(
+        r"Model value at the implied volatility \(should equal the quote\): \\\$([0-9,.]+), "
+        r"(?:equal to the quote|\\\$([0-9.e+-]+) from the quote)\.",
+        check.proto.help,
+    )
+    assert match, check.proto.help
+    return check.value, match[1], float(match[2] or 0.0)
+
+
 def test_iv_model_check_shows_the_quote_precision_and_the_full_value_in_its_help(app):
-    # Six decimals did not fit the card; the full value and its distance from the quote are in the help.
-    check = next(m for m in app.metric if m.label == "Model check")
-    assert check.value == "$10.4506"
-    value = bs.price(100, 100, 1, 0.05, 0.2)
-    assert f"\\${value:,.6f}, " in check.proto.help and "from the quote." in check.proto.help
+    # Six decimals did not fit the card; the full value and its distance from the quote are in the help. The
+    # default quote is the model value at the sidebar's 20 %, which Let's Be Rational inverts to the last bit, so
+    # the help usually reads "equal to the quote."; another quote is repriced to within rounding.
+    value, full, distance = _model_check(app)
+    assert value == "$10.4506" and full == f"{bs.price(100, 100, 1, 0.05, 0.2):,.6f}"
+    assert distance <= 1e-12
+    _quote(app).set_value(12.3456).run()
+    _ok(app)
+    value, full, distance = _model_check(app)
+    assert value == "$12.3456" and full == "12.345600"
+    assert distance <= 1e-12  # measured 1.8e-15: bs.price at the implied volatility, not the quote's own digits
 
 
 def test_iv_gap_to_the_sidebar_never_shows_a_negative_zero(app):
