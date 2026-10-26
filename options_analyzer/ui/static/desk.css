@@ -198,3 +198,41 @@
 .st-key-methodology_drawer h3 {
   font-size: 1rem;
 }
+
+/* The anchors that the tab's contents link to stop under Streamlit's toolbar band (3.75rem), not behind it. */
+.st-key-methodology [id] {
+  scroll-margin-top: 4rem;
+}
+
+/* A display formula wider than its column (the local-variance formula on a phone) scrolls on its own, so that the
+   page never scrolls sideways. */
+:is(.st-key-methodology, .st-key-methodology_drawer) .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* A link never breaks across lines: a reference's DOI, arXiv ID or host reads whole, and copies whole. */
+:is(.st-key-methodology, .st-key-methodology_drawer) a {
+  white-space: nowrap;
+}
+
+/* Printing the Methodology tab (the UI spec's print surface, 3.6) prints every section, open, on as many pages as it
+   takes: the boxes that hold the page at the window's height (stApp, stAppViewContainer, the box around stMain and
+   stMain, which scrolls) grow to their content, the closed sections show their text (in Chromium 131, Safari 18.4
+   and Firefox 143 on: the browsers that let a page style a closed section's content), and the sidebar is left out.
+   Only while the Methodology tab is open: printing the other tabs is unchanged. */
+@media print {
+  :is([data-testid='stApp'], [data-testid='stAppViewContainer'], :has(> [data-testid='stMain']), [data-testid='stMain']):has(.st-key-methodology) {
+    position: static;
+    height: auto;
+    overflow: visible;
+  }
+
+  [data-testid='stApp']:has(.st-key-methodology) [data-testid='stSidebar'] {
+    display: none;
+  }
+
+  .st-key-methodology details::details-content {
+    content-visibility: visible;
+  }
+}

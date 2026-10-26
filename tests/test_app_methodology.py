@@ -89,6 +89,51 @@ def test_each_file_is_one_section_with_balanced_maths(path):
     assert plain.replace("$$", "").count("$") % 2 == 0, "unclosed inline maths"
 
 
+#: An inline formula: a pair of single dollar signs (not a literal \\$, not the $$ of display maths).
+_INLINE = re.compile(r"(?<![\\$])\$(?!\$)(.+?)(?<![\\$])\$(?!\$)", flags=re.DOTALL)
+#: What KaTeX may break an inline formula after, at its top level: a relation or a binary operator.
+_BREAKS = re.compile(r"[=<>+\-]|\\(?:le|ge|leq|geq|approx|notin|in|neq|pm|mp|times|cdot)(?![a-zA-Z])")
+
+
+def _top_level(formula: str) -> str:
+    """The formula without its groups in braces (and their contents), where KaTeX never breaks a line."""
+    out, depth = "", 0
+    for char in formula:
+        depth += char == "{"
+        if depth == 0:
+            out += char
+        depth -= char == "}"
+    return out
+
+
+@pytest.mark.parametrize("path", FILES, ids=lambda p: p.name)
+def test_display_formulas_are_blocks(path):
+    # Streamlit typesets $$...$$ on one line as inline maths, at the size of the text, in its paragraph: display
+    # maths needs its $$ on lines of their own.
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert all(line.strip() == "$$" for line in lines if "$$" in line), path.name
+    assert sum(line.strip() == "$$" for line in lines) % 2 == 0
+
+
+@pytest.mark.parametrize("path", FILES, ids=lambda p: p.name)
+def test_inline_formulas_never_break_inside(path):
+    # KaTeX breaks an inline formula after a relation or an operator, which split "(1 − α −" from "β) σ²/252" across
+    # two lines. A formula with one wraps its whole in braces: it then moves to the next line as a whole (the widest
+    # is 281 px, against a 297 px column in the drawer on a 390 px phone: tests/test_theme.py).
+    body = re.sub(r"^\$\$$.*?^\$\$$", "", path.read_text(encoding="utf-8"), flags=re.MULTILINE | re.DOTALL)
+    for formula in _INLINE.findall(body.replace("\\$", "")):
+        assert not _BREAKS.search(_top_level(formula)), formula
+
+
+def test_the_inline_formula_check_finds_break_points():
+    assert _top_level(r"\omega = (1-\alpha-\beta)") == r"\omega = (1-\alpha-\beta)"
+    assert _BREAKS.search(_top_level(r"\omega = (1-\alpha-\beta)"))
+    assert not _BREAKS.search(_top_level(r"{\omega = (1-\alpha-\beta)}"))
+    assert not _BREAKS.search(_top_level(r"e^{-700}")) and not _BREAKS.search(_top_level(r"t_\nu"))
+    assert _BREAKS.search(_top_level(r"a \le b")) and not _BREAKS.search(_top_level(r"\left a \right"))
+    assert _INLINE.findall(r"a $x$ costs \$1, $y = 2$ and $$z$$") == ["x", "y = 2"]
+
+
 def test_the_first_line_is_one_caption_of_at_most_140_characters():
     assert len(tab_methodology.INTRO) <= 140
 
@@ -154,6 +199,18 @@ def test_the_contents_link_to_every_section(new_app):
     assert re.findall(r"\[([^\]]+)\]\(#([\w-]+)\)", contents) == [(s.title, s.anchor) for s in SECTIONS]
 
 
+def test_the_tab_ends_with_the_script_of_its_links(new_app):
+    # A link to a section (from the contents, or ?tab=Methodology#references) opens it: a script in the page, drawn
+    # after the sections, so that they are in the page when it runs. The browser tests run it (tests/test_theme.py).
+    at = new_app(tab="Methodology").run()
+    _ok(at)
+    tab = _tab(at)
+    [script] = _of_type(tab, "html")
+    assert list(_nodes(tab))[-1] is script
+    assert script.proto.body == tab_methodology._ANCHORS and script.proto.unsafe_allow_javascript
+    assert script.proto.body.startswith("<script>") and script.proto.body.endswith("</script>")
+
+
 def test_the_tab_is_drawn_only_when_open(app):
     # Only the open tab runs: the first visit opens the Pricing tab, and the Methodology's text is not drawn.
     assert not any(e.label in TITLES for e in _of_type(app._tree, "expander"))
@@ -197,7 +254,7 @@ def test_the_header_button_opens_the_drawer_over_the_open_tab(new_app, tab):
     settings = dialog.proto.dialog
     assert settings.title == "Methodology" and settings.is_open and settings.dismissible
     assert settings.position == settings.DialogPosition.RIGHT  # a drawer at full height (Streamlit 1.65 and later)
-    assert settings.width == settings.DialogWidth.MEDIUM  # up to 750 px, which the user can widen
+    assert settings.width == settings.DialogWidth.LARGE  # the UI spec's (3.6); the user can narrow it
     assert settings.icon == ":material/menu_book:"
     # The open tab's section first and open, then the others in their order, collapsed; the Methodology tab has no
     # section of its own. The same text as the tab, without the line of contents and its anchors.
@@ -209,6 +266,7 @@ def test_the_header_button_opens_the_drawer_over_the_open_tab(new_app, tab):
     assert [e.markdown[0].value for e in expanders] == [s.body for s in order]
     assert dialog.caption[0].value == tab_methodology.INTRO
     assert not any(m.value.startswith(("**Contents**", "<div id=")) for m in dialog.markdown)
+    assert not _of_type(dialog, "html")  # no links, so no script for them
     # The open tab stays open and stays in the link.
     assert _drawn_tabs(at) == {tab, "Strategy"}
     assert at.query_params.get("tab") in ((tab, [tab]) if tab != desk.TABS[0] else (None, tab, [tab]))
@@ -270,6 +328,44 @@ def test_the_section_shows_the_reports_tables_with_its_commit_and_date(new_app, 
     assert [c.value for c in section.caption[1:]] == ["A note."]
 
 
+def _right_aligned(table) -> set[int]:
+    """The columns of a table drawn with st.table that the Styler right-aligns (format.right_aligned)."""
+    rules = re.findall(r"([^{}]+)\{([^}]*)\}", table.proto.arrow_data.styler.styles)
+    right = [selectors for selectors, style in rules if style.strip() == "text-align: right !important"]
+    return {int(column) for selectors in right for column in re.findall(r"_col(\d+)\b", selectors)}
+
+
+def test_the_columns_of_numbers_are_right_aligned_as_written(new_app, results_file):
+    results_file.write_text(json.dumps(REPORT), encoding="utf-8")
+    at = new_app(tab="Methodology").run()
+    _ok(at)
+    first, second = _validation(at).table
+    assert _right_aligned(first) == {1} and _right_aligned(second) == set()  # Cases: 3 and 2.5
+    assert first.value.values.tolist() == [["a", "3", "pass"], ["b", "2.5", ""]]  # the text, as the report wrote it
+
+
+@pytest.mark.parametrize(
+    ("cells", "numeric"),
+    [
+        (["0.37", "0.04"], True),
+        (["3", "2.5", "1e-05", "-4", "−2.5e-4", "+1"], True),
+        (["1,000", "12,345.6"], True),
+        (["12 %", "3.5%", "25 bp", "<0.001", "≤ 0.05"], True),
+        (["4 / 2.5", "17 / 10.0", "17/10"], True),
+        (["0.37", ""], True),
+        (["green", "yellow"], False),
+        (["0.37", "n/a"], False),
+        (["SYN HIST"], False),
+        (["2026-11-02"], False),
+        (["1,00"], False),
+        (["", ""], False),
+    ],
+)
+def test_numeric_columns(cells, numeric):
+    table = tab_methodology.ResultsTable("T", ("Label", "Value"), tuple(("x", cell) for cell in cells))
+    assert tab_methodology.numeric_columns(table) == (("Value",) if numeric else ())
+
+
 def test_a_backtest_table_keeps_its_zones_as_text_and_its_tags(new_app, results_file):
     # The shape the spec asks of the VaR backtest (section 3.6, VL-7a): the zone is a word, not a colour, and each row
     # says its history is synthetic. The renderer shows every cell as the report wrote it. (Made-up rows, to test the
@@ -283,6 +379,7 @@ def test_a_backtest_table_keeps_its_zones_as_text_and_its_tags(new_app, results_
     at = new_app(tab="Methodology").run()
     _ok(at)
     [table] = _validation(at).table
+    assert _right_aligned(table) == {0, 1, 2}  # days, exceptions / expected and Kupiec p; zone and history are text
     assert table.value["Zone"].tolist() == ["green", "yellow"]
     assert table.value["History"].tolist() == ["SYN HIST", "SYN HIST"]
 
@@ -339,6 +436,7 @@ def _report(**changes) -> dict:
         (_report(tables=["x"]), "table 1 must be an object"),
         (_report(table_title=""), "table 1: 'title' must be a non-empty string"),
         (_report(table_columns=[]), "table 1: 'columns' must be a non-empty list"),
+        (_report(table_columns=["A", "B", "A"]), "table 1: the column names must differ"),
         (_report(table_rows=[]), "table 1: 'rows' must be a non-empty list"),
         (_report(table_rows=[["a", 1]]), "table 1: row 1 must be a list of 3 cells"),
         (_report(table_rows=[["a", 1, {"x": 1}]]), "table 1: row 1 must be text, a number or null, not dict"),
@@ -346,7 +444,8 @@ def _report(**changes) -> dict:
     ],
     ids=[
         "not json", "not an object", "no commit", "short commit", "upper-case commit", "no date", "other date format",
-        "no such date", "no tables", "table not an object", "empty title", "no columns", "no rows", "short row",
+        "no such date", "no tables", "table not an object", "empty title", "no columns", "same column names",
+        "no rows", "short row",
         "object cell", "empty note",
     ],
 )  # fmt: skip
@@ -430,43 +529,98 @@ def test_every_cited_work_is_in_the_references():
         assert author in references, f"{name} is cited but {author} is not in the references"
 
 
-def _get(url: str, *, attempts: int = 3) -> tuple[int, bytes]:
-    """Status and body of a GET request, retried on network errors and server errors (5xx), which pass, but not on
-    a client error (4xx: the link is wrong)."""
-    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (link check)"})
+#: How to check each link that is neither a DOI nor an arXiv ID: the address to ask (the link itself, or an API where
+#: the site answers scripts with a bot check, "Making sure you're not a bot!", and a status 200) and a text that the
+#: answer must hold, which a bot check or an error page does not.
+SITES = {
+    "https://maths-people.anu.edu.au/~brent/pub/pub011.html": (None, "Algorithms for Minimization without Derivatives"),
+    "https://www.federalreserve.gov/publications/files/2026-final-supervisory-stress-test-scenarios-20260204.pdf": (
+        None, "%PDF-"
+    ),
+    "https://www.risk.net/derivatives/equity-derivatives/1500211/pricing-with-a-smile": (None, "Pricing with a smile"),
+    "https://theses.hal.science/tel-00588686": (
+        "https://api.archives-ouvertes.fr/search/?q=halId_s:tel-00588686&fl=halId_s", '"halId_s":"tel-00588686"'
+    ),
+    "https://www.pearson.com/en-us/subject-catalog/p/options-futures-and-other-derivatives/P200000005938": (
+        None, "Options, Futures, and Other Derivatives"
+    ),
+    "https://openlibrary.org/isbn/9780071389976": (
+        "https://openlibrary.org/isbn/9780071389976.json", "The Complete Guide to Option Pricing Formulas"
+    ),
+}  # fmt: skip
+#: When the last request to the arXiv API was sent: its terms ask for at most one request every 3 seconds.
+_ARXIV_LAST = [0.0]
+
+
+def _get(url: str, *, attempts: int = 4) -> tuple[int | None, str]:
+    """Status and text of a GET request (None and the error for a network error). A request that the site refuses
+    for now (429 Too Many Requests, or a server error) or that fails on the network is sent again, after the time
+    that the site's Retry-After asks for (60 s at most) or 5, 10, 20 s."""
+    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (reference link check)"})
+    status, text = None, ""
     for attempt in range(attempts):
-        last = attempt == attempts - 1
+        if "arxiv.org" in url:
+            time.sleep(max(0.0, _ARXIV_LAST[0] + 3.0 - time.monotonic()))
+            _ARXIV_LAST[0] = time.monotonic()
+        wait = 5.0 * 2**attempt
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
-                return response.status, response.read()
+                return response.status, response.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
-            if exc.code < 500 or last:
-                return exc.code, b""
-        except OSError:
-            if last:
-                raise
-        time.sleep(5.0 * (attempt + 1))
-    raise AssertionError("unreachable")
+            status, text = exc.code, exc.read().decode("utf-8", errors="replace")
+            if exc.code != 429 and exc.code < 500:
+                return status, text
+            after = exc.headers.get("Retry-After", "")
+            wait = min(float(after), 60.0) if after.isdigit() else wait
+        except OSError as exc:
+            status, text = None, str(exc)
+        if attempt < attempts - 1:
+            time.sleep(wait)
+    return status, text
+
+
+def _verdict(text: str, url: str) -> tuple[str, str]:
+    """Whether a reference's link is right ("ok"), wrong ("wrong": the record does not exist), or could not be told
+    ("inconclusive": the site refused the check or did not answer), with what was seen."""
+    if text.startswith("doi:"):
+        # The DOI handle service, which does not depend on the publisher's site answering a script: 1 means the DOI
+        # is registered, and 100 (with status 404) that it is not.
+        doi = text.removeprefix("doi:")
+        status, body = _get(f"https://doi.org/api/handles/{urllib.parse.quote(doi, safe='/')}")
+        code = json.loads(body).get("responseCode") if status in (200, 404) and body.startswith("{") else None
+        if status == 200 and code == 1:
+            return "ok", ""
+        return ("wrong", "not a registered DOI") if code == 100 else ("inconclusive", f"HTTP {status}")
+    if text.startswith("arXiv:"):
+        paper = text.removeprefix("arXiv:")
+        status, body = _get(f"https://export.arxiv.org/api/query?id_list={paper}")
+        if status != 200:
+            return "inconclusive", f"HTTP {status}"
+        found = f"arxiv.org/abs/{paper}" in body and "<title>Error</title>" not in body
+        return ("ok", "") if found else ("wrong", "no such arXiv paper")
+    check, expected = SITES[url]
+    status, body = _get(check or url)
+    if status in (404, 410):
+        return "wrong", f"HTTP {status}"
+    if status == 200 and expected in body:
+        return "ok", ""
+    return "inconclusive", f"HTTP {status}" + (f", without {expected!r}" if status == 200 else "")
+
+
+def test_every_link_but_dois_and_arxiv_ids_has_a_check():
+    assert sorted(url for text, url in _links() if not text.startswith(("doi:", "arXiv:"))) == sorted(SITES)
 
 
 @pytest.mark.network
 @pytest.mark.slow
 def test_every_reference_link_resolves():
-    # Every DOI is registered (the DOI handle service, which does not depend on the publisher's site answering a
-    # script), every arXiv identifier is a paper, and every other link answers. Meant for a nightly run.
-    failures = []
-    for text, url in _links():
-        if text.startswith("doi:"):
-            doi = text.removeprefix("doi:")
-            status, body = _get(f"https://doi.org/api/handles/{urllib.parse.quote(doi, safe='/')}")
-            if status != 200 or json.loads(body).get("responseCode") != 1:
-                failures.append(f"{text}: not a registered DOI ({status})")
-        elif text.startswith("arXiv:"):
-            status, body = _get(f"https://export.arxiv.org/api/query?id_list={text.removeprefix('arXiv:')}")
-            if status != 200 or b"<entry>" not in body or b"<title>Error</title>" in body:
-                failures.append(f"{text}: no such arXiv paper ({status})")
-        else:
-            status, _ = _get(url)
-            if status >= 400:
-                failures.append(f"{url}: HTTP {status}")
-    assert not failures, failures
+    # Every DOI is registered, every arXiv identifier is a paper, and every other link opens the work it names.
+    # Meant for a nightly run (CI's per-push jobs leave out the network tests). A link that a site refuses to check
+    # (rate limits, a bot check, no answer) is inconclusive, not wrong: the test then skips, naming it, once it has
+    # found no wrong link.
+    verdicts = {f"{text} ({url})": _verdict(text, url) for text, url in _links()}
+    wrong = [f"{link}: {seen}" for link, (verdict, seen) in verdicts.items() if verdict == "wrong"]
+    assert not wrong, wrong
+    unknown = [f"{link}: {seen}" for link, (verdict, seen) in verdicts.items() if verdict == "inconclusive"]
+    if unknown:
+        pytest.skip(f"links that could not be checked now: {unknown}")

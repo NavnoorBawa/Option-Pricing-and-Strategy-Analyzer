@@ -7,7 +7,9 @@ sections divide into ``### `` subsections (:func:`parse_section`).
 One renderer draws the Methodology in two places:
 
 * the Methodology tab (:func:`render`): a line of contents that links to every section, then the sections,
-  collapsed, so that the whole reference fits in about a screen;
+  collapsed, so that the whole reference fits in about a screen. A link to a section, from the contents or from
+  another page (``?tab=Methodology#references``), opens it; printing the tab prints every section, open
+  (``static/desk.css``);
 * the drawer that the header's Methodology button opens on the right, over the open tab, which stays as it was
   (:func:`drawer`). Streamlit has no way to open a dialog scrolled to a section, so the drawer starts with the open
   tab's own section (:data:`TAB_SECTIONS`), already open, followed by the others, collapsed.
@@ -27,6 +29,8 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+
+from .format import right_aligned
 
 #: Folder of the Methodology files.
 FOLDER = Path(__file__).with_name("methodology")
@@ -50,6 +54,47 @@ INTRO = (
 NOT_GENERATED = "The validation report has not been generated for this version of the app, so there are no results yet."
 #: The commit of a report run: 7 to 40 lowercase hexadecimal digits, as git writes it.
 _COMMIT = re.compile(r"[0-9a-f]{7,40}")
+#: A cell of a results table that reads as a number, which the table right-aligns: a JSON number as Python writes
+#: it, or text such as 0.37, −2.5e-4, 1,000, 12 %, 3 bp, <0.001, or 4 / 2.5 (a count over its expected value).
+_NUMBER = r"[<>≤≥]?\s?[−+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[eE][−+-]?\d+)?(?:\s?(?:%|bp))?"
+_NUMERIC = re.compile(rf"{_NUMBER}(?:\s?/\s?{_NUMBER})?")
+#: The tab's links to its sections, a script that st.html runs in the page. The browser alone would scroll to a
+#: section that is still collapsed, and not at all for a link from another page, since Streamlit draws the anchors
+#: after the browser has looked for them. So a link of the line of contents, or a link to the tab with a section's
+#: anchor (?tab=Methodology#references), opens that section and brings it to the top, without a script run. A click
+#: leaves the address as it was, and the anchor of a link is removed once used, so that it does not stay in the
+#: address on the other tabs. (``static/desk.css`` keeps the anchors clear of Streamlit's toolbar band.)
+_ANCHORS = """<script>
+(() => {
+  // Open the section whose anchor is `id` (its title in lower case and hyphens) and keep it at the top of the page
+  // for a second, while Streamlit's animation opens it: until then the page may be too short to scroll that far.
+  const show = (id) => {
+    const anchor = /^[a-z0-9-]+$/.test(id) && document.querySelector(`.st-key-methodology [id="${id}"]`);
+    const details = anchor && anchor.closest("[data-testid=stVerticalBlock]").querySelector("details");
+    if (!details) return false;
+    if (!details.open) details.querySelector("summary").click();
+    const top = new ResizeObserver(() => anchor.scrollIntoView({block: "start"}));
+    top.observe(details);
+    setTimeout(() => top.disconnect(), 1000);
+    return true;
+  };
+  // A link from another page. The script can run before Streamlit has drawn the sections: look again for 5 s.
+  const fromAddress = (tries = 50) => {
+    const id = location.hash.slice(1);
+    if (show(id)) history.replaceState(history.state, "", location.pathname + location.search);
+    else if (id && tries > 0) setTimeout(() => fromAddress(tries - 1), 100);
+  };
+  fromAddress();
+  if (window.methodologyLinks) return;  // the listeners, once per page: the script runs each time the tab opens
+  window.methodologyLinks = true;
+  addEventListener("hashchange", () => fromAddress());
+  document.addEventListener("click", (event) => {
+    const link = event.target.closest && event.target.closest(".st-key-methodology a[href^='#']");
+    const plain = event.button === 0 && !(event.metaKey || event.ctrlKey || event.shiftKey || event.altKey);
+    if (link && plain && show(link.hash.slice(1))) event.preventDefault();
+  });
+})();
+</script>"""
 
 
 @dataclass(frozen=True)
@@ -168,6 +213,8 @@ def _table(spec: object, where: str) -> ResultsTable:
     if not isinstance(columns, list) or not columns:
         raise ValueError(f"{where}: 'columns' must be a non-empty list")
     names = tuple(_text(name, f"{where}: a column name") for name in columns)
+    if len(set(names)) < len(names):
+        raise ValueError(f"{where}: the column names must differ")
     rows = spec.get("rows")
     if not isinstance(rows, list) or not rows:
         raise ValueError(f"{where}: 'rows' must be a non-empty list")
@@ -193,7 +240,8 @@ def validation_results(path: Path | str | None = None) -> ValidationResults | No
     with at least one table, and in each table at least one row with one cell per column. The ``note`` is
     optional. The report writes each cell as it should read (a number with its units and precision, ``pass``, a
     zone such as ``green``); a cell that is a JSON number is shown as Python writes it, and ``null`` as an empty
-    cell.
+    cell. The Validation section shows each cell's text as it is, and right-aligns the columns of numbers
+    (:func:`numeric_columns`).
 
     Parameters
     ----------
@@ -249,6 +297,37 @@ def validation_results(path: Path | str | None = None) -> ValidationResults | No
     return ValidationResults(commit, date, tuple(_table(spec, f"table {i}") for i, spec in enumerate(tables, 1)))
 
 
+def numeric_columns(table: ResultsTable) -> tuple[str, ...]:
+    """The columns of a results table that hold numbers, which the Validation section right-aligns.
+
+    A column holds numbers when each of its cells but the empty ones reads as a number: a JSON number, or text
+    such as ``0.37``, ``−2.5e-4``, ``1,000``, ``12 %``, ``3 bp``, ``<0.001`` or ``4 / 2.5`` (a count over its
+    expected value). Digits are tabular in the app's font, so right-aligned numbers of the same precision line up.
+
+    Parameters
+    ----------
+    table : ResultsTable
+        A table of the validation report (:func:`validation_results`).
+
+    Returns
+    -------
+    tuple of str
+        The names of the columns of numbers, in the table's order.
+
+    Examples
+    --------
+    >>> table = ResultsTable("Backtest", ("Days", "Exceptions / expected", "Kupiec p", "Zone"),
+    ...                      (("250", "4 / 2.5", "0.37", "green"), ("1,000", "17 / 10.0", "<0.001", "red")))
+    >>> numeric_columns(table)
+    ('Days', 'Exceptions / expected', 'Kupiec p')
+    """
+    return tuple(
+        name
+        for i, name in enumerate(table.columns)
+        if any(row[i] for row in table.rows) and all(_NUMERIC.fullmatch(row[i]) for row in table.rows if row[i])
+    )
+
+
 def _results() -> None:
     """The validation report's results, at the end of the Validation section, or why there are none."""
     try:
@@ -262,7 +341,9 @@ def _results() -> None:
     st.caption(f"Computed by the validation report at commit `{results.commit}` on {results.date.isoformat()}.")
     for table in results.tables:
         st.markdown(f"**{table.title}**")
-        st.table(pd.DataFrame(list(table.rows), columns=list(table.columns)), hide_index=True, border="horizontal")
+        frame = pd.DataFrame(list(table.rows), columns=list(table.columns))
+        text = [name for name in table.columns if name not in numeric_columns(table)]
+        st.table(right_aligned(frame, text_columns=text), hide_index=True, border="horizontal")
         if table.note:
             st.caption(table.note)
 
@@ -290,6 +371,9 @@ def _sections(*, first: str | None, contents: bool) -> None:
 def render() -> None:
     """The Methodology tab: a line of contents that links to each section, then every section, collapsed.
 
+    A link to a section, from the line of contents or from another page (``?tab=Methodology#references``), opens
+    the section and scrolls to it (a script in the page, :data:`_ANCHORS`).
+
     Examples
     --------
     >>> from streamlit.testing.v1 import AppTest
@@ -302,18 +386,18 @@ def render() -> None:
     """
     with st.container(key="methodology", width=760):
         _sections(first=None, contents=True)
+        st.html(_ANCHORS, unsafe_allow_javascript=True)
 
 
-# Medium, not the UI spec's "large": a large drawer is 1,120 px wide from a 1,280 px screen up, so on a 1,440 px laptop
-# it covers the whole tab (whose content starts 333 px in) and sets lines of about 150 characters.
-@st.dialog("Methodology", position="right", width="medium", icon=":material/menu_book:")
+@st.dialog("Methodology", position="right", width="large", icon=":material/menu_book:")
 def drawer(tab: str) -> None:
     """The Methodology in a drawer on the right, at full height, over the open tab, which stays as it was.
 
     The drawer starts with the open tab's section, open, and follows with the others, collapsed, as the tab draws
     them (:func:`render`) but without the line of contents. Closing it (its close button, the Escape key or a click
-    beside it) does not rerun the app. It is 750 px wide at most, so that the tab stays in view beside it on a
-    laptop, and the user can widen it by dragging its edge.
+    beside it) does not rerun the app. It is Streamlit's large dialog (UI spec 3.6): 1,120 px wide from a 1,280 px
+    screen up, which the user can narrow by dragging its edge, and all but 21 px of a phone's width. Its text keeps the
+    tab's measure, 760 px at most, so that lines stay short enough to read.
 
     Parameters
     ----------
@@ -331,5 +415,5 @@ def drawer(tab: str) -> None:
     >>> at.expander[0].label, at.expander[0].proto.expanded, at.expander[1].proto.expanded
     ('Implied vol', True, False)
     """
-    with st.container(key="methodology_drawer"):
+    with st.container(key="methodology_drawer", width=760):
         _sections(first=TAB_SECTIONS.get(tab), contents=False)
