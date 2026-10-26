@@ -11,6 +11,7 @@ from scipy.special import ndtr
 
 from .. import black_scholes as bs
 from . import cache, charts
+from .components import card_row
 from .format import md, money, pct
 from .inputs import Inputs
 
@@ -137,105 +138,8 @@ def _model_card(inputs: Inputs, prices: Prices) -> tuple[str, str, str, str]:
     )
 
 
-#: Headline-card text in the theme's IBM Plex Sans: values in Medium at 22.75 px (the theme's metricValueFontSize,
-#: 1.625rem of its 14 px base), labels (and deltas) in Regular at 12.25 px. Digits (tabular), "$", "+" and "−" are
-#: 0.6 em wide in Plex Sans Medium; the narrower and wider characters are listed. Labels average at most 0.517 em
-#: per character.
-_VALUE_PX, _LABEL_PX, _LABEL_EM = 22.75, 12.25, 0.517
-_DIGIT_EM = 0.6
-_CHAR_EM = {",": 0.29, ".": 0.29, " ": 0.236, "-": 0.401, "%": 0.947}
-#: Room to spare on every value (about 2 px on a desktop), for browsers that round the glyph widths differently.
-_VALUE_SPARE_EM = 0.1
-#: Card padding and border, the label's help icon and its margin, and the gap between cards (gap="small").
-_CARD_CHROME_PX, _HELP_ICON_PX, _CARD_GAP_PX = 28.0, 19.25, 14.0
-#: Smallest value size on a narrow screen, where the values shrink so that the cards stay two by two (an
-#: index-level forward, "$105,127.1096", still fits half of a 360 px phone).
-_MIN_VALUE_PX = 16.0
 #: Keys of the headline price-card row and of its two pairs.
 PRICE_CARDS = ("price_cards", ("price_cards_prices", "price_cards_model"))
-
-
-def _value_em(value: str) -> float:
-    """Width of a card value in ems of its font size, with a little room to spare."""
-    return sum(_CHAR_EM.get(c, _DIGIT_EM) for c in value) + _VALUE_SPARE_EM
-
-
-def _card_width(
-    label: str, value: str, value_px: float = _VALUE_PX, wrap_label: bool = False, delta: str = ""
-) -> float:
-    """Width in px a headline card needs to show its value on one line and its label and delta (the small line
-    under the value, if any) on one line each (or, with ``wrap_label``, one word per line)."""
-
-    def characters(text: str) -> int:
-        return max((len(word) for word in text.split()), default=0) if wrap_label else len(text)
-
-    label_px = _LABEL_PX * _LABEL_EM * characters(label) + _HELP_ICON_PX
-    delta_px = _LABEL_PX * _LABEL_EM * characters(delta)
-    return max(value_px * _value_em(value), label_px, delta_px) + _CARD_CHROME_PX
-
-
-def _cards_style(
-    cards: list[tuple[str, ...]], key: str = PRICE_CARDS[0], pair_keys: tuple[str, str] = PRICE_CARDS[1]
-) -> str:
-    """Flex sizes that wrap the four cards in pairs: 4 across, then 2 + 2, then 1 per row (never 3 + 1).
-
-    ``cards`` holds ``(label, value)`` or ``(label, value, delta)``; ``key`` is the row's container key and
-    ``pair_keys`` those of its two pairs (see :func:`card_row`).
-
-    Every card is based on the widest card's width, and each pair on two of them side by side, so the row moves
-    the second pair to its own line before either pair has to stack its cards, and both pairs stack at the same
-    width. (Streamlit bases each card on its own content and each container on a fixed 8rem, so on its own the
-    row wraps 3 + 1, or stacks one pair's cards but not the other's.)
-
-    Where the row is narrower than one pair at full size (a phone), the labels and deltas wrap and the values
-    shrink with the row so that the widest still fits half of it, down to 16 px (they never grow beyond their
-    desktop size): the cards stay two by two on any phone instead of stacking into four full-width cards that push
-    the tabs below the first screen. The sizes follow the row's own width (a container query), so an open sidebar
-    on a narrow window is covered too.
-    """
-
-    def width(card: tuple[str, ...], value_px: float = _VALUE_PX, wrap: bool = False) -> float:
-        label, value, *delta = card
-        return _card_width(label, value, value_px, wrap, *delta)
-
-    card = int(np.ceil(max(width(c) for c in cards)))
-    pair = 2 * card + int(_CARD_GAP_PX)
-    compact = int(np.ceil(max(width(c, _MIN_VALUE_PX, True) for c in cards)))
-    em = max(_value_em(c[1]) for c in cards)
-    # Each card of a full-width pair is half the row less half the gap; its value gets that less the padding.
-    value_space = f"50cqw - {_CARD_GAP_PX / 2 + _CARD_CHROME_PX:g}px"
-    row, name = f".st-key-{key}", key.replace("_", "-")
-    first, second = (f".st-key-{k}" for k in pair_keys)
-    pairs = f"{row} > :has(> {first}, > {second})"
-    each_card = f"{first} > *, {second} > *"
-    return (
-        "<style>"
-        f"{row} {{ container: {name} / inline-size; }} "
-        f"{pairs} {{ flex: 1 1 {pair}px !important; }} "
-        f"{each_card} {{ flex: 1 1 {card}px !important; }} "
-        f"@container {name} (width < {pair}px) {{ "
-        f"{pairs} {{ flex-basis: {2 * compact + int(_CARD_GAP_PX)}px !important; }} "
-        f"{each_card} {{ flex-basis: {compact}px !important; }} "
-        f"{first}, {second} {{ align-items: stretch; }} "
-        f"{row} [data-testid='stMetric'] {{ height: 100%; }} "
-        f"{row} :is([data-testid='stMetricLabel'], [data-testid='stMetricDelta']) "
-        ":is([data-testid='stMarkdownContainer'], p) { white-space: normal; } "
-        f"{row} [data-testid='stMetricValue'] "
-        f"{{ font-size: clamp({_MIN_VALUE_PX:g}px, calc(({value_space}) / {em:g}), {_VALUE_PX:g}px); }} "
-        "}"
-        "</style>"
-    )
-
-
-def card_row(key: str, pair_keys: tuple[str, str], cards: list[tuple[str, str, dict]]) -> None:
-    """Four bordered metric cards ``(label, value, metric options)`` in two pairs that wrap together: 4 across,
-    2 + 2 or 1 per row (sizes in :func:`_cards_style`), so no value is cut off at any width."""
-    texts = [(label, value, str(options.get("delta") or "")) for label, value, options in cards]
-    st.html(_cards_style(texts, key, pair_keys))
-    row = st.container(horizontal=True, gap="small", key=key)
-    pairs = tuple(row.container(horizontal=True, gap="small", key=k) for k in pair_keys)
-    for i, (label, value, options) in enumerate(cards):
-        pairs[i // 2].metric(label, value, border=True, **options)
 
 
 def render_price_cards(inputs: Inputs, prices: Prices) -> None:
@@ -328,7 +232,7 @@ def _sensitivity(inputs: Inputs) -> None:
 
     x_plot = x * 100 if kind == "vol" else x
     fig = charts.sensitivity_chart(x_plot, curve("call"), curve("put"), x_title, y_title, current, strike_x)
-    st.plotly_chart(fig, key="sensitivity_chart")
+    charts.show(fig, key="sensitivity_chart", alt=f"Call and put {y_title.lower()} against {x_title.lower()}")
     if note := _european_note(inputs):
         st.caption(note)
 
@@ -344,9 +248,10 @@ def _heatmaps(inputs: Inputs) -> None:
     # One above the other at full width: side by side, each cell was too narrow for its value (5 to 9 px text).
     for kind in ("call", "put"):
         values = bs.price(grid_s, args[0], args[1], args[2], grid_v, inputs.dividend_yield, kind)
-        st.plotly_chart(
+        charts.show(
             charts.price_heatmap(spots, vols, values, f"{kind.capitalize()} value ($)"),
             key=f"heatmap_{kind}",
+            alt=f"Heatmap of the {kind} value ($) over spot price and volatility",
         )
     if note := _european_note(inputs):
         st.caption(note)
@@ -440,10 +345,13 @@ def _tree_diagnostics(inputs: Inputs, prices: Prices) -> None:
     st.markdown("**Convergence with the number of steps**")
     series, references = cache.tree_convergence(S, K, T, r, sigma, q, model.steps, model.american)
     reference_label = "Converged" if model.american else "Black-Scholes-Merton"
+    reference = "converged American value" if model.american else "Black-Scholes-Merton value"
     for col, kind in zip(st.columns(2), ("call", "put"), strict=True):
-        col.plotly_chart(
+        charts.show(
             charts.convergence_chart(series[kind], references[kind], reference_label, kind.capitalize()),
             key=f"tree_convergence_{kind}",
+            alt=f"{kind.capitalize()} value on each lattice against the number of tree steps, with the {reference}",
+            container=col,
         )
     st.caption(
         f"Step counts from 10 to the sidebar's {model.steps:,}. CRR oscillates between odd and even step counts; "
@@ -465,7 +373,11 @@ def _tree_diagnostics(inputs: Inputs, prices: Prices) -> None:
                 )
         st.markdown("**Early-exercise boundary**")
         if boundaries:
-            st.plotly_chart(charts.exercise_boundary_chart(boundaries, K), key="exercise_boundary")
+            charts.show(
+                charts.exercise_boundary_chart(boundaries, K),
+                key="exercise_boundary",
+                alt="Early-exercise boundary: the critical spot price against days from today, with the strike",
+            )
             st.caption(
                 "Exercising immediately is optimal when the spot is beyond the boundary: below it for a put, "
                 "above it for a call. With a non-negative rate and no dividends an American call is never "
@@ -493,9 +405,11 @@ def _monte_carlo_diagnostics(inputs: Inputs, prices: Prices) -> None:
     c1, c2 = st.columns(2)
     with c1:
         st.markdown(f"**Sample paths** ({len(paths)} of the {model.n_paths:,} scenarios behind the price)")
-        st.plotly_chart(
+        charts.show(
             charts.paths_chart(times * 365, paths, K, S * np.exp((r - q) * times), "Risk-neutral mean (forward)"),
             key="mc_paths",
+            alt=f"{len(paths)} simulated price paths and their risk-neutral mean (the forward) against days from "
+            "today, with the strike",
         )
         st.caption(
             "The price samples each scenario's price at expiry exactly; its path from today is filled in with a "
@@ -509,9 +423,10 @@ def _monte_carlo_diagnostics(inputs: Inputs, prices: Prices) -> None:
         mu = np.log(S) + (r - q - 0.5 * sigma**2) * T
         sd = sigma * np.sqrt(T)
         pdf = np.exp(-0.5 * ((np.log(grid) - mu) / sd) ** 2) / (grid * sd * np.sqrt(2 * np.pi))
-        st.plotly_chart(
+        charts.show(
             charts.histogram_chart(s_t, "Underlying price at expiry", [(K, "strike", charts.NEUTRAL)], pdf=(grid, pdf)),
             key="mc_terminal",
+            alt="Histogram of the simulated underlying prices at expiry, with the log-normal density and the strike",
         )
     rows = [
         {

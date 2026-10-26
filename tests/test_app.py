@@ -102,3 +102,29 @@ def test_iv_shift_leaves_the_expiry_curve_and_metrics_alone(app):
     _ok(app)
     assert _trace(app, "At expiry")["y"] == before
     assert _trace(app, "Today")["name"] == "Today, IV +10 pts"
+
+
+#: Every chart of the app, by key; together the three pricing models draw each of them.
+CHART_KEYS = {
+    "sensitivity_chart", "heatmap_call", "heatmap_put", "tree_convergence_call", "tree_convergence_put",
+    "exercise_boundary", "mc_paths", "mc_terminal", "payoff_chart", "risk_heatmap", "date_heatmap", "time_decay",
+    "greek_profiles", "stress_chart", "var_hist", "surf_iv", "surf_lv", "smiles", "term_structure", "iv_curve",
+}  # fmt: skip
+
+
+def test_every_chart_has_the_desk_config_and_a_description(new_app):
+    # Every chart goes through charts.show: the desk toolbar and SVG download, and an accessible name for screen
+    # readers (Streamlit leaves a chart without one unnamed).
+    seen = set()
+    for query in ({}, {"model": "Binomial tree", "style": "American"}, {"model": "Monte Carlo"}):
+        at = new_app(**query).run()
+        _ok(at)
+        for chart in at.get("plotly_chart"):
+            key = chart.proto.id.rsplit("-", 1)[-1]
+            config = json.loads(chart.proto.config)
+            assert config["displaylogo"] is False and config["displayModeBar"] == "hover", key
+            assert config["toImageButtonOptions"] == {"format": "svg", "filename": f"options-analyzer-{key}"}, key
+            assert chart.proto.theme == "streamlit", key
+            assert len(chart.proto.alt) >= 20 and not chart.proto.alt[0].islower(), (key, chart.proto.alt)
+            seen.add(key)
+    assert seen == CHART_KEYS

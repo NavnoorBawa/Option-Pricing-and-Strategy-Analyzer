@@ -14,6 +14,7 @@ import streamlit as st
 
 from .. import vol_surface as vs
 from . import cache, charts
+from .components import card_row
 from .inputs import Inputs
 
 SSVI = "Parametric (SSVI)"
@@ -279,7 +280,12 @@ def _smiles(surface: vs.VolSurface) -> None:
         for i in picked:
             rows = surface.quotes[np.isclose(surface.quotes["maturity"], maturities[i], rtol=0.0, atol=1e-9)]
             quotes.append((rows["moneyness"].to_numpy(), rows["iv"].to_numpy(), rows["fitted_iv"].to_numpy()))
-    st.plotly_chart(charts.smile_chart(surface.moneyness, slices, "Moneyness K/S", quotes=quotes), key="smiles")
+    charts.show(
+        charts.smile_chart(surface.moneyness, slices, "Moneyness K/S", quotes=quotes),
+        key="smiles",
+        alt="Implied and local volatility against moneyness for the selected maturities"
+        + (", with the market quotes" if quotes is not None else ""),
+    )
     if quotes is not None:
         st.caption("Circles are the quotes; hover one to see how far the SVI fit misses it.")
 
@@ -296,31 +302,38 @@ def render(inputs: Inputs) -> None:
     from_quotes = surface.quotes is not None
     fitted = " of the fitted surface" if from_quotes else ""
     in_quotes = " Arbitrage in the quotes themselves is listed in the notes below." if from_quotes else ""
-    c = st.columns(4)
-    c[0].metric(
-        "Grid", f"{len(surface.maturities)} × {len(surface.moneyness)}", border=True, help="Maturities × strikes."
-    )
     # Short labels: "Calendar-arbitrage points" was cut to "Calendar-arbitrage p…" in a row of four at 1,280 px.
-    c[1].metric(
-        "Calendar arbitrage",
-        surface.calendar_violations,
-        border=True,
-        help=f"Number of grid points{fitted} where total implied variance falls as maturity increases at fixed "
-        f"forward moneyness (∂w/∂T < 0; for market quotes, by more than the quotes' precision).{in_quotes}",
-    )
-    c[2].metric(
-        "Butterfly arbitrage",
-        surface.butterfly_violations,
-        border=True,
-        help=f"Number of grid points{fitted} that fail Durrleman's condition: g(y) < 0, a negative risk-neutral "
-        f"density.{in_quotes}",
-    )
-    c[3].metric(
-        "Local vol defined",
-        _local_vol_share(valid, quoted),
-        border=True,
-        help=f"Share of the grid points that have an implied vol (inside the quoted strikes) where local "
-        f"volatility is also defined: {valid:,} of {quoted:,}.",
+    card_row(
+        "surface_cards",
+        ("surface_cards_a", "surface_cards_b"),
+        [
+            ("Grid", f"{len(surface.maturities)} × {len(surface.moneyness)}", {"help": "Maturities × strikes."}),
+            (
+                "Calendar arbitrage",
+                surface.calendar_violations,
+                {
+                    "help": f"Number of grid points{fitted} where total implied variance falls as maturity increases "
+                    "at fixed forward moneyness (∂w/∂T < 0; for market quotes, by more than the quotes' "
+                    f"precision).{in_quotes}"
+                },
+            ),
+            (
+                "Butterfly arbitrage",
+                surface.butterfly_violations,
+                {
+                    "help": f"Number of grid points{fitted} that fail Durrleman's condition: g(y) < 0, a negative "
+                    f"risk-neutral density.{in_quotes}"
+                },
+            ),
+            (
+                "Local vol defined",
+                _local_vol_share(valid, quoted),
+                {
+                    "help": "Share of the grid points that have an implied vol (inside the quoted strikes) where "
+                    f"local volatility is also defined: {valid:,} of {quoted:,}."
+                },
+            ),
+        ],
     )
     for note in surface.notes:
         st.warning(note)
@@ -340,16 +353,20 @@ def render(inputs: Inputs) -> None:
     # the 3-D scene's axes (Plotly sizes the scene by the chart's height, so a wider chart only adds margin).
     # Centred, so a wide screen does not leave the right half of the row empty.
     row = st.container(horizontal=True, horizontal_alignment="center", key="surfaces")
-    row.plotly_chart(
+    charts.show(
         charts.surface_3d(surface.moneyness, surface.maturities, surface.implied_vol, "Implied volatility", colorscale),
         key="surf_iv",
+        alt="3-D implied volatility surface over moneyness and maturity",
+        container=row,
         width=SURFACE_CHART_WIDTH,
     )
-    row.plotly_chart(
+    charts.show(
         charts.surface_3d(
             surface.moneyness, surface.maturities, surface.local_vol, "Local volatility (Dupire / Gatheral)", colorscale
         ),
         key="surf_lv",
+        alt="3-D local volatility surface over moneyness and maturity",
+        container=row,
         width=SURFACE_CHART_WIDTH,
     )
 
@@ -360,7 +377,7 @@ def render(inputs: Inputs) -> None:
     series = {"ATM implied vol": summary["ATM implied vol"], "ATM local vol": summary["ATM local vol"]}
     fig = charts.lines_chart(summary["Maturity (years)"], series, "Maturity (years)", "Volatility", hline=None)
     fig.update_yaxes(tickformat=".1%")
-    st.plotly_chart(fig, key="term_structure")
+    charts.show(fig, key="term_structure", alt="At-the-money implied and local volatility against maturity")
     shown = summary.assign(**{c: summary[c] * 100 for c in ("ATM implied vol", "ATM local vol")})
     st.dataframe(
         shown,

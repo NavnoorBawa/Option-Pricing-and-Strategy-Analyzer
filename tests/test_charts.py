@@ -139,16 +139,35 @@ def test_show_draws_with_the_desk_config(monkeypatch):
     default = Container()
     monkeypatch.setattr(charts, "st", default)
     fig = go.Figure()
-    assert charts.show(fig, key="payoff_chart") == "element"
+    assert charts.show(fig, key="payoff_chart", alt="Position P&L against the underlying price") == "element"
     column = Container()
-    charts.show(fig, key="heatmap_call", container=column, width=420)
+    charts.show(fig, key="heatmap_call", alt="Call value heatmap", container=column, width=420, theme=None)
     (where1, fig1, kw1), (where2, _, kw2) = calls
     assert where1 is default and fig1 is fig and where2 is column
     assert kw1["key"] == "payoff_chart" and kw1["theme"] == "streamlit"
+    assert kw1["alt"] == "Position P&L against the underlying price" and kw2["alt"] == "Call value heatmap"
     assert kw1["config"]["displaylogo"] is False
     assert kw1["config"]["toImageButtonOptions"] == {"format": "svg", "filename": "options-analyzer-payoff_chart"}
     assert kw2["config"]["toImageButtonOptions"]["filename"] == "options-analyzer-heatmap_call" and kw2["width"] == 420
+    assert kw2["theme"] is None  # the figure's own colours
     assert charts.PLOTLY_CONFIG["toImageButtonOptions"]["filename"] == "options-analyzer-chart"  # left unchanged
+
+
+@pytest.mark.parametrize("alt", ["", "   "])
+def test_show_refuses_a_chart_without_a_description(monkeypatch, alt):
+    # Streamlit treats a blank alt as no accessible name at all, so a chart drawn with one would be silent to a
+    # screen reader.
+    monkeypatch.setattr(charts, "st", None)  # nothing may be drawn
+    with pytest.raises(ValueError, match="description"):
+        charts.show(go.Figure(), key="payoff_chart", alt=alt)
+
+
+def test_every_chart_in_the_app_goes_through_show():
+    # One entry point, so that the desk config and the accessible name cannot be forgotten on a new chart.
+    root = Path(charts.__file__).parents[2]
+    sources = [*(root / "options_analyzer").rglob("*.py"), root / "main.py"]
+    calls = {p.relative_to(root).as_posix(): p.read_text(encoding="utf-8").count("plotly_chart(") for p in sources}
+    assert {path: n for path, n in calls.items() if n} == {"options_analyzer/ui/charts.py": 1}  # in show()
 
 
 def _colours(fig: go.Figure) -> set[str]:

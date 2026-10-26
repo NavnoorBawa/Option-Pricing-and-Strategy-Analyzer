@@ -425,7 +425,8 @@ def test_both_static_folders_are_identical():
         assert (STATIC_FOLDERS[0] / path).read_bytes() == (STATIC_FOLDERS[1] / path).read_bytes(), path
 
 
-#: Labels of the headline cards (Pricing and Implied Volatility tabs), whose widths tab_pricing estimates.
+#: Labels of the headline cards (Pricing and Implied Volatility tabs), whose widths ui/components.py estimates. (The
+#: other card rows are checked as whole rows in tests/test_app_components.py.)
 CARD_LABELS = (
     "Call value", "Put value", "Forward price", "Call ITM probability", "Exercise premium", "Tree error vs BSM",
     "Std. error", "Implied volatility", "Model check", "Vega at IV", "Time value",
@@ -435,19 +436,19 @@ CARD_LABELS = (
 def test_the_card_width_model_uses_the_theme_font_sizes():
     # The cards' sizes come from a model of their text in the theme's font: with values modelled at Streamlit's
     # default 36 px in Source Sans, the Plex values on a phone grew to 36 px and were cut to '$10.45…'.
-    from options_analyzer.ui import tab_pricing
+    from options_analyzer.ui import components
 
     base = THEME["baseFontSize"]
     value_px = base * float(THEME["metricValueFontSize"].removesuffix("rem"))
     small_px = base * 0.875  # Streamlit's small text: the card labels and deltas
-    assert (tab_pricing._VALUE_PX, tab_pricing._LABEL_PX) == (value_px, small_px) == (22.75, 12.25)
+    assert (components._VALUE_PX, components._LABEL_PX) == (value_px, small_px) == (22.75, 12.25)
     assert THEME["metricValueFontWeight"] == 500  # the value widths are those of Plex Sans Medium
 
 
 def test_the_card_width_model_matches_plex_sans():
     pytest.importorskip("brotli")  # WOFF2 decompression
     ttlib = pytest.importorskip("fontTools.ttLib")
-    from options_analyzer.ui import tab_pricing
+    from options_analyzer.ui import components
 
     def advances(weight: str) -> dict[str, float]:
         font = ttlib.TTFont(STATIC_FOLDERS[1] / "fonts" / f"IBMPlexSans-{weight}.woff2")
@@ -455,13 +456,19 @@ def test_the_card_width_model_matches_plex_sans():
         return {chr(cp): metrics[name][0] / units for cp, name in cmap.items() if cp < 0x2300}
 
     medium, regular = advances("Medium"), advances("Regular")
-    # A value is never modelled narrower than it is, and the model is exact to 0.002 em.
-    for char in "0123456789$+−,. -%":
-        model = tab_pricing._CHAR_EM.get(char, tab_pricing._DIGIT_EM)
+    # A character of an amount or a percentage, with the suffixes of the shortened amounts ("$46.62M", "-$4.14T",
+    # "$1.2e+15"), is never modelled narrower than it is, and the model is exact to 0.002 em. ("M" fell back to the
+    # 0.6 em of a digit, 0.214 em short.)
+    for char in "0123456789$+−,. -%MBTe":
+        model = components._CHAR_EM.get(char, components._DIGIT_EM)
         assert medium[char] <= model <= medium[char] + 0.002, char
+    # The words and signs a card shows instead of an amount are not modelled narrower than they are either.
+    for value in ("Unlimited", "No profit", "No loss", "Too large", "–", ">99.9%", "<0.1%", "30 × 41"):
+        model = components._value_em(value) - components._VALUE_SPARE_EM
+        assert model >= sum(medium[c] for c in value) - 1e-9, value
     # Labels: at most _LABEL_EM per character on average.
     for label in CARD_LABELS:
-        assert sum(regular[c] for c in label) <= tab_pricing._LABEL_EM * len(label), label
+        assert sum(regular[c] for c in label) <= components._LABEL_EM * len(label), label
 
 
 def _covered(code_point: int) -> bool:
@@ -502,7 +509,7 @@ def test_the_cmap_snapshot_matches_the_fonts():
 # --- In Chromium --------------------------------------------------------------------------------------------------
 # The theme as a browser draws it: the running app (main.py on a free local port) and a few charts drawn by
 # plotly.js. These tests need Playwright and a Chromium it can launch (CHROMIUM_EXECUTABLE, Playwright's own, or any
-# revision Playwright has downloaded); without them they are skipped.
+# revision Playwright has downloaded); without them they are skipped. The tests that drive the app are marked e2e.
 
 
 def _launch_chromium(playwright):
@@ -608,18 +615,121 @@ _CARD_VALUES = """() => {
 }"""
 
 
+#: The tab of every card row (the price cards sit above the tabs).
+CARD_ROW_TABS = {
+    "price_cards": "Pricing & Greeks",
+    "strategy_cards": "Strategy Builder",
+    "greek_cards": "Strategy Builder",
+    "expectation_cards": "Strategy Builder",
+    "var_cards": "Risk & Scenarios",
+    "surface_cards": "Volatility Surface",
+    "iv_cards": "Implied Volatility",
+}
+
+
+@pytest.mark.e2e
+@pytest.mark.slow
 @pytest.mark.parametrize("width", [1440, 390, 360])
 def test_no_card_value_is_cut_off(chromium, app_url, width):
     # IBM Plex digits are 0.6 em wide where the cards' model assumed Source Sans' 0.5 em, and on a phone the values
     # grew to 36 px: at 390 and 360 px the price cards read '$10.45…' and '$105.1…', the IV cards '20.00…'.
     page = _open(chromium, app_url, "dark", width)
     try:
-        for tab in ("Pricing & Greeks", "Implied Volatility"):
+        for tab in dict.fromkeys(CARD_ROW_TABS.values()):
             _tab(page, tab)
             values = page.evaluate(_CARD_VALUES)
             assert values["plex"], "IBM Plex Sans did not load"
             assert not values["cut"], (tab, values["cut"])
             assert values["sizes"] and max(values["sizes"]) <= 22.75, (tab, values["sizes"])
+    finally:
+        page.close()
+
+
+#: Every card of a card row: its box, the top and the left and right edges of its value's text, the right edge and
+#: the number of lines of its label's text, the edges of its content box (inside the border and padding), in px,
+#: and its value's font size.
+_CARD_ROW = """key => [...document.querySelectorAll(`.st-key-${key} [data-testid=stMetric]`)].map(card => {
+  const box = card.getBoundingClientRect(), outer = getComputedStyle(card);
+  const inner = getComputedStyle(card.firstElementChild);
+  const glyphs = element => {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const rects = [...range.getClientRects()].filter(r => r.width > 0);
+    return {top: Math.min(...rects.map(r => r.top)), left: Math.min(...rects.map(r => r.left)),
+            right: Math.max(...rects.map(r => r.right)), lines: new Set(rects.map(r => Math.round(r.top))).size};
+  };
+  const valueBox = card.querySelector('[data-testid=stMetricValue]'), value = glyphs(valueBox);
+  const label = glyphs(card.querySelector('[data-testid=stMetricLabel] [data-testid=stMarkdownContainer]'));
+  const left = parseFloat(outer.borderLeftWidth) + parseFloat(outer.paddingLeft) + parseFloat(inner.paddingLeft);
+  const right = parseFloat(outer.borderRightWidth) + parseFloat(outer.paddingRight) + parseFloat(inner.paddingRight);
+  return {label: card.querySelector('[data-testid=stMetricLabel]').innerText.trim(), x: box.left, y: box.top,
+          width: box.width, height: box.height, valueTop: value.top - box.top, valueLeft: value.left,
+          valueRight: value.right, labelRight: label.right, labelLines: label.lines, contentLeft: box.left + left,
+          contentRight: box.right - right, font: parseFloat(getComputedStyle(valueBox).fontSize)};
+})"""
+
+
+def _lines(cards: list[dict]) -> list[list[dict]]:
+    """The cards of a row by line (cards whose tops are within 2 px), top to bottom."""
+    lines: list[list[dict]] = []
+    for card in sorted(cards, key=lambda c: (c["y"], c["x"])):
+        if lines and abs(lines[-1][0]["y"] - card["y"]) < 2:
+            lines[-1].append(card)
+        else:
+            lines.append([card])
+    return lines
+
+
+@pytest.mark.e2e
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    ("width", "query", "three_up"),
+    # Phones (Android and iPhone widths) and a laptop with the sidebar open (the strategy and Greek rows 2 + 2, the
+    # three-card rows 3 across), and on a phone a 100,000-lot position, whose amounts are in millions ("$46.62M").
+    [
+        pytest.param(360, "", False, id="360"),
+        pytest.param(390, "", False, id="390"),
+        pytest.param(1024, "", True, id="1024"),
+        pytest.param(390, "?contracts=100000", False, id="390-100000-lots"),
+    ],
+)
+def test_card_rows_line_up(chromium, app_url, width, query, three_up):
+    # The cards of each line of a row have one width, one height and one value baseline; a card is as wide on a
+    # line of its own (2 + 1) as above it; and no value or label runs out of its card's content box. Every value is
+    # at the theme's full size, and on a line of three cards no label takes more than two lines. The rows of three
+    # go 2 + 1 on phones, and the Strategy summary and Greek rows wrap together with their cards lined up.
+    # (The subgrid and stretch rules of ui/components.py depend on Streamlit's DOM: the bordered stMetric box, the
+    # padded box inside it and the element container around it.)
+    page = _open(chromium, app_url + query, "light", width)
+    try:
+        rows = {}
+        for key, tab in CARD_ROW_TABS.items():
+            if not page.locator(f".st-key-{key} [data-testid=stMetric]").first.is_visible():
+                _tab(page, tab)
+            rows[key] = page.evaluate(_CARD_ROW, key)
+        for key, cards in rows.items():
+            assert len(cards) in (3, 4), key
+            for line in _lines(cards):
+                for measure in ("width", "height", "valueTop"):
+                    values = [card[measure] for card in line]
+                    assert max(values) - min(values) <= 1, (key, measure, [(c["label"], c[measure]) for c in line])
+                if len(line) >= 3:
+                    assert max(card["labelLines"] for card in line) <= 2, (key, [c["label"] for c in line])
+            widths = [card["width"] for card in cards]
+            assert max(widths) - min(widths) <= 1, (key, widths)
+            for card in cards:
+                assert card["font"] == pytest.approx(22.75, abs=0.01), (key, card["label"], card["font"])
+                assert card["valueLeft"] >= card["contentLeft"] - 0.5, (key, card["label"])
+                assert max(card["valueRight"], card["labelRight"]) <= card["contentRight"] + 0.5, (key, card)
+        for key in ("expectation_cards", "var_cards"):
+            assert [len(line) for line in _lines(rows[key])] == ([3] if three_up else [2, 1]), key
+        for key in ("strategy_cards", "greek_cards"):
+            assert [len(line) for line in _lines(rows[key])] == [2, 2], key
+
+        def boxes(key: str) -> list[list[tuple[int, int]]]:
+            return [[(round(c["x"]), round(c["width"])) for c in line] for line in _lines(rows[key])]
+
+        assert boxes("strategy_cards") == boxes("greek_cards")
     finally:
         page.close()
 
@@ -630,6 +740,7 @@ _CHIPS = """() => [...document.querySelectorAll('[data-testid=stMultiSelect] [da
   .map(e => [e.innerText, getComputedStyle(e).color, getComputedStyle(e).backgroundColor])"""
 
 
+@pytest.mark.e2e
 @pytest.mark.parametrize("scheme", ["dark", "light"])
 def test_text_on_the_primary_colour_is_legible_in_the_app(chromium, app_url, scheme):
     page = _open(chromium, app_url, scheme, 1440)

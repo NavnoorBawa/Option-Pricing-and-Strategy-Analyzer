@@ -1,8 +1,8 @@
 """Plotly figure builders and the desk house style.
 
-Pure functions (data in, figure out) so they are easy to test. Render them with :func:`show`, which passes the
-desk Plotly config and keeps ``theme="streamlit"``, so fonts, backgrounds and the categorical colours follow the
-light or dark app theme.
+Pure functions (data in, figure out) so they are easy to test. The app draws every chart with :func:`show`, which
+passes the desk Plotly config and the chart's description for screen readers, and keeps ``theme="streamlit"``, so
+fonts, backgrounds and the categorical colours follow the light or dark app theme.
 
 Colours come from :mod:`.theme`. Each builder takes a ``palette`` (default: the current mode's semantic colours)
 for the colours that carry a meaning: profit and loss, call and put, reference lines. Series that are only told
@@ -14,14 +14,19 @@ style (unified hover, a crosshair, outside ticks, a legend at the top left), whi
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import plotly.graph_objects as go
 import plotly.io as pio
 import streamlit as st
 
-from . import theme
+# As desk_theme, so that show() can take st.plotly_chart's theme argument under its own name.
+from . import theme as desk_theme
 from .format import signed
+
+if TYPE_CHECKING:
+    from streamlit.delta_generator import DeltaGenerator
 
 #: Heights (px) of a primary chart and of a smaller, secondary one.
 HEIGHT, HEIGHT_SECONDARY = 360, 260
@@ -68,7 +73,7 @@ _ALIASES = {"CALL": "call", "PUT": "put", "PROFIT": "profit", "LOSS": "loss", "N
 def __getattr__(name: str) -> str:
     """``charts.CALL``, ``charts.LOSS`` and the other colour names: the token of the current light/dark mode."""
     if name in _ALIASES:
-        return theme.palette()[_ALIASES[name]]
+        return desk_theme.palette()[_ALIASES[name]]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -79,14 +84,55 @@ def translucent(color: str, alpha: float) -> str:
     return f"rgba({red},{green},{blue},{alpha:g})"
 
 
-def show(fig: go.Figure, *, key: str, container=None, **kwargs):
-    """Draw ``fig`` with the desk Plotly config; its SVG download is named after ``key``.
+def show(
+    fig: go.Figure,
+    *,
+    key: str,
+    alt: str,
+    container: DeltaGenerator | None = None,
+    theme: Literal["streamlit"] | None = "streamlit",
+    **kwargs: Any,
+) -> Any:
+    """Draw ``fig`` with the desk Plotly config and an accessible name: the one way the app draws a chart.
 
-    ``container`` is where to draw it (a column, say; default: the current position), and other keyword arguments
-    go to ``st.plotly_chart`` (``width``, ``on_select``, ...).
+    Parameters
+    ----------
+    fig : plotly.graph_objects.Figure
+        The figure, usually from one of the builders here.
+    key : str
+        The chart's element key. It also names the SVG download: ``options-analyzer-<key>.svg``.
+    alt : str
+        A short, specific description of the chart for screen readers, such as "Call and put delta against spot
+        price" (Streamlit's ``alt``: the chart's accessible name). It must not be blank.
+    container : DeltaGenerator, optional
+        Where to draw the chart (a column or a horizontal container, say); default: the current position.
+    theme : {"streamlit", None}, default "streamlit"
+        ``"streamlit"`` lets the app theme fill in the fonts, backgrounds and categorical colours of the light or
+        dark mode; ``None`` draws the figure exactly as built.
+    **kwargs
+        Further keyword arguments of ``st.plotly_chart`` (``width`` in px, ``on_select``, ...).
+
+    Returns
+    -------
+    DeltaGenerator or PlotlyState
+        What ``st.plotly_chart`` returns.
+
+    Raises
+    ------
+    ValueError
+        If ``alt`` is blank.
+
+    Examples
+    --------
+    Outside a running app Streamlit draws nothing:
+
+    >>> fig = sensitivity_chart([90.0, 100.0, 110.0], [3.0, 10.0, 18.0], [12.0, 5.0, 2.0], "Spot", "Value", 100.0)
+    >>> _ = show(fig, key="sensitivity_chart", alt="Call and put value against spot price")
     """
+    if not alt.strip():
+        raise ValueError(f"chart {key!r} needs a description (alt) for screen readers")
     config = PLOTLY_CONFIG | {"toImageButtonOptions": {"format": "svg", "filename": f"options-analyzer-{key}"}}
-    return (container or st).plotly_chart(fig, key=key, config=config, theme="streamlit", **kwargs)
+    return (container or st).plotly_chart(fig, key=key, config=config, theme=theme, alt=alt, **kwargs)
 
 
 def style(fig: go.Figure, palette: dict[str, str] | None = None, height: int | None = None) -> go.Figure:
@@ -97,7 +143,7 @@ def style(fig: go.Figure, palette: dict[str, str] | None = None, height: int | N
     on the dark background and 5.73:1 on the light one, where the theme's own faded grey was 3.62:1 at 10.5 px.
     (Legends and chart titles keep the theme's text colours.)
     """
-    colors = palette or theme.palette()
+    colors = palette or desk_theme.palette()
     fig.update_layout(
         template=TEMPLATE,
         height=height or fig.layout.height or HEIGHT,
@@ -174,7 +220,7 @@ def scenario_styles(n: int, palette: dict[str, str] | None = None) -> list[tuple
     +1σ): falls in the put orange, rises in the call blue and the middle ("unchanged") in the muted grey, with the
     dash marking the size of the move (solid for the largest, then dashed, dotted, dash-dotted). Use it instead of
     the categorical colours where the order of the series means something."""
-    colors = palette or theme.palette()
+    colors = palette or desk_theme.palette()
     dashes = ("solid", "dash", "dot", "dashdot")
     half = (n - 1) / 2
     styles = []
@@ -200,7 +246,7 @@ def sensitivity_chart(
 ):
     """Call and put values or Greeks against one input. The call is the first trace and the put the second, so
     they take the theme's first two categorical colours (the call and put colours of the mode)."""
-    colors = palette or theme.palette()
+    colors = palette or desk_theme.palette()
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=x, y=call_y, name="Call", line=dict(width=LINE_WIDTH)))
     fig.add_trace(go.Scatter(x=x, y=put_y, name="Put", line=dict(width=LINE_WIDTH)))
@@ -274,7 +320,7 @@ def convergence_chart(
 ):
     """Tree value against the number of steps (log scale, so the first steps are not squeezed together);
     ``series`` maps a name to ``(steps, values)``."""
-    colors = palette or theme.palette()
+    colors = palette or desk_theme.palette()
     fig = go.Figure()
     for name, (steps, values) in series.items():
         fig.add_trace(go.Scatter(x=steps, y=values, name=name, mode="lines", line=dict(width=LINE_WIDTH)))
@@ -292,7 +338,7 @@ def convergence_chart(
 def exercise_boundary_chart(boundaries: dict, strike: float, palette: dict[str, str] | None = None):
     """Critical spot price over time; ``boundaries`` maps names starting with "Call" or "Put" to ``(days, spots)``.
     The colours follow the option type (a put boundary drawn alone is still the put colour)."""
-    colors = palette or theme.palette()
+    colors = palette or desk_theme.palette()
     fig = go.Figure()
     for name, (days, spots) in boundaries.items():
         color = colors["call"] if name.lower().startswith("call") else colors["put"]
@@ -309,7 +355,7 @@ def paths_chart(
     mean_label: str = "Risk-neutral mean (forward)",
     palette: dict[str, str] | None = None,
 ):
-    colors = palette or theme.palette()
+    colors = palette or desk_theme.palette()
     fig = go.Figure()
     for path in paths:
         fig.add_trace(
@@ -364,7 +410,7 @@ def histogram_chart(
     bars rather than piled into the end bins, and a note above the chart says how many there are and how far they go.
     Densities are relative to the whole sample, so the bars integrate to the share of outcomes shown.
     """
-    colors = palette or theme.palette()
+    colors = palette or desk_theme.palette()
     values = np.asarray(values, dtype=float)
     lo, hi = np.percentile(values, [0.05, 99.95])
     marks = [float(x) for x, _, _ in lines if np.isfinite(x)]
@@ -441,7 +487,7 @@ def payoff_chart(
     The ±1σ band is named in the legend rather than annotated, so its label cannot collide with the spot label.
     The breakeven hover shows ``breakeven_decimals`` decimals, like the breakevens written under the cards.
     """
-    colors = palette or theme.palette()
+    colors = palette or desk_theme.palette()
     fig = go.Figure()
     if band is not None:
         fig.add_vrect(x0=band[0], x1=band[1], fillcolor=colors["muted"], opacity=0.10, line_width=0)
@@ -464,7 +510,7 @@ def payoff_chart(
                 fill="tozeroy",
                 mode="none",
                 # A translucent fill colour: Plotly does not apply a trace's opacity to a fill without lines.
-                fillcolor=translucent(colors[role], theme.FILL_OPACITY),
+                fillcolor=translucent(colors[role], desk_theme.FILL_OPACITY),
                 showlegend=False,
                 hoverinfo="skip",
             )
@@ -567,10 +613,10 @@ def lines_chart(
 ):
     """One line per series. ``styles`` gives each series a ``(colour, dash)``, such as :func:`scenario_styles`
     for ordered scenarios; without it the series take the theme's categorical colours in order."""
-    colors = palette or theme.palette()
+    colors = palette or desk_theme.palette()
     fig = go.Figure()
     for i, (name, y) in enumerate(series.items()):
-        line = dict(width=LINE_WIDTH)
+        line: dict[str, object] = dict(width=LINE_WIDTH)
         if styles is not None:
             line |= dict(color=styles[i][0], dash=styles[i][1])
         fig.add_trace(go.Scatter(x=x, y=y, name=name, line=line))
@@ -586,7 +632,7 @@ def lines_chart(
 
 def bar_chart(names, values, x_title: str, palette: dict[str, str] | None = None):
     """Horizontal P&L bars in the profit or loss colour, each labelled with its signed amount."""
-    colors = palette or theme.palette()
+    colors = palette or desk_theme.palette()
     fig = go.Figure(
         go.Bar(
             x=values,
@@ -611,7 +657,7 @@ def surface_3d(moneyness, maturities, z, title: str, colorscale: str, palette: d
     # (a phone column is 328 px or more; the Volatility Surface tab wraps the two charts before they get
     # narrower). A margin does not help: the scene is clipped at its own domain, so a margin only moves the cut.
     # The axis and colour-bar text is in the muted colour, as in style().
-    text = dict(color=(palette or theme.palette())["muted"])
+    text = dict(color=(palette or desk_theme.palette())["muted"])
     fig = go.Figure(
         go.Surface(
             x=moneyness,
@@ -664,8 +710,8 @@ def smile_chart(
     ``quotes`` (aligned with ``slices``) adds the market quotes as markers:
     ``(moneyness, quoted implied vol, fitted implied vol)`` or ``None`` for a slice without quotes.
     """
-    colors = palette or theme.palette()
-    series = theme.categorical(colors)
+    colors = palette or desk_theme.palette()
+    series = desk_theme.categorical(colors)
     fig = go.Figure()
     for i, (label, implied, local) in enumerate(slices):
         color = series[i % len(series)]
@@ -673,8 +719,8 @@ def smile_chart(
         fig.add_trace(
             go.Scatter(x=x, y=local, name=f"Local · {label}", line=dict(color=color, width=LINE_WIDTH, dash="dash"))
         )
-        if quotes is not None and quotes[i] is not None:
-            qx, qiv, fitted = quotes[i]
+        if quotes is not None and (quote := quotes[i]) is not None:
+            qx, qiv, fitted = quote
             fig.add_trace(
                 go.Scatter(
                     x=qx,

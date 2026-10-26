@@ -13,6 +13,7 @@ import streamlit as st
 from .. import risk, scenarios
 from .. import strategies as strat
 from . import cache, charts
+from .components import card_row
 from .format import md, money, money_short
 from .tab_strategy import Position
 
@@ -67,7 +68,7 @@ def _scenario_grid(position: Position, front_days: float) -> None:
     spot_changes = np.linspace(-span, span, 13) / 100
     vol_changes = np.array([-0.5, -0.25, 0.0, 0.25, 0.5, 1.0])
     grid = scenarios.pnl_grid(position.strategy, position.market, spot_changes, vol_changes, horizon, position.units)
-    st.plotly_chart(
+    charts.show(
         # Implied-vol shocks (6) are the columns and spot shocks the rows, highest at the top, without the colour
         # scale (the cells say it), as in the spot × date grid: with 13 spot columns and a colour bar the cell values
         # shrank to 4 px on a phone.
@@ -80,6 +81,7 @@ def _scenario_grid(position: Position, front_days: float) -> None:
             colorbar=False,
         ),
         key="risk_heatmap",
+        alt="Heatmap of the position's P&L ($) by spot change (rows) and implied-vol change (columns)",
     )
     st.caption(
         "Every cell re-prices all legs at the shocked spot and implied volatility (relative change) "
@@ -107,7 +109,7 @@ def _date_grid(position: Position, front_days: float) -> None:
     at_expiry = bool(np.isclose(days[-1], front_days))
     if at_expiry:
         dates[-1] = "Expiry"
-    st.plotly_chart(
+    charts.show(
         # Dates (at most 8) are the columns and prices the rows, highest at the top, so that the cells stay wide
         # enough to read on a phone.
         charts.pnl_heatmap(
@@ -119,6 +121,7 @@ def _date_grid(position: Position, front_days: float) -> None:
             colorbar=False,
         ),
         key="date_heatmap",
+        alt="Heatmap of the position's P&L ($) by underlying price (rows) and date (columns)",
     )
     expiry = f", up to the front expiry on day {days[-1]:.0f}" if at_expiry else ""
     st.caption(
@@ -141,7 +144,11 @@ def _time_decay(position: Position, front_days: float) -> None:
         for i, (z, m) in enumerate(zip(zs, moves, strict=True))
     }
     fig = charts.lines_chart(days, series, "Days from today", "P&L ($)", styles=charts.scenario_styles(len(series)))
-    st.plotly_chart(fig, key="time_decay")
+    charts.show(
+        fig,
+        key="time_decay",
+        alt="The position's P&L ($) against days from today, for spot moves of up to one standard deviation",
+    )
     theta = strat.position_greeks(position.strategy, position.market)["theta"] * position.units / 365
     st.caption(
         md(
@@ -170,9 +177,10 @@ def _greek_profiles(position: Position, front_days: float) -> None:
     for d in dates:
         values = strat.position_greeks(position.strategy, market, spots, d / 365.0)[name]
         series["Today" if d == 0 else f"In {d} days"] = np.broadcast_to(values * scale * position.units, spots.shape)
-    st.plotly_chart(
+    charts.show(
         charts.lines_chart(spots, series, "Underlying price", title, vline=(market.spot, "spot")),
         key="greek_profiles",
+        alt=f"The position's {greek.lower()} against the underlying price, today and at later dates",
     )
     st.caption(
         "Position Greeks of the whole position across ±3 standard deviations of the price at the front expiry, "
@@ -223,7 +231,11 @@ def _stress_tests(position: Position) -> None:
         return
     table = pd.DataFrame(rows)
     # Chart and table are stacked at full width: side by side, the table hid its right-hand columns.
-    st.plotly_chart(charts.bar_chart(table["Scenario"], table["P&L"], "P&L ($)"), key="stress_chart")
+    charts.show(
+        charts.bar_chart(table["Scenario"], table["P&L"], "P&L ($)"),
+        key="stress_chart",
+        alt="The position's P&L ($) in each stress scenario, as horizontal bars",
+    )
     columns = ["Scenario", "P&L", "Spot change", "IV multiplier", "IV shock damped", "Rate change (bp)"]
     if elapsed or custom_on:
         columns += ["Days elapsed", "Legs expired"]
@@ -370,37 +382,43 @@ def _var(position: Position) -> None:
         result = cache.value_at_risk(position.strategy, position.market, config, position.units)
 
     ci = md(f"{money(result.var_ci95[0])} to {money(result.var_ci95[1])}")
-    c = st.columns(3)
-    c[0].metric(
-        f"VaR {confidence:.1%}",
-        money_short(result.var),
-        border=True,
-        help=md(
-            f"Loss not exceeded with {confidence:.1%} probability over {horizon} trading day(s). "
-            f"Exact: {money(result.var)}; 95% simulation interval {money(result.var_ci95[0])} to "
-            f"{money(result.var_ci95[1])}."
-        ),
-    )
-    c[1].metric(
-        f"Expected Shortfall {confidence:.1%}",
-        money_short(result.expected_shortfall),
-        border=True,
-        help=md(f"Average loss in the worst tail beyond VaR. Exact: {money(result.expected_shortfall)}."),
-    )
-    c[2].metric(
-        "Delta-normal VaR",
-        money_short(result.delta_normal_var),
-        border=True,
-        help=md(
-            "Linear approximation |Δ|·S·σ·√(h/252)·z. Differences from full revaluation show the "
-            f"position's non-linearity (gamma, vega). Exact: {money(result.delta_normal_var)}."
-        ),
+    card_row(
+        "var_cards",
+        ("var_cards_all",),
+        [
+            (
+                f"VaR {confidence:.1%}",
+                money_short(result.var),
+                {
+                    "help": md(
+                        f"Loss not exceeded with {confidence:.1%} probability over {horizon} trading day(s). "
+                        f"Exact: {money(result.var)}; 95% simulation interval {money(result.var_ci95[0])} to "
+                        f"{money(result.var_ci95[1])}."
+                    )
+                },
+            ),
+            (
+                f"Expected Shortfall {confidence:.1%}",
+                money_short(result.expected_shortfall),
+                {"help": md(f"Average loss in the worst tail beyond VaR. Exact: {money(result.expected_shortfall)}.")},
+            ),
+            (
+                "Delta-normal VaR",
+                money_short(result.delta_normal_var),
+                {
+                    "help": md(
+                        "Linear approximation |Δ|·S·σ·√(h/252)·z. Differences from full revaluation show the "
+                        f"position's non-linearity (gamma, vega). Exact: {money(result.delta_normal_var)}."
+                    )
+                },
+            ),
+        ],
     )
     st.caption(
         f"Simulation uncertainty: the 95% confidence interval of the VaR estimate is {ci} "
         f"(order statistics of the {n_paths:,} simulated outcomes)."
     )
-    st.plotly_chart(
+    charts.show(
         charts.histogram_chart(
             result.pnl,
             f"P&L over {horizon} trading day(s) ($)",
@@ -408,6 +426,8 @@ def _var(position: Position) -> None:
             value_text=money,
         ),
         key="var_hist",
+        alt=f"Histogram of the simulated P&L ($) over {horizon} trading day(s), with the VaR and the Expected "
+        "Shortfall",
     )
     stats = pd.DataFrame(
         [

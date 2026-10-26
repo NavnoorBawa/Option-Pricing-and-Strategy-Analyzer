@@ -15,7 +15,8 @@ from ..implied_vol import (
     lowest_tree_volatility,
     no_arbitrage_bounds,
 )
-from . import cache, charts, tab_pricing
+from . import cache, charts
+from .components import card_row
 from .format import md, money, pct
 from .inputs import Inputs
 
@@ -136,7 +137,7 @@ def render(inputs: Inputs) -> None:
     distance = "equal to the quote" if check == price else f"${abs(check - price):.1e} from the quote"
     check_detail = f": {money(check, 6)}, {distance}" if np.isfinite(check) else ""
     # The same wrapping pairs as the price cards, so no value is cut off at laptop or phone width.
-    tab_pricing.card_row(
+    card_row(
         "iv_cards",
         ("iv_cards_solution", "iv_cards_option"),
         [
@@ -205,7 +206,11 @@ def render(inputs: Inputs) -> None:
             annotation_text="lower bound",
             annotation_position="bottom right",
         )
-    st.plotly_chart(charts.apply_layout(fig, None, "Volatility (%)", "Option value ($)"), key="iv_curve")
+    charts.show(
+        charts.apply_layout(fig, None, "Volatility (%)", "Option value ($)"),
+        key="iv_curve",
+        alt=f"{style} {option_type} value against volatility, with the market price and the implied volatility",
+    )
     st.caption(
         "The quote is checked against the no-arbitrage bounds first. European quotes are converted to their "
         "out-of-the-money equivalent through put-call parity and solved with Brent's method; American quotes are "
