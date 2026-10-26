@@ -187,8 +187,8 @@ def _log_moneyness(S: float, K: float, T: float, r: float, q: float) -> float:
     """``ln(F/K) = ln(S/K) + (r - q)T``, accurate in relative terms also near the forward.
 
     Out of the money with ``σ√T`` small, the volatility's relative error equals that of ``ln(F/K)``, so
-    ``ln(S e^(-qT)/(K e^(-rT)))``, whose rounding is about ``ε`` absolute, would cost up to ``1e-12`` near the
-    forward. Within a factor of two ``S - K`` is exact, and ``log1p`` keeps the relative accuracy.
+    ``ln(S e^(-qT)/(K e^(-rT)))``, whose rounding is about ``ε`` absolute, would cost about ``ε/|ln(F/K)|`` (1e-13
+    at 0.2 % from the forward). Within a factor of two ``S - K`` is exact, and ``log1p`` keeps the relative accuracy.
     """
     ratio = S / K
     return (math.log1p((S - K) / K) if 0.5 <= ratio <= 2 else math.log(ratio)) + (r - q) * T
