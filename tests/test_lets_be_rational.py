@@ -9,7 +9,9 @@ least 1e-300) and inverts them. Rounding the price already moves the volatility 
 Where an in-the-money option's time value is below two units in the last place of its price, rounding the price
 loses the time value altogether and no volatility is recoverable (the linearised ``cond`` understates this). There
 the inversion must be backward stable instead: the returned volatility reprices the quote to within 4 units in the
-last place, or is NaN when the rounded quote is already below the rounded intrinsic value.
+last place, or is NaN (as in Jäckel's reference code) when the rounded quote is below the intrinsic value as the
+module computes it, ``2·sinh(θx/2)``, by no more than those 4 units. How often that happens depends on the rounding
+of ``numpy.sinh``: 0.5 % of the quotes with NumPy 2.4, 4 % with NumPy 1.26.
 """
 
 from __future__ import annotations
@@ -76,8 +78,12 @@ def _study(n: int, seed: int) -> dict:
         f"x={x[i]!r} s={s[i]!r} theta={theta[i]:+.0f}: error {error[i]:.3g} > {tolerance[i]:.3g}"
         for i in np.flatnonzero(identifiable & ~(error <= tolerance))
     ]
+    tx = theta * x
+    intrinsic = np.where(tx > 0, 2 * np.sinh(0.5 * tx), 0.0)  # as normalised_implied_volatility subtracts it
     for i in np.flatnonzero(~identifiable):  # backward stability where the time value was lost in rounding
-        if np.isnan(vol[i]):
+        if np.isnan(vol[i]):  # only where rounding put the quote below the intrinsic value
+            if not 0 < intrinsic[i] - beta[i] <= 4 * EPS * beta[i]:
+                failures.append(f"x={x[i]!r} s={s[i]!r} theta={theta[i]:+.0f}: NaN for {beta[i]!r} >= {intrinsic[i]!r}")
             continue
         repriced, _ = _exact_black(x[i], float(vol[i]), theta[i])
         if not abs(float(repriced) - beta[i]) <= 4 * EPS * beta[i]:
@@ -92,6 +98,7 @@ def _study(n: int, seed: int) -> dict:
         "converged": converged,
         "identifiable": identifiable,
         "error": error,
+        "nan": int(np.isnan(vol).sum()),
         "worst_over_tolerance": float(np.max((error / tolerance)[identifiable])),
         "failures": failures,
     }
@@ -103,6 +110,7 @@ def _assert_study(result: dict) -> None:
         result["failures"][:5]
     )
     assert result["converged"].all(), f"{(~result['converged']).sum()} cases report no convergence"
+    assert result["nan"] <= 0.1 * n  # rounded below the intrinsic value (measured: at most 0.73 %, 5.3 % on NumPy 1.26)
     assert result["worst_over_tolerance"] < 1  # recorded in the message of the slow test
 
 
@@ -120,7 +128,8 @@ def test_accuracy_study_fast_subset():
 def test_accuracy_study_100k():
     # 100,000 cases (about 35 s of mpmath), of which 97,086 have prices of at least 1e-300 and 66,738 keep their
     # time value. Measured: worst error 0.27 of the tolerance; at most 1.54e-15 where cond < 10 (60,088 quotes);
-    # every quote converged in the two Householder steps.
+    # every quote converged in the two Householder steps; 474 quotes rounded below their intrinsic value give NaN
+    # (14 of the fast subset's 1,927; 3,963 and 103 with NumPy 1.26, whose sinh is correctly rounded less often).
     result = _study(100_000, seed=1)
     _assert_study(result)
     assert result["identifiable"].sum() > 60_000

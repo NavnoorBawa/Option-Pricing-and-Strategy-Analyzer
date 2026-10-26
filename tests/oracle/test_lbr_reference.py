@@ -76,11 +76,17 @@ def test_implied_volatilities_agree():
     theirs = np.array([_py_implied(*args) for args in zip(beta, x, theta, strict=True)])
     difference = _assert_agreement(ours, theirs, s, cond)
     out_of_the_money = theta * x <= 0
-    assert np.mean(difference[out_of_the_money] <= 1e-15) >= 0.99  # measured: all, at most 7.8e-16
+    # Out of the money (2,537 quotes) every one agrees within 1e-15. Measured: at most 7.8e-16 apart (8.9e-16 with
+    # NumPy 1.26/SciPy 1.11).
+    assert np.all(difference[out_of_the_money] <= 1e-15), np.max(difference[out_of_the_money])
     # In the money they part where 0.11 < |x| < 0.2: py_lets_be_rational subtracts the intrinsic value as
     # e^(x/2) - 1/e^(x/2), which revision 1520 replaced by 2·sinh(x/2) ("incurs a larger roundoff error"). Measured:
-    # 12 of 3,000 quotes beyond 4·cond·ε apart, their error 4 to 7.5·cond·ε against at most 0.5·cond·ε here.
-    assert np.mean(difference <= np.maximum(1e-15, 4 * cond * EPS)) >= 0.99
+    # 12 of the 463 in-the-money quotes (13 with NumPy 1.26/SciPy 1.11) beyond max(1e-15, 4·cond·ε) apart; on each
+    # py_lets_be_rational's error is 3.9 to 7.5·cond·ε and ours at most 0.7·cond·ε.
+    in_the_money = ~out_of_the_money
+    apart = in_the_money & (difference > np.maximum(1e-15, 4 * cond * EPS))
+    assert apart.sum() <= 0.05 * in_the_money.sum()
+    assert np.all(np.abs(ours - s)[apart] < np.abs(theirs - s)[apart])  # where they part, theirs is the one off
 
 
 def test_price_level_implied_volatilities_agree():
