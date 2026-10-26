@@ -87,8 +87,9 @@ ON_PRIMARY_SELECTORS = (
     ":is(:hover, :focus):enabled",
 )
 
-#: The desk stylesheet, all of the app's own CSS but the per-row sizes of the card rows (see
-#: :func:`apply_stylesheet`).
+#: The desk stylesheet, all of the app's own CSS but the sizes that depend on the text on screen: the header's
+#: two-line width (ui/header.py) and the per-row sizes of the card rows (ui/components.py). See
+#: :func:`apply_stylesheet`.
 STYLESHEET = Path(__file__).with_name("static") / "desk.css"
 
 

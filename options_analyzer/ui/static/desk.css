@@ -1,5 +1,7 @@
-/* The desk stylesheet: all of the app's own CSS but the per-row sizes of the card rows (ui/components.py).
-   ui/theme.py apply_stylesheet() adds it to the page once per script run, with st.html.
+/* The desk stylesheet: all of the app's own CSS but the sizes that depend on the text on screen, which the code
+   that draws it adds on every run: the width of the header's two-line ticker (ui/header.py, one custom property)
+   and the per-row sizes of the card rows (ui/components.py). ui/theme.py apply_stylesheet() adds it to the page
+   once per script run, with st.html.
 
    Selectors use stable hooks only: the class that Streamlit gives an element with a key (.st-key-KEY) and the
    data-testid values listed in tests/test_theme.py, which checks every selector here against that list.
@@ -22,16 +24,20 @@
 /* --- Header strip (ui/header.py) ----------------------------------------------------------------------------- */
 
 /* Two items: the identity block (brand and ticker in one paragraph) and the action group. Streamlit wraps each in
-   a layout box, which is the flex item. The identity block takes the room the actions leave and wraps the ticker
-   between its items; below 16rem for it, the action group moves under it as a whole, on the right. */
+   a layout box, which is the flex item. The identity block takes the room the actions leave, but never less than
+   --desk-identity-min, the width in which the brand and this run's ticker fit in two lines (ui/header.py sets it
+   on every run, from the ticker's text). Below that, the action group moves under the ticker as a whole, on the
+   right, and the identity block takes the full width. So the ticker never needs more than two lines beside the
+   actions, and while the ticker is at its full size (a strip of 406px and more) the strip never gets taller as it
+   widens. */
 .st-key-desk_header {
-  container-type: inline-size;
+  container: desk-header / inline-size;
   row-gap: 0.25rem;
 }
 
 .st-key-desk_header > :has(> .st-key-desk_identity) {
   flex: 1 1 0 !important;
-  min-width: min(100%, 16rem);
+  min-width: min(100%, var(--desk-identity-min, 30rem));
 }
 
 .st-key-desk_header > :has(> .st-key-desk_actions) {
@@ -40,21 +46,23 @@
   margin-left: auto;
 }
 
-/* The group wraps only on a row narrower than itself (a phone under about 350px), rather than run off the screen. */
 .st-key-desk_actions {
   justify-content: flex-end;
   gap: 0.5rem;
 }
 
 /* Plex Mono has no Greek: σ comes from Plex Sans. The size follows the strip's width down to 0.72rem (the card
-   labels' size), so that a 390px phone needs two lines for the brand and the ticker. */
+   labels' size), so that a 390px phone needs two lines for the brand and the ticker; ui/header.py models the
+   width at the full 0.8125rem. Balanced lines: no item is left alone on a last line. */
 .st-key-desk_identity p {
   font-family: 'IBM Plex Mono', 'IBM Plex Sans', monospace;
   font-size: clamp(0.72rem, 2.8cqi, 0.8125rem);
   font-variant-numeric: tabular-nums slashed-zero;
+  text-wrap: balance;
 }
 
-/* The brand, in small capitals (Plex has no small-caps glyphs: capitals at a small size, spaced out). */
+/* The brand, in small capitals (Plex has no small-caps glyphs: capitals at a small size, spaced out). ui/header.py
+   counts its width from these values. */
 .st-key-desk_identity strong {
   margin-right: 0.75rem;
   font-family: 'IBM Plex Sans', sans-serif;
@@ -69,6 +77,24 @@
 .st-key-desk_actions button {
   min-height: 2rem;
   padding: 0 0.625rem;
+}
+
+/* On a phone (a strip under 30rem: the longest badge, "CRR tree · 2,000 steps · European", and the two labelled
+   buttons take 405px) the Share and Methodology buttons show their icons only, so that the group stays on one line
+   down to a 360px screen. The labels stay in the page, out of sight, as the buttons' accessible names. */
+@container desk-header (width < 30rem) {
+  .st-key-desk_actions button {
+    padding: 0 0.5rem;
+  }
+
+  .st-key-desk_actions button [data-testid='stMarkdownContainer'] {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
 }
 
 /* --- Metric cards ------------------------------------------------------------------------------------------- */

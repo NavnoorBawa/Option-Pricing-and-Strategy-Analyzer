@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import ast
 import datetime as dt
 import math
 import re
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
+import numpy as np
 import pytest
 import streamlit as st
 from streamlit.errors import StreamlitAPIException
@@ -19,6 +22,7 @@ from options_analyzer.ui.inputs import Inputs
 from options_analyzer.ui.model_config import ModelConfig
 
 NBSP, NB_HYPHEN = "\xa0", "‑"
+UI = Path(header.__file__).parent
 
 
 def _ok(at: AppTest) -> None:
@@ -157,6 +161,55 @@ def test_the_share_popover_holds_the_link_to_this_view(new_app):
     assert captions == ["Add this to the app's address to open this view:", header.SHARE_NOTE]
 
 
+#: Each URL parameter of the app (the key of a widget bound to the URL), and the words of the Share note that name
+#: it. The Strategy tab's template has one parameter per category, ``strategy_<category>``.
+LINK_WORDS = {
+    **dict.fromkeys(("spot", "strike", "days", "vol", "rate", "div"), "the market inputs"),
+    "model": "the pricing model",
+    **dict.fromkeys(("tree", "steps", "style", "paths", "seed", "antithetic", "control_variate"), "its settings"),
+    "tab": "the open tab",
+    "strategy_category": "template",
+    "strategy_<category>": "template",
+    "strategy_width_pct": "strike width",
+    "contracts": "contracts",
+    "multiplier": "shares per contract",
+    "commission": "commission",
+}
+
+
+def _bound_keys() -> set[str]:
+    """The keys of the widgets bound to the URL (``bind="query-params"``) in the app's source."""
+    keys = set()
+    for path in UI.glob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            options = {k.arg: k.value for k in getattr(node, "keywords", ())} if isinstance(node, ast.Call) else {}
+            if isinstance(options.get("bind"), ast.Constant) and options["bind"].value == "query-params":
+                key = options["key"]
+                keys.add(key.value if isinstance(key, ast.Constant) else f"strategy_<{ast.unparse(key.args[0])}>")
+    return keys
+
+
+def test_the_share_note_names_everything_the_link_holds():
+    # The note said the link held "the strategy template and size", but the strike width, the shares per contract
+    # and the commission are in it too. Every parameter bound to the URL is now named; a new one fails this test
+    # until the note names it.
+    assert _bound_keys() == set(LINK_WORDS)
+    for key, words in LINK_WORDS.items():
+        assert words in header.SHARE_NOTE, key
+    assert "Edited legs, uploaded quotes" in header.SHARE_NOTE  # what the link does not hold
+
+
+def test_the_share_link_holds_the_strategy_settings(new_app):
+    query = {"strategy": "Iron Condor", "strategy_width_pct": "5.00", "contracts": 3, "multiplier": 50}
+    at = new_app(**query, commission="0.65").run()
+    _ok(at)
+    [code] = _block(at, "desk_share").code
+    assert code.value == (
+        "?strategy_width_pct=5.00&contracts=3&multiplier=50&commission=0.65"
+        "&strategy_category=Range-bound&strategy_Range-bound=Iron+Condor"
+    )
+
+
 def test_the_share_popover_at_the_default_view(app):
     assert not _block(app, "desk_share").code
     assert [c.value for c in _block(app, "desk_share").caption] == [
@@ -179,6 +232,43 @@ def test_the_page_settings(new_app, monkeypatch):
         f"Options Analytics v{version} (Option-Pricing-and-Strategy-Analyzer) by Navnoor Bawa. "
         "Educational tool, not investment advice."
     )
+
+
+def _after_price_cards(at: AppTest):
+    """The element right after the price cards on the page (their caption, if any, or the tabs)."""
+    children = list(at.main.children.values())
+    cards = next(i for i, child in enumerate(children) if _key(child) == "price_cards")
+    return children[cards + 1]
+
+
+def test_the_price_cards_have_no_caption_at_the_closed_form(app):
+    # Under the cards, "Black-Scholes-Merton (closed form) · risk-neutral probability of finishing in the money:
+    # call N(d2) = 55.96%, put 44.04%" repeated the badge's model and the fourth card, and took two lines on a phone
+    # (47 px). The put's probability, its only other figure, is in the fourth card's tooltip.
+    assert getattr(_after_price_cards(app), "type", None) == "tab_container"
+    itm = _block(app, "price_cards_model").metric[1]
+    assert itm.label == "Call ITM probability" and itm.value == "55.96%"
+    assert "the put's is 1 − N(d₂) = 44.04%." in itm.proto.help
+
+
+@pytest.mark.parametrize(
+    ("query", "caption"),
+    [
+        ({"model": "Binomial tree"}, r"Error against the closed-form value: call [+-]\$0\.\d{6}, put [+-]\$0\.\d{6}$"),
+        ({"model": "Binomial tree", "style": "American"}, r"Early-exercise premium: call \$0\.0000, put \+\$0\.\d{4} "),
+        ({"model": "Monte Carlo"}, r"Standard error: call \$0\.\d{4}, put \$0\.\d{4}; 95% CI = price ± 1\.96 SE$"),
+    ],
+)
+def test_the_price_cards_caption_gives_the_call_and_the_put(new_app, query, caption):
+    # Where the fourth card shows the larger of the call's and the put's figures, the caption gives both, without
+    # the model's name (the badge has it): one line on a desktop.
+    at = new_app(**query).run()
+    _ok(at)
+    after = _after_price_cards(at)
+    assert after.type == "caption"
+    text = after.value.replace("\\$", "$")  # Markdown escapes the dollar signs
+    assert re.match(caption, text), text
+    assert not any(name in text for name in ("Leisen-Reimer", "Monte Carlo", "steps", "paths"))
 
 
 # --- No emoji -------------------------------------------------------------------------------------------------------
@@ -244,6 +334,82 @@ def test_no_emoji_in_the_ui(new_app, monkeypatch):
 
 
 # --- The parts of the strip ----------------------------------------------------------------------------------------
+
+
+def _wrap(text: str, width_rem: float) -> list[str]:
+    """The lines of the identity block (brand, then ``text``) at ``width_rem``, broken as a browser breaks them:
+    greedily, at the spaces only (the ticker's other spaces are no-break spaces), with the space at a line's end not
+    counted. Widths from the model of ui/header.py."""
+    words = [header.BRAND, *text.split(" ")]
+    lines, width = [[words[0]]], header._BRAND_REM
+    for word in words[1:]:
+        extra = header._ticker_rem(" " + word)
+        if width + extra > width_rem:
+            lines.append([word])
+            width = header._ticker_rem(word)
+        else:
+            lines[-1].append(word)
+            width += extra
+    return [" ".join(line) for line in lines]
+
+
+#: Tickers from the shortest the inputs allow to the longest: penny and index levels, 3,650 days, signed rates.
+TICKERS = [
+    _inputs(),
+    _inputs(spot=0.01, strike=0.01, days=1, vol=0.001, rate=0, q=0),
+    _inputs(spot=5812.37, strike=5800, days=30, q=0.013),
+    _inputs(spot=45123.5, strike=45000, rate=-0.0125),
+    _inputs(spot=0.01, strike=0.01, days=3650, rate=-0.05, q=0.5),
+    _inputs(spot=1234567.89, strike=1234567.89, days=3650, vol=1.2, rate=-0.0125, q=0.125),
+    _inputs(spot=1e7, strike=1e7, days=3650, vol=5.0, rate=0.5, q=0.0),
+]
+
+
+@pytest.mark.parametrize("inputs", TICKERS, ids=lambda i: f"S={i.spot:g},T={i.days}")
+def test_the_identity_width_is_the_narrowest_two_line_layout(inputs):
+    # The action group sits beside the ticker only where the brand and the ticker fit in two lines: the header
+    # gives the stylesheet the narrowest such width. At that width a browser's line breaking needs two lines (or
+    # one), and half a ticker character narrower (less the room to spare) it needs three.
+    text = header.ticker(inputs, today=dt.date(2026, 10, 26))
+    width = header._identity_rem(text)
+    assert len(_wrap(text, width)) <= 2
+    assert len(_wrap(text, width - header._SPARE_REM - 0.25)) == 3
+    assert 25 < width < 40  # rem: 350 to 560 px
+
+
+def test_the_identity_width_model_matches_the_fonts():
+    pytest.importorskip("brotli")  # WOFF2 decompression
+    ttlib = pytest.importorskip("fontTools.ttLib")
+
+    def advances(name: str) -> dict[str, float]:
+        font = ttlib.TTFont(UI / "static" / "fonts" / f"{name}.woff2")
+        cmap, metrics, units = font.getBestCmap(), font["hmtx"], font["head"].unitsPerEm
+        return {chr(cp): metrics[glyph][0] / units for cp, glyph in cmap.items()}
+
+    mono, sans, semibold = (advances(n) for n in ("IBMPlexMono-Regular", "IBMPlexSans-Regular", "IBMPlexSans-SemiBold"))
+    # Every character a ticker can show is 0.6 em wide in Plex Mono; σ, which Plex Mono lacks, comes from Plex Sans.
+    alphabet = set("".join(header.ticker(i, today=dt.date(2026, 10, 26)) for i in TICKERS)) - {"σ"}
+    assert alphabet <= set(mono) and {mono[c] for c in alphabet} == {header._MONO_EM}
+    assert "σ" not in mono and sans["σ"] == header._SIGMA_EM
+    # The brand: SemiBold capitals at 0.75rem, tracked 0.08 em, and a 0.75rem margin (static/desk.css).
+    css = (UI / "static" / "desk.css").read_text(encoding="utf-8")
+    brand = re.search(r"\.st-key-desk_identity strong \{([^}]*)\}", css).group(1)
+    for declaration in ("margin-right: 0.75rem", "font-size: 0.75rem", "font-weight: 600", "letter-spacing: 0.08em"):
+        assert declaration in brand, declaration
+    assert "font-size: clamp(0.72rem, 2.8cqi, 0.8125rem)" in css  # the ticker's full size, header._TICKER_REM
+    glyphs = sum(semibold[c] for c in header.BRAND.upper())
+    brand = 0.75 * (glyphs + 0.08 * len(header.BRAND)) + 0.75
+    assert abs(header._BRAND_REM - brand) < 1e-9
+
+
+def test_the_header_gives_the_stylesheet_its_two_line_width(app):
+    # A custom property, set on every run for the ticker on screen; static/desk.css reads it.
+    style = next(h.proto.body for h in app.get("html") if h.proto.body.startswith("<style>.st-key-desk_header {"))
+    text = header.ticker(_inputs())
+    width = header._identity_rem(text)
+    assert style == f"<style>.st-key-desk_header {{ --desk-identity-min: {width:.2f}rem; }}</style>"
+    css = (UI / "static" / "desk.css").read_text(encoding="utf-8")
+    assert "min-width: min(100%, var(--desk-identity-min, 30rem));" in css
 
 
 def test_the_ticker_wraps_only_between_its_items():
@@ -345,6 +511,36 @@ def test_the_logo_is_a_simple_theme_safe_monogram():
         assert _contrast(tile, sidebar) >= 3, sidebar
     assert _contrast(glyph, tile) >= 4.5
     assert header.LOGO.stat().st_size < 1000
+
+
+def test_the_monogram_letters_stand_apart_with_equal_margins():
+    # The O and the A were 0.52 units apart (0.34 px at the 21 px the sidebar shows), so they merged at the foot of
+    # the A. Now at least 2 units (1.3 px) of tile show between them, and the two letters sit in the middle of the
+    # tile, with equal margins (within 0.1 unit) on the left and right and above and below.
+    svg = ET.parse(header.LOGO).getroot()
+    ns = "{http://www.w3.org/2000/svg}"
+    group = svg.find(f"{ns}g")
+    half = float(group.get("stroke-width")) / 2
+    circle = group.find(f"{ns}circle")
+    cx, cy, r = (float(circle.get(k)) for k in ("cx", "cy", "r"))
+    path = group.find(f"{ns}path").get("d")
+    left, apex, right = (tuple(map(float, xy)) for xy in re.findall(r"([\d.]+) ([\d.]+)", path)[:3])
+    # The legs end flat (butt caps), so their outer corners stick out by half the stroke across each leg.
+    leg = np.subtract(apex, left)
+    across = np.array([leg[1], -leg[0]]) / np.hypot(*leg) * half  # perpendicular to the left leg, outwards
+    t = np.clip(np.dot(np.subtract((cx, cy), left), leg) / np.dot(leg, leg), 0, 1)
+    gap = np.hypot(*np.subtract((cx, cy), np.add(left, t * leg))) - (r + half) - half
+    assert gap >= 2.0
+    extent_x = (cx - r - half, right[0] + abs(across[0]))
+    extent_y = (min(cy - r - half, apex[1] - half), max(cy + r + half, left[1] + abs(across[1])))
+    assert extent_x[0] == pytest.approx(32 - extent_x[1], abs=0.1)
+    assert extent_y[0] == pytest.approx(32 - extent_y[1], abs=0.1)
+    # The bar of the A runs between the centre lines of its legs.
+    bar = re.search(r"M([\d.]+) ([\d.]+)H([\d.]+)", path)
+    x0, y, x1 = map(float, bar.groups())
+    at = (left[1] - y) / (left[1] - apex[1])
+    assert x0 == pytest.approx(left[0] + at * (apex[0] - left[0]), abs=0.01)
+    assert x1 == pytest.approx(right[0] - at * (right[0] - apex[0]), abs=0.01)
 
 
 def test_the_app_shows_the_logo(new_app, monkeypatch):

@@ -272,8 +272,8 @@ def test_apply_stylesheet_sends_the_desk_stylesheet(monkeypatch):
 #: block, and of the elements the stylesheet styles. (No "section[data-testid=...]" or emotion class: those change
 #: between Streamlit releases.)
 DESK_TESTIDS = {
-    "stMainBlockContainer", "stVerticalBlock", "stMetric", "stMetricLabel", "stMetricValue", "stMultiSelect",
-    "stNumberInput", "stNumberInputStepUp", "stNumberInputStepDown",
+    "stMainBlockContainer", "stVerticalBlock", "stMetric", "stMetricLabel", "stMetricValue", "stMarkdownContainer",
+    "stMultiSelect", "stNumberInput", "stNumberInputStepUp", "stNumberInputStepDown",
 }  # fmt: skip
 #: Attributes other than data-testid: a multiselect's chips have no test id of their own.
 DESK_ATTRIBUTES = {"data-tag"}
@@ -510,15 +510,16 @@ def test_every_run_loads_the_stylesheet_before_the_app(monkeypatch):
 
 
 def test_the_page_carries_the_stylesheet_once():
-    # The whole desk stylesheet in one <style>, first on the page; the only other style elements are the card rows'
-    # own sizes.
+    # The whole desk stylesheet in one <style>, first on the page. The only other style elements hold the sizes that
+    # depend on the text on screen: the header's two-line width (one custom property) and the card rows' sizes.
     from streamlit.testing.v1 import AppTest
 
     at = AppTest.from_file(str(ROOT / "main.py"), default_timeout=120).run()
     assert not at.exception, at.exception
     bodies = [h.proto.body for h in at.get("html")]
     assert bodies[0] == f"<style>{theme.STYLESHEET.read_text(encoding='utf-8')}</style>"
-    assert all(re.match(r"<style>\.st-key-\w+_cards \{ container:", b) for b in bodies[1:]), bodies[1:]
+    assert re.fullmatch(r"<style>\.st-key-desk_header \{ --desk-identity-min: \d+\.\d\drem; \}</style>", bodies[1])
+    assert all(re.match(r"<style>\.st-key-\w+_cards \{ container:", b) for b in bodies[2:]), bodies[2:]
 
 
 def test_both_static_folders_are_identical():
@@ -1120,70 +1121,112 @@ def test_the_desk_shell_on_a_laptop(chromium, app_url, scheme):
         page.close()
 
 
+#: The lines of the header's identity block as the browser broke them: the text of each, with plain spaces.
+_IDENTITY_LINES = """() => {
+  const p = document.querySelector('.st-key-desk_identity p'), range = document.createRange(), lines = [];
+  const walker = document.createTreeWalker(p, NodeFilter.SHOW_TEXT);
+  let top = null;
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    for (let i = 0; i < node.length; i++) {
+      range.setStart(node, i); range.setEnd(node, i + 1);
+      const r = range.getClientRects()[0];
+      if (!r) continue;
+      if (top === null || r.top > top + 2) { lines.push(''); top = r.top; }
+      lines[lines.length - 1] += node.data[i];
+    }
+  }
+  return lines.map(l => l.replace(/\\s+/g, ' ').trim());
+}"""
+
+
+def _items(line: str) -> list[str]:
+    """The ticker items of a line of the identity block (the brand left out)."""
+    return [item for item in line.removeprefix("Options Analytics").split(" · ") if item.strip(" ·")]
+
+
+#: Long inputs that made the header wrap badly: an index level with a 2,000-step American CRR tree, and a five-digit
+#: level with a million Monte Carlo paths (the longest badges, and tickers of 86 and 89 characters).
+LONG_INPUTS = {
+    "tree": dict(
+        spot="5812.37", strike="5800", model="Binomial tree", tree="Cox-Ross-Rubinstein", steps="2000", style="American"
+    ),
+    "paths": {"spot": "45123.5", "strike": "45000", "model": "Monte Carlo", "paths": "1,000,000"},
+}
+SHELL_INPUTS = {"default": {}, **LONG_INPUTS}
+
+
 @pytest.mark.e2e
 @pytest.mark.slow
-def test_the_desk_shell_on_a_phone(chromium, app_url):
+@pytest.mark.parametrize("inputs", SHELL_INPUTS)
+def test_the_desk_shell_on_a_phone(chromium, app_url, inputs):
     # On a 390 x 844 phone the tabs started 518 px down (and about 620 px before the card rows wrapped in pairs).
-    # The plan's target, 330 px, needs the two lines of the price cards' caption gone as well; the caption stays,
-    # and the tab content starts at about 377 px.
+    # With the header strip in two lines and the price cards' caption gone (it repeated the badge and the fourth
+    # card), the tab content starts at about 327 px. A long badge split the action group, which left the
+    # Methodology button alone on a third line (tab content at 447 px): on a phone the buttons show their icons only.
+    query = f"/?{urllib.parse.urlencode(SHELL_INPUTS[inputs])}" if SHELL_INPUTS[inputs] else ""
     page = chromium.new_page(viewport={"width": 390, "height": 844}, color_scheme="dark")
     try:
-        page.goto(app_url)
+        page.goto(app_url + query)
         page.wait_for_selector("[data-testid=stMetricValue]", timeout=120_000)
         _settle(page)
-        shell = _shell(page)
-        assert shell["panel"]["top"] <= 380
-        assert not shell["cut"] and shell["tabScroll"] <= 0  # every tab label whole, none scrolled away
-        assert shell["pageScroll"] <= 0 and shell["headerScroll"] <= 0
-        assert shell["identity"]["height"] < 40  # the brand and the ticker in two lines
-        assert max(shell["centres"]) - min(shell["centres"]) < 2
+        if inputs == "default":
+            assert _shell(page)["panel"]["top"] <= 330
+        for width in (390, 430, 375, 360):
+            page.set_viewport_size({"width": width, "height": 844})
+            page.wait_for_timeout(300)
+            shell = _shell(page)
+            assert not shell["cut"] and shell["tabScroll"] <= 0, width  # every tab label whole, none scrolled away
+            assert shell["pageScroll"] <= 0 and shell["headerScroll"] <= 0, width
+            assert max(shell["centres"]) - min(shell["centres"]) < 2, width  # the group on one line
+            assert abs(shell["actions"]["right"] - shell["header"]["right"]) < 1, width
+            # Icons only (the popover's with its arrow). Streamlit draws each button twice, with and without its
+            # tooltip, and hides one of them.
+            buttons = page.evaluate(
+                "[...document.querySelectorAll('.st-key-desk_actions button')].map(b => b.getBoundingClientRect())"
+            )
+            assert all(b["width"] < 60 for b in buttons), (width, buttons)
+            for name in ("Share", "Methodology"):  # still named for screen readers
+                assert page.get_by_role("button", name=name).count() == 1, name
+            lines = page.evaluate(_IDENTITY_LINES)
+            assert len(lines) <= (2 if inputs == "default" and width == 390 else 3), (width, lines)
+            assert len(_items(lines[-1])) >= 2, (width, lines)  # balanced lines: no item alone on the last one
     finally:
         page.close()
 
 
-#: Long inputs that made the header wrap badly at 1,280 to 1,440 px: an index level with a 2,000-step American tree,
-#: and a five-digit level with a million Monte Carlo paths.
-LONG_INPUTS = {
-    "tree": {"spot": "5812.37", "strike": "5800", "model": "Binomial tree", "steps": "2000", "style": "American"},
-    "paths": {"spot": "45123.5", "strike": "45000", "model": "Monte Carlo", "paths": "1,000,000"},
-}
-
-
 @pytest.mark.e2e
 @pytest.mark.slow
-@pytest.mark.parametrize("inputs", LONG_INPUTS)
-def test_the_header_wraps_cleanly_with_long_inputs(chromium, app_url, inputs):
-    # With the sidebar open: from 1,280 px the actions keep the top right and the ticker wraps beside them, between
-    # its items; at 1,024 px the action group moves, whole, under the ticker on the right.
-    page = _open(chromium, f"{app_url}/?{urllib.parse.urlencode(LONG_INPUTS[inputs])}", "dark", 1440)
+@pytest.mark.parametrize("inputs", SHELL_INPUTS)
+def test_the_header_wraps_cleanly_on_a_laptop(chromium, app_url, inputs):
+    # With the sidebar open, from 1,440 down to 900 px. The identity block kept its place beside the actions down to
+    # 16rem, so between about 960 and 1,220 px the ticker wrapped into three or four ragged lines (header 73 px at
+    # 1,000 px but 68 px at 1,024). Now the actions stay beside the ticker only while it fits in two lines there,
+    # and otherwise move, whole, under it on the right: the ticker never takes more than two lines, and the strip
+    # never grows as the window widens.
+    query = f"/?{urllib.parse.urlencode(SHELL_INPUTS[inputs])}" if SHELL_INPUTS[inputs] else ""
+    page = _open(chromium, app_url + query, "dark", 1440)
     try:
-        for width in (1440, 1366, 1280, 1024):
+        heights = []
+        for width in range(900, 1441, 20):
             page.set_viewport_size({"width": width, "height": 900})
-            page.wait_for_timeout(300)
-            shell = _shell(page)
+            page.wait_for_timeout(150)
+            shell, lines = _shell(page), page.evaluate(_IDENTITY_LINES)
+            assert len(lines) <= 2, (width, lines)
+            assert all(_items(line) for line in lines[1:]), (width, lines)
             assert max(shell["centres"]) - min(shell["centres"]) < 2, width  # the group never splits
             assert abs(shell["actions"]["right"] - shell["header"]["right"]) < 1, width
             assert shell["headerScroll"] <= 0 and shell["pageScroll"] <= 0, width
-            assert shell["identity"]["height"] < 40, width  # the ticker in two lines at most
-            if width >= 1280:
-                assert shell["header"]["height"] < 40, width  # one row
-                assert shell["actions"]["top"] < shell["identity"]["bottom"], width
-            else:
-                assert shell["actions"]["top"] >= shell["identity"]["bottom"] - 1, width  # under the ticker
-                assert shell["header"]["height"] < 80, width
+            if shell["actions"]["top"] < shell["identity"]["bottom"] - 1:  # beside the ticker: one row
+                assert shell["header"]["height"] < 40, width
+            else:  # under it, on the right
+                assert shell["header"]["height"] < 75, width
+            heights.append(shell["header"]["height"])
+        assert all(wider <= narrower + 0.5 for narrower, wider in itertools.pairwise(heights)), heights
         # The ticker's items never break inside: each line of the ticker starts with an item's letter.
-        lines = page.evaluate("""() => {
-          const p = document.querySelector('.st-key-desk_identity p'), range = document.createRange(), starts = [];
-          const text = p.firstChild.nextSibling;  // the text after the brand
-          for (let i = 0; i < text.length; i++) {
-            range.setStart(text, i); range.setEnd(text, i + 1);
-            const r = range.getClientRects()[0];
-            const last = starts[starts.length - 1];
-            if (r && (!last || r.top > last.top + 2)) starts.push({top: r.top, char: text.data[i]});
-          }
-          return starts.map(s => s.char);
-        }""")
-        assert set(lines) <= set(" SKσrqF0123456789"), lines
+        page.set_viewport_size({"width": 1024, "height": 900})
+        page.wait_for_timeout(300)
+        starts = [line[0] for line in page.evaluate(_IDENTITY_LINES)[1:]]
+        assert set(starts) <= set("SKσrqF0123456789"), starts
     finally:
         page.close()
 

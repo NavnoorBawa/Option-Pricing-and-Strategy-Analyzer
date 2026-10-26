@@ -81,7 +81,9 @@ def compute_prices(inputs: Inputs) -> Prices:
 
 def _model_card(inputs: Inputs, prices: Prices) -> tuple[str, str, str, str]:
     """``(label, value, caption, help)`` of the fourth headline card: what the sidebar model adds or how far it
-    is from the exact answer. (Put-call parity would read zero for every European model by construction.)"""
+    is from the exact answer. (Put-call parity would read zero for every European model by construction.) The
+    caption under the cards gives the call's and the put's figures where the card shows the larger of the two; it
+    is empty for the closed form, whose card holds the call's figure and its tooltip the put's."""
     S, K, T, r, sigma, q = (
         inputs.spot,
         inputs.strike,
@@ -97,7 +99,7 @@ def _model_card(inputs: Inputs, prices: Prices) -> tuple[str, str, str, str]:
         return (
             "Exercise premium",
             money(premium[larger], 4),
-            f"early-exercise premium: call {money(premium['call'], 4, signed=True)}, "
+            f"Early-exercise premium: call {money(premium['call'], 4, signed=True)}, "
             f"put {money(premium['put'], 4, signed=True)} (against the same tree with European exercise)",
             "American value minus the value on the same tree with European exercise (the larger of the call's and "
             "the put's is shown). Measured on one lattice, so the tree's discretisation error cancels.",
@@ -107,7 +109,7 @@ def _model_card(inputs: Inputs, prices: Prices) -> tuple[str, str, str, str]:
         return (
             "Tree error vs BSM",
             money(max(abs(e) for e in error.values()), 6),
-            f"error against the closed-form value: call {money(error['call'], 6, signed=True)}, "
+            f"Error against the closed-form value: call {money(error['call'], 6, signed=True)}, "
             f"put {money(error['put'], 6, signed=True)}",
             "Tree value minus the closed-form Black-Scholes-Merton value, the exact answer for European exercise "
             "(the larger of the call's and the put's is shown). It shrinks as the number of steps grows.",
@@ -119,7 +121,7 @@ def _model_card(inputs: Inputs, prices: Prices) -> tuple[str, str, str, str]:
         return (
             "Std. error",
             money(max(finite), 4) if finite else "–",
-            f"standard error: call {money(se['call'], 4)}, put {money(se['put'], 4)}; 95% CI = price ± 1.96 SE"
+            f"Standard error: call {money(se['call'], 4)}, put {money(se['put'], 4)}; 95% CI = price ± 1.96 SE"
             + (f". {HEAVY_TAIL_NOTE}." if heavy else ""),
             "Standard error of the simulated prices (the larger of the call's and the put's is shown); it falls "
             "as one over the square root of the number of paths.",
@@ -132,9 +134,9 @@ def _model_card(inputs: Inputs, prices: Prices) -> tuple[str, str, str, str]:
     return (
         "Call ITM probability",
         pct(itm, 2),
-        f"risk-neutral probability of finishing in the money: call N(d₂) = {pct(itm, 2)}, put {pct(1.0 - itm, 2)}",
+        "",
         "Probability that the call finishes in the money under the pricing (risk-neutral) measure, N(d₂); the "
-        "put's is 1 − N(d₂). It uses the risk-free drift, so it is not a real-world forecast.",
+        f"put's is 1 − N(d₂) = {pct(1.0 - itm, 2)}. It uses the risk-free drift, so it is not a real-world forecast.",
     )
 
 
@@ -154,7 +156,9 @@ def render_price_cards(inputs: Inputs, prices: Prices) -> None:
         (label, value, md(help_text)),
     ]
     card_row(*PRICE_CARDS, [(name, text, {"help": help_text}) for name, text, help_text in cards])
-    st.caption(md(f"{inputs.model.label} · {caption}"))
+    # The header's badge names the model, so the caption only adds what the cards do not show.
+    if caption:
+        st.caption(md(caption))
 
 
 def _european_note(inputs: Inputs) -> str:
