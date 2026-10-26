@@ -15,14 +15,17 @@ is added to :func:`options_analyzer.vol_surface.parse_quotes`:
     ``Expiration Date, Calls, Last Sale, Net, Bid, Ask, ..., IV, ..., Strike, Puts, Last Sale, Net, Bid, Ask, ...``
     and one row per expiry and strike, the call left of the strike and the put right of it.
 
-Lines that start with ``#`` before the table are skipped (the provenance header of the test fixtures).
+Lines that start with ``#`` before the table are skipped (the provenance header of the test fixtures). Files are read
+as UTF-8 (with or without a byte-order mark), or as Windows-1252, the encoding Excel saves CSV files in on Western
+Windows, when they are not UTF-8.
 
 Every layout identifies a contract by its OCC symbol (``ROOT + YYMMDD + C/P + strike x 1000``), or builds the symbol
 from root, expiry, type and strike. The settlement style comes from the root
 (:func:`options_analyzer.clock.settlement_style`) unless the long layout states it, and :func:`to_quotes` takes each
-time to expiry from :mod:`options_analyzer.clock`. Contracts that cannot be read, whose symbol disagrees with their
-other columns, that have settled, that have no offer, whose bid is above the ask, or whose bid is zero are dropped,
-with one message per reason.
+time to expiry from :mod:`options_analyzer.clock`. Contracts that cannot be read, that an OCC symbol cannot carry (a
+root such as ``^SPX``, a strike off OCC's grid, an expiry outside 2000-2099) or that quote a negative price, whose
+symbol disagrees with their other columns, that have settled, that have no offer, whose bid is above the ask, or
+whose bid is zero are dropped, with one message per reason; a bad row never stops the rest of the file being read.
 
 The vendor's implied vol is kept only as the ``vendor_iv`` diagnostic. Vendors compute it with their own rates,
 dividends and models, so two vendors disagree on the same quote, and some write a placeholder (such as 1e-05) where
@@ -45,7 +48,7 @@ import pandas as pd
 from dateutil import parser as dateutil_parser
 
 from ..clock import settlement_style, time_to_expiry, to_new_york
-from .schema import CHAIN_COLUMNS, chain_frame, occ_symbol, parse_occ_symbol, validate_chain
+from .schema import CHAIN_COLUMNS, chain_frame, fits_occ, occ_symbol, parse_occ_symbol, validate_chain
 
 __all__ = ["LAYOUTS", "MIN_VENDOR_IV", "clean_chain", "read_chain", "to_quotes"]
 
@@ -74,7 +77,15 @@ def _text(source: FileLike) -> str:
         data = source.read()
     else:
         raise TypeError(f"expected a path, bytes, an open file or a DataFrame, got {type(source).__name__}")
-    return data.decode("utf-8-sig") if isinstance(data, bytes) else data.lstrip("﻿")
+    if isinstance(data, str):
+        return data.lstrip("﻿")
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:  # Excel on Western Windows saves CSV as Windows-1252; Latin-1 decodes any byte
+        try:
+            return data.decode("cp1252")
+        except UnicodeDecodeError:
+            return data.decode("latin-1")
 
 
 def _key(name: object) -> str:
@@ -92,11 +103,21 @@ def _table(text: str) -> tuple[str, pd.DataFrame]:
         header = next(csv.reader([lines[i]]), [])
         if {"calls", "strike", "puts"} <= {_key(cell) for cell in header}:
             # Cboe: lines about the underlying come first, and the header names Bid, Ask and IV twice (calls, puts).
-            frame = pd.read_csv(io.StringIO("\n".join(lines[i + 1 :])), header=None, dtype=str)
-            frame.columns = [cell.strip() for cell in header][: frame.shape[1]]
+            frame = _read_csv("\n".join(lines[i + 1 :]), header=None)
+            names = [cell.strip() for cell in header]
+            names += [f"_extra{j}" for j in range(frame.shape[1] - len(names))]  # rows that end in a trailing comma
+            frame.columns = names[: frame.shape[1]]
             return "cboe", frame
-    frame = pd.read_csv(io.StringIO("\n".join(lines[start:])), dtype=str)
+    frame = _read_csv("\n".join(lines[start:]))
     return _layout_of(frame), frame
+
+
+def _read_csv(text: str, *, header: int | None = 0) -> pd.DataFrame:
+    """All cells as text; a trailing comma on a row never turns the first column into the index."""
+    try:
+        return pd.read_csv(io.StringIO(text), dtype=str, header=header, index_col=False)
+    except pd.errors.EmptyDataError:
+        raise ValueError("the file holds no table (it is empty, or holds only comment lines)") from None
 
 
 def _layout_of(frame: pd.DataFrame) -> str:
@@ -221,6 +242,8 @@ def _contracts(
     )
     finite = np.isfinite(frame[["strike", "bid", "ask"]].to_numpy(dtype=float)).all(axis=1)
     unreadable |= pd.Series(~finite, index=index)
+    prices = (frame["bid"] >= 0) & (frame["ask"] >= 0)
+    invalid = ~unreadable & ~(fits_occ(frame["root"], frame["expiry"], frame["strike"]) & prices)
     styles = frame["root"].map(settlement_style, na_action="ignore")
     if settlement is not None:
         stated = settlement.astype("string").str.strip().str.upper()
@@ -228,7 +251,7 @@ def _contracts(
         unreadable |= _flags(stated.notna() & ~valid)
         styles = stated.where(valid, styles)
     frame["settlement"] = styles.astype(object)
-    frame["_problem"] = np.where(unreadable, "unreadable", np.where(disagree, "inconsistent", ""))
+    frame["_problem"] = np.select([unreadable, invalid, disagree], ["unreadable", "invalid", "inconsistent"], "")
     return frame
 
 
@@ -317,6 +340,10 @@ def _finish(frame: pd.DataFrame, as_of: datetime, messages: list[str]) -> pd.Dat
         problem = np.where((problem == "") & rows, reason, problem)
     texts = {
         "unreadable": "with a missing or unreadable symbol, expiry, type, strike, bid or ask",
+        "invalid": (
+            "that an OCC symbol cannot carry or that quote a negative price (OCC symbols need a root of 1 to 6 letters "
+            "or digits, an expiry in 2000-2099 and a strike that is a positive multiple of 0.001 below 100,000)"
+        ),
         "inconsistent": "whose OCC symbol disagrees with their root, expiry, type or strike",
         "expired": f"that had settled by {as_of:%Y-%m-%d %H:%M} ET (expired)",
         "no offer": "with no offer (an ask of zero)",

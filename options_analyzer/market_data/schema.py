@@ -33,6 +33,7 @@ __all__ = [
     "ChainSchemaError",
     "OccSymbol",
     "chain_frame",
+    "fits_occ",
     "occ_symbol",
     "parse_occ_symbol",
     "validate_chain",
@@ -43,7 +44,10 @@ _TEXT_COLUMNS = ("symbol", "root", "settlement", "type")
 _FLOAT_COLUMNS = ("strike", "bid", "ask", "vendor_iv")
 #: ROOT (1-6 letters or digits, padded with spaces to 6 in OCC's 21-character form), YYMMDD, C or P, 8 digits.
 _OCC = re.compile(r"([A-Z0-9]{1,6}) *(\d{6})([CP])(\d{8})")
+_ROOT = re.compile(r"[A-Z0-9]{1,6}")
 _STRIKE_PRECISION = 1000  # OCC writes the strike in thousandths of a dollar
+_MAX_THOUSANDTHS = 10**8  # eight digits: strikes below 100,000
+_FIRST_YEAR, _LAST_YEAR = 2000, 2099  # the two-digit years of an OCC symbol
 
 
 class ChainSchemaError(ValueError):
@@ -85,17 +89,17 @@ def occ_symbol(root: str, expiry: date, option_type: str, strike: float) -> str:
     'SPY261218P00612500'
     """
     root = str(root).strip().upper()
-    if not re.fullmatch(r"[A-Z0-9]{1,6}", root):
+    if not _ROOT.fullmatch(root):
         raise ValueError(f"an OCC root is 1 to 6 letters or digits, got {root!r}")
     if isinstance(expiry, datetime):
         expiry = expiry.date()
-    if not 2000 <= expiry.year <= 2099:
+    if not _FIRST_YEAR <= expiry.year <= _LAST_YEAR:
         raise ValueError(f"OCC symbols write the year in two digits (2000-2099), got {expiry}")
     side = {"call": "C", "put": "P"}.get(str(option_type).strip().lower())
     if side is None:
         raise ValueError(f"option type must be 'call' or 'put', got {option_type!r}")
     thousandths = round(float(strike) * _STRIKE_PRECISION)
-    if not (0 < thousandths < 10**8 and abs(thousandths - float(strike) * _STRIKE_PRECISION) < 1e-6):
+    if not (0 < thousandths < _MAX_THOUSANDTHS and abs(thousandths - float(strike) * _STRIKE_PRECISION) < 1e-6):
         raise ValueError(f"an OCC strike is a positive multiple of 0.001 below 100,000, got {strike!r}")
     return f"{root}{expiry:%y%m%d}{side}{thousandths:08d}"
 
@@ -127,6 +131,24 @@ def parse_occ_symbol(symbol: str) -> OccSymbol:
     except ValueError:
         raise ValueError(f"the OCC symbol {symbol!r} has no valid date in {yymmdd!r}") from None
     return OccSymbol(root, expiry, "call" if side == "C" else "put", int(strike) / _STRIKE_PRECISION)
+
+
+def fits_occ(root: pd.Series, expiry: pd.Series, strike: pd.Series) -> pd.Series:
+    """Which contracts an OCC symbol can carry: a root of 1 to 6 capital letters or digits, an expiry in 2000-2099
+    and a strike that is a positive multiple of 0.001 below 100,000 (False where a value is missing).
+
+    Examples
+    --------
+    >>> fits_occ(pd.Series(["SPXW", "^SPX", "SPY"]), pd.to_datetime(pd.Series(["2026-11-02"] * 3)),
+    ...          pd.Series([7930.0, 7930.0, 100.0004])).tolist()
+    [True, False, False]
+    """
+    roots = root.map(lambda value: isinstance(value, str) and _ROOT.fullmatch(value) is not None).astype(bool)
+    years = pd.to_datetime(expiry).dt.year
+    thousandths = pd.to_numeric(strike, errors="coerce").astype(float) * _STRIKE_PRECISION
+    on_grid = (thousandths - thousandths.round()).abs() < 1e-6
+    strikes = on_grid & (thousandths.round() > 0) & (thousandths.round() < _MAX_THOUSANDTHS)
+    return roots & years.between(_FIRST_YEAR, _LAST_YEAR).fillna(False).astype(bool) & strikes.fillna(False)
 
 
 def chain_frame(columns: dict[str, Any]) -> pd.DataFrame:

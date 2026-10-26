@@ -828,6 +828,58 @@ def test_long_layout_without_symbols_and_bad_rows():
     assert "Dropped 2 contract(s) whose OCC symbol disagrees with their root, expiry, type or strike." in messages
 
 
+@pytest.mark.parametrize(
+    "bad_row",
+    [
+        "2026-11-20,^SPX,call,6000,1.0,1.2",  # a ticker, not an OCC root
+        "2026-11-20,SPXWEEKLY,call,6000,1.0,1.2",  # seven characters
+        "2026-11-20,SPX,call,-100,1.0,1.2",
+        "2026-11-20,SPX,call,0,1.0,1.2",
+        "2026-11-20,SPX,call,100.0004,1.0,1.2",  # off OCC's grid of 0.001
+        "2026-11-20,SPX,call,1e6,1.0,1.2",  # beyond OCC's eight digits
+        "1999-12-17,SPX,call,6000,1.0,1.2",  # before OCC's two-digit years and the NYSE calendar
+        "2100-01-15,SPX,call,6000,1.0,1.2",  # OCC would write 2000
+        "2101-01-20,SPX,call,6000,1.0,1.2",  # beyond the NYSE calendar too
+        "2026-11-20,SPX,call,6000,-1.0,1.2",
+        "2026-11-20,SPX,call,6000,1.0,-1.2",
+    ],
+)
+def test_a_contract_an_occ_symbol_cannot_carry_is_dropped_not_fatal(bad_row):
+    """One bad row is dropped with a message; the rest of the upload is read."""
+    text = "\n".join(["expiry,root,type,strike,bid,ask", bad_row, "2026-11-20,SPX,put,6000,1.5,1.7"])
+    chain, messages = read_chain(text.encode(), as_of=AS_OF)
+    assert chain["symbol"].tolist() == ["SPX261120P06000000"]
+    assert messages[0] == "Read 2 contract(s) in the app's long layout."
+    assert len(messages) == 2 and messages[1].startswith("Dropped 1 contract(s) that an OCC symbol cannot carry")
+
+
+def test_trailing_commas_encodings_and_empty_files():
+    """Rows that end in a trailing comma (Cboe and long layouts), a Windows-1252 file (Excel on Western Windows), a
+    file that is neither UTF-8 nor Windows-1252 (read as Latin-1), and a file with no table."""
+    path = FIXTURES / FIXTURE_LAYOUTS["cboe"]
+    reference, _ = read_chain(path, as_of=AS_OF)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    header = next(i for i, line in enumerate(lines) if line.startswith("Expiration Date"))
+    for trailing in (lines[header + 1 :], lines[header:]):  # data rows only, or the header too
+        text = "\n".join(lines[: len(lines) - len(trailing)] + [line + "," for line in trailing])
+        pd.testing.assert_frame_equal(read_chain(text.encode(), as_of=AS_OF)[0], reference)
+    windows = "\n".join(['"S&P 500 INDEX \u2013 SPX",Last: 7915.00', *lines[header - 1 :]]).encode("cp1252")
+    with pytest.raises(UnicodeDecodeError):
+        windows.decode("utf-8")
+    pd.testing.assert_frame_equal(read_chain(windows, as_of=AS_OF)[0], reference)
+    latin = b'"Index \x81\x8d",Last: 7915.00\n' + "\n".join(lines[header - 1 :]).encode()  # bytes cp1252 lacks
+    pd.testing.assert_frame_equal(read_chain(latin, as_of=AS_OF)[0], reference)
+    long = b"expiry,root,type,strike,bid,ask\n2026-11-20,SPX,call,6000,1.0,1.2,\n2026-11-20,SPX,put,6000,1.5,1.7,\n"
+    chain, _ = read_chain(long, as_of=AS_OF)
+    assert chain[["symbol", "bid", "ask"]].values.tolist() == [
+        ["SPX261120C06000000", 1.0, 1.2],
+        ["SPX261120P06000000", 1.5, 1.7],
+    ]
+    for empty in (b"", b"# Provenance: fabricated\n# nothing else\n"):
+        with pytest.raises(ValueError, match="holds no table"):
+            read_chain(empty, as_of=AS_OF)
+
+
 def test_clean_chain_on_the_synthetic_chain(index_chain):
     later = datetime(2026, 11, 2, 10, 0)
     cleaned, messages = clean_chain(index_chain.quotes, as_of=later)
