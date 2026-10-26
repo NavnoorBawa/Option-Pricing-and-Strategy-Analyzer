@@ -528,7 +528,8 @@ class VarianceClock:
         rational arithmetic, so the result is the correctly rounded value of an exactly additive quantity. Over
         consecutive intervals, ``variance_time(a, c)`` therefore equals ``variance_time(a, b) + variance_time(b, c)``
         to within four units of 2**-53 (about 4.4e-16) times the largest of the three in size: a relative, not an
-        absolute, tolerance, as no float sum of numbers of a few years can be exact to 1e-15 absolute.
+        absolute, tolerance, as no float sum of numbers of a few years can be exact to 1e-15 absolute. (Variance times
+        below the smallest normal float, which only weights below about 1e-305 make, round to 2**-1075 absolute.)
 
         Parameters
         ----------

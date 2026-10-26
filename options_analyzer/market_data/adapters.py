@@ -207,7 +207,8 @@ def _dates(values: pd.Series) -> pd.Series:
             return None
         return pd.Timestamp(first.date()) if first.date() == second.date() else None
 
-    return values.map(parse).astype("datetime64[ns]")
+    parsed = {text: parse(text) for text in values.dropna().unique()}  # a chain repeats a few expiries many times
+    return values.map(parsed).astype("datetime64[ns]")
 
 
 def _flags(values: pd.Series) -> pd.Series:

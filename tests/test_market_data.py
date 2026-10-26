@@ -528,7 +528,8 @@ def test_deep_etf_puts_with_cash_dividends_are_worth_their_exercise_value(etf_ch
         else:
             next_dividend = expiries[expiries > 0].min()  # the present value of the first dividend
             assert (premium >= 0).all() and (premium < next_dividend).all()
-            assert (premium == 0).any() and (premium > 0.1).sum() >= 10  # exercised at once only beyond K = 154
+            # Exercised at once from K = 154, where the interest on the strike to the next ex-date beats the dividend.
+            assert (premium == 0).any() and (premium > 0.1).sum() >= 10
 
 
 def test_etf_puts_with_cash_dividends_are_the_escrowed_tree_at_the_clock_times(etf_one_percent):
