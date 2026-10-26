@@ -168,18 +168,39 @@ def implied_volatility(
     price, S, K, T, r, q, fwd_s, pv_k = _check_european_quote(price, S, K, T, r, q, phi)
 
     # Work with the out-of-the-money side: same time value, better conditioning.
-    otm_phi = -1 if fwd_s >= pv_k else 1
-    otm_price = price if otm_phi == phi else price - phi * (fwd_s - pv_k)
+    x = _log_moneyness(S, K, T, r, q)
+    otm_phi = -1 if x >= 0 else 1
+    otm_price = price if otm_phi == phi else price - phi * _forward_intrinsic(fwd_s, pv_k, x)
     if otm_price <= 0.0:
         return 0.0  # no time value: the quote sits exactly on the lower bound
     try:
         beta = otm_price / (math.sqrt(fwd_s) * math.sqrt(pv_k))  # undiscounted price over √(FK)
-        s, converged = lbr._lets_be_rational_s(beta, -abs(math.log(fwd_s / pv_k)))
+        s, converged = lbr._lets_be_rational_s(beta, -abs(x))
     except (ArithmeticError, ValueError):  # forwards that under- or overflow
         converged = False
     if converged:
         return _accept(s / math.sqrt(T))
     return _brent_implied_volatility(otm_price, S, K, T, r, q, "put" if otm_phi < 0 else "call", tol)
+
+
+def _log_moneyness(S: float, K: float, T: float, r: float, q: float) -> float:
+    """``ln(F/K) = ln(S/K) + (r - q)T``, accurate in relative terms also near the forward.
+
+    Out of the money with ``σ√T`` small, the volatility's relative error equals that of ``ln(F/K)``, so
+    ``ln(S e^(-qT)/(K e^(-rT)))``, whose rounding is about ``ε`` absolute, would cost up to ``1e-12`` near the
+    forward. Within a factor of two ``S - K`` is exact, and ``log1p`` keeps the relative accuracy.
+    """
+    ratio = S / K
+    return (math.log1p((S - K) / K) if 0.5 <= ratio <= 2 else math.log(ratio)) + (r - q) * T
+
+
+def _forward_intrinsic(fwd_s: float, pv_k: float, x: float) -> float:
+    """``S e^(-qT) - K e^(-rT) = K e^(-rT)·(e^x - 1)``, without the cancellation of the difference near the forward.
+
+    The difference of the two rounded values is off by ``ε·S``, which near the money is a large part of a small
+    out-of-the-money price (low volatility, short expiry).
+    """
+    return pv_k * math.expm1(x) if abs(x) < 1 else fwd_s - pv_k
 
 
 def _accept(vol: float) -> float:
@@ -234,9 +255,13 @@ def _option_signs(option_type: ArrayLike) -> np.ndarray:
     return np.array([bs.option_sign(kind) for kind in unique], dtype=float)[inverse].reshape(kinds.shape)
 
 
-def _libm_exp(values: np.ndarray) -> np.ndarray:
-    """:func:`_exp` element by element, so that the batch's bounds equal the scalar path's to the last bit."""
-    return np.fromiter(map(_exp, values.tolist()), dtype=float, count=values.size)
+def _libm(function, values: np.ndarray) -> np.ndarray:
+    """A ``math`` function element by element.
+
+    NumPy's exp, log1p and expm1 can differ from libm's in the last bit, which would let a quote within an ulp of a
+    bound, or without time value, be judged differently by the batch than by :func:`implied_volatility`.
+    """
+    return np.fromiter(map(function, values.tolist()), dtype=float, count=values.size)
 
 
 def implied_volatility_batch(
@@ -307,22 +332,32 @@ def implied_volatility_batch(
         code[(code == 0) & (T <= 0)] = _CODES.index("expired")
         rows = np.flatnonzero(code == 0)
         p, s_, k_, t_, r_, q_, ph = (a[rows] for a in (price, S, K, T, r, q, phi))
-        fwd_s = s_ * _libm_exp(-q_ * t_)
-        pv_k = k_ * _libm_exp(-r_ * t_)
+        fwd_s = s_ * _libm(_exp, -q_ * t_)  # as _discounted
+        pv_k = k_ * _libm(_exp, -r_ * t_)
         below = p < np.maximum(ph * (fwd_s - pv_k), 0.0) - 1e-12 * np.maximum(s_, k_)
         above = ~below & (p >= np.where(ph > 0, fwd_s, pv_k))
         code[rows[below]] = _CODES.index("below_lower_bound")
         code[rows[above]] = _CODES.index("at_or_above_upper_bound")
 
         keep = ~below & ~above
-        rows, p, t_, ph, fwd_s, pv_k = rows[keep], p[keep], t_[keep], ph[keep], fwd_s[keep], pv_k[keep]
-        otm_phi = np.where(fwd_s >= pv_k, -1.0, 1.0)
-        otm_price = np.where(otm_phi == ph, p, p - ph * (fwd_s - pv_k))
+        rows, p, s_, k_, t_, r_, q_, ph = (a[keep] for a in (rows, p, s_, k_, t_, r_, q_, ph))
+        fwd_s, pv_k = fwd_s[keep], pv_k[keep]
+        ratio = s_ / k_  # as _log_moneyness
+        near = (ratio >= 0.5) & (ratio <= 2)
+        x = np.empty_like(ratio)
+        x[near] = _libm(math.log1p, (s_[near] - k_[near]) / k_[near])
+        x[~near] = _libm(math.log, ratio[~near])
+        x += (r_ - q_) * t_
+        intrinsic = fwd_s - pv_k  # as _forward_intrinsic
+        small = np.abs(x) < 1
+        intrinsic[small] = pv_k[small] * _libm(math.expm1, x[small])
+        otm_phi = np.where(x >= 0, -1.0, 1.0)
+        otm_price = np.where(otm_phi == ph, p, p - ph * intrinsic)
         vol[rows] = 0.0  # no time value; overwritten below where there is some
         live = otm_price > 0
         rows, t_ = rows[live], t_[live]
         beta = otm_price[live] / (np.sqrt(fwd_s[live]) * np.sqrt(pv_k[live]))
-        s, converged = lbr._lets_be_rational_v(beta, -np.abs(np.log(fwd_s[live] / pv_k[live])))
+        s, converged = lbr._lets_be_rational_v(beta, -np.abs(x[live]))
         sigma = s / np.sqrt(t_)
         accepted = converged & (sigma <= MAX_VOL)
         vol[rows[accepted]] = np.where(sigma[accepted] >= _VOL_FLOOR, sigma[accepted], 0.0)
