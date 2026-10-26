@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import math
+import sys
 from datetime import date, datetime, timedelta, timezone
 from fractions import Fraction
 from pathlib import Path
@@ -192,8 +193,10 @@ def _assert_adds_up(whole: float, first: float, second: float) -> None:
     The plan's 1e-15 is relative: one unit in the last place of a variance time of four years is 8.9e-16, so no float
     sum of such numbers is exact to 1e-15 absolute. Each value is the correctly rounded value of an exactly additive
     quantity, which bounds the error by 4 x 2**-53 (4.4e-16) of the largest; 1e-15 leaves a margin over that bound.
+    Below the smallest normal float (a weight of 1e-309 makes such variance times) rounding is absolute, at most
+    2**-1075 a value, so the scale never goes below that float.
     """
-    scale = max(abs(whole), abs(first), abs(second))
+    scale = max(abs(whole), abs(first), abs(second), sys.float_info.min)
     assert abs(whole - (first + second)) <= 1e-15 * scale, (whole, first, second)
 
 
@@ -215,6 +218,7 @@ def test_variance_time_adds_up_over_consecutive_intervals():
     @hypothesis.example([0, 201, 2_100_960], 0.0, 1.2441050931918338, 18)
     @hypothesis.example([0, _SPAN, 1], 0.0, 0.0, 59)  # pieces of four years that nearly cancel
     @hypothesis.example([_SPAN, 0, _SPAN // 2], 2.0, 2.0, 0)
+    @hypothesis.example([0, 1, 127], 1.0625, 2.225073858507203e-309, 0)  # subnormal variance times on a holiday
     def check(minutes, weekend, holiday, seconds):
         t0, t1, t2 = (_moment(m) + timedelta(seconds=seconds) for m in minutes)  # in any order
         variance_clock = clock.VarianceClock(weekend, holiday, [(date(2026, 4, 30), 0.04), (date(2027, 1, 28), 0.3)])
