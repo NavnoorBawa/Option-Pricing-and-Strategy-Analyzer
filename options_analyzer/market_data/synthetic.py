@@ -11,7 +11,8 @@ model whose every input is known:
   strikes each side, at most 100 in all); further out, two coarser bands (to 80 and 60 strikes) whose step is the
   finest multiple of the interval (1, 2 or 5 times a power of ten) that keeps each band within its limit. Every
   strike is on the exchange's grid, and an expiry lists at most 243 strikes whatever the spot: with at most 18
-  expiries (6 weeklies, 6 monthlies and 6 later quarterlies), a chain has at most 8,748 rows.
+  expiries (6 weeklies, 6 monthlies and 6 later quarterlies), a chain has at most 8,748 rows. Strikes from 100,000
+  up, which an OCC symbol cannot carry, are not listed (a spot near 50,000 at a high rate reaches them).
 * Time: years to the settlement time from :mod:`options_analyzer.clock` (minutes / 525,600).
 * Volatility: an SSVI surface (:class:`options_analyzer.vol_surface.SSVIParams`) evaluated in variance time
   (:class:`options_analyzer.clock.VarianceClock`, weekends and holidays at a tenth of a trading day), so the total
@@ -125,8 +126,10 @@ _INTERVALS: dict[str, tuple[tuple[float, float], ...]] = {
     "index": ((1_000.0, 5.0), (100.0, 1.0)),
     "etf": ((25.0, 1.0), (5.0, 0.5)),
 }
-#: Largest spot: the furthest strikes (1.6 times the spot at rates of a few percent) must stay below OCC's 100,000.
+#: Largest spot: at rates of a few percent the furthest strikes, about 1.6 times the spot, stay below OCC's limit.
 MAX_SPOT = 50_000.0
+#: OCC symbols write the strike in eight digits of thousandths: strikes below 100,000.
+_OCC_STRIKE_LIMIT = 100_000.0
 #: The near-the-money band lists at least this many strikes each side of the forward (for low-priced underlyings).
 _NEAR_STRIKES = 5
 #: Strike bands around the forward: (the most strikes the band may hold, its lower edge, its upper edge), each edge in
@@ -460,6 +463,15 @@ def sample_chain(
         The quotes (canonical schema), the model value and vol of each, and the true forward, discount factor and
         ATM vol of each expiry.
 
+    Raises
+    ------
+    ValueError
+        If the spot, ``as_of``, a rate, the dividend yield, a cash dividend or ``box_spread`` is out of range, if the
+        variance clock has events, if the dividends to an expiry are worth more than the spot, or if an expiry's
+        forward is so high that fewer than five strikes above it are below OCC's strike limit of 100,000.
+    TypeError
+        If ``dividends`` is neither a number nor a sequence of pairs, or an ex-date is not a date.
+
     Examples
     --------
     An SPX-like chain at 10:00 ET on Monday 26 October 2026, 4% Treasury rate, 1.3% dividend yield:
@@ -519,6 +531,13 @@ def sample_chain(
         forward = escrowed * math.exp(-dividend_yield * T) / discount
         theta = float(ssvi.theta(tau))
         strikes = _strikes(forward, interval, math.sqrt(theta))
+        strikes = strikes[strikes < _OCC_STRIKE_LIMIT]
+        if np.count_nonzero(strikes > forward) < _NEAR_STRIKES:
+            raise ValueError(
+                f"the {expiry} forward is {forward:,.2f} (spot {spot:,g}, box rate {r:.2%}): fewer than "
+                f"{_NEAR_STRIKES} strikes above it are below OCC's strike limit of {_OCC_STRIKE_LIMIT:,.0f}; lower "
+                "the spot or the rate"
+            )
         k = np.log(strikes / forward)
         w = ssvi.total_variance(k, tau)[0]
         iv = np.sqrt(w / T)

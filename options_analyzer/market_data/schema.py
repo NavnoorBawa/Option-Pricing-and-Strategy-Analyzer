@@ -152,9 +152,31 @@ def fits_occ(root: pd.Series, expiry: pd.Series, strike: pd.Series) -> pd.Series
 
 
 def chain_frame(columns: dict[str, Any]) -> pd.DataFrame:
-    """A DataFrame with the canonical columns in order and types: text as Python objects (also under pandas 3,
-    whose default string type would otherwise differ between sources), expiries as ``datetime64[ns]`` and the
-    numbers as floats. ``vendor_iv`` may be left out (all NaN)."""
+    """A DataFrame with the canonical columns in order and types.
+
+    Text as Python objects (also under pandas 3, whose default string type would otherwise differ between sources),
+    expiries as ``datetime64[ns]`` and the numbers as floats. The values are not checked (see :func:`validate_chain`).
+
+    Parameters
+    ----------
+    columns : dict of str to array-like
+        A value or sequence for each column of :data:`CHAIN_COLUMNS`; ``vendor_iv`` may be left out (all NaN).
+        Other keys are ignored.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The columns of :data:`CHAIN_COLUMNS`, in that order.
+
+    Examples
+    --------
+    >>> frame = chain_frame({"symbol": ["SPXW261102C07930000"], "root": ["SPXW"], "expiry": ["2026-11-02"],
+    ...                      "settlement": ["PM"], "type": ["call"], "strike": [7930], "bid": [12.3], "ask": [12.9]})
+    >>> frame.dtypes.astype(str).to_dict()  # doctest: +NORMALIZE_WHITESPACE
+    {'symbol': 'object', 'root': 'object', 'expiry': 'datetime64[ns]', 'settlement': 'object', 'type': 'object',
+     'strike': 'float64', 'bid': 'float64', 'ask': 'float64', 'vendor_iv': 'float64'}
+    >>> validate_chain(frame)
+    """
     data = {"vendor_iv": np.nan, **columns}
     frame = pd.DataFrame({column: data[column] for column in CHAIN_COLUMNS})
     return frame.astype(

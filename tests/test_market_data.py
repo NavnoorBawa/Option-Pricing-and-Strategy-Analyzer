@@ -319,6 +319,19 @@ def test_strike_interval_and_the_supported_spots():
         assert (per_expiry["bid"].apply(lambda bids: (bids > 0).sum()) >= 4).all()
 
 
+def test_strikes_stay_below_occs_limit_at_high_spots_and_rates(monkeypatch):
+    """The documented extremes: a spot of 50,000 at a 20% rate lists no strike from OCC's 100,000 up, and a forward
+    so high that fewer than five strikes above it would remain is refused with a message about the inputs."""
+    monkeypatch.setattr(synthetic.binomial, "price", lambda *args: 0.0)
+    for style in ("index", "etf"):
+        chain = sample_chain(50_000.0, 0.20, 0.0, as_of=AS_OF, style=style, noise=False)
+        validate_chain(chain.quotes)
+        assert chain.quotes["strike"].max() < 100_000 < chain.expiries["forward"].max() * 1.4
+        _check_listing(chain)
+    with pytest.raises(ValueError, match=r"forward is 100,901\.79 \(spot 50,000, box rate 50\.45%\).*100,000"):
+        sample_chain(50_000.0, 0.50, 0.0, as_of=AS_OF)
+
+
 def test_expiries_weeklies_monthlies_and_settlement(index_chain, etf_chain):
     expiries = index_chain.expiries
     for row in expiries.itertuples():
