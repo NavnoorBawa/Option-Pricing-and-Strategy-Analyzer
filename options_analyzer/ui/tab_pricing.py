@@ -17,6 +17,9 @@ from .inputs import Inputs
 
 #: Monte Carlo scenarios drawn on the sample-paths chart.
 SAMPLE_PATHS = 60
+#: The confidence interval of a simulated price, in no-break spaces: it never splits over two lines (on a phone "SE"
+#: stood alone on the second line of the caption under the price cards).
+_CI_FORMULA = "95% CI = price ± 1.96 SE".replace(" ", "\xa0")
 #: What a heavy-tailed Monte Carlo sample does instead of the usual estimator (see ``monte_carlo``).
 HEAVY_TAIL_NOTE = (
     "Heavy-tailed sample (large σ√T): the put is averaged directly and the call follows from put-call parity"
@@ -121,7 +124,7 @@ def _model_card(inputs: Inputs, prices: Prices) -> tuple[str, str, str, str]:
         return (
             "Std. error",
             money(max(finite), 4) if finite else "–",
-            f"Standard error: call {money(se['call'], 4)}, put {money(se['put'], 4)}; 95% CI = price ± 1.96\xa0SE"
+            f"Standard error: call {money(se['call'], 4)}, put {money(se['put'], 4)}; {_CI_FORMULA}"
             + (f". {HEAVY_TAIL_NOTE}." if heavy else ""),
             "Standard error of the simulated prices, after any variance reduction in use (the header's badge names "
             "it: AV for antithetic variates, CV for a control variate). The larger of the call's and the put's is "

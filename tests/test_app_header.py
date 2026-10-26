@@ -276,8 +276,11 @@ def test_the_price_cards_have_no_caption_at_the_closed_form(app):
     [
         ({"model": "Binomial tree"}, r"Error against the closed-form value: call [+-]\$0\.\d{6}, put [+-]\$0\.\d{6}$"),
         ({"model": "Binomial tree", "style": "American"}, r"Early-exercise premium: call \$0\.0000, put \+\$0\.\d{4} "),
-        # "1.96 SE" is never split over two lines (a no-break space): on a phone "SE" stood alone on the second line.
-        ({"model": "Monte Carlo"}, r"Standard error: call \$0\.\d{4}, put \$0\.\d{4}; 95% CI = price ± 1\.96\xa0SE$"),
+        # The interval's formula never splits over two lines (no-break spaces): on a phone "SE" stood alone.
+        (
+            {"model": "Monte Carlo"},
+            r"Standard error: call \$0\.\d{4}, put \$0\.\d{4}; 95%\xa0CI\xa0=\xa0price\xa0±\xa01\.96\xa0SE$",
+        ),
     ],
 )
 def test_the_price_cards_caption_gives_the_call_and_the_put(new_app, query, caption):
