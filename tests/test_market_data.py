@@ -493,6 +493,172 @@ def test_etf_american_values_with_cash_dividends(etf_chain):
     assert np.any(call & (value > european + 0.05))
 
 
+def test_deep_etf_puts_with_cash_dividends_are_worth_their_exercise_value(etf_chain, etf_one_percent):
+    """Exercise pays the strike less the full share price. Exercising at the escrowed spot (the spot less the present
+    value of the dividends to expiry) made every deep put worth at least ``K - S`` plus that present value.
+
+    SPY-like dividends are smaller than the interest on the strike until the next ex-date, so a put deep in the money
+    is exercised at once and worth exactly ``K - S``. With 1% of the spot a quarter, waiting for the next dividend
+    pays near the money and exercising at once further out: the deep puts are worth ``K - S`` plus less than the
+    present value of that one dividend, whatever the dividends after it.
+    """
+    for chain, spot in ((etf_chain, 600.0), (etf_one_percent, 100.0)):
+        expiries = chain.expiries.set_index(["expiry", "root"])["dividends_pv"]
+        rows = _with_expiry_data(chain).join(expiries, on=["expiry", "root"])
+        puts = rows[rows["type"].eq("put") & (rows["dividends_pv"] > 0)]
+        assert (puts["value"] >= puts["strike"] - spot - 1e-9).all()
+        deep = puts[puts["strike"] >= 1.25 * spot]
+        assert len(deep) > 20 and deep["expiry"].nunique() == puts["expiry"].nunique()
+        premium = (deep["value"] - (deep["strike"] - spot)).to_numpy()
+        if spot == 600.0:
+            np.testing.assert_allclose(premium, 0.0, rtol=0, atol=1e-9)
+        else:
+            next_dividend = expiries[expiries > 0].min()  # the present value of the first dividend
+            assert (premium >= 0).all() and (premium < next_dividend).all()
+            assert (premium == 0).any() and (premium > 0.1).sum() >= 10  # exercised at once only beyond K = 154
+
+
+def test_etf_puts_with_cash_dividends_are_the_escrowed_tree_at_the_clock_times(etf_one_percent):
+    """Each put is Hull's escrowed tree at the quote's own clock times (the escrowed spot, the box rate and the model
+    vol of its expiry, and every ex-date's time and present value from the clock), floored at the value of the same
+    put with a shorter expiry, whose exercise it can copy. Without dividends the tree is the binomial engine's
+    Leisen-Reimer tree to rounding."""
+    spot, as_of = 100.0, clock.to_new_york(AS_OF)
+    rows = _with_expiry_data(etf_one_percent).join(
+        etf_one_percent.expiries.set_index(["expiry", "root"])[["settles_at", "dividends_pv"]], on=["expiry", "root"]
+    )
+    puts = rows[rows["type"].eq("put")].copy()
+    for _, group in puts.groupby("expiry"):
+        first = group.iloc[0]
+        paid = []
+        for ex_date, cash in ONE_PERCENT:
+            drop = clock.to_new_york(datetime.combine(ex_date, clock.MARKET_OPEN))
+            if drop <= first["settles_at"]:
+                years = clock.year_fraction(as_of, drop)
+                paid.append((years, cash * math.exp(-BOX * years)))
+        escrowed = spot - sum(pv for _, pv in paid)
+        assert first["dividends_pv"] == pytest.approx(spot - escrowed, rel=1e-14, abs=0)
+        puts.loc[group.index, "tree"] = synthetic._escrowed_american_puts(
+            escrowed, group["strike"].to_numpy(), first["maturity"], first["rate"], group["iv"].to_numpy(), paid
+        )
+    floored = puts.sort_values("expiry", kind="stable").groupby("strike")["tree"].cummax()
+    np.testing.assert_allclose(puts["value"], floored.loc[puts.index], rtol=1e-13, atol=1e-12)
+    lifted = puts["value"] - puts["tree"]
+    assert 0 < lifted.max() < 0.05 and (lifted >= 0).all()  # the floor corrects the tree's time steps a little
+    strikes, vols = np.array([60.0, 90.0, 100.0, 110.0, 160.0]), np.array([0.4, 0.25, 0.2, 0.18, 0.3])
+    tree = synthetic._escrowed_american_puts(100.0, strikes, 1.3, BOX, vols, [])
+    engine = [
+        synthetic.binomial.price(100.0, K, 1.3, BOX, v, 0.0, "put", 201, True, "lr")
+        for K, v in zip(strikes, vols, strict=True)
+    ]
+    np.testing.assert_allclose(tree, engine, rtol=0, atol=1e-10)
+
+
+#: ETF chains with cash dividends, for QuantLib's date-based engines: (spot, dividends, the largest error allowed
+#: against its escrowed-dividend engine, $).
+_DIVIDEND_CHAINS = {
+    "spy-like": (600.0, SPY_DIVIDENDS, 0.08),
+    "one-percent": (100.0, ONE_PERCENT, 0.04),
+    "1.7%-a-quarter": (600.0, [(date(2026, 12, 18), 10.0), (date(2027, 3, 19), 10.0)], 0.2),
+}
+
+
+def _whole_day_tree(row, spot: float, dividends) -> tuple[float, int, list[tuple[int, float]]]:
+    """The escrowed tree for one put at whole-day times, its days to expiry and [(days to the ex-date, cash)]."""
+    days = round(row.maturity * 365)
+    paid = [((ex_date - AS_OF.date()).days, cash) for ex_date, cash in dividends if ex_date <= row.expiry.date()]
+    pv = [cash * math.exp(-row.rate * d / 365) for d, cash in paid]
+    times = [(d / 365, value) for (d, _), value in zip(paid, pv, strict=True)]
+    strike, vol = np.array([row.strike]), np.array([row.iv])
+    value = synthetic._escrowed_american_puts(spot - sum(pv), strike, days / 365, row.rate, vol, times)[0]
+    return float(value), days, paid
+
+
+def _whole_day_puts(chain: synthetic.SyntheticChain, spot: float, dividends) -> list[tuple]:
+    """Puts with a dividend before expiry, at the strikes nearest 90%, 105% and 120% of the spot of every such expiry
+    (out of the money, where early exercise starts to matter, and deep in the money), as (strike, days to expiry,
+    box rate, model vol, [(days to the ex-date, cash)], half the quoted spread, the chain's value at those whole-day
+    times: the tree, floored at the trees of the same put's shorter expiries)."""
+    rows = _with_expiry_data(chain).join(
+        chain.expiries.set_index(["expiry", "root"])["dividends_pv"], on=["expiry", "root"]
+    )
+    puts = rows[rows["type"].eq("put")]
+    paying = puts[puts["dividends_pv"] > 0]
+    nearest = [
+        (group["strike"] - level * spot).abs().idxmin()
+        for _, group in paying.groupby("expiry")
+        for level in (0.9, 1.05, 1.2)
+    ]
+    sample = []
+    for row in paying.loc[nearest].itertuples():
+        value, days, paid = _whole_day_tree(row, spot, dividends)
+        shorter = puts[(puts["strike"] == row.strike) & (puts["expiry"] < row.expiry)]
+        value = max([value] + [_whole_day_tree(other, spot, dividends)[0] for other in shorter.itertuples()])
+        sample.append((row.strike, days, row.rate, row.iv, paid, 0.5 * (row.ask - row.bid), value))
+    return sample
+
+
+def _quantlib_american_put(ql, spot, strike, days, rate, vol, paid, model) -> float:
+    """QuantLib's finite-difference American put (800 x 800 grid) with cash dividends in ``model``."""
+    today = ql.Date(AS_OF.day, AS_OF.month, AS_OF.year)
+    ql.Settings.instance().evaluationDate = today
+    day_count = ql.Actual365Fixed()
+    process = ql.BlackScholesMertonProcess(
+        ql.QuoteHandle(ql.SimpleQuote(spot)),
+        ql.YieldTermStructureHandle(ql.FlatForward(today, 0.0, day_count)),
+        ql.YieldTermStructureHandle(ql.FlatForward(today, rate, day_count)),
+        ql.BlackVolTermStructureHandle(ql.BlackConstantVol(today, ql.NullCalendar(), vol, day_count)),
+    )
+    dividends = ql.DividendVector([today + d for d, _ in paid], [cash for _, cash in paid])
+    option = ql.VanillaOption(ql.PlainVanillaPayoff(ql.Option.Put, strike), ql.AmericanExercise(today, today + days))
+    scheme = ql.FdmSchemeDesc.Douglas()
+    option.setPricingEngine(
+        ql.FdBlackScholesVanillaEngine(process, dividends, 800, 800, 0, scheme, False, -ql.nullDouble(), model)
+    )
+    return option.NPV()
+
+
+@pytest.mark.oracle
+@pytest.mark.parametrize("case", list(_DIVIDEND_CHAINS))
+def test_etf_puts_with_cash_dividends_match_quantlib_escrowed_finite_differences(case):
+    """The chain's puts (Hull's escrowed tree with the shorter-expiry floor) against QuantLib's finite-difference
+    engine in the same escrowed-dividend model (an independent method, on an 800 x 800 grid), at whole-day times:
+    within half the quoted spread, and within $0.08, $0.04 and $0.20. The tree's 201 steps exercise up to a step
+    after an ex-date, which costs most for deep puts at two years and large dividends: measured over every sixth put
+    with a dividend before expiry, the largest errors are $0.062, $0.026 and $0.17."""
+    ql = pytest.importorskip("QuantLib")
+    spot, dividends, largest = _DIVIDEND_CHAINS[case]
+    chain = sample_chain(spot, UST, dividends, as_of=AS_OF, style="etf", noise=False)
+    for strike, days, rate, vol, paid, half_spread, value in _whole_day_puts(chain, spot, dividends):
+        escrowed = ql.FdBlackScholesVanillaEngine.Escrowed
+        theirs = _quantlib_american_put(ql, spot, strike, days, rate, vol, paid, escrowed)
+        assert value == pytest.approx(theirs, abs=min(largest, half_spread)), (strike, days)
+
+
+@pytest.mark.oracle
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="the escrowed-dividend model puts the vol on the spot less the dividends' present value, not on the share "
+    "price; the planned dividends engine (spot-drop finite differences) replaces it",
+)
+def test_etf_puts_with_cash_dividends_match_a_spot_drop_model():
+    """For the planned dividends engine: puts with a dividend before expiry within half the quoted spread of
+    QuantLib's spot-drop finite-difference engine at the same vol. The escrowed model is up to $0.18 lower (about the
+    gap between the two models' European values) and beyond half the spread on 40% of the SPY-like puts."""
+    ql = pytest.importorskip("QuantLib")
+    misses = []
+    for spot, dividends, _ in _DIVIDEND_CHAINS.values():
+        chain = sample_chain(spot, UST, dividends, as_of=AS_OF, style="etf", noise=False)
+        for strike, days, rate, vol, paid, half_spread, value in _whole_day_puts(chain, spot, dividends):
+            theirs = _quantlib_american_put(
+                ql, spot, strike, days, rate, vol, paid, ql.FdBlackScholesVanillaEngine.Spot
+            )
+            if abs(value - theirs) > half_spread:
+                misses.append((spot, strike, days, round(value - theirs, 4)))
+    assert misses == []
+
+
 @pytest.mark.parametrize("noise", [False, True], ids=["noise-free", "noisy"])
 def test_quotes_have_no_static_arbitrage(noise, index_chain, index_model, etf_chain, etf_one_percent):
     """Acceptance (2): no quote-level arbitrage flags: the model-free vertical and butterfly check (both styles), the

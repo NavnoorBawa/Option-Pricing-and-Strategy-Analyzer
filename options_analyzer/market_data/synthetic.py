@@ -21,15 +21,29 @@ model whose every input is known:
 * Rates: discounting and forwards at a box rate, the Treasury zero rate plus 45 bp (SPX box spreads finance above
   Treasuries). ``rate_curve`` is a flat rate or a function of the time to expiry until a curve module exists.
 * Dividends: a continuous yield, or cash dividends ``(ex-date, $ per share)`` that drop the spot at the open of the
-  ex-date. Cash dividends use the escrowed-dividend approximation: the options are valued on the spot less the present
-  value of the dividends paid before expiry, as if that were a lognormal asset. It gets the forward exactly but not the
-  volatility of the stock just before an ex-date; the planned dividends engine (a finite-difference model with the
-  dividend step on the spot) replaces it.
-* Prices: Black-76 for index options. ETF options are American: puts (and calls with a continuous yield) come from the
-  Leisen-Reimer binomial tree of :mod:`options_analyzer.binomial` with 201 steps; calls with cash dividends use Black's
-  approximation, the largest of the exercise value, the European value to expiry and the European value to just
-  before each ex-date, with no tree needed because the escrowed spot pays nothing. The European to just before an
-  ex-date is priced on the surface itself, at the forward and variance time of that moment, so it is the same for
+  ex-date. Cash dividends use the escrowed-dividend model: the share price is a lognormal escrowed spot (the spot less
+  the present value of the dividends paid before expiry) plus the present value of the dividends still to come. The
+  model gets the forward exactly and its European values are Black-76 at that forward, as the surface states, but it
+  puts the volatility on the escrowed spot rather than on the share price. A spot-drop model (the dividend a step down
+  in the share price, whose volatility is the input) at the same vol values options higher: on the SPY-like chain of
+  the tests, up to $0.18 more for the puts with a dividend before expiry (QuantLib's finite-difference engines), about
+  as much as for the European ones, and more than half the quoted spread on 40% of them. The planned dividends engine
+  (a finite-difference model with the dividend step on the spot) replaces the escrowed model.
+* Prices: Black-76 for index options. ETF options are American. With a continuous yield, puts and calls come from
+  the Leisen-Reimer binomial tree of :mod:`options_analyzer.binomial` with 201 steps. With cash dividends, puts come
+  from a Leisen-Reimer tree of 201 steps on the escrowed spot that exercises at the full share price (Hull's
+  escrowed-dividend tree), so a deep in-the-money put is worth its exercise value ``K - S`` where exercising is
+  optimal. (Exercising at the escrowed spot instead, as the binomial engine would on that spot, overvalues such puts
+  by up to the present value of the dividends to expiry: $3.56 at the June 2027 expiry of the SPY-like chain.) The
+  tree agrees with QuantLib's escrowed-dividend finite-difference engine within $0.07 on the SPY-like chain of the
+  tests, and within half the quoted spread for dividends of up to 1.7% of the spot a quarter: its 201 steps exercise
+  up to a step after an ex-date, which costs most for deep puts at two years ($0.20 at $10 a quarter on a $600 ETF).
+  Every American value is then floored at the value of the same option with a shorter expiry, whose exercise it can
+  copy: that keeps the values rising with maturity and lifts a long-dated put towards its finer short-dated
+  neighbour, by up to $0.21 in the tests (the largest error left is then $0.17). Calls with cash dividends use
+  Black's approximation, the largest of the exercise value, the European value to expiry and the European value to
+  just before each ex-date, with no tree needed because the escrowed spot pays nothing. The European to just before
+  an ex-date is priced on the surface itself, at the forward and variance time of that moment, so it is the same for
   every expiry after the ex-date and the American calls gain value with maturity, as they must.
 * Quotes: a half-spread of a few hundredths of a vol point times vega, widening with ``|k|`` (in ATM standard
   deviations) and with ``T``, plus 0.1% of the value, and at least one tick. Ticks are $0.05 below $3 and $0.10 from $3
@@ -323,6 +337,7 @@ class _ExDate(NamedTuple):
     """A cash dividend seen from the valuation time."""
 
     drop: datetime  # the open of the ex-date, New York time
+    years: float  # calendar years to the ex-date (minutes / 525,600)
     pv: float  # present value of the cash, $ per share
     forward: float  # forward to just before the ex-date (the spot less the dividends paid before it), $
     discount_factor: float  # to the ex-date
@@ -341,12 +356,60 @@ def _ex_dates(
     discounted = []
     for drop, amount in cash:
         t = year_fraction(as_of, drop)
-        discounted.append((drop, amount * math.exp(-(rate(t) + box_spread) * t), math.exp(-(rate(t) + box_spread) * t)))
+        discount = math.exp(-(rate(t) + box_spread) * t)
+        discounted.append((drop, t, amount * discount, discount))
     ex_dates = []
-    for drop, pv, discount in discounted:
-        before = spot - sum(other_pv for other, other_pv, _ in discounted if other < drop)
-        ex_dates.append(_ExDate(drop, pv, before / discount, discount, variance_clock.variance_time(as_of, drop)))
+    for drop, t, pv, discount in discounted:
+        before = spot - sum(other_pv for other, _, other_pv, _ in discounted if other < drop)
+        ex_dates.append(_ExDate(drop, t, pv, before / discount, discount, variance_clock.variance_time(as_of, drop)))
     return ex_dates
+
+
+def _peizer_pratt(z: np.ndarray, n: int) -> np.ndarray:
+    """Peizer-Pratt method-2 inversion of the normal distribution, as in the Leisen-Reimer tree."""
+    denom = n + 1.0 / 3.0 + 0.1 / (n + 1.0)
+    return 0.5 + np.copysign(0.5, z) * np.sqrt(1.0 - np.exp(-((z / denom) ** 2) * (n + 1.0 / 6.0)))
+
+
+def _escrowed_american_puts(
+    escrowed: float,
+    strikes: np.ndarray,
+    T: float,
+    r: float,
+    iv: np.ndarray,
+    dividends: Sequence[tuple[float, float]],
+    steps: int = TREE_STEPS,
+) -> np.ndarray:
+    """American puts in the escrowed-dividend model, exercised at the full share price (Hull's tree).
+
+    The escrowed spot ``S*`` (the spot less the present value of the dividends paid before expiry) follows a
+    Leisen-Reimer tree of ``steps`` (odd) steps at the rate ``r`` and each strike's vol, as in
+    :func:`options_analyzer.binomial.price`, vectorised over the strikes (where its probabilities round to 0 or 1,
+    the drift-centred lattice the binomial module falls back to). At a node at time ``t`` the share price is
+    ``S*`` plus the dividends still to go ex after ``t``, valued at ``t``; exercise pays the strike less that share
+    price, which at the root is ``K - S``. ``dividends`` holds ``(years to the ex-date, present value)`` pairs.
+    """
+    K, sigma = strikes[:, None], iv[:, None]
+    dt = T / steps
+    growth = math.exp(r * dt)
+    sd = sigma * math.sqrt(T)
+    d1 = (np.log(escrowed / K) + r * T) / sd + 0.5 * sd
+    p, p_star = _peizer_pratt(d1 - sd, steps), _peizer_pratt(d1, steps)
+    centred = np.minimum(np.minimum(p, 1.0 - p), np.minimum(p_star, 1.0 - p_star)) > 1e-12
+    p_lr = np.where(centred, p, 0.5)
+    u = np.where(centred, growth * p_star / p_lr, np.exp((r - 0.5 * sigma**2) * dt + sigma * math.sqrt(dt)))
+    d = np.where(centred, (growth - p_lr * u) / (1.0 - p_lr), np.exp((r - 0.5 * sigma**2) * dt - sigma * math.sqrt(dt)))
+    p = np.where(centred, p, (growth - d) / (u - d))
+    log_u, log_d = np.log(u), np.log(d)
+    ups = np.arange(steps + 1)[None, :]
+    values = np.maximum(K - escrowed * np.exp(ups * log_u + (steps - ups) * log_d), 0.0)
+    for i in range(steps - 1, -1, -1):
+        values = (p * values[:, 1:] + (1.0 - p) * values[:, :-1]) / growth
+        t = i * dt
+        to_come = sum(pv for years, pv in dividends if years > t) * math.exp(r * t)
+        share = escrowed * np.exp(ups[:, : i + 1] * log_u + (i - ups[:, : i + 1]) * log_d) + to_come
+        values = np.maximum(values, K - share)
+    return values[:, 0]
 
 
 def sample_chain(
@@ -465,7 +528,7 @@ def sample_chain(
         for call in (True, False):
             if style == "index":
                 value = _black(forward, strikes, w, discount, call)
-            elif not call or not cash:
+            elif not cash:  # a continuous yield: the binomial engine
                 kind = "call" if call else "put"
                 value = np.array(
                     [
@@ -473,6 +536,8 @@ def sample_chain(
                         for K, sigma in zip(strikes, iv, strict=True)
                     ]
                 )
+            elif not call:
+                value = _escrowed_american_puts(escrowed, strikes, T, r, iv, [(e.years, e.pv) for e in paid])
             else:  # Black's approximation: exercise now, just before an ex-date, or hold to expiry
                 value = np.maximum(_black(forward, strikes, w, discount, True), spot - strikes)
                 for ex_date in paid:
@@ -505,6 +570,8 @@ def sample_chain(
 
     frame = pd.DataFrame(rows, columns=["root", "expiry", "settlement", "type", "strike"])
     value = np.maximum(np.array(values), 0.0)
+    if style == "etf":  # an American option is worth at least a shorter one, whose exercise it can copy
+        value = pd.Series(value).groupby([frame["root"], frame["type"], frame["strike"]]).cummax().to_numpy()
     tick = _MIN_TICK[style]
     half = np.maximum(np.array(half_spreads), tick)
     mid = value
