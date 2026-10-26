@@ -65,7 +65,7 @@ Everything the project uses is free.
 | Playwright and Chromium | Apache 2.0, BSD | Browser tests and screenshots |
 | IBM Plex Sans and Mono | SIL Open Font License | Self-hosted type |
 | GitHub and GitHub Actions | Free for public repositories | Code hosting and CI |
-| Papers: Jäckel (2015) *Let's Be Rational*; Andersen, Lake and Offengenden (2016); Healy (2021); Leisen and Reimer (1996); Gatheral (2006); Gatheral and Jacquier (2014); Acerbi and Tasche (2002) | Publicly available | Methods; full references in the app's Methodology tab and in `docs/methods/` |
+| Papers: Jäckel (2015) *Let's Be Rational*; Andersen, Lake and Offengenden (2016); Healy (2021); Leisen and Reimer (1996); Gatheral (2006); Gatheral and Jacquier (2014); Acerbi and Tasche (2002) | Publicly available | Methods; full references in the app's Methodology tab |
 | NYSE holiday calendar, Cboe and OCC product specifications | Public web pages | The market clock, settlement rules and OCC symbols |
 
 Development was AI-assisted: the code, tests and documents were written with Claude Code (an AI coding assistant,

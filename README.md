@@ -129,7 +129,8 @@ st.strike_for_delta(-0.16, market, 0.5, 0.22, "put")  # 88.07, the 16-delta put 
   differences, the Greek-ladder identities across all 26 strategy templates, and the vega-bucket sums.
 - **App tests**: Streamlit AppTests of every tab and deep link, plus Chromium browser tests of the layout, run locally
   with `pytest -m e2e`.
-- The method notes in [`docs/methods/`](docs/methods) state each engine's error and limits.
+- The app's Methodology tab documents every model with its references, and
+  [`docs/methods/american_alo.md`](docs/methods/american_alo.md) states the American engine's error and limits.
 
 ## Conventions
 
