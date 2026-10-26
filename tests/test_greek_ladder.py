@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import re
 import warnings
 
 import numpy as np
@@ -195,6 +196,39 @@ def test_invalid_ladders_are_rejected():
         sc.greek_ladder(strategy, market, roll_days=math.nan)
     with pytest.raises(ValueError, match="sigma_days"):
         sc.greek_ladder(strategy, market, unit="sigma", sigma_days=0)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"shocks": (1, math.nan)}, "shock must be a finite number, got nan"),
+        ({"shocks": (math.inf,)}, "shock must be a finite number, got inf"),
+        ({"shocks": (-math.inf,)}, "shock must be a finite number, got -inf"),
+        ({"shocks": (1, "2")}, "shock must be a number, got '2'"),
+        ({"shocks": (None,)}, "shock must be a number, got None"),
+        ({"shocks": ([1, 2],)}, "shock must be a single number"),
+        ({"shocks": 5}, "shocks must be a sequence of numbers, got 5"),
+        ({"roll_days": np.array([1.0, 2.0])}, "roll_days must be a single number"),
+        ({"roll_days": math.inf}, "roll_days must be a finite number"),
+        ({"roll_days": "1"}, "roll_days must be a number"),
+        ({"sigma_days": math.nan, "unit": "sigma"}, "sigma_days must be a finite number"),
+        ({"sigma_days": np.array([1.0]), "unit": "sigma"}, "sigma_days must be a single number"),
+    ],
+)
+def test_non_numbers_are_rejected_by_name(kwargs, message):
+    # Every argument that is not a single finite number raises ValueError naming it (a NaN shock used to be reported
+    # as taking spot below zero, an array roll_days raised TypeError).
+    market = MARKETS["3M"]
+    with pytest.raises(ValueError, match=re.escape(message)):
+        sc.greek_ladder(_template("Long Call", market), market, **kwargs)
+
+
+def test_numpy_shocks_and_days_are_accepted():
+    market = MARKETS["3M"]
+    strategy = _template("Long Straddle", market)
+    plain = sc.greek_ladder(strategy, market, (-1, 0, 1), roll_days=2)
+    from_numpy = sc.greek_ladder(strategy, market, np.array([-1.0, 0.0, 1.0]), roll_days=np.float64(2.0))
+    assert np.array_equal(plain[NUMERIC].to_numpy(), from_numpy[NUMERIC].to_numpy())
 
 
 def test_ladder_through_expiry_has_no_warnings():

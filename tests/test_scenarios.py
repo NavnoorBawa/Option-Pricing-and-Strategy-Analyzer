@@ -1,3 +1,4 @@
+import re
 from dataclasses import replace
 
 import numpy as np
@@ -202,3 +203,54 @@ def test_scenario_cube_rejects_unknown_modes_and_shapes():
         sc.pnl_grid(strategy, MARKET, SPOT_MOVES, VOL_SHOCKS, vol_mode="1M")
     with pytest.raises(ValueError, match="one-dimensional"):
         sc.scenario_cube(strategy, MARKET, np.zeros((2, 2)), VOL_SHOCKS)
+
+
+_DAYS_RULE = "days must be finite and non-negative"
+_SPOT_RULE = "spot_changes must be finite and at least -1"
+
+
+@pytest.mark.parametrize(
+    ("args", "kwargs", "message"),
+    [
+        (([0.0], [0.0], [-10]), {}, f"{_DAYS_RULE} (calendar days elapsed), got -10"),
+        (([0.0], [0.0], [0, np.nan]), {}, f"{_DAYS_RULE} (calendar days elapsed), got nan"),
+        (([0.0], [0.0], np.inf), {}, f"{_DAYS_RULE} (calendar days elapsed), got inf"),
+        (([0.0, np.inf], [0.0]), {}, f"{_SPOT_RULE} (a -100% move takes spot to zero), got inf"),
+        (([-1.5], [0.0]), {}, f"{_SPOT_RULE} (a -100% move takes spot to zero), got -1.5"),
+        (([0.0], [0.0, np.nan]), {}, "vol_shocks must be finite, got nan"),
+        ((["0.1"], [0.0]), {}, "spot_changes must be numbers, got ['0.1']"),
+        (([0.0], [0.0, None]), {}, "vol_shocks must be numbers, got [0.0, None]"),
+        (([0.0], [0.0], [[1, 2], [3]]), {}, "days must be numbers"),
+        (([0.0], [0.1]), {"vol_mode": "1m", "vol_tenor_decay": np.nan}, "vol_tenor_decay must be a finite number"),
+    ],
+)
+def test_scenario_cube_rejects_invalid_axes_by_name(args, kwargs, message):
+    # Negative days used to return the P&L of time running backwards, and NaN days failed inside black_scholes
+    # without naming the argument.
+    strategy = S.build_template("Long Straddle", 100, 5)
+    with pytest.raises(ValueError, match=re.escape(message)):
+        sc.scenario_cube(strategy, MARKET, *args, **kwargs)
+
+
+def test_pnl_grid_rejects_invalid_arguments_by_name():
+    strategy = S.build_template("Long Straddle", 100, 5)
+    # vol_mode is checked whether or not there are vol_changes (it used to be ignored without them).
+    with pytest.raises(ValueError, match="vol_mode"):
+        sc.pnl_grid(strategy, MARKET, [0.0, 0.1], vol_mode="bogus")
+    with pytest.raises(ValueError, match=_DAYS_RULE):
+        sc.pnl_grid(strategy, MARKET, [0.0, 0.1], days=[0, -1])
+    with pytest.raises(ValueError, match=_DAYS_RULE):
+        sc.pnl_grid(strategy, MARKET, [0.0, 0.1], [0.0], days=np.nan)
+    with pytest.raises(ValueError, match="vol_changes must be finite"):
+        sc.pnl_grid(strategy, MARKET, [0.0, 0.1], [np.inf])
+    with pytest.raises(ValueError, match=_SPOT_RULE):
+        sc.pnl_grid(strategy, MARKET, [np.nan])
+
+
+def test_a_minus_100_percent_move_is_valued_at_zero_spot():
+    # The boundary itself is valid: at zero spot a straddle is worth its discounted strike (the put's intrinsic).
+    strategy = S.build_template("Long Straddle", 100, 5)
+    base = float(S.position_value(strategy, MARKET))
+    expected = 100 * np.exp(-MARKET.rate * MARKET.expiry) - base
+    assert sc.pnl_grid(strategy, MARKET, [-1.0])[0, 0] == pytest.approx(expected, rel=1e-14)
+    assert sc.scenario_cube(strategy, MARKET, [-1.0], [0.0])[0, 0, 0] == pytest.approx(expected, rel=1e-14)

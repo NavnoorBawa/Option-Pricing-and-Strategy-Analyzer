@@ -1,3 +1,5 @@
+import sys
+
 import mpmath as mp
 import numpy as np
 import pytest
@@ -444,6 +446,67 @@ def test_strike_for_delta_rejects_unattainable_deltas():
         S.strike_for_delta(0.25, market, 1.0, -0.2, "call")
     with pytest.raises(ValueError, match="option_type"):
         S.strike_for_delta(0.25, market, 1.0, 0.2, "stock")
+
+
+def test_strike_for_delta_out_of_floating_point_range():
+    # The strike is spot x e^{-d1 v + (r - q) T + v^2 / 2} with v = sigma sqrt(T); it used to raise OverflowError.
+    market = S.Market(100, 0.05, 0.2, 1.0)
+    for target, kind in ((0.5, "call"), (-0.5, "put")):  # v = 10 sqrt(30) = 54.8: e^1502
+        with pytest.raises(ValueError, match=r"strike of a .*-delta .* e\^1502, is out of floating-point range"):
+            S.strike_for_delta(target, market, 30.0, 10.0, kind)
+    # Below the smallest normal float: a 1e-300-delta put (d1 = 37) with v = 37 and a carry of -50.
+    with pytest.raises(ValueError, match=r"e\^-736.2, is out of floating-point range"):
+        S.strike_for_delta(-1e-300, S.Market(100, -0.5, 0.2, 1.0), 100.0, 3.7, "put")
+    with pytest.raises(ValueError, match="dividend discount factor"):
+        S.strike_for_delta(0.5, S.Market(100, 0.05, 0.2, 1.0, -100.0), 10.0, 0.2, "call")
+
+
+def test_strike_for_delta_gives_a_strike_or_a_value_error():
+    # Property over a deliberately wide domain (rates and yields of +/-100%, 100 years, 2000% vol): any finite
+    # inputs give a positive finite strike or a ValueError, never an OverflowError.
+    hypothesis = pytest.importorskip("hypothesis")
+    st = hypothesis.strategies
+
+    @hypothesis.given(
+        target=st.floats(-1.0, 1.0),
+        rate=st.floats(-1.0, 1.0),
+        q=st.floats(-1.0, 1.0),
+        expiry=st.floats(1e-9, 100.0),
+        vol=st.floats(1e-4, 20.0),
+        kind=st.sampled_from(["call", "put"]),
+    )
+    def check(target, rate, q, expiry, vol, kind):
+        try:
+            strike = S.strike_for_delta(target, S.Market(100, rate, 0.2, 1.0, q), expiry, vol, kind)
+        except ValueError:
+            return
+        assert sys.float_info.min <= strike <= sys.float_info.max
+
+    check()
+
+
+def test_strike_for_delta_round_trip_property():
+    # Property over desk inputs (one minute to ten years, 1% to 300% vol, deltas from 1e-4 to 1 - 1e-4 of e^{-qT}):
+    # the strike's delta is the target. The tolerance includes the delta's conditioning: a strike rounded to a float
+    # moves it by up to phi(d1) eps / v, with v = sigma sqrt(T) (1e-10 at one minute and 1% vol).
+    hypothesis = pytest.importorskip("hypothesis")
+    st = hypothesis.strategies
+
+    @hypothesis.given(
+        fraction=st.floats(1e-4, 1 - 1e-4),
+        rate=st.floats(-0.1, 0.2),
+        q=st.floats(-0.1, 0.2),
+        expiry=st.floats(1 / 525_600, 10.0),
+        vol=st.floats(0.01, 3.0),
+        kind=st.sampled_from(["call", "put"]),
+    )
+    def check(fraction, rate, q, expiry, vol, kind):
+        target = (1 if kind == "call" else -1) * fraction * np.exp(-q * expiry)
+        strike = S.strike_for_delta(target, S.Market(100, rate, 0.2, 1.0, q), expiry, vol, kind)
+        delta = bs.greeks(100, strike, expiry, rate, vol, q, kind)["delta"]
+        assert delta == pytest.approx(target, abs=1e-12 + 1e-15 / (vol * expiry**0.5))
+
+    check()
 
 
 def _width_offsets(name: str) -> list[int]:

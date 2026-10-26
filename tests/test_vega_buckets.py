@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from scipy.special import ndtri
 
+from options_analyzer import black_scholes as bs
 from options_analyzer import scenarios as sc
 from options_analyzer import strategies as S
 
@@ -116,28 +117,96 @@ def test_book_weighted_vega_is_the_one_month_stress_pnl():
     assert weighted == pytest.approx(symmetric, rel=1e-4)
 
 
-@pytest.mark.parametrize(
-    "market", [S.Market(100, 0.05, 0.2, 0.25, 0.01), S.Market(100, 0.04, 0.3, 400 / 365)], ids=["3M", "400d"]
-)
+#: Markets for the template identities: short-dated (at 7 days the 5-wide wings are 1.8 standard deviations out),
+#: dividend yield above the rate, and long-dated.
+STRESS_MARKETS = {
+    "7d": S.Market(100, 0.05, 0.2, 7 / 365, 0.01),
+    "14d": S.Market(100, 0.05, 0.2, 14 / 365, 0.01),
+    "30d": S.Market(100, 0.05, 0.2, 30 / 365, 0.01),
+    "45d q>r": S.Market(100, 0.01, 0.25, 45 / 365, 0.06),
+    "3M": S.Market(100, 0.05, 0.2, 0.25, 0.01),
+    "400d": S.Market(100, 0.04, 0.3, 400 / 365),
+}
+
+
+def _leg_moves(strategy: S.Strategy, market: S.Market):
+    """``(leg, sigma, tau, dsigma)`` of each option leg under the +1% one-month shock, dsigma = 0.01 sigma w(tau)."""
+    for leg in strategy.legs:
+        if leg.is_option:
+            sigma = market.volatility if leg.volatility is None else leg.volatility
+            tau = market.expiry if leg.expiry is None else leg.expiry
+            yield leg, sigma, tau, 0.01 * sigma * min(1.0, (tau / ONE_MONTH) ** -sc.DEFAULT_VOL_TENOR_DECAY)
+
+
+@pytest.mark.parametrize("market", list(STRESS_MARKETS.values()), ids=list(STRESS_MARKETS))
 def test_template_weighted_vega_is_the_one_month_stress_pnl(market):
-    # Where the legs' vegas nearly cancel the one-sided P&L is dominated by volga (a 3-month call spread: net
-    # 0.0013 against a gross of 0.058, 1.1% apart), so the tolerance is 1% of the net plus 0.1% of the gross
-    # (sum over legs of |weighted vega|); the symmetric stress agrees to 1e-4 of the net plus 1e-6 of the gross.
+    # weighted_vega is the first-order P&L of the one-month shock, so the identity is with the symmetric stress
+    # (P&L(+1%) - P&L(-1%)) / 2, which differs from it by third-order terms only. Tolerance: 1e-4 of the net plus
+    # 1e-4 of the gross (the sum over legs of |weighted vega|), so that ratio spreads, whose legs nearly cancel, are
+    # covered. Measured: at most 3.4e-5 of net + gross (a 14-day iron condor); against the net alone up to 3.9e-3
+    # (a 14-day call ratio backspread, net 0.47% of gross).
     for name in S.TEMPLATES:
         strategy = S.build_template(name, 100, 5, market.expiry)
         weighted = sc.weighted_vega(strategy, market)
         gross = sum(abs(sc.weighted_vega(S.Strategy("leg", (leg,)), market)) for leg in strategy.legs)
+        _, symmetric = _stress(strategy, market)
+        assert abs(weighted - symmetric) <= 1e-4 * (abs(weighted) + gross), name
+
+
+@pytest.mark.parametrize("market", list(STRESS_MARKETS.values()), ids=list(STRESS_MARKETS))
+def test_one_sided_stress_adds_the_volga_term(market):
+    # The +1% stress alone is not an identity: (P&L(+1%) + P&L(-1%)) / 2 is the second-order term
+    # sum(q volga dsigma^2) / 2, from black_scholes' vomma at each leg's own IV and tenor, up to fourth-order terms.
+    # Tolerance 1e-3 of the gross term (sum over legs of its absolute value); measured at most 1.3e-4.
+    for name in S.TEMPLATES:
+        strategy = S.build_template(name, 100, 5, market.expiry)
+        terms = []
+        for leg, sigma, tau, move in _leg_moves(strategy, market):
+            g = bs.greeks(market.spot, leg.strike, tau, market.rate, sigma, market.dividend_yield, leg.kind)
+            terms.append(0.5 * leg.quantity * g["vomma"] * move**2)
         up, symmetric = _stress(strategy, market)
-        assert abs(weighted - up) <= 1e-2 * abs(weighted) + 1e-3 * gross, name
-        assert abs(weighted - symmetric) <= 1e-4 * abs(weighted) + 1e-6 * gross, name
+        even = up - symmetric  # (P&L(+1%) + P&L(-1%)) / 2
+        assert abs(even - sum(terms)) <= 1e-3 * sum(abs(x) for x in terms), name
 
 
-def _repriced_slope(strategy: S.Strategy, market: S.Market, shift_by_leg) -> float:
+def test_one_sided_stress_misses_short_dated_wings_by_more_than_one_percent():
+    # Why the plan's one-sided 1% target holds for the book but is not a template identity: a 7-day 95/105 strangle
+    # has no vega cancellation at all (both legs long), yet its +1% stress P&L is 1.62% above weighted_vega, all of
+    # it the volga term. Measured on all 26 templates: up to 1.6% at 7 days (strangles, iron condor, jade lizard),
+    # 76% at 14 days (call ratio backspread, net vega 0.47% of gross), 4.0% at 45 days with q > r (collar, 0.69%).
+    market = STRESS_MARKETS["7d"]
+    strangle = S.build_template("Long Strangle", 100, 5)
+    weighted = sc.weighted_vega(strangle, market)
+    up, symmetric = _stress(strangle, market)
+    assert up / weighted - 1 == pytest.approx(0.0162, abs=5e-4)
+    assert symmetric == pytest.approx(weighted, rel=1e-4)
+
+
+def test_weighted_vega_is_the_derivative_even_one_day_out():
+    # One day out the 5-wide wings sit 4.7 and 4.9 standard deviations away and even the symmetric +/-1% stress is
+    # off by third-order terms (7.1e-3 of a long strangle), but weighted_vega is still the derivative. An explicit
+    # repricing at 1e-3 of the shock agrees to 1e-7 of net + gross; measured at most 9e-9. (At 1e-4 the rounding of
+    # the in-the-money call of the diagonal, worth $5 with a vega of $7e-5 per vol point, leaves 7e-7.)
+    market = S.Market(100, 0.05, 0.2, 1 / 365, 0.01)
+    decay = sc.DEFAULT_VOL_TENOR_DECAY
+
+    def one_month(sigma: float, tau: float) -> float:
+        return 0.01 * sigma * min(1.0, (tau / ONE_MONTH) ** -decay)
+
+    for name in S.TEMPLATES:
+        strategy = S.build_template(name, 100, 5, market.expiry)
+        weighted = sc.weighted_vega(strategy, market)
+        gross = sum(abs(sc.weighted_vega(S.Strategy("leg", (leg,)), market)) for leg in strategy.legs)
+        slope = _repriced_slope(strategy, market, one_month, step=1e-3)
+        assert abs(weighted - slope) <= 1e-7 * (abs(weighted) + gross), name
+
+
+def _repriced_slope(strategy: S.Strategy, market: S.Market, shift_by_leg, step: float = 1e-4) -> float:
     """P&L per unit of a shock that moves each option leg's IV by ``shift_by_leg(sigma, tau)``, by explicit leg IVs.
 
-    A symmetric difference at 1e-4 of the shock: its O(shock^2) error is about 1e-8 relative.
+    A symmetric difference at ``step`` of the shock, over the option legs only (shares do not depend on IV, and
+    their value would only add rounding noise): its O(step^2) error is about 1e-8 relative at the default step.
     """
-    step = 1e-4
 
     def shocked(sign: float) -> float:
         legs = []
@@ -145,9 +214,8 @@ def _repriced_slope(strategy: S.Strategy, market: S.Market, shift_by_leg) -> flo
             if leg.is_option:
                 sigma = market.volatility if leg.volatility is None else leg.volatility
                 tau = market.expiry if leg.expiry is None else leg.expiry
-                leg = replace(leg, volatility=sigma + sign * step * shift_by_leg(sigma, tau))
-            legs.append(leg)
-        return float(S.position_value(S.Strategy("shocked", tuple(legs)), market))
+                legs.append(replace(leg, volatility=sigma + sign * step * shift_by_leg(sigma, tau)))
+        return float(S.position_value(S.Strategy("shocked", tuple(legs)), market)) if legs else 0.0
 
     return (shocked(1.0) - shocked(-1.0)) / (2 * step)
 
@@ -296,3 +364,5 @@ def test_invalid_buckets_and_schemes_are_rejected():
         sc.vega_buckets(book, MARKET, strike_axis="moneyness", moneyness_edges=(1.1, math.inf))
     with pytest.raises(ValueError, match="scheme"):
         sc.weighted_vega(book, MARKET, scheme="linear")
+    with pytest.raises(ValueError, match="decay must be a finite number"):
+        sc.weighted_vega(book, MARKET, decay=math.nan)  # min(1, w ** -nan) would silently be 1

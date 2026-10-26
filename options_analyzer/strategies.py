@@ -27,6 +27,7 @@ Conventions
 from __future__ import annotations
 
 import math
+import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import pairwise
@@ -1198,6 +1199,13 @@ def strike_for_delta(target: float, market: Market, expiry: float, volatility: f
     float
         The strike ($ per share).
 
+    Raises
+    ------
+    ValueError
+        If an input is not finite, ``expiry`` or ``volatility`` is not positive, ``target`` is not an attainable
+        delta of that option type, or the strike is out of floating-point range (the strike grows like
+        ``e^{v^2 / 2}`` in ``v = volatility * sqrt(expiry)``, so this happens from ``v`` of about 30).
+
     Examples
     --------
     The 16-delta put and call of a 45-day option at 18% volatility:
@@ -1216,14 +1224,26 @@ def strike_for_delta(target: float, market: Market, expiry: float, volatility: f
         raise ValueError("expiry must be positive")
     if not volatility > 0:
         raise ValueError("volatility must be positive")
-    df_q = math.exp(-market.dividend_yield * expiry)
+    try:
+        df_q = math.exp(-market.dividend_yield * expiry)
+    except OverflowError:
+        raise ValueError("the dividend discount factor e^{-qT} is out of floating-point range") from None
     side = "call" if phi > 0 else "put"
     if not 0.0 < phi * target < df_q:
         bounds = f"(0, {df_q:.6g})" if phi > 0 else f"({-df_q:.6g}, 0)"
         raise ValueError(f"a {side} delta must lie in {bounds}, got {target:g}")
     d1 = phi * float(ndtri(phi * target / df_q))
     v = volatility * math.sqrt(expiry)
-    return market.spot * math.exp(-d1 * v + (market.rate - market.dividend_yield) * expiry + 0.5 * v * v)
+    exponent = -d1 * v + (market.rate - market.dividend_yield) * expiry + 0.5 * v * v
+    try:
+        strike = market.spot * math.exp(exponent)
+    except OverflowError:
+        strike = math.inf
+    if not sys.float_info.min <= strike <= sys.float_info.max:
+        raise ValueError(
+            f"the strike of a {target:g}-delta {side}, spot x e^{exponent:.4g}, is out of floating-point range"
+        )
+    return strike
 
 
 #: Centre strike of the probe build used to read each template leg's strike offset (a whole multiple of the width).
