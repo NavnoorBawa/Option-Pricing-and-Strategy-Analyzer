@@ -20,3 +20,12 @@ coverage.xml
 
 # Agent worktrees created during development
 .claude/worktrees/
+
+# Market data and caches stay on the machine that made them (docs/data_policy.md): downloaded chains, curves and
+# price histories, and the example database Hypothesis keeps between local runs. Test fixtures live in tests/fixtures.
+/data/
+/downloads/
+*.parquet
+*.feather
+.cache/
+.hypothesis/
