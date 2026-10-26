@@ -8,7 +8,7 @@ One row above the price cards, ``st.container(horizontal=True, key="desk_header"
   Share popover with the link to this exact view (:func:`share_link`) and a Methodology button.
 
 How the row wraps on narrow screens is set in ``static/desk.css``: the ticker wraps between its items, never inside
-one, and the action group moves under it as a whole (it wraps only on a phone narrower than itself, under 340 px).
+one, and the action group moves under it as a whole (it wraps only on a phone narrower than about 350 px).
 :func:`logo` draws the monogram of ``static/logo.svg``.
 """
 

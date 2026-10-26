@@ -40,7 +40,7 @@
   margin-left: auto;
 }
 
-/* The group wraps only on a row narrower than itself (a phone under 340px), rather than run off the screen. */
+/* The group wraps only on a row narrower than itself (a phone under about 350px), rather than run off the screen. */
 .st-key-desk_actions {
   justify-content: flex-end;
   gap: 0.5rem;

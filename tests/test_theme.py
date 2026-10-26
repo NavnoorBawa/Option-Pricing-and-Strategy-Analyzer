@@ -1105,6 +1105,17 @@ def test_the_desk_shell_on_a_laptop(chromium, app_url, scheme):
         assert abs(shell["actions"]["right"] - shell["header"]["right"]) < 1  # on the right
         assert shell["identity"]["height"] < 24  # the brand and the ticker on one line
         assert not shell["cut"] and shell["tabScroll"] <= 0 and shell["pageScroll"] <= 0
+        # The ticker is set in Plex Mono, and the badge's grey text is legible on its tint of the page.
+        font = page.evaluate("getComputedStyle(document.querySelector('.st-key-desk_identity p')).fontFamily")
+        assert font.startswith('"IBM Plex Mono"') and page.evaluate("document.fonts.check('13px \"IBM Plex Mono\"')")
+        color, tint = page.evaluate(
+            "(e => [getComputedStyle(e).color, getComputedStyle(e).backgroundColor])"
+            "(document.querySelector('.st-key-desk_actions .stMarkdownBadge'))"
+        )
+        *rgb, alpha = (float(v) for v in re.findall(r"[\d.]+", tint))
+        page_rgb = [int(_mode(scheme)["backgroundColor"][i : i + 2], 16) for i in (1, 3, 5)]
+        badge = "#" + "".join(f"{round(alpha * c + (1 - alpha) * b):02X}" for c, b in zip(rgb, page_rgb, strict=True))
+        assert contrast(_hex(color), badge) >= 4.5, (color, badge)
     finally:
         page.close()
 
