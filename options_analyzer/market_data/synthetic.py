@@ -6,12 +6,18 @@ model whose every input is known:
 
 * Expiries: the Friday weeklies of the next six weeks, the next six third-Friday monthlies and the March, June,
   September and December quarterlies out to two years. An expiry on an NYSE holiday moves to the trading day before.
+* Strikes: near the money, every strike at the exchange's interval (:func:`strike_interval`: 5 points for an index
+  from 1,000, like SPX; $1 for an ETF from $25, like SPY), over 1.5 ATM standard deviations each side (at least five
+  strikes each side, at most 100 in all); further out, two coarser bands (to 80 and 60 strikes) whose step is the
+  finest multiple of the interval (1, 2 or 5 times a power of ten) that keeps each band within its limit. Every
+  strike is on the exchange's grid, and an expiry lists at most 243 strikes whatever the spot: with at most 20
+  expiries, the chain stays under 10,000 rows.
 * Time: years to the settlement time from :mod:`options_analyzer.clock` (minutes / 525,600).
 * Volatility: an SSVI surface (:class:`options_analyzer.vol_surface.SSVIParams`) evaluated in variance time
   (:class:`options_analyzer.clock.VarianceClock`, weekends and holidays at a tenth of a trading day), so the total
   implied variance at forward log-moneyness ``k`` is ``w(k, tau)`` and the implied vol is ``sqrt(w / T)`` at the
-  calendar time ``T``. SSVI with ``eta (1 + |rho|) <= 2`` has no static arbitrage, and a variance clock only
-  re-times it, so the model prices have none either.
+  calendar time ``T``. SSVI with ``eta (1 + |rho|) <= 2`` (and ``gamma <= 1/2``) has no butterfly or calendar
+  arbitrage, and a variance clock only re-times it, so the European values have no static arbitrage.
 * Rates: discounting and forwards at a box rate, the Treasury zero rate plus 45 bp (SPX box spreads finance above
   Treasuries). ``rate_curve`` is a flat rate or a function of the time to expiry until a curve module exists.
 * Dividends: a continuous yield, or cash dividends ``(ex-date, $ per share)`` that drop the spot at the open of the
@@ -21,13 +27,16 @@ model whose every input is known:
   dividend step on the spot) replaces it.
 * Prices: Black-76 for index options. ETF options are American: puts (and calls with a continuous yield) come from the
   Leisen-Reimer binomial tree of :mod:`options_analyzer.binomial` with 201 steps; calls with cash dividends use Black's
-  approximation, the larger of the European values to expiry and to just before each ex-date, with no tree needed
-  because the escrowed spot pays nothing.
+  approximation, the largest of the exercise value, the European value to expiry and the European value to just
+  before each ex-date, with no tree needed because the escrowed spot pays nothing. The European to just before an
+  ex-date is priced on the surface itself, at the forward and variance time of that moment, so it is the same for
+  every expiry after the ex-date and the American calls gain value with maturity, as they must.
 * Quotes: a half-spread of a few hundredths of a vol point times vega, widening with ``|k|`` (in ATM standard
   deviations) and with ``T``, plus 0.1% of the value, and at least one tick. Ticks are $0.05 below $3 and $0.10 from $3
   (SPX) or $0.01 (SPY is penny-quoted). Bids are rounded down and asks up, so the model value always lies inside the
-  quote: the quotes have no static arbitrage either. Calls and puts are quoted at every strike; the far wings have a
-  zero bid (an offer only).
+  quote, and the quotes inherit the model's freedom from static arbitrage: no vertical, butterfly or (for the
+  American ETF options, whose values rise with maturity) calendar spread is free. The tests check all three. Calls
+  and puts are quoted at every strike; the far wings have a zero bid (an offer only).
 * Noise (``noise=True``, the default): each spread is scaled by ``exp(0.2 Z)``, each mid moved by up to half the
   half-spread from the model value, and a third of the wing quotes cheaper than four ticks lose their bid, all from a
   generator seeded with ``seed``; the output is the same for the same inputs. ``noise=False`` quotes the model value
@@ -38,11 +47,13 @@ Everything is labelled :data:`SYNTHETIC_LABEL`.
 
 from __future__ import annotations
 
+import itertools
 import math
-from collections.abc import Callable, Sequence
+import numbers
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Literal
+from typing import Literal, NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -68,6 +79,7 @@ __all__ = [
     "SYNTHETIC_LABEL",
     "SyntheticChain",
     "sample_chain",
+    "strike_interval",
 ]
 
 SYNTHETIC_LABEL = "Synthetic — not market data"
@@ -84,19 +96,33 @@ TREE_STEPS = 201
 WEEKLY_WEEKS = 6
 MONTHLIES = 6
 HORIZON_DAYS = 730
+#: Valuation dates whose expiries (out to two years) fall in the NYSE calendar and OCC's two-digit years.
+_FIRST_VALUATION, _LAST_VALUATION = date(2000, 1, 1), date(2097, 12, 31)
 #: Half-spread in vol at the money for a short expiry, by style.
 _SPREAD_VOL = {"index": 0.0005, "etf": 0.0002}
 _SPREAD_VALUE = 0.001  # plus this fraction of the option value (deep in-the-money options quote wide in dollars)
 _MIN_TICK = {"index": 0.05, "etf": 0.01}
-#: Strike bands around the forward, in ln(K/F): (step as a multiple of the base step, then the lower and upper edge as
-#: a multiple of the ATM standard deviation sqrt(w) with the smallest and largest width allowed). The base step is about
-#: spot / 1,200 for an index (5 points for SPX) and spot / 600 for an ETF ($1 for SPY).
+#: The exchange's strike interval near the money, by style: (the lowest spot it applies from, interval), highest
+#: first. Cboe lists index options no closer than 5 points apart (SPX), with $1 strikes for small indices such as XSP;
+#: SPY, QQQ and IWM list $1 strikes, and low-priced ETFs $0.50 ones. Below the lowest spot the grid holds too few
+#: strikes to quote, so :func:`sample_chain` refuses it.
+_INTERVALS: dict[str, tuple[tuple[float, float], ...]] = {
+    "index": ((1_000.0, 5.0), (100.0, 1.0)),
+    "etf": ((25.0, 1.0), (5.0, 0.5)),
+}
+#: Largest spot: the furthest strikes (up to about 1.6 times the spot) must stay below OCC's 100,000.
+MAX_SPOT = 50_000.0
+#: The near-the-money band lists at least this many strikes each side of the forward (for low-priced underlyings).
+_NEAR_STRIKES = 5
+#: Strike bands around the forward: (the most strikes the band may hold, its lower edge, its upper edge), each edge in
+#: ln(K/F) as (a multiple of the ATM standard deviation sqrt(w), the smallest, the largest). The first band lists every
+#: strike at the exchange's interval and is cut to its limit around the forward; each further band uses the finest
+#: multiple of the previous band's step that keeps it within its limit (see :func:`_strikes`).
 _BANDS = (
-    (1, (1.5, 0.02, 0.04), (1.5, 0.02, 0.04)),
-    (5, (4.0, 0.08, 0.35), (2.5, 0.05, 0.2)),
-    (20, (8.0, 0.15, 1.0), (4.0, 0.08, 0.4)),
+    (100, (1.5, 0.02, 0.04), (1.5, 0.02, 0.04)),
+    (80, (4.0, 0.08, 0.35), (2.5, 0.05, 0.2)),
+    (60, (8.0, 0.15, 1.0), (4.0, 0.08, 0.4)),
 )
-_NICE_STEPS = (0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0)
 
 Style = Literal["index", "etf"]
 
@@ -157,19 +183,71 @@ def _schedule(today: date, style: Style) -> list[tuple[date, str, SettlementStyl
     return sorted(listed)
 
 
-def _base_step(spot: float, style: Style) -> float:
-    target = spot / (1_200.0 if style == "index" else 600.0)
-    return max([step for step in _NICE_STEPS if step <= target], default=_NICE_STEPS[0])
+def strike_interval(spot: float, style: Style = "index") -> float:
+    """The exchange's strike interval near the money for an underlying at ``spot``, in $ (index points).
+
+    5 for an index from 1,000 (SPX) and 1 below (XSP); $1 for an ETF from $25 (SPY) and $0.50 below.
+
+    Parameters
+    ----------
+    spot : float
+        Underlying price, $ (index points); at least 100 for an index and $5 for an ETF.
+    style : {"index", "etf"}, default "index"
+
+    Raises
+    ------
+    ValueError
+        If ``spot`` is below the style's lowest spot or above :data:`MAX_SPOT`.
+
+    Examples
+    --------
+    >>> strike_interval(5999.0), strike_interval(600.0), strike_interval(600.0, "etf"), strike_interval(20.0, "etf")
+    (5.0, 1.0, 1.0, 0.5)
+    """
+    if style not in _INTERVALS:
+        raise ValueError(f"style must be 'index' or 'etf', got {style!r}")
+    spot = float(spot)
+    tiers = _INTERVALS[style]
+    lowest = tiers[-1][0]
+    if not (math.isfinite(spot) and lowest <= spot <= MAX_SPOT):
+        raise ValueError(
+            f"spot must be from {lowest:,g} to {MAX_SPOT:,g} for the {style} style, got {spot!r}: below, the strike "
+            "grid holds too few strikes to quote; above, the furthest strikes pass OCC's limit of 100,000"
+        )
+    return next(interval for start, interval in tiers if spot >= start)
 
 
-def _strikes(forward: float, step: float, sd: float) -> np.ndarray:
-    """Listed strikes around ``forward``: fine near the money, coarser further out (see :data:`_BANDS`)."""
+def _multiples() -> Iterator[int]:
+    """1, 2, 5, 10, 20, 50, 100, ..."""
+    for exponent in itertools.count():
+        for digit in (1, 2, 5):
+            yield digit * 10**exponent
+
+
+def _strikes(forward: float, interval: float, sd: float) -> np.ndarray:
+    """Listed strikes around ``forward``: every strike at ``interval`` near the money, coarser further out.
+
+    Each band of :data:`_BANDS` spans its edges in ``sd`` (the ATM standard deviation of ln K/F) and holds at most
+    its limit of strikes (plus one where both edges fall on a strike): the first, widened to at least
+    :data:`_NEAR_STRIKES` strikes each side of the forward, by keeping only the strikes nearest the forward, the others
+    by stepping at the finest multiple of the previous band's step that fits. Each step divides the next, so a coarser
+    band adds no strike between those of a finer one.
+    """
     grids = []
-    for multiple, (below, low_min, low_max), (above, high_min, high_max) in _BANDS:
-        width = multiple * step
+    multiple = 1
+    for band, (limit, (below, low_min, low_max), (above, high_min, high_max)) in enumerate(_BANDS):
         low = forward * math.exp(-min(max(below * sd, low_min), low_max))
         high = forward * math.exp(min(max(above * sd, high_min), high_max))
-        grids.append(np.arange(math.ceil(low / width), math.floor(high / width) + 1) * width)
+        if band == 0:  # at least _NEAR_STRIKES each side of the forward, at most `limit` in all
+            low, high = min(low, forward - _NEAR_STRIKES * interval), max(high, forward + _NEAR_STRIKES * interval)
+            half_width = 0.5 * limit * interval
+            low, high = max(low, forward - half_width), min(high, forward + half_width)
+        else:
+            multiple = next(
+                m for m in _multiples() if m % multiple == 0 and high - low <= limit * m * interval * (1 + 1e-12)
+            )
+        width = multiple * interval
+        grids.append(np.arange(math.ceil(low / width - 1e-9), math.floor(high / width + 1e-9) + 1) * width)
     strikes = np.unique(np.round(np.concatenate(grids), 3))
     return strikes[strikes > 0]
 
@@ -184,18 +262,22 @@ def _black(forward: float, strike: np.ndarray, variance: np.ndarray, discount: f
 
 
 def _round_down(price: np.ndarray, style: Style) -> np.ndarray:
+    """Bids: the next tick strictly below ``price``, with the tick of the rounded price (index: $0.05 below $3)."""
     if style == "etf":
         bid = np.floor(price / 0.01 - 1e-9) * 0.01
     else:
-        bid = np.where(price < 3.0, np.floor(price / 0.05 - 1e-9) * 0.05, np.floor(price / 0.10 - 1e-9) * 0.10)
+        bid = np.floor(price / 0.05 - 1e-9) * 0.05
+        bid = np.where(bid < 3.0 - 1e-9, bid, np.floor(price / 0.10 - 1e-9) * 0.10)
     return np.round(np.maximum(bid, 0.0), 2)
 
 
 def _round_up(price: np.ndarray, style: Style) -> np.ndarray:
+    """Asks: the next tick strictly above ``price``, with the tick of the rounded price (index: $0.10 from $3)."""
     if style == "etf":
         ask = np.ceil(price / 0.01 + 1e-9) * 0.01
     else:
-        ask = np.where(price <= 3.0, np.ceil(price / 0.05 + 1e-9) * 0.05, np.ceil(price / 0.10 + 1e-9) * 0.10)
+        ask = np.ceil(price / 0.05 + 1e-9) * 0.05
+        ask = np.where(ask < 3.0 - 1e-9, ask, np.ceil(price / 0.10 + 1e-9) * 0.10)
     return np.round(ask, 2)
 
 
@@ -215,7 +297,7 @@ def _rate_function(rate_curve: float | Callable[[float], float]) -> Callable[[fl
     return rate
 
 
-def _cash_dividends(dividends: Sequence[tuple[date, float]], as_of: datetime) -> list[tuple[datetime, float]]:
+def _cash_dividends(dividends: Iterable[tuple[date, float]], as_of: datetime) -> list[tuple[datetime, float]]:
     """Cash dividends after ``as_of``: (the open of the ex-date in New York, $ per share), in date order."""
     paid = []
     for item in dividends:
@@ -236,6 +318,36 @@ def _cash_dividends(dividends: Sequence[tuple[date, float]], as_of: datetime) ->
     return sorted(paid)
 
 
+class _ExDate(NamedTuple):
+    """A cash dividend seen from the valuation time."""
+
+    drop: datetime  # the open of the ex-date, New York time
+    pv: float  # present value of the cash, $ per share
+    forward: float  # forward to just before the ex-date (the spot less the dividends paid before it), $
+    discount_factor: float  # to the ex-date
+    variance_time: float  # years of variance time to the ex-date
+
+
+def _ex_dates(
+    cash: list[tuple[datetime, float]],
+    spot: float,
+    as_of: datetime,
+    rate: Callable[[float], float],
+    box_spread: float,
+    variance_clock: VarianceClock,
+) -> list[_ExDate]:
+    """Each cash dividend's present value, and the forward, discount factor and variance time just before it."""
+    discounted = []
+    for drop, amount in cash:
+        t = year_fraction(as_of, drop)
+        discounted.append((drop, amount * math.exp(-(rate(t) + box_spread) * t), math.exp(-(rate(t) + box_spread) * t)))
+    ex_dates = []
+    for drop, pv, discount in discounted:
+        before = spot - sum(other_pv for other, other_pv, _ in discounted if other < drop)
+        ex_dates.append(_ExDate(drop, pv, before / discount, discount, variance_clock.variance_time(as_of, drop)))
+    return ex_dates
+
+
 def sample_chain(
     spot: float,
     rate_curve: float | Callable[[float], float],
@@ -254,7 +366,8 @@ def sample_chain(
     Parameters
     ----------
     spot : float
-        Underlying price, $.
+        Underlying price, $ (index points): 100 to 50,000 for an index, $5 to $50,000 for an ETF (see
+        :func:`strike_interval`).
     rate_curve : float or callable
         Treasury zero rate (continuously compounded, decimal): one rate for every expiry, or a function of the time
         to expiry in years.
@@ -262,7 +375,7 @@ def sample_chain(
         A continuous dividend yield (decimal), or cash dividends as ``(ex-date, $ per share)``; those with an ex-date
         open at or before ``as_of`` are already paid and ignored.
     as_of : datetime
-        Valuation time (a naive datetime is New York wall-clock time).
+        Valuation time (a naive datetime is New York wall-clock time), from 2000 to 2097.
     style : {"index", "etf"}, default "index"
         ``"index"``: European, SPX (AM-settled monthlies) and SPXW (PM-settled weeklies), ticks of $0.05/$0.10.
         ``"etf"``: American, SPY (PM-settled), penny ticks.
@@ -273,7 +386,7 @@ def sample_chain(
     ssvi : SSVIParams, default DEFAULT_SSVI
         The volatility surface, in variance time.
     variance_clock : VarianceClock, default DEFAULT_CLOCK
-        The clock that turns calendar time into variance time.
+        The clock that turns calendar time into variance time; without events (SSVI has no jumps).
     box_spread : float, default 0.0045
         Box rate minus Treasury rate (decimal).
 
@@ -291,31 +404,40 @@ def sample_chain(
     >>> chain.label
     'Synthetic — not market data'
     >>> len(chain.quotes), chain.expiries[["root", "settlement"]].value_counts().sort_index().to_dict()
-    (6840, {('SPX', 'AM'): 12, ('SPXW', 'PM'): 5})
+    (5458, {('SPX', 'AM'): 12, ('SPXW', 'PM'): 5})
     >>> front = chain.expiries.iloc[0]
     >>> str(front["expiry"].date()), front["root"], round(float(front["forward"]), 2), round(float(front["atm_vol"]), 4)
     ('2026-10-30', 'SPXW', 6002.2, 0.1772)
     >>> chain.quotes.query("symbol == 'SPXW261030C06000000'")[["bid", "ask"]].values.tolist()
-    [[46.7, 47.3]]
+    [[46.8, 47.2]]
     """
     spot = float(spot)
-    if not (math.isfinite(spot) and spot > 0):
-        raise ValueError(f"spot must be finite and positive, got {spot!r}")
-    if style not in _MIN_TICK:
-        raise ValueError(f"style must be 'index' or 'etf', got {style!r}")
+    interval = strike_interval(spot, style)  # also checks the style and the spot
     box_spread = float(box_spread)
     if not math.isfinite(box_spread):
         raise ValueError(f"box_spread must be finite, got {box_spread!r}")
+    if variance_clock.events:
+        raise ValueError("the SSVI surface has no jumps: pass a variance clock without events")
     as_of = to_new_york(as_of)
+    if not _FIRST_VALUATION <= as_of.date() <= _LAST_VALUATION:
+        raise ValueError(
+            f"as_of must be from {_FIRST_VALUATION} to {_LAST_VALUATION}, so that every expiry falls in the NYSE "
+            f"calendar and in OCC's two-digit years (2000-2099), got {as_of:%Y-%m-%d}"
+        )
     rate = _rate_function(rate_curve)
-    if isinstance(dividends, (int, float)):
+    if isinstance(dividends, numbers.Real) and not isinstance(dividends, bool):
         dividend_yield, cash = float(dividends), []
         if not math.isfinite(dividend_yield):
             raise ValueError(f"the dividend yield must be finite, got {dividend_yield!r}")
-    else:
+    elif isinstance(dividends, Iterable) and not isinstance(dividends, (str, bytes)):
         dividend_yield, cash = 0.0, _cash_dividends(dividends, as_of)
+    else:
+        raise TypeError(
+            "dividends must be a continuous yield (a number) or a sequence of (ex-date, cash per share) pairs, got "
+            f"{type(dividends).__name__}"
+        )
+    ex_dates = _ex_dates(cash, spot, as_of, rate, box_spread, variance_clock)
 
-    step = _base_step(spot, style)
     rows, values, vols, half_spreads, expiry_rows = [], [], [], [], []
     for expiry, root, settlement in _schedule(as_of.date(), style):
         settles = settlement_time(expiry, settlement)
@@ -325,14 +447,14 @@ def sample_chain(
             continue
         r = rate(T) + box_spread
         discount = math.exp(-r * T)
-        paid = [(year_fraction(as_of, drop), amount) for drop, amount in cash if drop <= settles]
-        pv = sum(amount * math.exp(-(rate(t) + box_spread) * t) for t, amount in paid)
+        paid = [ex_date for ex_date in ex_dates if ex_date.drop <= settles]
+        pv = sum(ex_date.pv for ex_date in paid)
         escrowed = spot - pv
         if not escrowed > 0:
             raise ValueError(f"the dividends to {expiry} are worth more than the spot")
         forward = escrowed * math.exp(-dividend_yield * T) / discount
         theta = float(ssvi.theta(tau))
-        strikes = _strikes(forward, step, math.sqrt(theta))
+        strikes = _strikes(forward, interval, math.sqrt(theta))
         k = np.log(strikes / forward)
         w = ssvi.total_variance(k, tau)[0]
         iv = np.sqrt(w / T)
@@ -350,12 +472,13 @@ def sample_chain(
                         for K, sigma in zip(strikes, iv, strict=True)
                     ]
                 )
-            else:  # Black's approximation: exercise just before an ex-date, or hold to expiry
+            else:  # Black's approximation: exercise now, just before an ex-date, or hold to expiry
                 value = np.maximum(_black(forward, strikes, w, discount, True), spot - strikes)
-                for t, _ in paid:
-                    before = spot - sum(amount * math.exp(-(rate(s) + box_spread) * s) for s, amount in paid if s < t)
-                    discount_t = math.exp(-(rate(t) + box_spread) * t)
-                    value = np.maximum(value, _black(before / discount_t, strikes, iv * iv * t, discount_t, True))
+                for ex_date in paid:
+                    if ex_date.variance_time > 0:  # the European to just before it, on the surface at that moment
+                        w_before = ssvi.total_variance(np.log(strikes / ex_date.forward), ex_date.variance_time)[0]
+                        european = _black(ex_date.forward, strikes, w_before, ex_date.discount_factor, True)
+                        value = np.maximum(value, european)
             half = _SPREAD_VOL[style] * widening * vega + _SPREAD_VALUE * value
             for strike, v, sigma, h in zip(strikes, value, iv, half, strict=True):
                 rows.append((root, expiry, settlement, "call" if call else "put", strike))

@@ -377,8 +377,8 @@ def clean_chain(chain: pd.DataFrame, *, as_of: datetime) -> tuple[pd.DataFrame, 
     >>> cleaned, messages = clean_chain(chain, as_of=datetime(2026, 11, 2, 10, 0))
     >>> for message in messages:
     ...     print(message)
-    Dropped 184 contract(s) that had settled by 2026-11-02 10:00 ET (expired).
-    Dropped 155 contract(s) with a zero bid (offer only).
+    Dropped 244 contract(s) that had settled by 2026-11-02 10:00 ET (expired).
+    Dropped 145 contract(s) with a zero bid (offer only).
     """
     missing = [column for column in CHAIN_COLUMNS if column not in chain.columns]
     if missing:

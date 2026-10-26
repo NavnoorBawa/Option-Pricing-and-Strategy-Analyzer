@@ -34,6 +34,9 @@ SPOT, UST, YIELD = 6000.0, 0.04, 0.013
 BOX = UST + synthetic.BOX_SPREAD
 #: SPY-like cash dividends: quarterly ex-dates near the third Friday of the last month of each quarter.
 SPY_DIVIDENDS = [(date(2026, 12, 18), 1.85), (date(2027, 3, 19), 1.75), (date(2027, 6, 18), 1.80)]
+#: Cash dividends of 1% of the spot each quarter on a $100 ETF: the case where pricing the exercise just before an
+#: ex-date at the expiry's own smile vol made calls lose value with maturity.
+ONE_PERCENT = [(day, 1.0) for day in (date(2026, 12, 18), date(2027, 3, 19), date(2027, 6, 18), date(2027, 9, 17))]
 
 
 @pytest.fixture(scope="module")
@@ -49,6 +52,11 @@ def index_model() -> synthetic.SyntheticChain:
 @pytest.fixture(scope="module")
 def etf_chain() -> synthetic.SyntheticChain:
     return sample_chain(600.0, UST, SPY_DIVIDENDS, as_of=AS_OF, style="etf")
+
+
+@pytest.fixture(scope="module")
+def etf_one_percent() -> synthetic.SyntheticChain:
+    return sample_chain(100.0, UST, ONE_PERCENT, as_of=AS_OF, style="etf", noise=False)
 
 
 def _with_expiry_data(chain: synthetic.SyntheticChain) -> pd.DataFrame:
@@ -87,6 +95,30 @@ def _price_arbitrage(quotes: pd.DataFrame) -> int:
         lam = (K[2:] - K[1:-1]) / (K[2:] - K[:-2])
         flags += int(np.sum(lam * ask[:-2] + (1 - lam) * ask[2:] - bid[1:-1] < -1e-9))
     return flags
+
+
+def _calendar_arbitrage(quotes: pd.DataFrame) -> int:
+    """Quote-level calendar flags for American options: buying the later expiry at its ask and selling the earlier
+    one at its bid, same root, type and strike, must not take in money (an American option is worth at least as much
+    with more time to run)."""
+    flags = 0
+    for _, group in quotes.groupby(["root", "type", "strike"]):
+        group = group.sort_values("expiry")
+        bid, ask = group["bid"].to_numpy(float), group["ask"].to_numpy(float)
+        later = np.triu(np.ones((len(bid), len(bid)), dtype=bool), 1)  # pairs i < j (expiry_i < expiry_j)
+        flags += int(np.sum(later & (bid[:, None] > ask[None, :] + 1e-9)))
+    return flags
+
+
+def _value_drops_with_maturity(chain: synthetic.SyntheticChain) -> int:
+    """Pairs (same root, type and strike, expiry_i < expiry_j) whose model value falls with maturity."""
+    rows = chain.quotes.join(chain.theoretical)
+    drops = 0
+    for _, group in rows.groupby(["root", "type", "strike"]):
+        value = group.sort_values("expiry")["value"].to_numpy()
+        later = np.triu(np.ones((len(value), len(value)), dtype=bool), 1)
+        drops += int(np.sum(later & (value[None, :] < value[:, None] - 1e-9)))
+    return drops
 
 
 def _surface(chain: pd.DataFrame, as_of: datetime, rate: float, dividend_yield: float) -> vs.VolSurface:
@@ -199,15 +231,92 @@ def test_synthetic_chain_is_deterministic_per_seed(index_chain, etf_chain):
     pd.testing.assert_frame_equal(etf_again.quotes, etf_chain.quotes)
 
 
+def _check_listing(chain: synthetic.SyntheticChain) -> None:
+    """Acceptance (4) and the strike grid: under 10,000 rows and at most 243 strikes an expiry (the band limits of the
+    module docstring); every strike on the exchange's interval; every strike at that interval near the money (within
+    1.9% of the forward, or 45 intervals if that is less, and at least 5 intervals)."""
+    interval = synthetic.strike_interval(chain.spot, chain.style)
+    q = chain.quotes
+    assert len(q) < 10_000, (chain.style, chain.spot, len(q))
+    assert len(chain.expiries) <= 20
+    assert np.allclose(q["strike"] / interval, np.round(q["strike"] / interval), rtol=0, atol=1e-9)
+    for row in chain.expiries.itertuples():
+        strikes = q.loc[(q["expiry"] == row.expiry) & (q["root"] == row.root) & (q["type"] == "call"), "strike"]
+        strikes = strikes.to_numpy()
+        assert len(strikes) <= 243 and row.strikes == len(strikes)
+        radius = max(5 * interval, min(0.019 * row.forward, 45 * interval))
+        near = strikes[np.abs(strikes - row.forward) <= radius]
+        assert len(near) >= 10 and np.allclose(np.diff(near), interval), (chain.spot, row.expiry)
+
+
+#: SPX-like index levels and ETF prices; just below a round level is where a spot-relative step used to halve.
+INDEX_SPOTS = [*range(3_000, 12_001, 100), 2_999, 5_999, 11_999]
+ETF_SPOTS = [*range(50, 1_201, 50), 5, 24.99, 25, 599, 1_199]
+
+
+@pytest.mark.parametrize(
+    ("style", "spots"), [("index", INDEX_SPOTS), ("etf", ETF_SPOTS)], ids=["index-3000-12000", "etf-50-1200"]
+)
+def test_strike_grid_and_row_budget_over_spot_levels(style, spots, monkeypatch):
+    """Acceptance (4) and the near-the-money strikes at every spot, not only at the round 6,000. The listing does not
+    depend on prices, so the ETF's tree is replaced by a stub to keep the sweep fast."""
+    monkeypatch.setattr(synthetic.binomial, "price", lambda *args: 0.0)
+    rows = []
+    for spot in spots:
+        chain = sample_chain(float(spot), UST, YIELD, as_of=AS_OF, style=style, noise=False)
+        _check_listing(chain)
+        rows.append(len(chain.quotes))
+        interval = synthetic.strike_interval(spot, style)
+        if spot >= (3_000 if style == "index" else 200):  # coarser wings once the far strikes outnumber the limits
+            longest = chain.quotes[chain.quotes["expiry"] == chain.quotes["expiry"].max()]
+            assert np.diff(np.unique(longest["strike"])).max() > interval
+    assert max(rows) < 10_000
+    # The row count moves within a narrow range with the spot instead of doubling below a round level.
+    if style == "index":
+        assert min(rows) > 3_000 and max(rows) < 1.7 * min(rows)
+
+
+@pytest.mark.slow
+def test_row_budget_over_spot_levels_at_other_valuation_times(monkeypatch):
+    """Acceptance (4) at two more valuation times (the day before Juneteenth and an expiry morning): SPX-like levels
+    3,000 to 12,000 in steps of 100 and ETF prices $50 to $1,200 in steps of $25."""
+    monkeypatch.setattr(synthetic.binomial, "price", lambda *args: 0.0)
+    for as_of in (datetime(2026, 6, 18, 15, 30), datetime(2026, 11, 20, 9)):
+        for style, spots in (("index", range(3_000, 12_001, 100)), ("etf", range(50, 1_201, 25))):
+            for spot in spots:
+                _check_listing(sample_chain(float(spot), UST, YIELD, as_of=as_of, style=style, noise=False))
+
+
 def test_default_expiry_set_stays_under_10000_rows():
-    """Acceptance (4), at valuation times through a year, holidays and expiry days included."""
+    """Acceptance (4) for the default 6,000 chain, at valuation times through a year, holidays and expiry days
+    included, and for the default ETF chain with its binomial tree."""
     starts = [datetime(2026, 1, 2, 9, 45) + timedelta(days=28 * i) for i in range(14)]
     starts += [datetime(2026, 4, 2, 15, 0), datetime(2026, 11, 20, 9, 0), datetime(2026, 12, 24, 12, 59)]
-    rows = [len(sample_chain(SPOT, UST, YIELD, as_of=start, noise=False).quotes) for start in starts]
+    rows = []
+    for start in starts:
+        chain = sample_chain(SPOT, UST, YIELD, as_of=start, noise=False)
+        _check_listing(chain)
+        rows.append(len(chain.quotes))
     assert max(rows) < 10_000
     assert min(rows) > 4_000
     etf = sample_chain(600.0, UST, YIELD, as_of=datetime(2026, 6, 1, 10), style="etf", noise=False)
-    assert len(etf.quotes) < 10_000
+    _check_listing(etf)
+
+
+def test_strike_interval_and_the_supported_spots():
+    assert synthetic.strike_interval(6000.0) == synthetic.strike_interval(1_000.0) == 5.0
+    assert synthetic.strike_interval(999.99) == synthetic.strike_interval(100.0) == 1.0
+    assert synthetic.strike_interval(600.0, "etf") == synthetic.strike_interval(25.0, "etf") == 1.0
+    assert synthetic.strike_interval(24.99, "etf") == synthetic.strike_interval(5.0, "etf") == 0.5
+    for spot, style in ((99.9, "index"), (4.99, "etf"), (50_001.0, "index"), (math.nan, "etf"), (-1.0, "index")):
+        with pytest.raises(ValueError, match="spot must be from"):
+            sample_chain(spot, UST, YIELD, as_of=AS_OF, style=style)
+    # At the lowest spots every expiry still lists at least ten strikes, some with a bid.
+    for spot, style in ((100.0, "index"), (5.0, "etf")):
+        chain = sample_chain(spot, UST, YIELD, as_of=AS_OF, style=style, noise=False)
+        per_expiry = chain.quotes.groupby("expiry")
+        assert per_expiry.size().min() >= 2 * 10
+        assert (per_expiry["bid"].apply(lambda bids: (bids > 0).sum()) >= 4).all()
 
 
 def test_expiries_weeklies_monthlies_and_settlement(index_chain, etf_chain):
@@ -237,13 +346,15 @@ def test_strikes_ticks_and_quote_shape(index_chain, etf_chain):
     # Calls and puts at every strike of every expiry.
     sides = q.groupby(["expiry", "root", "strike"])["type"].agg(lambda kinds: tuple(sorted(kinds)))
     assert (sides == ("call", "put")).all()
-    # 5-point strikes near the money and coarser wings.
+    # 5-point strikes near the money and coarser wings, every strike a multiple of 5.
     front = q[(q["expiry"] == q["expiry"].min()) & (q["type"] == "call")]["strike"].to_numpy()
     steps = np.diff(front)
-    assert steps.min() == 5 and steps.max() == 100 and np.all(steps % 5 == 0)
+    assert steps.min() == 5 and steps.max() == 50 and np.all(front % 5 == 0)
     forward = index_chain.expiries["forward"].iloc[0]
     assert np.all(steps[np.abs(front[1:] / forward - 1) < 0.02] == 5)
-    assert np.all(front[np.abs(front / forward - 1) > 0.1] % 100 == 0)
+    assert np.all(steps[np.abs(front[1:] / forward - 1) > 0.085] == 50)
+    longest = q[(q["expiry"] == q["expiry"].max()) & (q["type"] == "call")]["strike"].to_numpy()
+    assert longest.min() < 0.45 * SPOT and longest.max() > 1.45 * SPOT  # wings out to -60% and +40% in ln K/F
     # Ticks: $0.05 below $3, $0.10 from $3 (SPX); pennies for the ETF.
     for column in ("bid", "ask"):
         cents = np.round(q[column].to_numpy() * 100).astype(int)
@@ -255,6 +366,22 @@ def test_strikes_ticks_and_quote_shape(index_chain, etf_chain):
     zero_bid = q["bid"] == 0
     assert 0 < zero_bid.mean() < 0.1
     assert index_chain.theoretical.loc[zero_bid, "value"].max() < 1.0
+
+
+def test_tick_rounding_uses_the_tick_of_the_rounded_price():
+    """Bids round down and asks up to the nearest valid tick strictly beyond the price: SPX trades in $0.05 below $3
+    and $0.10 from $3 (so $3.05 is never a price), SPY in pennies. Checked against every valid tick, by search."""
+    assert synthetic._round_up(np.array([2.95, 2.999, 3.0, 3.001, 3.1]), "index").tolist() == [3.0, 3.0, 3.1, 3.1, 3.2]
+    assert synthetic._round_down(np.array([3.0, 3.001, 3.1, 3.16]), "index").tolist() == [2.95, 3.0, 3.0, 3.1]
+    prices = np.round(np.linspace(0.001, 12.0, 24_000), 6)
+    for style, ticks in (
+        ("index", np.round(np.concatenate([np.arange(60) * 0.05, 3.0 + np.arange(200) * 0.1]), 2)),
+        ("etf", np.round(np.arange(1_500) * 0.01, 2)),
+    ):
+        up = ticks[np.searchsorted(ticks, prices + 1e-9, side="right")]
+        down = ticks[np.maximum(np.searchsorted(ticks, prices - 1e-9, side="left") - 1, 0)]
+        np.testing.assert_array_equal(synthetic._round_up(prices, style), up)
+        np.testing.assert_array_equal(synthetic._round_down(prices, style), down)
 
 
 def test_model_value_lies_inside_every_quote(index_chain, index_model, etf_chain):
@@ -314,7 +441,7 @@ def test_index_values_match_quantlib_black_calculator(index_model):
 def test_etf_tree_values_match_quantlib_finite_differences():
     """With a continuous yield the ETF chain prices puts and calls on the binomial tree. Each value is the tree at the
     quote's time to expiry, and the tree agrees with QuantLib's finite-difference American engine (an independent
-    method) within a cent at whole-day maturities."""
+    method, on a 1,000 x 1,000 grid) within a cent at whole-day maturities."""
     ql = pytest.importorskip("QuantLib")
     chain = sample_chain(600.0, UST, 0.013, as_of=AS_OF, style="etf", noise=False)
     rows = _with_expiry_data(chain)
@@ -335,7 +462,7 @@ def test_etf_tree_values_match_quantlib_finite_differences():
         )
         kind = ql.Option.Call if row.type == "call" else ql.Option.Put
         option = ql.VanillaOption(ql.PlainVanillaPayoff(kind, row.strike), ql.AmericanExercise(today, expiry))
-        option.setPricingEngine(ql.FdBlackScholesVanillaEngine(process, 400, 400))
+        option.setPricingEngine(ql.FdBlackScholesVanillaEngine(process, 1000, 1000))
         tree = synthetic.binomial.price(
             600.0, row.strike, days / 365, row.rate, row.iv, 0.013, row.type, synthetic.TREE_STEPS, True, "lr"
         )
@@ -367,15 +494,87 @@ def test_etf_american_values_with_cash_dividends(etf_chain):
 
 
 @pytest.mark.parametrize("noise", [False, True], ids=["noise-free", "noisy"])
-def test_quotes_have_no_static_arbitrage(noise, index_chain, index_model, etf_chain):
-    """Acceptance (2): no quote-level arbitrage flags, by the model-free price check (both styles) and by the
-    surface's own checks on the quotes (European index options)."""
+def test_quotes_have_no_static_arbitrage(noise, index_chain, index_model, etf_chain, etf_one_percent):
+    """Acceptance (2): no quote-level arbitrage flags: the model-free vertical and butterfly check (both styles), the
+    calendar check for the American ETF options (SPY-like dividends, and 1% of the spot a quarter), and the surface's
+    own checks on the quotes (European index options)."""
     index = index_chain if noise else index_model
     assert _price_arbitrage(index.quotes) == 0
     etf = etf_chain if noise else sample_chain(600.0, UST, SPY_DIVIDENDS, as_of=AS_OF, style="etf", noise=False)
-    assert _price_arbitrage(etf.quotes) == 0
+    one_percent = sample_chain(100.0, UST, ONE_PERCENT, as_of=AS_OF, style="etf") if noise else etf_one_percent
+    for chain in (etf, one_percent):
+        assert _price_arbitrage(chain.quotes) == 0
+        assert _calendar_arbitrage(chain.quotes) == 0
+        assert _value_drops_with_maturity(chain) == 0
     surface = _surface(index.quotes, AS_OF, BOX, YIELD)
     assert _arbitrage_notes(surface) == []
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    ("spot", "dividends"),
+    [
+        (600.0, 0.013),
+        (600.0, [(date(2026, 12, 18), 6.0), (date(2027, 3, 19), 6.0)]),
+        (600.0, [(date(2026, 12, 18), 10.0), (date(2027, 3, 19), 10.0)]),
+        (50.0, [(date(2026, 12, 17), 1.0)]),
+    ],
+    ids=["yield", "1%-cash", "1.7%-cash", "2%-cash-low-price"],
+)
+def test_american_calendar_over_more_dividend_cases(spot, dividends):
+    """The calendar check on the ETF chains with larger cash dividends and with a continuous yield, with and without
+    noise: model values never fall with maturity, so the quotes cannot either."""
+    for noise in (False, True):
+        chain = sample_chain(spot, UST, dividends, as_of=AS_OF, style="etf", noise=noise)
+        assert _value_drops_with_maturity(chain) == 0
+        assert _calendar_arbitrage(chain.quotes) == 0
+        assert _price_arbitrage(chain.quotes) == 0
+
+
+def test_an_injected_calendar_spread_is_flagged(etf_one_percent):
+    quotes = etf_one_percent.quotes.copy()
+    calls = quotes[(quotes["type"] == "call") & (quotes["strike"] == 95.0)].sort_values("expiry")
+    earlier, later = calls.index[3], calls.index[4]
+    quotes.loc[earlier, ["bid", "ask"]] = quotes.loc[later, "ask"] + np.array([0.05, 0.10])
+    assert _calendar_arbitrage(quotes) > 0
+
+
+@pytest.mark.oracle
+def test_etf_calls_with_cash_dividends_follow_blacks_approximation_on_the_surface(etf_one_percent):
+    """Each call is worth the largest of its exercise value, the European to expiry and the European to just before
+    each ex-date, the last priced at the forward and on the SSVI total variance of that moment (QuantLib's
+    BlackCalculator for the European values; the ex-date quantities recomputed here from the clock)."""
+    ql = pytest.importorskip("QuantLib")
+    spot, box = 100.0, UST + synthetic.BOX_SPREAD
+    as_of = clock.to_new_york(AS_OF)
+    ex_dates = []
+    for ex_date, cash in ONE_PERCENT:
+        drop = clock.to_new_york(datetime.combine(ex_date, clock.MARKET_OPEN))
+        t = clock.year_fraction(as_of, drop)
+        ex_dates.append(
+            (drop, cash * math.exp(-box * t), math.exp(-box * t), synthetic.DEFAULT_CLOCK.variance_time(as_of, drop))
+        )
+    rows = _with_expiry_data(etf_one_percent)
+    rows = rows[rows["type"] == "call"].join(
+        etf_one_percent.expiries.set_index(["expiry", "root"])["settles_at"], on=["expiry", "root"]
+    )
+    payoff = lambda K: ql.PlainVanillaPayoff(ql.Option.Call, K)  # noqa: E731
+    before_ex_date = 0
+    for row in rows.itertuples():
+        candidates = [
+            spot - row.strike,
+            ql.BlackCalculator(
+                payoff(row.strike), row.forward, row.iv * math.sqrt(row.maturity), row.discount_factor
+            ).value(),
+        ]
+        for drop, _, discount, tau in ex_dates:
+            if drop <= row.settles_at:
+                forward = (spot - sum(pv for other, pv, _, _ in ex_dates if other < drop)) / discount
+                w = synthetic.DEFAULT_SSVI.total_variance(math.log(row.strike / forward), tau)[0]
+                candidates.append(ql.BlackCalculator(payoff(row.strike), forward, math.sqrt(w), discount).value())
+        assert row.value == pytest.approx(max(candidates), rel=1e-11, abs=1e-12), (row.expiry, row.strike)
+        before_ex_date += int(max(candidates[2:], default=-1.0) > max(candidates[:2]) + 1e-6)
+    assert before_ex_date > 50  # the exercise just before an ex-date is what sets many of these values
 
 
 def test_an_injected_butterfly_is_flagged(index_model, etf_chain):
@@ -449,8 +648,26 @@ def test_rate_curve_and_dividend_inputs():
     # A dividend that went ex before the valuation time is ignored; one after the last expiry changes nothing.
     paid = sample_chain(SPOT, UST, [(date(2026, 10, 1), 30.0), (date(2029, 1, 5), 30.0)], as_of=AS_OF, noise=False)
     assert (paid.expiries["dividends_pv"] == 0).all()
-    with pytest.raises(ValueError, match="spot must be finite and positive"):
+    with pytest.raises(ValueError, match="spot must be from"):
         sample_chain(-1.0, UST, YIELD, as_of=AS_OF)
+    # A dividend yield may be any real number, numpy's included; text and booleans are refused.
+    reference = sample_chain(SPOT, UST, YIELD, as_of=AS_OF, noise=False).quotes
+    for value in (np.float64(YIELD), np.float32(YIELD)):
+        assert np.allclose(sample_chain(SPOT, UST, value, as_of=AS_OF, noise=False).quotes["ask"], reference["ask"])
+    pd.testing.assert_frame_equal(
+        sample_chain(SPOT, UST, np.int64(0), as_of=AS_OF, noise=False).quotes,
+        sample_chain(SPOT, UST, 0, as_of=AS_OF, noise=False).quotes,
+    )
+    for bad in ("0.013", True, None):
+        with pytest.raises(TypeError, match="continuous yield"):
+            sample_chain(SPOT, UST, bad, as_of=AS_OF)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="without events"):
+        sample_chain(
+            SPOT, UST, YIELD, as_of=AS_OF, variance_clock=clock.VarianceClock(events=[(date(2026, 11, 4), 0.02)])
+        )
+    for as_of in (datetime(1999, 12, 31, 10), datetime(2098, 1, 2, 10)):
+        with pytest.raises(ValueError, match="as_of must be from 2000-01-01 to 2097-12-31"):
+            sample_chain(SPOT, UST, YIELD, as_of=as_of)
     with pytest.raises(ValueError, match="style"):
         sample_chain(SPOT, UST, YIELD, as_of=AS_OF, style="future")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="rate curve"):
