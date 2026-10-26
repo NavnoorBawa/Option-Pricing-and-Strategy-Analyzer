@@ -232,13 +232,13 @@ def test_synthetic_chain_is_deterministic_per_seed(index_chain, etf_chain):
 
 
 def _check_listing(chain: synthetic.SyntheticChain) -> None:
-    """Acceptance (4) and the strike grid: under 10,000 rows and at most 243 strikes an expiry (the band limits of the
-    module docstring); every strike on the exchange's interval; every strike at that interval near the money (within
-    1.9% of the forward, or 45 intervals if that is less, and at least 5 intervals)."""
+    """Acceptance (4) and the strike grid: under 10,000 rows, at most 18 expiries and 243 strikes an expiry (the band
+    limits of the module docstring); every strike on the exchange's interval; every strike at that interval near the
+    money (within 1.9% of the forward, or 45 intervals if that is less, and at least 5 intervals)."""
     interval = synthetic.strike_interval(chain.spot, chain.style)
     q = chain.quotes
     assert len(q) < 10_000, (chain.style, chain.spot, len(q))
-    assert len(chain.expiries) <= 20
+    assert len(chain.expiries) <= 18  # 6 weeklies, 6 monthlies and 6 quarterlies in months 7 to 24
     assert np.allclose(q["strike"] / interval, np.round(q["strike"] / interval), rtol=0, atol=1e-9)
     for row in chain.expiries.itertuples():
         strikes = q.loc[(q["expiry"] == row.expiry) & (q["root"] == row.root) & (q["type"] == "call"), "strike"]

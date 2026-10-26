@@ -120,6 +120,13 @@ def _dead_proxy(monkeypatch: pytest.MonkeyPatch) -> int:
     return dead
 
 
+def _goes_outside(address: object, dead_port: int) -> bool:
+    """An (host, port, ...) address of another machine, or of the dead proxy."""
+    if not (isinstance(address, tuple) and address):
+        return False
+    return not _is_loopback(address[0]) or (len(address) > 1 and address[1] == dead_port)
+
+
 def _record_network(monkeypatch: pytest.MonkeyPatch, *, dead_port: int) -> list[str]:
     """Record every look-up of another host and every connection or datagram to another host or to ``dead_port``.
 
@@ -142,8 +149,7 @@ def _record_network(monkeypatch: pytest.MonkeyPatch, *, dead_port: int) -> list[
         @functools.wraps(method)
         def recording(sock: socket.socket, *args: Any) -> Any:
             address = args[-1] if args else None  # connect(address), sendto(data[, flags], address)
-            internet = sock.family in (socket.AF_INET, socket.AF_INET6) and isinstance(address, tuple) and address
-            if internet and (not _is_loopback(address[0]) or (len(address) > 1 and address[1] == dead_port)):
+            if sock.family in (socket.AF_INET, socket.AF_INET6) and _goes_outside(address, dead_port):
                 attempts.append(f"{name}({address!r})")
             return method(sock, *args)
 

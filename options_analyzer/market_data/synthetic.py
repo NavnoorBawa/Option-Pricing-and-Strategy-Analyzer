@@ -10,8 +10,8 @@ model whose every input is known:
   from 1,000, like SPX; $1 for an ETF from $25, like SPY), over 1.5 ATM standard deviations each side (at least five
   strikes each side, at most 100 in all); further out, two coarser bands (to 80 and 60 strikes) whose step is the
   finest multiple of the interval (1, 2 or 5 times a power of ten) that keeps each band within its limit. Every
-  strike is on the exchange's grid, and an expiry lists at most 243 strikes whatever the spot: with at most 20
-  expiries, the chain stays under 10,000 rows.
+  strike is on the exchange's grid, and an expiry lists at most 243 strikes whatever the spot: with at most 18
+  expiries (6 weeklies, 6 monthlies and 6 later quarterlies), a chain has at most 8,748 rows.
 * Time: years to the settlement time from :mod:`options_analyzer.clock` (minutes / 525,600).
 * Volatility: an SSVI surface (:class:`options_analyzer.vol_surface.SSVIParams`) evaluated in variance time
   (:class:`options_analyzer.clock.VarianceClock`, weekends and holidays at a tenth of a trading day), so the total
@@ -76,6 +76,7 @@ __all__ = [
     "BOX_SPREAD",
     "DEFAULT_CLOCK",
     "DEFAULT_SSVI",
+    "MAX_SPOT",
     "SYNTHETIC_LABEL",
     "SyntheticChain",
     "sample_chain",
@@ -103,14 +104,14 @@ _SPREAD_VOL = {"index": 0.0005, "etf": 0.0002}
 _SPREAD_VALUE = 0.001  # plus this fraction of the option value (deep in-the-money options quote wide in dollars)
 _MIN_TICK = {"index": 0.05, "etf": 0.01}
 #: The exchange's strike interval near the money, by style: (the lowest spot it applies from, interval), highest
-#: first. Cboe lists index options no closer than 5 points apart (SPX), with $1 strikes for small indices such as XSP;
-#: SPY, QQQ and IWM list $1 strikes, and low-priced ETFs $0.50 ones. Below the lowest spot the grid holds too few
-#: strikes to quote, so :func:`sample_chain` refuses it.
+#: first. Cboe lists index options no closer than 5 points apart (SPX; Rule 4.13), with $1 strikes for small indices
+#: such as XSP (its product specification); SPY, QQQ and IWM list $1 strikes, and low-priced ETFs $0.50 ones. Below
+#: the lowest spot the grid holds too few strikes to quote, so :func:`sample_chain` refuses it.
 _INTERVALS: dict[str, tuple[tuple[float, float], ...]] = {
     "index": ((1_000.0, 5.0), (100.0, 1.0)),
     "etf": ((25.0, 1.0), (5.0, 0.5)),
 }
-#: Largest spot: the furthest strikes (up to about 1.6 times the spot) must stay below OCC's 100,000.
+#: Largest spot: the furthest strikes (1.6 times the spot at rates of a few percent) must stay below OCC's 100,000.
 MAX_SPOT = 50_000.0
 #: The near-the-money band lists at least this many strikes each side of the forward (for low-priced underlyings).
 _NEAR_STRIKES = 5
