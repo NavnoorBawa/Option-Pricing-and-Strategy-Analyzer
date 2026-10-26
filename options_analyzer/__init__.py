@@ -10,4 +10,4 @@ The Streamlit user interface lives in :mod:`options_analyzer.ui` (install the
 with the ``options-analyzer`` command once installed.
 """
 
-__version__ = "2.0.0"
+__version__ = "3.0.0"
