@@ -58,15 +58,17 @@ def _py_implied(beta: float, x: float, theta: float) -> float:
 
 
 def _assert_agreement(ours, theirs, truth, cond):
-    """Ours within max(1e-14, 4·cond·ε) of the true volatility, and the two within max(2e-15, 8·cond·ε) of each other.
+    """Ours within max(1e-14, 4·cond·ε) of the true volatility, and the two within max(2e-15, 12·cond·ε) of each other.
 
-    Each implementation's error reaches a few ε times cond, so they may differ by about twice that: a flat 1e-15 is
-    not attainable for two double-precision implementations once cond exceeds about 1.1. Returns the relative
-    differences.
+    Each implementation's error reaches a few ε times cond, so they may differ by about the sum: a flat 1e-15 is not
+    attainable for two double-precision implementations once cond exceeds about 1.1. In the money
+    py_lets_be_rational's own error reaches about 7.5·cond·ε (it computes e^(x/2) - e^(-x/2) where revision 1520 uses
+    2·sinh(x/2)), and the platform's libm moves it by a little more, so the agreement bound is 12·cond·ε; our accuracy
+    is held to 4·cond·ε against the 60-digit truth. Returns the relative differences.
     """
     assert np.all(np.abs(ours - truth) <= np.maximum(1e-14, 4 * cond * EPS) * truth)
     difference = np.abs(ours - theirs) / truth
-    assert np.all(difference <= np.maximum(2e-15, 8 * cond * EPS)), np.max(difference / (cond * EPS))
+    assert np.all(difference <= np.maximum(2e-15, 12 * cond * EPS)), np.max(difference / (cond * EPS))
     return difference
 
 
