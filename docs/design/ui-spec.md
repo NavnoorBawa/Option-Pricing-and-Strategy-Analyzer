@@ -1243,3 +1243,17 @@ Every review point not listed here was applied as written. Each line below is a 
 15. **Principal, stale cue "dim only the containers downstream of the changed input": partly rejected.** CSS cannot know which input changed, so the rule dims the whole tab body after 300 ms and never the header or sidebar.
 16. **Principal, `asof` from two bound widgets via hand-written query sync: solved differently.** One `st.datetime_input` with `bind` exists on 1.65.0 and 1.66.1 [V-me], so there is one widget and one parameter.
 17. **MM and principal, Risk tiles: MM's "maximum loss" tile went to the position line.** The six-tile cap (principal) holds, and the six pinned tiles are the Greeks, the worst grid cell and the worst stress, as MM listed.
+
+## Appendix B. Decisions on the open questions
+
+Taken by the lead on 2026-10-26 so that the build can proceed; the owner can reverse any of them.
+
+1. UI-1 and UI-2 are accepted: the price cards move into Pricing, and the header becomes market-level.
+2. The Streamlit floor rises to 1.66 when the UI lane next touches the dependency files (Streamlit Community Cloud installs the
+   latest release anyway). Until then everything must still run on 1.65.
+3. The default preset is the synthetic index chain, always labelled synthetic; `?preset=textbook` keeps the v2 inputs.
+4. `legs=` in the share link is accepted up to 1,500 characters.
+5. The 36 items without full text get their detail and acceptance written back during INT-2, seeded from this spec.
+6. PR-7 and BK-2 are promoted to must, and the cut line in 4.5 is adopted.
+7. `primaryColor` changes from amber to the link blue (UI-22).
+8. The global model control offers BSM and ALO only; the tree and Monte Carlo engines move to Pricing's Engine diagnostics.
