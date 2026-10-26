@@ -370,10 +370,11 @@ def position_greeks(strategy: Strategy, market: Market, spot=None, t: float = 0.
 class PositionRisk:
     """Risk of a whole position at one spot and date, in desk units.
 
-    Every field is for the position as given (per unit of :class:`Leg` quantity) times the ``multiplier`` passed to
-    :func:`position_risk`, so with ``multiplier = contracts x 100`` the dollar fields are the book's dollars. The
-    time-decay fields (theta, charm, veta) are changes per calendar day of elapsed time; a vol point is 0.01 of
-    implied volatility on every leg; rho is per 1% (100 bp) rise in the risk-free rate.
+    Every field but ``spot`` is for the position as given (per unit of :class:`Leg` quantity) times the
+    ``multiplier`` passed to :func:`position_risk`, so with ``multiplier = contracts x 100`` the dollar fields are
+    the book's dollars and delta and gamma are in shares. The time-decay fields (theta, charm, veta) are changes
+    per calendar day of elapsed time; a vol point is 0.01 of implied volatility on every leg; rho is per 1%
+    (100 bp) rise in the risk-free rate.
 
     Attributes
     ----------

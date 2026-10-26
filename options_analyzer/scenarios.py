@@ -7,8 +7,8 @@ mutually consistent. Scenario P&L is measured against the position's
 *current* model value, so it isolates market risk (fill prices and fees do not
 enter; they are part of the payoff analysis instead).
 
-Tables returned here use stable snake_case column and bucket names; display
-labels belong to the UI.
+The risk tables (:func:`greek_ladder`, :func:`vega_buckets`) use stable
+snake_case column and bucket names; display labels belong to the UI.
 """
 
 from __future__ import annotations
