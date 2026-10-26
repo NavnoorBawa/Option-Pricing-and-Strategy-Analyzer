@@ -17,3 +17,6 @@ dist/
 .coverage.*
 htmlcov/
 coverage.xml
+
+# Agent worktrees created during development
+.claude/worktrees/
