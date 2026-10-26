@@ -27,6 +27,13 @@ the largest relative difference was 4.2e-8 (a butterfly in vol points). Raw SVI 
 flat smile (there ``s`` moved by a factor of three while every vol agreed), so they are compared only through the vols
 they give.
 
+The fit is not bit-reproducible on every input, before the split as after it: on some quote tables (about one in
+twelve random ones) repeating the same call can end :func:`~options_analyzer.vol_surface.fit_svi`'s
+Levenberg-Marquardt iterations (SciPy's MINPACK) a few ulps apart, depending on the state of the heap. That moved
+implied and local vols by at most 4e-11 relative and never changed a text, a count or a NaN; the root cause is not
+isolated. No case here gave a second result over 25 heap layouts, so a bit-identity failure on the recording platform
+is a change of behaviour.
+
 To record the fixture again (only for a change that is meant to alter these outputs)::
 
     PYTHONPATH=. python tests/test_surface_golden.py --record
