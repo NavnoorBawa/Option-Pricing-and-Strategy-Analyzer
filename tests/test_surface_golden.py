@@ -7,25 +7,30 @@ before it became the ``options_analyzer.vol_surface`` package. For every case be
 :meth:`~options_analyzer.vol_surface.VolSurface.implied_vol_at` returned or raised:
 
 * messages, notes and error messages verbatim, with the :class:`~options_analyzer.vol_surface.QuoteWarning` ones marked;
-* SVI parameters, maturities, quoted ranges, fit RMSEs, the summary table and implied vols at chosen points as exact
-  floats (JSON writes the shortest decimal that reads back as the same double);
-* every large array (the grids and the cleaned and fitted quote tables) as its shape, NaN count, sum and the SHA-256
-  of its float64 bytes.
+* SVI parameters, each SVI slice's total variance at nine points of its quoted range, maturities, quoted ranges, fit
+  RMSEs, the summary table and implied vols at chosen points as exact floats (JSON writes the shortest decimal that
+  reads back as the same double);
+* every large array as its shape, NaN count, sum and the SHA-256 of its float64 bytes, and its values to 10
+  significant digits: all of them for the K/S grid and the implied- and local-vol grids, 256 at evenly spaced
+  positions for the cleaned and fitted quote tables.
 
 The cases are the sample quote tables (``sample_quotes`` seeds 0-3, implied vols and prices), the two CSV templates the
 Surface tab offers, the three bundled chain fixtures (``tests/fixtures/chain_*.csv``), synthetic chains
-(``market_data.sample_chain``), SSVI grids, and small tables that take every branch of the quote reader and every note
-of the fit.
+(``market_data.sample_chain``), SSVI grids, small tables that take every branch of the quote reader but one it cannot
+reach (a price grid of no positive price), cleaned quotes that raise every note
+:func:`~options_analyzer.vol_surface.fit_market_surface` writes, in each of its wordings, and quotes it is not meant
+for (not cleaned, or a spot that is not positive), where the error and the RuntimeWarnings are recorded.
 
 Two checks. The last bits of ``exp``, ``log`` and the BLAS kernels depend on the library versions and on the CPU, so
 bit-identity is only defined on the platform the fixture was recorded on: there, every output must be identical
-(the whole case, serialised). Everywhere, every text, count and shape must be identical and every number except the
-raw SVI parameters must agree to a relative 1e-6 (absolute 1e-9 near zero). Measured on the recording machine with
-NumPy's AVX-512 code paths and OpenBLAS's own kernel switched off (``NPY_DISABLE_CPU_FEATURES``,
-``OPENBLAS_CORETYPE=Haswell``), and with NumPy 1.26, SciPy 1.11 and pandas 2.1, every text and count was the same and
-the largest relative difference was 4.2e-8 (a butterfly in vol points). Raw SVI parameters are not identifiable on a
-flat smile (there ``s`` moved by a factor of three while every vol agreed), so they are compared only through the vols
-they give.
+(the whole case, serialised, digests included). Everywhere, every text, count, shape and NaN must be identical and
+every number but the raw SVI parameters must agree to a relative 1e-6 (absolute 1e-9 near zero), the array values one
+by one. Measured on the recording machine with NumPy's AVX-512 code paths and OpenBLAS's own kernel switched off
+(``NPY_DISABLE_CPU_FEATURES``, ``OPENBLAS_CORETYPE=Haswell``), and with NumPy 1.26, SciPy 1.11 and pandas 2.1, every
+text, count and NaN was the same, and the largest difference was 4.2% of that tolerance (4.2e-8 relative, a butterfly
+in vol points; 4.1e-8 in the local-vol grids). Raw SVI parameters are not identifiable on a flat smile (there ``s``
+moved by a factor of three while every vol agreed), so they are compared only through the variances and vols they
+give.
 
 The fit is not bit-reproducible on every input, before the split as after it: on some quote tables (about one in
 twelve random ones) repeating the same call can end :func:`~options_analyzer.vol_surface.fit_svi`'s
@@ -48,6 +53,7 @@ import json
 import math
 import platform
 import sys
+import warnings
 from collections.abc import Callable, Iterator
 from datetime import date, datetime
 from functools import cache
@@ -74,6 +80,8 @@ HEADER = (
     "# PYTHONPATH=. python tests/test_surface_golden.py --record",
 )
 RTOL, ATOL = 1e-6, 1e-9
+DIGITS = 10  # significant digits of the array values kept for the comparison off the recording platform
+SAMPLE = 256  # values kept of each quote table (the grids are kept whole)
 
 AS_OF = datetime(2026, 10, 26, 10, 0)  # the valuation time of the chain fixtures (tests/test_market_data.py)
 CHAIN_SPOT, UST, YIELD = 7915.0, 0.04, 0.013
@@ -96,22 +104,32 @@ def _floats(values: Any) -> list:
     return [_floats(v) if np.ndim(v) else _float(v) for v in np.asarray(values, dtype=float)]
 
 
-def _array(values: Any) -> dict[str, Any]:
-    """Shape, NaN count, sum and SHA-256 of an array's float64 bytes (little endian, C order)."""
+def _array(values: Any, *, sample: bool = False) -> dict[str, Any]:
+    """Shape, NaN count, sum and SHA-256 of an array's float64 bytes (little endian, C order), and its values in C
+    order to :data:`DIGITS` significant digits: all of them, or with ``sample`` at most :data:`SAMPLE` of them at
+    evenly spaced positions (a fixed choice for a given shape)."""
     array = np.ascontiguousarray(values, dtype="<f8")
     finite = array[np.isfinite(array)]
+    flat = array.ravel()
+    if sample and flat.size > SAMPLE:
+        flat = flat[np.linspace(0, flat.size - 1, SAMPLE).round().astype(int)]
     return {
         "shape": list(array.shape),
         "nan": int(np.isnan(array).sum()),
         "sum": _float(finite.sum()) if finite.size else 0.0,
         "sha256": hashlib.sha256(array.tobytes()).hexdigest(),
+        "values": [_float(float(f"{v:.{DIGITS}g}")) for v in flat],
     }
 
 
 def _frame(frame: pd.DataFrame) -> dict[str, Any]:
-    """Columns and dtypes, and the index and the (numeric) columns side by side as one array."""
+    """Columns and dtypes, and the index and the (numeric) columns side by side as one array (values sampled)."""
     values = np.column_stack([frame.index.to_numpy(dtype=float), frame.to_numpy(dtype=float)])
-    return {"columns": [str(c) for c in frame.columns], "dtypes": [str(t) for t in frame.dtypes], **_array(values)}
+    return {
+        "columns": [str(c) for c in frame.columns],
+        "dtypes": [str(t) for t in frame.dtypes],
+        **_array(values, sample=True),
+    }
 
 
 def _error(exc: Exception) -> dict[str, str]:
@@ -133,9 +151,21 @@ def _surface(surface: vs.VolSurface) -> dict[str, Any]:
         "quotes": None if surface.quotes is None else _frame(surface.quotes),
         "fit_rmse": None if surface.fit_rmse is None else _floats(surface.fit_rmse),
         "svi": [_floats(dataclasses.astuple(fit)) for fit in surface.svi],
+        "svi_variance": _svi_variance(surface),
         "quoted_y": None if surface.quoted_y is None else _floats(surface.quoted_y),
         "ssvi": None if surface.ssvi is None else _floats(dataclasses.astuple(surface.ssvi)),
     }
+
+
+def _svi_variance(surface: vs.VolSurface) -> list:
+    """Each SVI slice's total variance at nine evenly spaced points of its quoted forward log-moneyness range: what
+    the raw parameters give where they are identified by the quotes."""
+    if surface.quoted_y is None:
+        return []
+    return [
+        _floats(fit.total_variance(np.linspace(lo, hi, 9))[0])
+        for fit, (lo, hi) in zip(surface.svi, surface.quoted_y, strict=True)
+    ]
 
 
 def _points(surface: vs.VolSurface) -> list:
@@ -283,6 +313,7 @@ def _quote_tables() -> dict[str, tuple[pd.DataFrame, dict[str, float]]]:
     add("years_whole_refused", {"Strike": K, "Maturity": ranks, "ImpliedVol": V})
     add("years_long_unlabelled", {"Strike": K, "Maturity": T * 2.5, "ImpliedVol": V})
     add("tenors_refused", {"Strike": K, "Tenor": [f"{max(round(t * 12), 1)}M" for t in T], "ImpliedVol": V})
+    add("maturity_text_refused", {"Strike": K, "Maturity": "soon", "ImpliedVol": V})
     add("dates_refused", {"Strike": K, "Expiry": expiry.dt.strftime("%Y-%m-%d"), "ImpliedVol": V})
     add("yyyymmdd_refused", {"Strike": K, "Maturity": expiry.dt.strftime("%Y%m%d").astype(int), "ImpliedVol": V})
     add("expiration_dates_and_ttm", {"Strike": K, "Expiration": expiry.dt.strftime("%m/%d/%Y"), "TTM": T, "IV": V})
@@ -333,6 +364,8 @@ def _quote_tables() -> dict[str, tuple[pd.DataFrame, dict[str, float]]]:
     add("crossed_quotes", px.drop(columns="Price").assign(Bid=bid, Ask=ask.where(px.index % 7 != 2, 0.0)), market)
     add("last_trade_only", px.rename(columns={"Price": "Last"}), market)
     add("last_trade_fallback", px.assign(Price=blank, **{"Last price": px["Price"]}), market)
+    add("zero_bids_where_price_blank", px.assign(Price=blank, Bid=bid.where(blank.notna(), 0.0), Ask=ask), market)
+    add("last_trade_blank_where_price_blank", px.assign(Price=blank, Last=px["Price"].where(blank.notna())), market)
     add("mid_next_to_bid_ask", px.drop(columns="Price").assign(Mid=(bid + ask) / 2, Bid=bid, Ask=ask), market)
     add("volume_next_to_prices", px.assign(Vol=1000), market)
     add("bad_option_types", px.assign(Type=px["Type"].where(px.index % 11 != 4, "straddle")), market)
@@ -361,6 +394,7 @@ def _fit_cases() -> Iterator[tuple[str, Callable[[], dict]]]:
     params = vs.SSVIParams()
     days = (30, 91, 182, 365, 730)
     grid = np.linspace(0.75, 1.3, 23)
+    grid9 = np.linspace(80.0, 120.0, 9)
     exact = _ssvi_vols(params, 0.04, days, grid)
     thin = _ssvi_vols(params, 0.04, (60,), (0.9, 1.0, 1.1))
     dense = _ssvi_vols(params, 0.04, (91, 182), np.linspace(0.6, 1.5, 260))
@@ -379,6 +413,10 @@ def _fit_cases() -> Iterator[tuple[str, Callable[[], dict]]]:
     smiles = _ssvi_vols(params, 0.05, (14, 30, 60, 91), np.arange(90, 111) / 100).round({"iv": 4})
     smiles.loc[(smiles["maturity"] == round(30 / 365, 10)) & (smiles["strike"].round(6) == 110.0), "iv"] += 0.06
     mixed = spike.assign(price_error=np.where(spike.index % 2 == 0, 0.02, np.nan))
+    # Vols of 0.01 vol point at the money: the fitted SVI minimum variance is slightly negative there.
+    near_zero = pd.DataFrame(
+        [{"strike": k, "maturity": t, "iv": 1e-4 + np.log(k / 100) ** 2} for t in (0.1, 0.5) for k in grid9]
+    )
     cases = {
         "ssvi_exact": (exact, 100.0, 0.04, 0.0),
         "ssvi_exact_with_carry": (_ssvi_vols(params, 0.03, days, grid), 100.0, 0.05, 0.02),
@@ -395,8 +433,10 @@ def _fit_cases() -> Iterator[tuple[str, Callable[[], dict]]]:
         "coarse_grid": (exact, 100.0, 0.04, 0.0, 5),
         "unknown_price_errors": (exact.assign(price_error=np.nan), 100.0, 0.04, 0.0),
         "butterfly_with_some_price_errors": (mixed, 100.0, 0.04, 0.0),
+        "butterfly_with_price_errors": (spike.assign(price_error=0.02), 100.0, 0.04, 0.0),
         "flat_within_quote_precision": (flat, 100.0, 0.0, 0.0),
         "vertical_spread_with_a_close_fit": (smiles, 100.0, 0.05, 0.0),
+        "zero_total_variance": (near_zero, 100.0, 0.0, 0.0),
     }
     for name, args in cases.items():
         yield f"fit_{name}", lambda args=args: _surface_outputs(lambda: vs.fit_market_surface(*args))
@@ -429,10 +469,51 @@ def _midpoint_vols(spot: float, tick: float, spike: float) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _unclean_outputs(make: Callable[[], vs.VolSurface]) -> dict[str, Any]:
+    """What a fit of quotes that :func:`~options_analyzer.vol_surface.parse_quotes` did not clean gives, first with
+    every RuntimeWarning shown (and recorded), then with RuntimeWarnings raised as errors (as in this suite). An error
+    is recorded by its type, and by its message only when it comes from this package or NumPy (SciPy's messages
+    change between versions)."""
+    outputs: dict[str, Any] = {}
+    for action in ("always", "error"):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter(action, RuntimeWarning)
+            try:
+                outcome: dict[str, Any] = _surface(make())
+            except (ValueError, RuntimeWarning) as exc:
+                outcome = {"error": type(exc).__name__}
+                if isinstance(exc, (vs.QuoteParseError, RuntimeWarning)):
+                    outcome["message"] = str(exc)
+        found = [str(w.message) for w in caught if issubclass(w.category, RuntimeWarning)]
+        outputs[action] = {"outcome": outcome, "runtime_warnings": found}
+    return outputs
+
+
+def _unclean_cases() -> Iterator[tuple[str, Callable[[], dict]]]:
+    """Quotes the fit is not meant for: it reads and fits one maturity at a time, so the first maturity it fails on
+    decides the error and the warnings."""
+    strikes = np.arange(80.0, 131.0, 5.0)
+    first = pd.DataFrame({"strike": strikes, "maturity": 0.1, "iv": 0.2 + 0.1 * np.log(100.0 / strikes) ** 2})
+    first.loc[4, "iv"] = np.nan
+    second = first.assign(maturity=0.5, iv=0.2)
+    second.loc[0, "strike"] = 0.0
+    nan_then_zero = pd.concat([first, second], ignore_index=True)
+    clean = _ssvi_vols(vs.SSVIParams(), 0.04, (30, 91, 182), np.linspace(0.8, 1.2, 9))
+    cases = {
+        "nan_vol_then_zero_strike": (nan_then_zero, 100.0),
+        "negative_spot": (clean, -100.0),
+        "nan_spot": (clean, np.nan),
+    }
+    for name, (quotes, spot) in cases.items():
+        yield (
+            f"fit_unclean_{name}",
+            lambda quotes=quotes, spot=spot: _unclean_outputs(lambda: vs.fit_market_surface(quotes, spot, 0.04, 0.0)),
+        )
+
+
 def _cases() -> dict[str, Callable[[], dict]]:
-    return dict(
-        item for group in (_sample_cases, _chain_cases, _ssvi_cases, _table_cases, _fit_cases) for item in group()
-    )
+    groups = (_sample_cases, _chain_cases, _ssvi_cases, _table_cases, _fit_cases, _unclean_cases)
+    return dict(item for group in groups for item in group())
 
 
 CASES = _cases()

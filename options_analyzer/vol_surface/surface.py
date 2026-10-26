@@ -4,7 +4,8 @@
 :func:`fit_market_surface` runs in four stages: :func:`_prepare` (each maturity's quotes in forward log-moneyness,
 dense ones binned, thin ones skipped), :func:`_fit_slices` (a raw SVI smile per maturity, and the model-free
 static-arbitrage checks of its quotes), :func:`_evaluate_grid` (implied and local vol on the K/S grid) and
-:func:`_diagnostics` (the notes on the quotes, the fits and the grid).
+:func:`_diagnostics` (the notes on the quotes, the fits and the grid). The first two work through the maturities
+together, one at a time: each maturity is fitted before the next one is read.
 
 :func:`ssvi_surface` lives here rather than in :mod:`.ssvi` because it builds a :class:`VolSurface`, which in turn
 holds the :class:`~.ssvi.SSVIParams` it came from.
@@ -12,6 +13,7 @@ holds the :class:`~.ssvi.SSVIParams` it came from.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import cast
 
@@ -242,8 +244,10 @@ def fit_market_surface(
     in each price would remove is reported as possible rather than certain.
     """
     carry = rate - dividend_yield
-    prepared, notes = _prepare(quotes, spot, carry)
-    slices = _fit_slices(prepared, spot, rate, carry)
+    notes: list[str] = []
+    # _prepare yields one maturity at a time, which _fit_slices fits before the next one is read: on quotes that
+    # parse_quotes did not clean, the first maturity the fit fails on decides the error and the warnings.
+    slices = _fit_slices(_prepare(quotes, spot, carry, notes), spot, rate, carry)
     if len(slices) < 2:
         n_maturities = quotes["maturity"].nunique()
         raise QuoteParseError(
@@ -305,11 +309,11 @@ class _Slice:
     quotes: pd.DataFrame  # its rows of the cleaned quotes, with their K/S (moneyness) and fitted vol (fitted_iv)
 
 
-def _prepare(quotes: pd.DataFrame, spot: float, carry: float) -> tuple[list[_Prepared], list[str]]:
+def _prepare(quotes: pd.DataFrame, spot: float, carry: float, notes: list[str]) -> Iterator[_Prepared]:
     """Stage 1 of :func:`fit_market_surface`: each maturity's forward log-moneyness and vols, and those the SVI fit is
-    given (dense quotes averaged into :data:`MAX_POINTS_PER_SLICE` bins, :func:`_binned`); a maturity with fewer than
-    :data:`MIN_STRIKES_PER_SLICE` strikes is skipped with a note. Returns ``(prepared, notes)``."""
-    prepared, notes = [], []
+    given (dense quotes averaged into :data:`MAX_POINTS_PER_SLICE` bins, :func:`_binned`), yielded in order of
+    maturity as they are read; a maturity with fewer than :data:`MIN_STRIKES_PER_SLICE` strikes is skipped with a
+    note, appended to ``notes``."""
     for maturity, grp in quotes.groupby("maturity"):
         T = float(cast(float, maturity))
         if grp["strike"].nunique() < MIN_STRIKES_PER_SLICE:
@@ -318,11 +322,10 @@ def _prepare(quotes: pd.DataFrame, spot: float, carry: float) -> tuple[list[_Pre
         y = np.log(grp["strike"].to_numpy(float) / spot) - carry * T
         iv = grp["iv"].to_numpy(float)
         y_fit, iv_fit = (y, iv) if len(y) <= MAX_POINTS_PER_SLICE else _binned(y, iv)
-        prepared.append(_Prepared(T, grp, y, iv, y_fit, iv_fit))
-    return prepared, notes
+        yield _Prepared(T, grp, y, iv, y_fit, iv_fit)
 
 
-def _fit_slices(prepared: list[_Prepared], spot: float, rate: float, carry: float) -> list[_Slice]:
+def _fit_slices(prepared: Iterable[_Prepared], spot: float, rate: float, carry: float) -> list[_Slice]:
     """Stage 2 of :func:`fit_market_surface`: the raw-SVI fit of each maturity (:func:`fit_svi`), its RMSE at the
     quotes, and the model-free static-arbitrage checks of the quotes (:func:`_quote_arbitrage`)."""
     slices = []
