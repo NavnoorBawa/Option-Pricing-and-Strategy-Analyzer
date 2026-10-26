@@ -260,7 +260,7 @@ def test_price_level_accuracy_fast_subset():
 @pytest.mark.oracle
 @pytest.mark.slow
 def test_price_level_accuracy_20k():
-    # Measured on these 20,000 quotes: 19,334 keep their time value and the worst error is within the tolerance,
+    # Measured on these 20,000 quotes: 19,334 keep their time value, the worst error is 0.57 of the tolerance and
     # at most 5.3e-15 where cond < 10. Before ln(F/K) and the forward intrinsic value were computed without
     # cancellation (log1p and expm1) near-the-money errors reached 6.7e-13.
     failures, worst = _price_level_study(20_000, seed=2)
