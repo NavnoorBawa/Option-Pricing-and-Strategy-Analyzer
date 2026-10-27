@@ -20,7 +20,7 @@ the Streamlit app is a thin interface on top of it.
 ## Highlights
 
 - **Implied volatility in 19 µs per quote, 15 ms per 10,000**: a vectorised port of Jäckel's *Let's Be Rational*
-  (revision 1520), accurate to a few ulps of the problem's own conditioning on 97,086 cases checked at 60 digits.
+  (revision 1520), accurate to a few ulps of the problem's own conditioning on the 66,738 quotes with time value among 97,086 cases checked at 60 digits.
 - **American options by spectral collocation**: the Andersen–Lake–Offengenden engine prices the 4,495-put grid of
   Healy (2021) with an RMSE of 1.6e-7 against QuantLib's high-precision engine, in under a millisecond per option. A
   2,000-step binomial tree gives an RMSE of 1.5e-4 in 14 ms. In the app it is the "American (ALO)" pricing model, with
@@ -133,7 +133,7 @@ st.strike_for_delta(-0.16, market, 0.5, 0.22, "put")  # 88.07, the 16-delta put 
   engines, and implied volatilities against Jäckel's own reference implementation. CI installs the oracle libraries
   and fails if any oracle test is skipped.
 - **High-precision references**: Greeks against 40-digit mpmath derivatives, 100,000 implied-volatility cases priced at
-  60 digits, and the 4,495-put American grid of Healy (2021) generated with QuantLib and stored in the repository, so
+  60 digits (the accuracy bound is proven on the 66,738 quotes that keep time value; the rest round to intrinsic), and the 4,495-put American grid of Healy (2021) generated with QuantLib and stored in the repository, so
   the main suite needs no QuantLib.
 - **Invariants**: put–call parity and symmetry, no-arbitrage bounds, monotonicity, Greeks against finite
   differences, the Greek-ladder identities across all 26 strategy templates, and the vega-bucket sums.
