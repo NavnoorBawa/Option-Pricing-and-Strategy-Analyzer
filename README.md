@@ -20,7 +20,8 @@ the Streamlit app is a thin interface on top of it.
   (revision 1520), accurate to a few ulps of the problem's own conditioning on 97,086 cases checked at 60 digits.
 - **American options by spectral collocation**: the Andersen–Lake–Offengenden engine prices the 4,495-put grid of
   Healy (2021) with an RMSE of 1.6e-7 against QuantLib's high-precision engine, in under a millisecond per option. A
-  2,000-step binomial tree gives an RMSE of 1.5e-4 in 14 ms.
+  2,000-step binomial tree gives an RMSE of 1.5e-4 in 14 ms. In the app it is the "American (ALO)" pricing model, with
+  smooth Greeks, the early-exercise boundary and American implied volatility.
 - **Desk-style risk**: dollar and second-order position Greeks, a Greek ladder by full revaluation, vega by expiry
   and delta bucket, one-month-weighted vega, and strikes chosen by delta.
 - **Market time done properly**: a New York clock with the NYSE calendar, AM and PM settlement, minute-based year
@@ -36,6 +37,10 @@ built from.
 
 **Pricing**
 - Black–Scholes–Merton with continuous dividend yield, exact at every edge case (expiry, zero volatility).
+- American (ALO): the Andersen–Lake–Offengenden engine with fast, accurate and high schemes, Greeks by finite
+  differences of the engine (closed form where the option is European, one-sided where a bump crosses an exercise
+  regime, and the app says which), the early-exercise premium and the exercise boundary, and a plain statement
+  whenever the engine falls back to a tree.
 - Binomial trees: Leisen–Reimer (≈O(1/n²) convergence for European exercise) and Cox–Ross–Rubinstein, European or
   American exercise, with bump-and-reprice tree Greeks, convergence charts and the early-exercise boundary.
 - Monte Carlo with exact terminal sampling, antithetic and control variates, reproducible seeds and 95 % confidence
@@ -62,7 +67,8 @@ built from.
 - Arbitrage-free SSVI surfaces or your own quotes (implied vols, or option prices inverted with Black–Scholes–Merton),
   fitted with an SVI smile per expiry and turned into local volatility with Gatheral's formula; calendar and butterfly
   arbitrage are detected and reported, never silently patched.
-- An implied-volatility solver for European and American quotes that checks the no-arbitrage bounds first.
+- An implied-volatility solver for European and American quotes that checks the no-arbitrage bounds first; under the
+  American (ALO) model it inverts the engine's price.
 
 **Desk shell**
 - A header with the contract ticker (spot, strike, expiry and days, vol, rates, forward), the model in use and a
@@ -100,6 +106,7 @@ from options_analyzer import american, black_scholes as bs, implied_vol, scenari
 
 bs.price(100, 105, 0.5, 0.04, 0.22, q=0.01, option_type="put")  # 8.1319
 american.price(100, 105, 0.5, 0.04, 0.22, 0.01, option_type="put")  # 8.3696 (Andersen-Lake-Offengenden)
+american.greeks(100, 105, 0.5, 0.04, 0.22, 0.01, option_type="put")["delta"]  # -0.5768, smooth American Greeks
 implied_vol.implied_volatility(8.50, 100, 105, 0.5, 0.04, 0.01, "put")  # 0.2332
 
 strikes = np.array([90, 95, 100, 105, 110.0])
@@ -184,8 +191,6 @@ The public app uses synthetic data and files you upload; it never scrapes market
 
 ## Limitations
 
-- The app values American options with binomial trees; the faster and more accurate Andersen–Lake–Offengenden engine
-  is in the library and not yet wired into the app.
 - Strategy valuation uses Black–Scholes–Merton at each leg's implied volatility (no smile dynamics, European
   exercise), and probabilities are log-normal.
 - The app's expiries are whole calendar days; the library supports fractional days down to same-day expiries.

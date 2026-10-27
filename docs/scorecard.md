@@ -35,7 +35,8 @@ How each number was measured:
 - **Engines.** A vectorised port of Jäckel's *Let's Be Rational* (revision 1520) for implied volatility, with a batch
   API that returns a reason for every rejected quote; and the Andersen–Lake–Offengenden spectral-collocation engine
   for American options, with a cached exercise boundary, three accuracy schemes and an honest fallback (flagged) for
-  the double-boundary regime.
+  the double-boundary regime. In the app it is the "American (ALO)" pricing model, with smooth Greeks, the exercise
+  boundary and American implied volatility.
 - **Risk analytics.** Position risk in dollar terms with second-order Greeks (vanna, volga, charm, veta), a Greek
   ladder by full revaluation, a spot × vol × time scenario cube, vega by expiry and delta bucket, one-month-weighted
   vega, and strikes chosen by delta.
