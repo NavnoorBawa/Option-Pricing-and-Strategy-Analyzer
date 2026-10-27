@@ -152,8 +152,9 @@ def render(inputs: Inputs) -> None:
             return np.nan
 
     if american and alo and iv > 0.0:
-        # The engine's own finite-difference vega (american.greeks), with its scheme held fixed.
-        vega = cache.alo_results(S, K, T, r, iv, q, model.scheme)[1][option_type]["vega"] / 100
+        # The engine's own vega (american.greeks): closed form for an option valued as European, otherwise a
+        # difference with its scheme held fixed.
+        vega = cache.alo_option(S, K, T, r, iv, q, option_type, model.scheme)[1]["vega"] / 100
     elif american:
         bump = 0.005
         low_vol = max(iv - bump, lowest)

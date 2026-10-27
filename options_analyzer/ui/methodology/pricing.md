@@ -51,9 +51,13 @@ high-precision values. Early exercise never pays for a call when ${q \le 0}$ and
 ${r \le 0}$ and ${q \ge r}$: both then equal Black–Scholes–Merton, and the app says why. Where the exercise region
 lies between two boundaries (${q < r < 0}$ for a put; Healy 2021) or the boundary iteration does not converge,
 the option falls back to the extrapolated Leisen–Reimer trees above, and the app says so. Greeks are central
-finite differences of the engine with its scheme and boundary equation held fixed (spot and expiry ±0.01 %,
-volatility ±0.01 vol point, rate and dividend yield ±1 bp); American implied volatility inverts the engine with
-Brent's method. The method, its error and its limits are written up in `docs/methods/american_alo.md`.
+finite differences of the engine with its scheme and boundary equation held fixed (spot and expiry ±0.01%,
+volatility ±0.01 vol point, rate and dividend yield ±1 bp); where a bump one way would change how the option
+is valued, the difference is taken on the other side. An option valued as European has the closed-form Greeks,
+and one exercised at once those of its exercise value. At a rate and dividend yield of zero both options are
+European, but a 1 bp move one way makes early exercise pay, so their rho and dividend rho are one-sided: the
+slopes on the side where it does not. American implied volatility inverts the engine with Brent's method. The
+method, its error and its limits are written up in `docs/methods/american_alo.md`.
 
 References for the engine: Andersen, L., Lake, M. and Offengenden, D. (2016). High-performance American option
 pricing. *Journal of Computational Finance* 20(1), 39–87.

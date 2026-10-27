@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import base64
 import dataclasses
+import itertools
 import json
+import pickle
 import re
 import urllib.parse
 
@@ -241,11 +243,158 @@ def test_the_greeks_are_finite_differences_of_the_engine_in_the_tabs_units(new_a
 
 
 def test_the_european_call_gets_the_closed_form_greeks():
-    # A call without dividends is European: its finite-difference Greeks reproduce the analytical ones.
-    fd = american.greeks(100, 100, 1.0, 0.05, 0.2, 0.0, option_type="call")
+    # A call without dividends is European: its Greeks are the analytical ones, and its finite differences agree.
+    g = american.greeks(100, 100, 1.0, 0.05, 0.2, 0.0, option_type="call")
     exact = bs.greeks(100, 100, 1.0, 0.05, 0.2, 0.0, "call")
+    differences = _differences("call")
+    assert g.basis == "closed form" and g.one_sided == ()
     for name in GREEKS:
-        assert fd[name] == pytest.approx(exact[name], rel=1e-7, abs=1e-9), name
+        assert g[name] == pytest.approx(exact[name], rel=1e-12, abs=1e-15), name
+        assert differences[name] == pytest.approx(exact[name], rel=1e-7, abs=1e-9), name
+
+
+def test_the_greeks_read_like_a_dict_and_survive_the_cache():
+    g = american.greeks(100, 100, 1.0, 0.05, 0.2, 0.02, option_type="put")
+    assert list(g) == list(GREEKS) == list(american.GREEK_NAMES) and len(g) == 6
+    assert dict(g) == {name: getattr(g, name) for name in GREEKS}
+    assert g.basis == "differences" and g.one_sided == ()
+    with pytest.raises(KeyError):
+        g["vanna"]
+    assert pickle.loads(pickle.dumps(g)) == g  # st.cache_data pickles what it returns
+
+
+@pytest.mark.parametrize("spot", [100.0, 120.0])
+@pytest.mark.parametrize("kind", ["call", "put"])
+def test_at_zero_rate_and_yield_rho_and_dividend_rho_are_black_scholes_mertons(kind, spot):
+    # Both options are European at r = q = 0, but a 1 bp move one way makes early exercise pay (a lower rate or a
+    # higher yield for the call, a higher rate or a lower yield for the put). A central difference averaged the two
+    # slopes of that kink: the call's rho at S = 120 came out 5.9 % low and its dividend rho 7 %.
+    g = american.greeks(spot, 100, 1.0, 0.0, 0.2, 0.0, option_type=kind)
+    exact = bs.greeks(spot, 100, 1.0, 0.0, 0.2, 0.0, kind)
+    assert g.basis == "closed form"
+    for name in GREEKS:
+        assert g[name] == pytest.approx(exact[name], rel=1e-12, abs=1e-15), name
+    central = _differences(kind, S=spot, r=0.0)
+    assert abs(central["rho"] / exact["rho"] - 1) > 0.01 and abs(central["epsilon"] / exact["epsilon"] - 1) > 0.01
+
+    # The closed form is the slope on the European side: a one-sided difference there agrees.
+    def one_sided(name: str, side: float) -> float:
+        h = 1e-5
+
+        def v(x: float) -> float:
+            return _price(kind, S=spot, **{"r": 0.0, "q": 0.0, name: x})
+
+        return side * (4 * v(side * h / 2) - 3 * v(0.0) - v(side * h)) / h
+
+    european_side = {"call": {"r": 1.0, "q": -1.0}, "put": {"r": -1.0, "q": 1.0}}[kind]
+    assert one_sided("r", european_side["r"]) == pytest.approx(exact["rho"], rel=1e-7)
+    assert one_sided("q", european_side["q"]) == pytest.approx(exact["epsilon"], rel=1e-7)
+    assert abs(one_sided("r", -european_side["r"]) / exact["rho"] - 1) > 0.02  # the other side's slope
+
+
+def test_at_zero_rate_and_yield_the_table_is_black_scholes_mertons_and_says_one_sided(new_app):
+    at = _run(new_app, rate="0")
+    table = _table(at, "Greek").set_index("Greek")
+    for kind in ("call", "put"):
+        exact = bs.greeks(100, 100, 1.0, 0.0, 0.2, 0.0, kind)
+        for name, shown in zip(GREEKS, table[kind.capitalize()], strict=True):
+            assert shown == pytest.approx(exact[name] * bs.GREEKS[name].scale, rel=1e-12, abs=1e-15), (kind, name)
+    [note] = [c.value for c in at.caption if c.value.startswith("American Greeks of the sidebar engine")]
+    assert "The call and the put equal their Black-Scholes-Merton values, so their Greeks are the closed-form" in note
+    assert note.endswith(tab_pricing.ALO_ZERO_CARRY_NOTE)
+    assert "so rho and dividend rho are one-sided here: the slopes on the side where it does not." in note
+    # The cards' caption says why both equal Black-Scholes-Merton, in words that hold at a rate of zero.
+    assert any(
+        "exercising a call early never pays (it would pay the strike early and gain no dividends)" in c.value
+        for c in at.caption
+    )
+    # A rate of zero with a dividend yield: the call has a premium, the put alone is European, and nothing is
+    # one-sided.
+    at = _run(new_app, rate="0", div="2")
+    [note] = [c.value for c in at.caption if c.value.startswith("American Greeks of the sidebar engine")]
+    assert "The put equals its Black-Scholes-Merton value, so its Greeks are the closed-form ones." in note
+    assert "one-sided" not in note
+
+
+@pytest.mark.parametrize("rate", [-0.0005, -0.03])
+def test_a_bump_into_another_regime_is_replaced_by_a_one_sided_difference(rate):
+    # A call at a negative rate without dividends has one exercise boundary, but 1 bp of dividend yield lower it
+    # has two, and the engine hands it to the tree: the central difference read the tree's value as part of the
+    # slope. The dividend rho is taken on the side of the inputs, as fine one-sided differences of the engine find.
+    S, K, T, sigma = 100.0, 100.0, 1.0, 0.2
+    assert american.price_details(S, K, T, rate, sigma, -1e-4, option_type="call").fallback_reason == "double boundary"
+    assert american.price_details(S, K, T, rate, sigma, 1e-4, option_type="call").method == "alo"
+    g = american.greeks(S, K, T, rate, sigma, 0.0, option_type="call")
+    assert g.basis == "differences" and g.one_sided == ("epsilon",)
+    h = 2e-6
+    form = american.price_details(S, K, T, rate, sigma, 0.0, option_type="call").fixed_point  # held, as in greeks
+
+    def v(q: float) -> float:
+        return american.price(S, K, T, rate, sigma, q, option_type="call", fixed_point=form)
+
+    reference = (4 * v(h / 2) - 3 * v(0.0) - v(h)) / h
+    assert g["epsilon"] == pytest.approx(reference, rel=2e-6)
+    central = _differences("call", r=rate)["epsilon"]
+    assert abs(central / reference - 1) > 1e-4  # what the one-sided difference corrects
+    # Every other Greek is still the central difference.
+    for name in ("delta", "gamma", "theta", "vega", "rho"):
+        assert g[name] == pytest.approx(_differences("call", r=rate)[name], rel=1e-9), name
+
+
+def test_the_app_names_a_one_sided_greek(new_app):
+    at = _run(new_app, rate="-1")
+    [note] = [c.value for c in at.caption if c.value.startswith("American Greeks of the sidebar engine")]
+    assert (
+        "The call's dividend rho is one-sided: a bump one way would change how the option is valued (a different "
+        "exercise regime, the tree instead of the engine or the reverse, or exercise at once), so the difference is "
+        "taken on the other side alone."
+    ) in note
+    assert "The put equals its Black-Scholes-Merton value, so its Greeks are the closed-form ones." in note
+
+
+def test_an_option_exercised_at_once_has_the_greeks_of_its_exercise_value(new_app):
+    # Below its critical spot the put is worth K - S: delta -1 and the rest zero. Differences of a value close to a
+    # strike of 1e7 gave a delta of -1.00024 at a spot of 0.01.
+    for S, K in ((60.0, 100.0), (0.01, 1e7)):
+        details = american.price_details(S, K, 30 / 365, 0.05, 0.1, 0.0, option_type="put")
+        assert details.method == "alo" and details.critical_spot >= S
+        g = american.greeks(S, K, 30 / 365, 0.05, 0.1, 0.0, option_type="put")
+        assert g.basis == "exercise value"
+        assert dict(g) == {"delta": -1.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0, "rho": 0.0, "epsilon": 0.0}
+    call = american.greeks(150, 100, 1.0, 0.0, 0.2, 0.3, option_type="call")
+    assert american.price_details(150, 100, 1.0, 0.0, 0.2, 0.3, option_type="call").critical_spot <= 150
+    assert call.basis == "exercise value" and call["delta"] == 1.0 and call["gamma"] == 0.0
+    at = _run(new_app, spot="60")
+    table = _table(at, "Greek").set_index("Greek")
+    assert list(table["Put"]) == [-1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    [note] = [c.value for c in at.caption if c.value.startswith("American Greeks of the sidebar engine")]
+    assert (
+        "The put is exercised at once at this spot (at or below its critical spot), so its Greeks are those of its "
+        "exercise value K − S: delta −1, the others zero."
+    ) in note
+
+
+def test_greeks_at_extreme_moneyness_are_not_rounding_noise(new_app):
+    # A put the engine values as European (r < 0 <= q) at a spot of 0.01 against a strike of 1e7: the second
+    # difference of a value near 1e7 was rounding (a gamma of -1862.6 per $1). It now has the closed form.
+    query = {"spot": "0.01", "strike": "10000000", "days": "30", "vol": "0.1", "rate": "-5", "div": "5"}
+    engine = _table(_run(new_app, **query), "Greek").set_index("Greek")
+    closed = _table(new_app(**query).run(), "Greek").set_index("Greek")  # Black-Scholes-Merton
+    np.testing.assert_allclose(engine["Put"], closed["Put"], rtol=1e-12, atol=1e-15)
+    assert engine.loc["Gamma Γ", "Put"] >= 0.0
+
+
+def test_greeks_stay_in_range_across_extreme_inputs():
+    # 432 options from a spot over strike of 1e-9 to 1e9, at volatilities of 0.1 % and 20 %: every delta lies in
+    # [0, 1] (call) or [-1, 0] (put) and every gamma is non-negative. Central differences throughout put 36 of them
+    # out of range, all at a spot over strike beyond 1e3 or 1e-3.
+    grid = itertools.product(
+        [0.01, 100.0, 1e7], [0.01, 100.0, 1e7], [1 / 365, 1.0], [-0.05, 0.0, 0.05], [0.001, 0.2], [0.0, 0.05]
+    )
+    for S, K, T, r, sigma, q in grid:
+        for kind, (lo, hi) in (("call", (0.0, 1.0)), ("put", (-1.0, 0.0))):
+            g = american.greeks(S, K, T, r, sigma, q, option_type=kind)
+            assert lo <= g["delta"] <= hi and g["gamma"] >= 0.0, (S, K, T, r, sigma, q, kind, dict(g))
 
 
 def test_the_american_put_greeks_agree_with_a_fine_tree():
@@ -401,6 +550,32 @@ def test_iv_tab_inverts_the_engine(new_app, kind):
     assert american.price(100, 100, 1.0, 0.05, solved, 0.02, option_type=kind) == pytest.approx(9.0, abs=1e-9)
 
 
+def test_iv_curve_is_the_engines_value_at_41_volatilities(new_app):
+    at = _run(new_app, tab="IV", div="2")
+    _iv_type(at).set_value("call").run()
+    _ok(at)
+    model = next(t for t in _chart(at, "iv_curve")["data"] if t["name"] == "Model value")
+    vols = _values(model["x"]) / 100
+    # 41 points, as on the tree's curve, from 0.5 % to the largest of 2.5 times the implied volatility (20 %),
+    # twice the sidebar's and 60 %.
+    np.testing.assert_allclose(vols, np.linspace(0.005, 0.6, 41), rtol=1e-12)
+    engine = american.price(100, 100, 1.0, 0.05, vols, 0.02, option_type="call")
+    np.testing.assert_allclose(_values(model["y"]), engine, rtol=1e-12)
+
+
+@pytest.mark.slow  # about 9 s: each tree value of the fallback takes about 0.1 s
+def test_iv_tab_inverts_the_tree_fallback_at_the_engines_corner(new_app):
+    # Where the engine hands the call to the tree (500 % volatility over five years at a rate of -1 %), the IV tab
+    # inverts the tree values: the quote at the sidebar volatility gives it back, and the curve has 41 points.
+    at = _run(new_app, tab="IV", rate="-1", vol="500", days="1825")
+    _iv_type(at).set_value("call").run()
+    _ok(at)
+    assert american.price_details(100, 100, 5.0, -0.01, 5.0, 0.0, option_type="call").fallback
+    assert _metrics(at)["Implied volatility"].value == "500.000%"
+    model = next(t for t in _chart(at, "iv_curve")["data"] if t["name"] == "Model value")
+    assert _values(model["x"]).size == 41
+
+
 def test_iv_tab_checks_the_bounds_first_with_the_trees_messages(new_app):
     at = _run(new_app, tab="IV", strike="120")
     _iv_type(at).set_value("put").run()
@@ -450,3 +625,9 @@ def test_the_methodology_describes_the_engine_with_its_references():
                       "QdFpAmericanEngine"):  # fmt: skip
         assert reference in pricing
     assert re.search(r"\*accurate\* is within \\\$0\.000005", pricing)
+    # The Greeks: their bumps with numbers and units kept together, and the one-sided slopes at r = q = 0.
+    engine = pricing[pricing.index("### American engine") :]
+    assert "±0.01%" in engine and "±0.01 %" not in engine
+    assert "±0.01\xa0vol point" in engine and "±1\xa0bp" in engine
+    assert "At a rate and dividend yield of zero both options are" in engine
+    assert "so their rho and dividend rho are one-sided" in engine

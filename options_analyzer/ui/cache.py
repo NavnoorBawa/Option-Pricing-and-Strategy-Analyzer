@@ -18,13 +18,20 @@ DEFAULT_TREE = (501, "lr")
 KINDS = ("call", "put")
 
 
-@st.cache_data(show_spinner=False, max_entries=64)
+@st.cache_data(show_spinner=False, max_entries=128)
+def alo_option(S, K, T, r, sigma, q, option_type, scheme) -> tuple[american.AmericanPrice, american.AmericanGreeks]:
+    """The American engine on one option: ``american.price_details`` and ``american.greeks``."""
+    return (
+        american.price_details(S, K, T, r, sigma, q, option_type=option_type, scheme=scheme),
+        american.greeks(S, K, T, r, sigma, q, option_type=option_type, scheme=scheme),
+    )
+
+
 def alo_results(S, K, T, r, sigma, q, scheme) -> tuple[dict, dict]:
-    """The American engine on the call and the put: ``(details, greeks)``, each keyed by option type, with
-    ``american.price_details`` and the finite-difference ``american.greeks``."""
-    details = {kind: american.price_details(S, K, T, r, sigma, q, option_type=kind, scheme=scheme) for kind in KINDS}
-    greeks = {kind: american.greeks(S, K, T, r, sigma, q, option_type=kind, scheme=scheme) for kind in KINDS}
-    return details, greeks
+    """The American engine on the call and the put: ``(details, greeks)``, each keyed by option type (see
+    :func:`alo_option`)."""
+    results = {kind: alo_option(S, K, T, r, sigma, q, kind, scheme) for kind in KINDS}
+    return {kind: res[0] for kind, res in results.items()}, {kind: res[1] for kind, res in results.items()}
 
 
 @st.cache_data(show_spinner=False, max_entries=32)
@@ -44,7 +51,9 @@ def alo_iv(price, S, K, T, r, q, option_type, scheme) -> float:
 
 @st.cache_data(show_spinner=False, max_entries=16)
 def alo_curve(S, K, T, r, q, option_type, max_vol, scheme) -> tuple[np.ndarray, np.ndarray]:
-    vols = np.linspace(0.005, max_vol, 101)
+    """The engine's value at the 41 volatilities of the tree's curve (:func:`american_curve`): a smooth curve
+    needs no more, and where the engine falls back to the tree each point costs two trees (about 0.1 s)."""
+    vols = np.linspace(0.005, max_vol, 41)
 
     def value(vol: float) -> float:
         try:

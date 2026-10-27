@@ -208,10 +208,37 @@ the time to expiry are moved by $\pm 10^{-4}$ of their values, the volatility, t
 $\pm 10^{-4}$ (`GREEK_BUMPS`). Every bump is priced with the scheme that solved the option (after any hand-over) and
 the form of its fixed-point equation, held fixed, so that no difference straddles one of the jumps under Limits; a
 plain difference with `fast` at $\Lambda$ just below 5 (a one-year put, $r = 10\%$, $\sigma = 4.475\%$) misreads
-vega by 0.9 %. Held fixed, the engine is smooth in every input: at $S = K = 100$, one year, $r = 5\%$,
-$\sigma = 20\%$ the put's Greeks agree with bumps ten times smaller to $4 \times 10^{-7}$ of each Greek, and a call
-without dividends, which is European, gets the closed-form Greeks to $3 \times 10^{-8}$. Where the option falls
-back to the tree, the differences are those of tree values, which are far less smooth.
+vega by 0.9 %. Held fixed, the engine is smooth in every input within a regime: at $S = K = 100$, one year,
+$r = 5\%$, $\sigma = 20\%$ the put's Greeks agree with bumps ten times smaller to $4 \times 10^{-7}$ of each Greek.
+Where the option falls back to the tree, the differences are those of tree values, which are far less smooth.
+
+The value is not smooth where the way the option is valued changes, so no difference is taken across such a line:
+
+* An option valued as European gets the closed-form Black-Scholes-Merton Greeks. At $r = q = 0$ both the call
+  and the put are European, but a 1 bp move one way makes early exercise pay (a lower rate or a higher yield for
+  the call, a higher rate or a lower yield for the put), and the value has a kink: the premium grows about in
+  proportion to the move, since the boundary at expiry is the strike. A central difference there averages two
+  slopes and missed rho and dividend rho by about 3 % at the money (6 to 7 % for a call at $S = 120$); the closed
+  form is the slope on the European side. It is also free of the rounding of differences of a value as large as
+  the strike: at $S = 0.01$, $K = 10^7$, 30 days, $r = -5\%$, $q = 5\%$, $\sigma = 0.1\%$ a central difference
+  gave the put a gamma of $-1863$.
+* An option exercised at once, at or beyond its critical spot, is worth its intrinsic value nearby: delta is
+  $\pm 1$ and the other Greeks are zero. Differences would be rounding there too (a put delta of $-1.00024$ at
+  $S = 0.01$, $K = 10^7$, 30 days, $r = 5\%$, $\sigma = 10\%$).
+* Where one bump changes the method (the regime, a fallback, or exercise at once), the derivative is taken on the
+  other side alone: one-sided differences over half the bump and over a quarter of it, extrapolated (Richardson;
+  third order for the slope, second for the curvature). A call at a negative rate without dividends is one: at
+  $q - 10^{-4}$ it lies in the double-boundary regime and is valued on the tree. Its dividend rho at $r = -3\%$ is
+  $-36.81271$ where the central difference gave $-36.8199$; at $r = -0.05\%$, where the value bends sharply near
+  the edge, it is $-49.15829$ against $-49.15836$ from one-sided differences fifty times finer, where the central
+  difference gave $-49.1644$.
+
+`AmericanGreeks.basis` and `AmericanGreeks.one_sided` say which applied; the app states them under its Greeks
+table. Over 4,320 options (spots and strikes from 0.01 to $10^7$, expiries from a day to ten years, rates from
+$-5\%$ to 50 %, volatilities from 0.1 % to 500 %, dividend yields from 0 to 50 %, calls and puts), no delta
+leaves $[0, 1]$ (call) or $[-1, 0]$ (put) by more than $5 \times 10^{-10}$, and no gamma is below $-10^{-6}$ but
+one of $-3.5 \times 10^{-6}$, from the tree values of a fallback. Central differences throughout broke one of these
+limits 343 times (deltas down to $-1.00024$, gammas down to $-3725$).
 
 `implied_vol.implied_volatility_alo` inverts `price` with Brent's method. The quote is first checked against the
 American bounds, with the messages of the tree solver; since the engine values $\sigma = 0$ exactly, the bracket

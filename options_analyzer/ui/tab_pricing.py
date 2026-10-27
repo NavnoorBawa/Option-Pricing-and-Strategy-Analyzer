@@ -30,7 +30,10 @@ HEAVY_TAIL_NOTE = (
 #: dividend yield is never negative, so that is a call without dividends at a rate of at least zero, and a put at a
 #: rate of at most zero.
 NEVER_EARLY = {
-    "call": "with no dividend yield, exercising a call early never pays (it would give up interest on the strike)",
+    "call": (
+        "with no dividend yield, exercising a call early never pays (it would pay the strike early and gain no "
+        "dividends)"
+    ),
     "put": "at a rate of zero or below, exercising a put early never pays (the strike would earn no interest)",
 }
 #: Why the American engine hands an option to the tree (``AmericanPrice.fallback_reason``).
@@ -60,7 +63,7 @@ class Prices:
     mc: dict | None = None
     #: Values on the same tree with European exercise (American tree only).
     european_tree: dict | None = None
-    #: The American engine's results (``american.price_details``) and finite-difference Greeks, by option type.
+    #: The American engine's results (``american.price_details``) and Greeks (``american.greeks``), by option type.
     alo: dict | None = None
     alo_greeks: dict | None = None
 
@@ -288,7 +291,7 @@ def _greeks_table(inputs: Inputs, higher_order: bool) -> pd.DataFrame:
 
 
 def _alo_greeks_table(prices: Prices) -> pd.DataFrame:
-    """The American engine's Greeks (finite differences, ``american.greeks``) in the layout and units of
+    """The American engine's Greeks (``american.greeks``) in the layout and units of
     :func:`_greeks_table`."""
     rows = []
     for name in ALO_GREEKS:
@@ -309,10 +312,57 @@ def _alo_greeks_table(prices: Prices) -> pd.DataFrame:
 #: How the Greeks table under the American engine is computed (american.GREEK_BUMPS).
 ALO_GREEKS_NOTE = (
     "American Greeks of the sidebar engine, in the units shown (theta per calendar day of elapsed time): central "
-    "finite differences of its value with the spot and the time to expiry moved by ±0.01%, the volatility by ±0.01 "
-    "vol pt and the rate and dividend yield by ±1 bp, the scheme and the boundary equation held fixed. Second- and "
-    "third-order Greeks are shown for Black-Scholes-Merton only."
+    "finite differences of its value with the spot and the time to expiry moved by ±0.01%, the volatility by "
+    "±0.01\xa0vol pt and the rate and dividend yield by ±1\xa0bp, the scheme and the boundary equation held fixed. "
+    "Second- and third-order Greeks are shown for Black-Scholes-Merton only."
 )
+#: At a rate and dividend yield of zero both options are European, at the edge of early exercise (american.greeks).
+ALO_ZERO_CARRY_NOTE = (
+    "At a rate and dividend yield of zero, a 1\xa0bp move one way makes early exercise pay (a lower rate or a higher "
+    "dividend yield for the call, a higher rate or a lower dividend yield for the put), so rho and dividend rho are "
+    "one-sided here: the slopes on the side where it does not."
+)
+#: The Greeks as the caption names them.
+_GREEK_WORDS = {"epsilon": "dividend rho"}
+
+
+def _join(words: list[str]) -> str:
+    return " and ".join(words) if len(words) < 3 else ", ".join(words[:-1]) + " and " + words[-1]
+
+
+def _alo_greeks_note(inputs: Inputs, prices: Prices) -> str:
+    """The caption of the Greeks table under the American engine: how they are computed, and for which option
+    each exception holds (``AmericanGreeks.basis`` and ``one_sided``, and the fallback to the tree)."""
+    greeks, details = prices.alo_greeks, prices.alo
+    notes = [ALO_GREEKS_NOTE]
+    closed = [kind for kind in cache.KINDS if greeks[kind].basis == "closed form"]
+    if len(closed) == 2:
+        notes.append(
+            "The call and the put equal their Black-Scholes-Merton values, so their Greeks are the closed-form ones."
+        )
+    elif closed:
+        notes.append(f"The {closed[0]} equals its Black-Scholes-Merton value, so its Greeks are the closed-form ones.")
+    if len(closed) == 2 and inputs.rate == 0.0 and inputs.dividend_yield == 0.0:
+        notes.append(ALO_ZERO_CARRY_NOTE)
+    for kind in cache.KINDS:
+        if greeks[kind].basis == "exercise value":
+            side, payoff, delta = ("above", "S − K", "1") if kind == "call" else ("below", "K − S", "−1")
+            notes.append(
+                f"The {kind} is exercised at once at this spot (at or {side} its critical spot), so its Greeks are "
+                f"those of its exercise value {payoff}: delta {delta}, the others zero."
+            )
+        if sided := [_GREEK_WORDS.get(name, name) for name in greeks[kind].one_sided]:
+            notes.append(
+                f"The {kind}'s {_join(sided)} {'is' if len(sided) == 1 else 'are'} one-sided: a bump one way would "
+                "change how the option is valued (a different exercise regime, the tree instead of the engine or "
+                "the reverse, or exercise at once), so the difference is taken on the other side alone."
+            )
+        if details[kind].fallback:
+            notes.append(
+                f"The {kind}'s are differences of tree values (see the warning above), far less smooth than the "
+                "engine's."
+            )
+    return " ".join(notes)
 
 
 def _sensitivity(inputs: Inputs) -> None:
@@ -696,11 +746,7 @@ def render(inputs: Inputs, prices: Prices) -> None:
     st.subheader("Greeks")
     if inputs.model.kind == "alo":
         table = _alo_greeks_table(prices)
-        fallback = [kind for kind, res in prices.alo.items() if res.fallback]
-        note = ALO_GREEKS_NOTE + "".join(
-            f" The {kind}'s are differences of tree values (see the warning above), far less smooth than the engine's."
-            for kind in fallback
-        )
+        note = _alo_greeks_note(inputs, prices)
     else:
         higher = st.toggle(
             "Show second- and third-order Greeks", value=False, key="higher_greeks", persist_state="session"
