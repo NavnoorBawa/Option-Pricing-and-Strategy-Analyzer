@@ -4,6 +4,7 @@ Where the project stands and what remains before it meets the standard of an int
 top-tier trading firm. Item codes (for example `SF-3`) refer to the detailed plan with acceptance tests, kept in the
 git history: `git show ee47346:docs/roadmap/plan-items.md`; the per-tab interface specification is at
 `git show ee47346:docs/design/ui-spec.md` (its Appendix B records decisions already taken).
+[docs/improvement-guide.md](docs/improvement-guide.md) explains what matters most, why, and how to work on it.
 
 ## The bar
 
