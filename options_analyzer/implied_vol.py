@@ -19,7 +19,8 @@ vectorised pass, with NaN and a reason for each rejected quote.
 
 :func:`implied_volatility_american` inverts a binomial tree (Leisen-Reimer by
 default) for American quotes (listed single-stock options), with American
-bounds.
+bounds; :func:`implied_volatility_alo` inverts the Andersen-Lake-Offengenden
+engine (:mod:`options_analyzer.american`) with the same bounds.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ import numpy as np
 from numpy.typing import ArrayLike
 from scipy.optimize import brentq
 
-from . import binomial
+from . import american, binomial
 from . import black_scholes as bs
 from . import lets_be_rational as lbr
 
@@ -41,6 +42,7 @@ __all__ = [
     "ImpliedVolError",
     "american_bounds",
     "implied_volatility",
+    "implied_volatility_alo",
     "implied_volatility_american",
     "implied_volatility_batch",
     "lowest_tree_volatility",
@@ -473,19 +475,8 @@ def implied_volatility_american(
     (which already includes the value of optimal early exercise). On a CRR
     tree the search starts at :func:`lowest_tree_volatility`.
     """
-    price, S, K, T, r, q = _check_contract(price, S, K, T, r, q)
-    lower, upper = american_bounds(S, K, T, r, q, option_type)
+    price, S, K, T, r, q = _check_american_quote(price, S, K, T, r, q, option_type)
     scale = max(S, K)
-    if price < lower - 1e-12 * scale:
-        raise ImpliedVolError(
-            f"price {price:.6g} is below the American lower bound {lower:.6g} (immediate exercise value); "
-            "no volatility can produce it",
-            "below_lower_bound",
-        )
-    if price >= upper:
-        raise ImpliedVolError(
-            f"price {price:.6g} is at or above the American upper bound {upper:.6g}", "at_or_above_upper_bound"
-        )
 
     def objective(vol: float) -> float:
         return binomial.price(S, K, T, r, vol, q, option_type, steps, american=True, method=method) - price
@@ -503,10 +494,73 @@ def implied_volatility_american(
                 f"a {steps}-step CRR tree can represent; use more steps or the Leisen-Reimer tree",
                 "below_tree_floor",
             )
+        raise _below_zero_volatility(price, price + floor)
+    hi = _upper_bracket(objective)
+    return float(brentq(objective, lowest, hi, xtol=tol, maxiter=200))
+
+
+def implied_volatility_alo(
+    price: float,
+    S: float,
+    K: float,
+    T: float,
+    r: float,
+    q: float = 0.0,
+    option_type: str = "call",
+    *,
+    scheme: str = "accurate",
+    tol: float = 1e-10,
+) -> float:
+    """Volatility that reproduces an American ``price`` with the Andersen-Lake-Offengenden engine
+    (:func:`american.price` with the given ``scheme``).
+
+    The quote is checked against the American bounds first, with the messages of
+    :func:`implied_volatility_american`. The engine values zero volatility exactly (the best deterministic
+    exercise date), so the bracket starts at 0; a quote at that value is reported as zero volatility, and one
+    below it is rejected. Brent's method then solves on ``[0, hi]``, ``hi`` the first of 1, 2, 4, ... up to
+    :data:`MAX_VOL` where the value reaches the quote.
+
+    Examples
+    --------
+    >>> from options_analyzer import american
+    >>> quote = american.price(100, 100, 1.0, 0.05, 0.2, 0.0, option_type="put")
+    >>> round(implied_volatility_alo(quote, 100, 100, 1.0, 0.05, 0.0, "put"), 10)
+    0.2
+    """
+    price, S, K, T, r, q = _check_american_quote(price, S, K, T, r, q, option_type)
+
+    def objective(vol: float) -> float:
+        return float(american.price(S, K, T, r, vol, q, option_type=option_type, scheme=scheme)) - price
+
+    floor = objective(0.0)
+    if floor >= 0.0:
+        if floor <= 1e-10 * max(S, K):
+            return 0.0  # the zero-volatility value, as in implied_volatility_american
+        raise _below_zero_volatility(price, price + floor)
+    hi = _upper_bracket(objective)
+    return float(brentq(objective, 0.0, hi, xtol=tol, rtol=4 * np.finfo(float).eps, maxiter=200))
+
+
+def _check_american_quote(price, S, K, T, r, q, option_type: str) -> tuple[float, float, float, float, float, float]:
+    """Raise the :class:`ImpliedVolError` of a quote outside the American bounds (:func:`american_bounds`); return
+    the inputs as floats."""
+    price, S, K, T, r, q = _check_contract(price, S, K, T, r, q)
+    lower, upper = american_bounds(S, K, T, r, q, option_type)
+    if price < lower - 1e-12 * max(S, K):
         raise ImpliedVolError(
-            f"price {price:.6g} is below the zero-volatility American value {price + floor:.6g}; "
+            f"price {price:.6g} is below the American lower bound {lower:.6g} (immediate exercise value); "
             "no volatility can produce it",
             "below_lower_bound",
         )
-    hi = _upper_bracket(objective)
-    return float(brentq(objective, lowest, hi, xtol=tol, maxiter=200))
+    if price >= upper:
+        raise ImpliedVolError(
+            f"price {price:.6g} is at or above the American upper bound {upper:.6g}", "at_or_above_upper_bound"
+        )
+    return price, S, K, T, r, q
+
+
+def _below_zero_volatility(price: float, floor: float) -> ImpliedVolError:
+    return ImpliedVolError(
+        f"price {price:.6g} is below the zero-volatility American value {floor:.6g}; no volatility can produce it",
+        "below_lower_bound",
+    )

@@ -10,11 +10,49 @@ from __future__ import annotations
 import numpy as np
 import streamlit as st
 
-from .. import binomial, implied_vol, monte_carlo, risk, vol_surface
+from .. import american, binomial, implied_vol, monte_carlo, risk, vol_surface
 from ..strategies import Market, Strategy
 
-#: Tree used for American quotes when the sidebar model is not a binomial tree.
+#: Tree used for American quotes when the sidebar model is neither a binomial tree nor the American engine.
 DEFAULT_TREE = (501, "lr")
+KINDS = ("call", "put")
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def alo_results(S, K, T, r, sigma, q, scheme) -> tuple[dict, dict]:
+    """The American engine on the call and the put: ``(details, greeks)``, each keyed by option type, with
+    ``american.price_details`` and the finite-difference ``american.greeks``."""
+    details = {kind: american.price_details(S, K, T, r, sigma, q, option_type=kind, scheme=scheme) for kind in KINDS}
+    greeks = {kind: american.greeks(S, K, T, r, sigma, q, option_type=kind, scheme=scheme) for kind in KINDS}
+    return details, greeks
+
+
+@st.cache_data(show_spinner=False, max_entries=32)
+def alo_boundary(K, T, r, sigma, q, option_type, scheme) -> tuple[np.ndarray, np.ndarray]:
+    return american.exercise_boundary(K, T, r, sigma, q, option_type=option_type, scheme=scheme)
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def alo_value(S, K, T, r, sigma, q, option_type, scheme) -> float:
+    return float(american.price(S, K, T, r, sigma, q, option_type=option_type, scheme=scheme))
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def alo_iv(price, S, K, T, r, q, option_type, scheme) -> float:
+    return implied_vol.implied_volatility_alo(price, S, K, T, r, q, option_type, scheme=scheme)
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def alo_curve(S, K, T, r, q, option_type, max_vol, scheme) -> tuple[np.ndarray, np.ndarray]:
+    vols = np.linspace(0.005, max_vol, 101)
+
+    def value(vol: float) -> float:
+        try:
+            return float(american.price(S, K, T, r, float(vol), q, option_type=option_type, scheme=scheme))
+        except ValueError:  # the fallback tree has no arbitrage-free lattice here: leave a gap in the curve
+            return np.nan
+
+    return vols, np.array([value(v) for v in vols])
 
 
 @st.cache_data(show_spinner=False, max_entries=64)

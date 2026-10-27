@@ -11,6 +11,7 @@ from . import header, tab_iv, tab_methodology, tab_pricing, tab_risk, tab_strate
 from .components import link_match
 from .format import md_code
 from .inputs import sidebar
+from .model_config import ALO_SCHEMES, MODEL_ALIASES, MODELS, ModelConfig
 
 REPO_URL = "https://github.com/NavnoorBawa/Option-Pricing-and-Strategy-Analyzer"
 #: The tabs, in order. The open tab is bound to the URL by its label, verbatim (``?tab=Risk``; no parameter for the
@@ -47,7 +48,9 @@ def _read_link() -> None:
     Streamlit gives a widget that is bound to the URL its parameter only when that is exactly one of its options,
     and drops it otherwise: ``?tab=risk`` would open the first tab. So before any widget reads the URL, the tab is
     matched without case or punctuation, also by its longer names (:data:`TAB_ALIASES`), and a repeated ``tab`` gives
-    its last value, as ``st.query_params`` reads it. The short form ``strategy=<template name>`` becomes the two
+    its last value, as ``st.query_params`` reads it. The pricing model and the American engine's scheme are matched
+    the same way, the model also by the header badge's short names (:data:`.model_config.MODEL_ALIASES`, so
+    ``?model=ALO`` works). The short form ``strategy=<template name>`` becomes the two
     parameters of the Strategy tab's menus (:func:`.tab_strategy.link_selection`). A value that matches nothing is
     dropped, with a note. The new link replaces the old one in one step (one browser history entry, as Streamlit's
     own corrections of a link make) and takes effect in a rerun, since a widget reads the URL its run started with.
@@ -71,6 +74,21 @@ def _read_link() -> None:
             )
         if tab not in (None, TABS[0]):  # the first tab has no parameter
             params["tab"] = [tab]
+    # The pricing model by its label or the badge's short name (?model=ALO), and the American engine's scheme.
+    for key, names, aliases, default in (
+        ("model", MODELS.values(), MODEL_ALIASES, MODELS["bsm"]),
+        ("scheme", ALO_SCHEMES.values(), {}, f"the {ModelConfig().scheme} scheme"),
+    ):
+        if key in params:
+            value = params.pop(key)[-1]
+            name = link_match(value, names, aliases=aliases)
+            if name is not None:
+                params[key] = [name]
+            elif value.strip():
+                what = "pricing model" if key == "model" else key
+                notes.append(
+                    f"This link asks for a {what} named {_shown(value)}, which does not exist, so {default} is used."
+                )
     if "strategy" in params:
         name = params.pop("strategy")[-1]
         selection = tab_strategy.link_selection(name)

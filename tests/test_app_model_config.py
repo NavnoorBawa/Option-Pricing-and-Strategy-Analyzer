@@ -110,4 +110,5 @@ def test_every_model_has_a_sidebar_label():
         "bsm": "Black-Scholes-Merton",
         "binomial": "Binomial tree",
         "monte_carlo": "Monte Carlo",
+        "alo": "American (ALO)",
     }

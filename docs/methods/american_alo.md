@@ -201,6 +201,22 @@ not exactly monotone in $\tau$ (see Limits). Inputs at the edges of the double r
 expiries down to $5 \times 10^{-324}$ years, $rT$ and $|q|T$ beyond 709, volatilities of 5,000 %) stay finite,
 quiet and within the bounds.
 
+## Greeks and implied volatility
+
+`greeks` returns delta, gamma, theta, vega, rho and dividend rho by central differences of `price`: the spot and
+the time to expiry are moved by $\pm 10^{-4}$ of their values, the volatility, the rate and the dividend yield by
+$\pm 10^{-4}$ (`GREEK_BUMPS`). Every bump is priced with the scheme that solved the option (after any hand-over) and
+the form of its fixed-point equation, held fixed, so that no difference straddles one of the jumps under Limits; a
+plain difference with `fast` at $\Lambda$ just below 5 (a one-year put, $r = 10\%$, $\sigma = 4.475\%$) misreads
+vega by 0.9 %. Held fixed, the engine is smooth in every input: at $S = K = 100$, one year, $r = 5\%$,
+$\sigma = 20\%$ the put's Greeks agree with bumps ten times smaller to $4 \times 10^{-7}$ of each Greek, and a call
+without dividends, which is European, gets the closed-form Greeks to $3 \times 10^{-8}$. Where the option falls
+back to the tree, the differences are those of tree values, which are far less smooth.
+
+`implied_vol.implied_volatility_alo` inverts `price` with Brent's method. The quote is first checked against the
+American bounds, with the messages of the tree solver; since the engine values $\sigma = 0$ exactly, the bracket
+starts there, and a quote at the zero-volatility value is reported as zero volatility.
+
 ## Speed
 
 Median wall-clock times on the development machine (one CPU core, NumPy), with the boundary cache cleared:

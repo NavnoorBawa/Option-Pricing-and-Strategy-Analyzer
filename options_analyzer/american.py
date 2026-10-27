@@ -75,6 +75,7 @@ The method, its error and its limits are written up in ``docs/methods/american_a
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import math
 from collections.abc import Sequence
@@ -89,11 +90,13 @@ from . import binomial
 from . import black_scholes as bs
 
 __all__ = [
+    "GREEK_BUMPS",
     "SCHEMES",
     "AmericanPrice",
     "Scheme",
     "exercise_boundary",
     "exercise_regime",
+    "greeks",
     "price",
     "price_details",
 ]
@@ -967,3 +970,78 @@ def exercise_boundary(
         )
     b = _boundary_at(h, 2.0 * np.sqrt(times / T) - 1.0, solver.n, _put_x(put_r, put_q))
     return times, K / b if phi > 0 else K * b
+
+
+# ------------------------------------------------------------------------------------------------- Greeks
+
+#: Bumps of :func:`greeks`: spot and time to expiry relative to their values; volatility, rate and dividend yield
+#: absolute (decimals). With its scheme and the form of its boundary equation held fixed, the engine is smooth in
+#: every input, so central differences this small are stable: at S = K = 100, one year, r = 5 % and sigma = 20 %
+#: the put's Greeks agree with bumps ten times smaller to 4e-7 of each Greek (and with bumps ten times larger to
+#: 1.4e-5), and a call without dividends, which is European, gets the closed-form Greeks to 3e-8.
+GREEK_BUMPS = {"spot": 1e-4, "expiry": 1e-4, "volatility": 1e-4, "rate": 1e-4}
+
+
+def greeks(
+    S: float,
+    K: float,
+    T: float,
+    r: float,
+    sigma: float,
+    q: float = 0.0,
+    *,
+    option_type: str = "call",
+    scheme: str | Scheme = "accurate",
+) -> dict[str, float]:
+    """First-order Greeks of an American option by central finite differences of :func:`price`.
+
+    Parameters are those of :func:`price_details`, as scalars, with ``S``, ``K``, ``T`` and ``sigma`` positive.
+    Every bumped value is priced with the scheme and the form of the boundary equation that solved the option at
+    its own inputs, held fixed (a :class:`Scheme` of one's own is never handed over), so that no difference
+    straddles a hand-over or a change of form, where the value jumps (see :func:`price`).
+
+    Returns
+    -------
+    dict
+        ``delta``, ``gamma``, ``theta``, ``vega``, ``rho`` and ``epsilon`` (dividend rho) in the raw units of
+        :func:`black_scholes.greeks`: per unit of spot, per year of calendar time (``theta = -dV/dT``) and per
+        unit (1.00 = 100 %) of volatility, rate and dividend yield; :data:`black_scholes.GREEKS` gives the display
+        scales. The bumps are :data:`GREEK_BUMPS`: ``S (1 +- 1e-4)``, ``T (1 +- 1e-4)``, ``sigma +- 1e-4`` (at
+        most half the volatility), ``r +- 1e-4`` and ``q +- 1e-4``. Where the option falls back to the tree
+        (:func:`price_details`), these are differences of tree values, which are far less smooth.
+
+    Examples
+    --------
+    A call without dividends is never exercised early, so its Greeks are Black-Scholes-Merton's:
+
+    >>> g = greeks(100, 100, 1.0, 0.05, 0.2, 0.0, option_type="call")
+    >>> round(g["delta"], 6), round(g["vega"], 5)
+    (0.636831, 37.52403)
+    >>> g = greeks(100, 100, 1.0, 0.05, 0.2, 0.0, option_type="put")
+    >>> round(g["delta"], 6), round(g["gamma"], 6), round(g["theta"] / 365, 5)
+    (-0.411059, 0.022989, -0.00613)
+    """
+    S, K, T, r, sigma, q = (float(x) for x in (S, K, T, r, sigma, q))
+    if min(S, K, T, sigma) <= 0.0:
+        raise ValueError("finite-difference Greeks need a positive spot, strike, time to expiry and volatility")
+    chosen = _scheme(scheme)
+    details = price_details(S, K, T, r, sigma, q, option_type=option_type, scheme=chosen)
+    held, form = chosen, None
+    if details.method == "alo":  # a boundary was solved: hold its scheme (after any hand-over) and its form
+        named = chosen is SCHEMES.get(chosen.name)
+        held, form = dataclasses.replace(SCHEMES[details.scheme] if named else chosen), details.fixed_point
+
+    def value(S: float = S, T: float = T, r: float = r, sigma: float = sigma, q: float = q) -> float:
+        return float(price(S, K, T, r, sigma, q, option_type=option_type, scheme=held, fixed_point=form))
+
+    h_s, h_t = GREEK_BUMPS["spot"] * S, GREEK_BUMPS["expiry"] * T
+    h_v, h_r = min(GREEK_BUMPS["volatility"], 0.5 * sigma), GREEK_BUMPS["rate"]
+    up, down = value(S=S + h_s), value(S=S - h_s)
+    return {
+        "delta": (up - down) / (2.0 * h_s),
+        "gamma": (up - 2.0 * details.value + down) / h_s**2,
+        "theta": -(value(T=T + h_t) - value(T=T - h_t)) / (2.0 * h_t),
+        "vega": (value(sigma=sigma + h_v) - value(sigma=sigma - h_v)) / (2.0 * h_v),
+        "rho": (value(r=r + h_r) - value(r=r - h_r)) / (2.0 * h_r),
+        "epsilon": (value(q=q + h_r) - value(q=q - h_r)) / (2.0 * h_r),
+    }
