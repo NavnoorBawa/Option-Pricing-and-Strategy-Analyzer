@@ -8,7 +8,7 @@ as ratios more than absolute figures.
 
 | Measure | v2.0.0 | v3.0.0 |
 | --- | --- | --- |
-| Automated tests | 3,357 | 4,953 |
+| Automated tests | 3,357 | 5,004 |
 | Implied volatility, 10,000 quotes | 7.65 s (Brent, one quote at a time) | 15 ms (vectorised Let's Be Rational) |
 | Implied volatility, one quote | 590–840 µs | 19 µs |
 | Implied-volatility accuracy | Brent root finder, no accuracy study | Within max(1e-14, 4·cond·ε) in volatility on all 66,738 quotes with time value, out of 97,086 cases priced at 60 digits with mpmath (worst 0.27 of that tolerance) |

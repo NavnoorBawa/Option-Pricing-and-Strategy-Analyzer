@@ -179,7 +179,7 @@ docs/                       Scorecard, method notes, data policy, screenshots
 
 ```bash
 pip install -r requirements-dev.txt     # app dependencies plus pinned test and lint tools
-pytest -n auto --dist loadfile           # 4,800+ tests in parallel
+pytest -n auto --dist loadfile           # 5,000 tests in parallel
 pip install -r requirements-oracle.txt && pytest -m oracle   # the QuantLib, Let's Be Rational and mpmath oracles
 ruff check . && ruff format --check .
 ```
