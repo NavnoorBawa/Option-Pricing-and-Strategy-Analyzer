@@ -24,6 +24,7 @@ _TREE_LIMIT = (
     "The sidebar's binomial tree has too few steps to price this option at the volatilities needed; "
     "increase the number of steps"
 )
+_ENGINE_LIMIT = "The American engine cannot price this option at the volatilities the search needs"
 
 
 def _reset_quote() -> None:
@@ -41,10 +42,12 @@ def render(inputs: Inputs) -> None:
         inputs.volatility,
     )
     model = inputs.model
-    # American quotes are inverted on the sidebar's tree when the binomial model is selected, so the headline
-    # American price reproduces the sidebar volatility here.
+    # American quotes are inverted on the sidebar's tree when the binomial model is selected, and with the sidebar's
+    # American engine when that is, so the headline American price reproduces the sidebar volatility here.
+    alo = model.kind == "alo"
     steps, method = (model.steps, model.tree_method) if model.kind == "binomial" else cache.DEFAULT_TREE
     tree_name = f"{steps:,}-step {METHODS[method]} tree"
+    engine_name = f"the sidebar's American engine ({model.scheme} scheme)"
     st.caption(
         f"Uses the sidebar contract: S = {S:,.2f}, K = {K:,.2f}, {inputs.days} days, r = {r:.2%}, q = {q:.2%}. "
         "The quote starts at the model value at the sidebar volatility and is kept when you change the volatility "
@@ -62,7 +65,7 @@ def render(inputs: Inputs) -> None:
     )
     # Follow the sidebar's exercise style until the user picks one here; the choice lasts until the sidebar
     # style changes again (the key, and so the widget, changes with it).
-    sidebar_style = "American" if model.kind == "binomial" and model.american else "European"
+    sidebar_style = "American" if model.is_american else "European"
     style = c2.segmented_control(
         "Exercise",
         ["European", "American"],
@@ -71,13 +74,21 @@ def render(inputs: Inputs) -> None:
         key=current_key("iv_style_", f"iv_style_{sidebar_style.lower()}"),
         persist_state="session",
         help="Follows the sidebar's pricing model unless you choose here. European quotes are inverted with "
-        f"Black-Scholes-Merton; American quotes (listed single-stock options) on a {tree_name}"
-        + (" (the sidebar's tree)." if model.kind == "binomial" else "."),
+        "Black-Scholes-Merton; American quotes (listed single-stock options) "
+        + (
+            f"with {engine_name}."
+            if alo
+            else f"on a {tree_name}" + (" (the sidebar's tree)." if model.kind == "binomial" else ".")
+        ),
     )
     american = style == "American"
-    lowest = lowest_tree_volatility(T, r, q, steps, method) if american else 0.0
+    # The engine values zero volatility exactly; a tree has a lowest volatility it can represent.
+    lowest = 0.0 if alo or not american else lowest_tree_volatility(T, r, q, steps, method)
+    limit = _ENGINE_LIMIT if alo else _TREE_LIMIT
 
     def model_price(vol: float) -> float:
+        if american and alo:
+            return cache.alo_value(S, K, T, r, max(vol, 0.0), q, option_type, model.scheme)
         if american:
             return cache.american_value(S, K, T, r, max(vol, lowest), q, option_type, steps, method)
         return bs.price(S, K, T, r, vol, q, option_type)
@@ -85,7 +96,7 @@ def render(inputs: Inputs) -> None:
     try:
         model_value = model_price(sigma)
     except ValueError as exc:  # a short tree cannot represent the sidebar volatility
-        st.error(f"{_TREE_LIMIT} ({exc}).")
+        st.error(f"{limit} ({exc}).")
         return
     # The quote belongs to the contract: its widget key holds the contract (not the volatility or the exercise
     # style), so the typed quote survives those changes and the reset button starts a fresh widget.
@@ -112,7 +123,10 @@ def render(inputs: Inputs) -> None:
     st.caption(md(f"No-arbitrage bounds for this {style} {option_type}: {money(lower, 4)} ≤ price < {money(upper, 4)}"))
 
     try:
-        if american:
+        if american and alo:
+            with st.spinner("Inverting the American engine…"):
+                iv = cache.alo_iv(price, S, K, T, r, q, option_type, model.scheme)
+        elif american:
             with st.spinner("Inverting the binomial tree…"):
                 iv = cache.american_iv(price, S, K, T, r, q, option_type, steps, method)
         else:
@@ -128,7 +142,7 @@ def render(inputs: Inputs) -> None:
             st.error(f"No implied volatility exists: {exc}.")
         return
     except ValueError as exc:  # the bracket search reached a volatility the tree cannot represent
-        st.error(f"{_TREE_LIMIT} ({exc}).")
+        st.error(f"{limit} ({exc}).")
         return
 
     def safe_price(vol: float) -> float:
@@ -137,7 +151,11 @@ def render(inputs: Inputs) -> None:
         except ValueError:
             return np.nan
 
-    if american:
+    if american and alo and iv > 0.0:
+        # The engine's own vega (american.greeks): closed form for an option valued as European, otherwise a
+        # difference with its scheme held fixed.
+        vega = cache.alo_option(S, K, T, r, iv, q, option_type, model.scheme)[1]["vega"] / 100
+    elif american:
         bump = 0.005
         low_vol = max(iv - bump, lowest)
         vega = (safe_price(iv + bump) - safe_price(low_vol)) / (iv + bump - low_vol) / 100
@@ -195,7 +213,9 @@ def render(inputs: Inputs) -> None:
         )
 
     max_vol = max(2.5 * iv, 2.0 * sigma, 0.6)
-    if american:
+    if american and alo:
+        vols, curve = cache.alo_curve(S, K, T, r, q, option_type, max_vol, model.scheme)
+    elif american:
         vols, curve = cache.american_curve(S, K, T, r, q, option_type, max_vol, steps, method)
     else:
         vols = np.linspace(0.005, max_vol, 400)
@@ -227,6 +247,6 @@ def render(inputs: Inputs) -> None:
     st.caption(
         "The quote is checked against the no-arbitrage bounds first. European quotes are converted to their "
         "out-of-the-money equivalent through put-call parity and solved with Brent's method; American quotes are "
-        f"solved with Brent's method on the {tree_name}. Option value increases with volatility, so a solution is "
-        "unique whenever vega is not zero."
+        f"solved with Brent's method on {engine_name if alo else 'the ' + tree_name}. Option value increases with "
+        "volatility, so a solution is unique whenever vega is not zero."
     )

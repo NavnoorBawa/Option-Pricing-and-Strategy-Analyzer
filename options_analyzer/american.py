@@ -75,9 +75,10 @@ The method, its error and its limits are written up in ``docs/methods/american_a
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import math
-from collections.abc import Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import NamedTuple, cast
 
@@ -89,11 +90,15 @@ from . import binomial
 from . import black_scholes as bs
 
 __all__ = [
+    "GREEK_BUMPS",
+    "GREEK_NAMES",
     "SCHEMES",
+    "AmericanGreeks",
     "AmericanPrice",
     "Scheme",
     "exercise_boundary",
     "exercise_regime",
+    "greeks",
     "price",
     "price_details",
 ]
@@ -967,3 +972,169 @@ def exercise_boundary(
         )
     b = _boundary_at(h, 2.0 * np.sqrt(times / T) - 1.0, solver.n, _put_x(put_r, put_q))
     return times, K / b if phi > 0 else K * b
+
+
+# ------------------------------------------------------------------------------------------------- Greeks
+
+#: Bumps of :func:`greeks`: spot and time to expiry relative to their values; volatility, rate and dividend yield
+#: absolute (decimals). With its scheme and the form of its boundary equation held fixed, the engine is smooth in
+#: every input within a regime, so differences this small are stable: at S = K = 100, one year, r = 5 % and
+#: sigma = 20 % the put's Greeks agree with bumps ten times smaller to 4e-7 of each Greek (and with bumps ten times
+#: larger to 1.4e-5).
+GREEK_BUMPS = {"spot": 1e-4, "expiry": 1e-4, "volatility": 1e-4, "rate": 1e-4}
+#: The Greeks of :func:`greeks`, in the order of :data:`black_scholes.GREEKS`.
+GREEK_NAMES = ("delta", "gamma", "theta", "vega", "rho", "epsilon")
+
+
+@dataclass(frozen=True)
+class AmericanGreeks(Mapping[str, float]):
+    """First-order Greeks of an American option (see :func:`greeks`), read like a dict: ``g["delta"]``.
+
+    Attributes
+    ----------
+    delta, gamma, theta, vega, rho, epsilon : float
+        In the raw units of :func:`black_scholes.greeks`.
+    basis : str
+        ``"differences"`` (finite differences of :func:`price`), ``"closed form"`` (an option valued as European:
+        the Black-Scholes-Merton Greeks) or ``"exercise value"`` (an option exercised at once: the Greeks of its
+        intrinsic value, delta +-1 and the others zero).
+    one_sided : tuple of str
+        The Greeks taken from one side only, because the bump on the other side changed how the option is valued.
+    """
+
+    delta: float
+    gamma: float
+    theta: float
+    vega: float
+    rho: float
+    epsilon: float
+    basis: str = "differences"
+    one_sided: tuple[str, ...] = ()
+
+    def __getitem__(self, name: str) -> float:
+        if name not in GREEK_NAMES:
+            raise KeyError(name)
+        return cast(float, getattr(self, name))
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(GREEK_NAMES)
+
+    def __len__(self) -> int:
+        return len(GREEK_NAMES)
+
+
+def _exercised(S: float, details: AmericanPrice, phi: int) -> bool:
+    """Whether the engine exercises the option at once at spot ``S``: at or below the critical spot of a put, at
+    or above that of a call."""
+    if details.method != "alo":
+        return False
+    return phi * (S - details.critical_spot) >= 0.0
+
+
+def greeks(
+    S: float,
+    K: float,
+    T: float,
+    r: float,
+    sigma: float,
+    q: float = 0.0,
+    *,
+    option_type: str = "call",
+    scheme: str | Scheme = "accurate",
+) -> AmericanGreeks:
+    """First-order Greeks of an American option, by finite differences of :func:`price` where they are needed.
+
+    Parameters are those of :func:`price_details`, as scalars, with ``S``, ``K``, ``T`` and ``sigma`` positive.
+
+    * An option valued as European (``method == "european"``, early exercise never optimal) has the closed-form
+      Black-Scholes-Merton Greeks. At the edge of that regime (a rate and dividend yield of zero, for instance,
+      where a 1 bp move one way makes early exercise pay) they are the one-sided derivatives within it.
+    * An option exercised at once (at or beyond its critical spot) is worth its intrinsic value nearby, so its
+      delta is -1 (put) or +1 (call) and the other Greeks are zero, without the rounding of differences of a value
+      as large as the strike.
+    * Otherwise each Greek is a central difference with the bumps of :data:`GREEK_BUMPS`: ``S (1 +- 1e-4)``,
+      ``T (1 +- 1e-4)``, ``sigma +- 1e-4`` (at most half the volatility), ``r +- 1e-4`` and ``q +- 1e-4``. Every
+      bumped value is priced with the scheme and the form of the boundary equation that solved the option at its
+      own inputs, held fixed (a :class:`Scheme` of one's own is never handed over), so that no difference
+      straddles a hand-over or a change of form, where the value jumps (see :func:`price`). Where one bump
+      changes how the option is valued (its ``method``, or whether it is exercised at once), the derivative is
+      taken on the other side alone, from values at a quarter, a half and the whole bump on it, extrapolated
+      (if both bumps change it, the central difference stands): for example the dividend rho of a call at a
+      negative rate without dividends, whose lower bump lies in the double-boundary regime. Where the option
+      falls back to the tree (:func:`price_details`), the differences are those of tree values, which are far
+      less smooth.
+
+    Returns
+    -------
+    AmericanGreeks
+        ``delta``, ``gamma``, ``theta``, ``vega``, ``rho`` and ``epsilon`` (dividend rho) in the raw units of
+        :func:`black_scholes.greeks`: per unit of spot, per year of calendar time (``theta = -dV/dT``) and per
+        unit (1.00 = 100 %) of volatility, rate and dividend yield; :data:`black_scholes.GREEKS` gives the display
+        scales. ``basis`` and ``one_sided`` say how they were found.
+
+    Examples
+    --------
+    A call without dividends is never exercised early, so its Greeks are Black-Scholes-Merton's:
+
+    >>> g = greeks(100, 100, 1.0, 0.05, 0.2, 0.0, option_type="call")
+    >>> round(g["delta"], 6), round(g["vega"], 5), g.basis
+    (0.636831, 37.52403, 'closed form')
+    >>> g = greeks(100, 100, 1.0, 0.05, 0.2, 0.0, option_type="put")
+    >>> round(g["delta"], 6), round(g["gamma"], 6), round(g["theta"] / 365, 5), g.basis
+    (-0.411059, 0.022989, -0.00613, 'differences')
+    >>> greeks(100, 100, 1.0, -0.01, 0.2, 0.0, option_type="call").one_sided
+    ('epsilon',)
+    """
+    S, K, T, r, sigma, q = (float(x) for x in (S, K, T, r, sigma, q))
+    if min(S, K, T, sigma) <= 0.0:
+        raise ValueError("finite-difference Greeks need a positive spot, strike, time to expiry and volatility")
+    phi = bs.option_sign(option_type)
+    chosen = _scheme(scheme)
+    details = price_details(S, K, T, r, sigma, q, option_type=option_type, scheme=chosen)
+    if details.method == "european":
+        exact = bs.greeks(S, K, T, r, sigma, q, option_type)
+        return AmericanGreeks(*(float(exact[name]) for name in GREEK_NAMES), basis="closed form")
+    if _exercised(S, details, phi):
+        return AmericanGreeks(float(phi), 0.0, 0.0, 0.0, 0.0, 0.0, basis="exercise value")
+    held, form = chosen, None
+    if details.method == "alo":  # a boundary was solved: hold its scheme (after any hand-over) and its form
+        named = chosen is SCHEMES.get(chosen.name)
+        held, form = dataclasses.replace(SCHEMES[details.scheme] if named else chosen), details.fixed_point
+    inputs = {"S": S, "T": T, "r": r, "sigma": sigma, "q": q}
+    v0 = details.value
+
+    def value(name: str, x: float) -> tuple[float, bool]:
+        """The value with input ``name`` at ``x``, and whether it is valued as at the unbumped inputs."""
+        c = inputs | {name: x}
+        d = price_details(
+            c["S"], K, c["T"], c["r"], c["sigma"], c["q"], option_type=option_type, scheme=held, fixed_point=form
+        )
+        return d.value, d.method == details.method and not _exercised(c["S"], d, phi)
+
+    one_sided = []
+
+    def slopes(name: str, h: float) -> tuple[float, float]:
+        """First and second derivatives in input ``name`` from bumps of ``+-h``."""
+        x = inputs[name]
+        (up, up_same), (down, down_same) = value(name, x + h), value(name, x - h)
+        if up_same == down_same:  # both on the side of the inputs (or, on a sliver narrower than 2 h, neither)
+            return (up - down) / (2.0 * h), (up - 2.0 * v0 + down) / h**2
+        # One side alone: values at a quarter, a half and the whole bump on it. Near the edge of a regime the value
+        # bends sharply, so the one-sided differences over h / 2 and h / 4 (second order for the slope, first for
+        # the curvature) are extrapolated (Richardson) to third and second order.
+        side = 1.0 if up_same else -1.0
+        far = up if up_same else down
+        half, quarter = value(name, x + 0.5 * side * h)[0], value(name, x + 0.25 * side * h)[0]
+        one_sided.append(name)
+        first = (side * (4.0 * half - 3.0 * v0 - far) / h, side * (4.0 * quarter - 3.0 * v0 - half) / (0.5 * h))
+        second = ((v0 - 2.0 * half + far) / (0.5 * h) ** 2, (v0 - 2.0 * quarter + half) / (0.25 * h) ** 2)
+        return (4.0 * first[1] - first[0]) / 3.0, 2.0 * second[1] - second[0]
+
+    delta, gamma = slopes("S", GREEK_BUMPS["spot"] * S)
+    theta = 0.0 - slopes("T", GREEK_BUMPS["expiry"] * T)[0]  # theta = -dV/dT, and +0.0 where dV/dT = 0
+    vega = slopes("sigma", min(GREEK_BUMPS["volatility"], 0.5 * sigma))[0]
+    rho = slopes("r", GREEK_BUMPS["rate"])[0]
+    epsilon = slopes("q", GREEK_BUMPS["rate"])[0]
+    names = {"S": ("delta", "gamma"), "T": ("theta",), "sigma": ("vega",), "r": ("rho",), "q": ("epsilon",)}
+    sided = tuple(greek for name in one_sided for greek in names[name])
+    return AmericanGreeks(delta, gamma, theta, vega, rho, epsilon, one_sided=sided)

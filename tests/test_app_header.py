@@ -176,6 +176,7 @@ LINK_WORDS = {
     **dict.fromkeys(("spot", "strike", "days", "vol", "rate", "div"), "the market inputs"),
     "model": "the pricing model",
     **dict.fromkeys(("tree", "steps", "style", "paths", "seed", "antithetic", "control_variate"), "its settings"),
+    "scheme": "its settings",
     "tab": "the open tab",
     "strategy_category": "template",
     "strategy_<category>": "template",

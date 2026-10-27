@@ -141,9 +141,10 @@ def model_badge(model: ModelConfig) -> str:
     Returns
     -------
     str
-        ``BSM · closed form``, ``LR tree · 2,000 steps · American`` or ``MC · 1,000,000 paths · AV+CV``: a Monte
-        Carlo simulation names the variance reductions in use, which its standard error includes: antithetic
-        variates (AV) and a control variate (CV). The badge's tooltip spells the model out.
+        ``BSM · closed form``, ``LR tree · 2,000 steps · American``, ``MC · 1,000,000 paths · AV+CV`` or
+        ``ALO · accurate · American``: a Monte Carlo simulation names the variance reductions in use, which its
+        standard error includes: antithetic variates (AV) and a control variate (CV); the American engine of
+        Andersen, Lake and Offengenden (ALO) names its scheme. The badge's tooltip spells the model out.
 
     Examples
     --------
@@ -153,6 +154,8 @@ def model_badge(model: ModelConfig) -> str:
     'MC · 1,000,000 paths · AV+CV'
     >>> model_badge(ModelConfig(kind="monte_carlo", antithetic=False, control_variate=False))
     'MC · 100,000 paths'
+    >>> model_badge(ModelConfig(kind="alo", scheme="high"))
+    'ALO · high · American'
     """
     if model.kind == "binomial":
         lattice = _LATTICE.get(model.tree_method, METHODS[model.tree_method])
@@ -160,6 +163,8 @@ def model_badge(model: ModelConfig) -> str:
     if model.kind == "monte_carlo":
         reductions = "+".join(name for name, on in (("AV", model.antithetic), ("CV", model.control_variate)) if on)
         return f"MC · {model.n_paths:,} paths" + (f" · {reductions}" if reductions else "")
+    if model.kind == "alo":
+        return f"ALO · {model.scheme} · American"
     return "BSM · closed form"
 
 

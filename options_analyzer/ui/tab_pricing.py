@@ -10,6 +10,7 @@ import streamlit as st
 from scipy.special import ndtr
 
 from .. import black_scholes as bs
+from ..american import AmericanPrice
 from . import cache, charts
 from .components import card_row
 from .format import md, money, pct
@@ -24,6 +25,32 @@ _CI_FORMULA = "95% CI = price ± 1.96 SE".replace(" ", "\xa0")
 HEAVY_TAIL_NOTE = (
     "Heavy-tailed sample (large σ√T): the put is averaged directly and the call follows from put-call parity"
 )
+#: Why the American engine values an option at its European value. ``american.exercise_regime`` finds early exercise
+#: never optimal for a call with ``q <= 0`` and ``q <= r`` and for a put with ``r <= 0`` and ``r <= q``; the sidebar's
+#: dividend yield is never negative, so that is a call without dividends at a rate of at least zero, and a put at a
+#: rate of at most zero.
+NEVER_EARLY = {
+    "call": (
+        "with no dividend yield, exercising a call early never pays (it would pay the strike early and gain no "
+        "dividends)"
+    ),
+    "put": "at a rate of zero or below, exercising a put early never pays (the strike would earn no interest)",
+}
+#: Why the American engine hands an option to the tree (``AmericanPrice.fallback_reason``).
+FALLBACK_REASONS = {
+    "double boundary": "its exercise region lies between two boundaries, which the engine does not solve",
+    "not converged": "the engine's iteration for the exercise boundary did not converge at these inputs",
+}
+#: How the American engine valued an option (``AmericanPrice.method``), for the engine table.
+ALO_METHODS = {
+    "alo": "Spectral collocation",
+    "european": "European value (never exercised early)",
+    "tree": "Leisen-Reimer trees (fallback)",
+    "exact": "Closed form",
+    "intrinsic": "Intrinsic value",
+}
+#: The engine's Greeks, as the Greeks table shows them (names of ``black_scholes.GREEKS``).
+ALO_GREEKS = ("delta", "gamma", "theta", "vega", "rho", "epsilon")
 
 
 @dataclass(frozen=True)
@@ -36,6 +63,9 @@ class Prices:
     mc: dict | None = None
     #: Values on the same tree with European exercise (American tree only).
     european_tree: dict | None = None
+    #: The American engine's results (``american.price_details``) and Greeks (``american.greeks``), by option type.
+    alo: dict | None = None
+    alo_greeks: dict | None = None
 
 
 def compute_prices(inputs: Inputs) -> Prices:
@@ -79,7 +109,48 @@ def compute_prices(inputs: Inputs) -> Prices:
             for kind, res in mc.items()
         }
         return Prices(mc["call"].price, mc["put"].price, notes["call"], notes["put"], mc=mc)
+    if model.kind == "alo":
+        details, greeks = cache.alo_results(S, K, T, r, sigma, q, model.scheme)
+        notes = {kind: _alo_note(kind, res) for kind, res in details.items()}
+        return Prices(
+            details["call"].value,
+            details["put"].value,
+            notes["call"],
+            notes["put"],
+            alo=details,
+            alo_greeks=greeks,
+        )
     return Prices(bs_call, bs_put, "Closed-form European value", "Closed-form European value")
+
+
+def _alo_note(kind: str, res: AmericanPrice) -> str:
+    """The tooltip of a price card under the American engine: its early-exercise premium, or why it has none, or
+    why the engine fell back to the tree."""
+    if res.fallback:
+        return f"Valued on Leisen-Reimer trees, not by the engine: {FALLBACK_REASONS[res.fallback_reason]}"
+    if res.method == "european":
+        return f"Equals the Black-Scholes-Merton value: {NEVER_EARLY[kind]}"
+    return (
+        f"Early-exercise premium {money(res.premium, 4, signed=True)} over the European value {money(res.european, 4)}"
+    )
+
+
+def alo_fallbacks(prices: Prices) -> list[str]:
+    """Plain statements of the options the American engine handed to the tree, and why (empty when none)."""
+    notes = []
+    for kind, res in (prices.alo or {}).items():
+        if res.fallback:
+            detail = ""
+            if res.fallback_reason == "not converged":
+                detail = (
+                    f" (its last step still moved the logarithm of the boundary by {res.last_step:.2g}, where at most "
+                    "0.01 passes)"
+                )
+            notes.append(
+                f"The {kind} is valued on Leisen-Reimer trees (2,001 and 4,003 steps, extrapolated) instead of the "
+                f"American engine: {FALLBACK_REASONS[res.fallback_reason]}{detail}."
+            )
+    return notes
 
 
 def _model_card(inputs: Inputs, prices: Prices) -> tuple[str, str, str, str]:
@@ -106,6 +177,22 @@ def _model_card(inputs: Inputs, prices: Prices) -> tuple[str, str, str, str]:
             f"put {money(premium['put'], 4, signed=True)} (against the same tree with European exercise)",
             "American value minus the value on the same tree with European exercise (the larger of the call's and "
             "the put's is shown). Measured on one lattice, so the tree's discretisation error cancels.",
+        )
+    if model.kind == "alo":
+        premium = {kind: prices.alo[kind].premium for kind in ("call", "put")}
+        larger = max(premium, key=lambda kind: abs(premium[kind]))
+        never = "".join(
+            f" The {kind} equals its Black-Scholes-Merton value: {NEVER_EARLY[kind]}."
+            for kind, res in prices.alo.items()
+            if res.method == "european"
+        )
+        return (
+            "Exercise premium",
+            money(premium[larger], 4),
+            f"Early-exercise premium: call {money(premium['call'], 4, signed=True)}, "
+            f"put {money(premium['put'], 4, signed=True)} (over the closed-form European value).{never}",
+            "American value minus the closed-form Black-Scholes-Merton value of the same option with European "
+            "exercise (the larger of the call's and the put's is shown): what the right to exercise early is worth.",
         )
     if model.kind == "binomial":
         error = {kind: prices.tree[kind].price - bs.price(S, K, T, r, sigma, q, kind) for kind in ("call", "put")}
@@ -163,6 +250,8 @@ def render_price_cards(inputs: Inputs, prices: Prices) -> None:
     # The header's badge names the model, so the caption only adds what the cards do not show.
     if caption:
         st.caption(md(caption))
+    for note in alo_fallbacks(prices):
+        st.warning(note, icon=":material/warning:")
 
 
 def _european_note(inputs: Inputs) -> str:
@@ -170,10 +259,13 @@ def _european_note(inputs: Inputs) -> str:
     model = inputs.model
     if model.kind == "bsm":
         return ""
-    early = " Early exercise is ignored here." if model.kind == "binomial" and model.american else ""
+    early = " Early exercise is ignored here." if model.is_american else ""
+    used = "the price cards and the model diagnostics"
+    if model.kind == "alo":  # the engine's Greeks replace the analytical ones
+        used = "the price cards, the Greeks and the model diagnostics"
     return (
         f"Closed-form Black-Scholes-Merton values for European exercise, not the sidebar's {model.label} "
-        f"(used for the price cards and the model diagnostics).{early}"
+        f"(used for {used}).{early}"
     )
 
 
@@ -196,6 +288,81 @@ def _greeks_table(inputs: Inputs, higher_order: bool) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+def _alo_greeks_table(prices: Prices) -> pd.DataFrame:
+    """The American engine's Greeks (``american.greeks``) in the layout and units of
+    :func:`_greeks_table`."""
+    rows = []
+    for name in ALO_GREEKS:
+        info = bs.GREEKS[name]
+        rows.append(
+            {
+                "Greek": f"{info.label} {info.symbol}".strip(),
+                "Call": prices.alo_greeks["call"][name] * info.scale,
+                "Put": prices.alo_greeks["put"][name] * info.scale,
+                "Unit": info.unit,
+                "Definition": info.description,
+                "Order": info.order,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+#: How the Greeks table under the American engine is computed (american.GREEK_BUMPS).
+ALO_GREEKS_NOTE = (
+    "American Greeks of the sidebar engine, in the units shown (theta per calendar day of elapsed time): central "
+    "finite differences of its value with the spot and the time to expiry moved by ±0.01%, the volatility by "
+    "±0.01\xa0vol pt and the rate and dividend yield by ±1\xa0bp, the scheme and the boundary equation held fixed. "
+    "Second- and third-order Greeks are shown for Black-Scholes-Merton only."
+)
+#: At a rate and dividend yield of zero both options are European, at the edge of early exercise (american.greeks).
+ALO_ZERO_CARRY_NOTE = (
+    "At a rate and dividend yield of zero, a 1\xa0bp move one way makes early exercise pay (a lower rate or a higher "
+    "dividend yield for the call, a higher rate or a lower dividend yield for the put), so rho and dividend rho are "
+    "one-sided here: the slopes on the side where it does not."
+)
+#: The Greeks as the caption names them.
+_GREEK_WORDS = {"epsilon": "dividend rho"}
+
+
+def _join(words: list[str]) -> str:
+    return " and ".join(words) if len(words) < 3 else ", ".join(words[:-1]) + " and " + words[-1]
+
+
+def _alo_greeks_note(inputs: Inputs, prices: Prices) -> str:
+    """The caption of the Greeks table under the American engine: how they are computed, and for which option
+    each exception holds (``AmericanGreeks.basis`` and ``one_sided``, and the fallback to the tree)."""
+    greeks, details = prices.alo_greeks, prices.alo
+    notes = [ALO_GREEKS_NOTE]
+    closed = [kind for kind in cache.KINDS if greeks[kind].basis == "closed form"]
+    if len(closed) == 2:
+        notes.append(
+            "The call and the put equal their Black-Scholes-Merton values, so their Greeks are the closed-form ones."
+        )
+    elif closed:
+        notes.append(f"The {closed[0]} equals its Black-Scholes-Merton value, so its Greeks are the closed-form ones.")
+    if len(closed) == 2 and inputs.rate == 0.0 and inputs.dividend_yield == 0.0:
+        notes.append(ALO_ZERO_CARRY_NOTE)
+    for kind in cache.KINDS:
+        if greeks[kind].basis == "exercise value":
+            side, payoff, delta = ("above", "S − K", "1") if kind == "call" else ("below", "K − S", "−1")
+            notes.append(
+                f"The {kind} is exercised at once at this spot (at or {side} its critical spot), so its Greeks are "
+                f"those of its exercise value {payoff}: delta {delta}, the others zero."
+            )
+        if sided := [_GREEK_WORDS.get(name, name) for name in greeks[kind].one_sided]:
+            notes.append(
+                f"The {kind}'s {_join(sided)} {'is' if len(sided) == 1 else 'are'} one-sided: a bump one way would "
+                "change how the option is valued (a different exercise regime, the tree instead of the engine or "
+                "the reverse, or exercise at once), so the difference is taken on the other side alone."
+            )
+        if details[kind].fallback:
+            notes.append(
+                f"The {kind}'s are differences of tree values (see the warning above), far less smooth than the "
+                "engine's."
+            )
+    return " ".join(notes)
 
 
 def _sensitivity(inputs: Inputs) -> None:
@@ -483,22 +650,117 @@ def _monte_carlo_diagnostics(inputs: Inputs, prices: Prices) -> None:
     )
 
 
+def _alo_diagnostics(inputs: Inputs, prices: Prices) -> None:
+    """The American engine: how it valued each option, and the early-exercise boundary it solved."""
+    K, T, r, sigma, q = inputs.strike, inputs.expiry, inputs.rate, inputs.volatility, inputs.dividend_yield
+    model = inputs.model
+    st.markdown("**Engine results**")
+
+    def solved(value: float, res: AmericanPrice) -> float | None:
+        return value if res.method == "alo" and np.isfinite(value) else None
+
+    rows = [
+        {
+            "Option": kind.capitalize(),
+            "American": res.value,
+            "European": res.european,
+            "Premium": res.premium,
+            "Critical spot": solved(res.critical_spot, res),
+            "Method": ALO_METHODS.get(res.method, res.method),
+            "Scheme used": res.scheme if res.method == "alo" else None,
+            "Last step": solved(res.last_step, res),
+        }
+        for kind, res in prices.alo.items()
+    ]
+    st.dataframe(
+        pd.DataFrame(rows),
+        hide_index=True,
+        placeholder="–",
+        column_config={
+            "American": st.column_config.NumberColumn(format="%.4f"),
+            "European": st.column_config.NumberColumn(format="%.4f"),
+            "Premium": st.column_config.NumberColumn(format="%.4f"),
+            "Critical spot": st.column_config.NumberColumn(format="%.4f"),
+            "Last step": st.column_config.NumberColumn(format="%.1e"),
+        },
+    )
+    st.caption(
+        "Dollars per share. The premium is the American value minus the closed-form European value. Today the put "
+        "is exercised at or below its critical spot, the call at or above it. A stiff option (a long expiry, or "
+        "high rates or dividends at low volatility) is solved with a finer scheme than the one chosen. The last "
+        "step, the engine's convergence check, is the largest change of the logarithm of the boundary in its final "
+        "iteration; above 0.01 the option goes to the tree. A dash: not applicable to how the option was valued."
+    )
+
+    st.markdown("**Early-exercise boundary**")
+    boundaries, missing = {}, []
+    for kind, res in prices.alo.items():
+        if res.method == "alo":
+            tau, spots = cache.alo_boundary(K, T, r, sigma, q, kind, model.scheme)
+            boundaries[f"{kind.capitalize()} boundary"] = ((T - tau[::-1]) * 365, spots[::-1])
+        elif res.method == "european":
+            missing.append(f"No {kind} boundary: {NEVER_EARLY[kind]}.")
+        elif res.fallback:
+            missing.append(f"No {kind} boundary: {FALLBACK_REASONS[res.fallback_reason]}.")
+        else:
+            missing.append(f"No {kind} boundary: the {kind} is valued in closed form here.")
+    if boundaries:
+        charts.show(
+            charts.exercise_boundary_chart(boundaries, K),
+            key="exercise_boundary",
+            alt="Early-exercise boundary of the American engine: the critical spot price against days from today, "
+            "with the strike",
+        )
+        ripple = (
+            " The fast scheme's 8 nodes can make the curve ripple between them, by up to about 1% of its value (2% at "
+            "volatilities near 150%); the accurate and high schemes draw it smoothly."
+            if model.scheme == "fast"
+            else ""
+        )
+        st.caption(
+            "Exercising at once is optimal when the spot is beyond the boundary: at or below it for a put, at or "
+            "above it for a call. At expiry it ends at K·min(1, r/q) for a put and K·max(1, r/q) for a call. The "
+            f"engine's boundary at 101 dates, closest together near expiry, where it moves fastest.{ripple} "
+            + " ".join(missing)
+        )
+    else:
+        st.info(" ".join(missing))
+
+
 def _model_diagnostics(inputs: Inputs, prices: Prices) -> None:
     if inputs.model.kind == "binomial":
         _tree_diagnostics(inputs, prices)
     elif inputs.model.kind == "monte_carlo":
         _monte_carlo_diagnostics(inputs, prices)
+    elif inputs.model.kind == "alo":
+        _alo_diagnostics(inputs, prices)
     else:
         st.info(
             "Black-Scholes-Merton is exact for European options under its assumptions. Switch the sidebar model to a "
-            "binomial tree or Monte Carlo to see convergence diagnostics, early exercise and simulated paths."
+            "binomial tree, Monte Carlo or the American engine to see convergence diagnostics, early exercise and "
+            "simulated paths."
         )
 
 
 def render(inputs: Inputs, prices: Prices) -> None:
     st.subheader("Greeks")
-    higher = st.toggle("Show second- and third-order Greeks", value=False, key="higher_greeks", persist_state="session")
-    table = _greeks_table(inputs, higher)
+    if inputs.model.kind == "alo":
+        table = _alo_greeks_table(prices)
+        note = _alo_greeks_note(inputs, prices)
+    else:
+        higher = st.toggle(
+            "Show second- and third-order Greeks", value=False, key="higher_greeks", persist_state="session"
+        )
+        table = _greeks_table(inputs, higher)
+        note = (
+            "Analytical Black-Scholes-Merton Greeks for European exercise, in the units shown "
+            "(theta and the other time Greeks per calendar day of elapsed time). "
+            + (
+                "Tree Greeks for the American option, including vega and rho, are under *Model diagnostics* below."
+                if inputs.model.american and inputs.model.kind == "binomial"
+                else ""
+            )
+        )
     st.dataframe(
         table.drop(columns="Order"),
         hide_index=True,
@@ -510,15 +772,7 @@ def render(inputs: Inputs, prices: Prices) -> None:
             "Put": st.column_config.NumberColumn(format="%.6f"),
         },
     )
-    st.caption(
-        "Analytical Black-Scholes-Merton Greeks for European exercise, in the units shown "
-        "(theta and the other time Greeks per calendar day of elapsed time). "
-        + (
-            "Tree Greeks for the American option, including vega and rho, are under *Model diagnostics* below."
-            if inputs.model.american and inputs.model.kind == "binomial"
-            else ""
-        )
-    )
+    st.caption(note)
 
     st.subheader("Sensitivity explorer")
     _sensitivity(inputs)
