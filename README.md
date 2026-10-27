@@ -199,7 +199,8 @@ The public app uses synthetic data and files you upload; it never scrapes market
 - The app's expiries are whole calendar days; the library supports fractional days down to same-day expiries.
 - Transaction costs beyond a flat commission, margin and discrete dividends are not modelled.
 
-This project is for education and analysis only and is **not investment advice**. Version 2.0 was a ground-up rebuild
+[ROADMAP.md](ROADMAP.md) lists what is done and what remains. This project is for education and analysis only and is
+**not investment advice**. Version 2.0 was a ground-up rebuild
 after a full audit of the original app ([AUDIT.md](AUDIT.md)); version 3.0 is summarised in the
 [scorecard](docs/scorecard.md).
 
