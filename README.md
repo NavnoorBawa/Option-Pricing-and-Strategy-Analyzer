@@ -3,6 +3,9 @@
 [![CI](https://github.com/NavnoorBawa/Option-Pricing-and-Strategy-Analyzer/actions/workflows/ci.yml/badge.svg)](https://github.com/NavnoorBawa/Option-Pricing-and-Strategy-Analyzer/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://option-pricing-and-strategy-analyzer.streamlit.app)
+
+**Live app: <https://option-pricing-and-strategy-analyzer.streamlit.app>**
 
 An options analytics workstation built with Streamlit. It prices European and American options, shows Greeks to
 third order, builds and analyses any multi-leg strategy, stress-tests it and measures its Value-at-Risk, and turns
