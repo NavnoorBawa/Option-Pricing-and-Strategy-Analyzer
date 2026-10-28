@@ -420,22 +420,37 @@ def _prices_to_vols(
             f"the file has {len(data):,} option prices to invert; at most {MAX_PRICE_QUOTES:,} are supported, "
             "so filter the chain (for example to fewer expiries) first"
         )
-    vols, reasons = [], []
+    vols, rejected = [], []
     for price, strike, T, kind in data[["price", "strike", "maturity", "type"]].itertuples(index=False):
         try:
             vols.append(implied_volatility(price, spot, strike, T, rate, dividend_yield, kind))
         except ImpliedVolError as exc:
             vols.append(np.nan)
-            reasons.append(str(exc))
+            rejected.append(exc)
     data = data.assign(iv=vols)
-    if reasons:
+    outside = [str(exc) for exc in rejected if exc.reason in ("below_lower_bound", "at_or_above_upper_bound")]
+    if outside:
         messages.append(
-            f"Dropped {len(reasons)} price quote(s) outside the no-arbitrage bounds at spot {spot:,.2f}, "
-            f"rate {rate:.2%} and dividend yield {dividend_yield:.2%} (e.g. {reasons[0]})."
+            f"Dropped {len(outside)} price quote(s) outside the no-arbitrage bounds at spot {spot:,.2f}, "
+            f"rate {rate:.2%} and dividend yield {dividend_yield:.2%} (e.g. {outside[0]})."
         )
-    no_time_value = int((data["iv"] == 0).sum())
-    if no_time_value:
-        messages.append(f"Dropped {no_time_value} price quote(s) with no time value (zero implied vol).")
+    # In the money within 1e-12·max(S, K) of the intrinsic value the last digits of a price decide its implied vol
+    # (a 2-day call struck at 60, spot 100, rate 4 %: 0 % at its intrinsic value, 94.5 % at 1e-13 above it), so such
+    # a quote would only add noise to the fit. The prices here are positive, so an out-of-the-money one is rejected
+    # only if its time value underflows once divided by √(FK).
+    flat = [str(exc) for exc in rejected if exc.reason == "no_time_value"]
+    if flat:
+        messages.append(f"Dropped {len(flat)} price quote(s) with no time value (e.g. {flat[0]}).")
+    other = [
+        str(exc)
+        for exc in rejected
+        if exc.reason not in ("below_lower_bound", "at_or_above_upper_bound", "no_time_value")
+    ]
+    if other:  # an implied vol above the solver's cap, typically
+        messages.append(f"Dropped {len(other)} other price quote(s) without an implied vol (e.g. {other[0]}).")
+    zero_vol = int((data["iv"] == 0).sum())
+    if zero_vol:  # out of the money with so little time value that the implied vol is below 1e-12
+        messages.append(f"Dropped {zero_vol} price quote(s) whose implied vol is zero to machine precision.")
     data = data[data["iv"] > 0]
     messages.append(
         f"Inverted {len(data)} option price(s) into implied vols with Black-Scholes-Merton (European exercise)."

@@ -484,6 +484,47 @@ def test_iv_time_value_is_quote_minus_intrinsic_value(iv_app):
     assert _dollars(_metrics(iv_app)["Time value"]) == pytest.approx(put - 20.0, abs=1e-4)
 
 
+def test_iv_tab_says_when_a_quote_has_no_time_value(new_app):
+    # A 2-day call struck at 60 with the spot at 100 and no rate: at the sidebar's 20 % the model value is the
+    # intrinsic value, 40, to the last digit. The tab used to show 0 % for it (and 94 % for 40 + 1e-13); now it says
+    # the quote has no time value and shows no volatility.
+    from options_analyzer.implied_vol import implied_volatility
+    from options_analyzer.ui.format import pct
+
+    at = new_app(tab="IV", strike="60", days="2", rate="0").run()
+    _ok(at)
+    assert _quote(at).value == 40.0
+    [warning] = [w.value for w in at.warning]
+    assert warning == (
+        "No implied volatility: this quote has no time value. It is within \\$0.00000000010 (one part in 10¹² of the "
+        "larger of spot and strike) of the option's intrinsic value, the no-arbitrage lower bound, and every "
+        "volatility from zero up to some level prices the option that close to it, so none can be singled out. The "
+        "model value at the sidebar volatility is such a quote: the option is that deep in the money. For a "
+        "volatility at this strike, invert the out-of-the-money option's quote: it is all time value."
+    )
+    assert "Implied volatility" not in _metrics(at) and not at.get("plotly_chart")
+    # Half a cent of time value is a volatility (230 %).
+    _quote(at).set_value(40.005).run()
+    assert not at.exception and not at.error
+    assert _metrics(at)["Implied volatility"] == pct(implied_volatility(40.005, 100, 60, 2 / 365, 0.0), 3) == "229.932%"
+    # Out of the money, a quote of zero has no time value either.
+    next(s for s in at.segmented_control if s.key == "iv_type").set_value("put").run()
+    _quote(at).set_value(0.0).run()
+    _ok(at)
+    assert [w.value for w in at.warning] == [
+        "No implied volatility: an out-of-the-money option is worth only its time value, and a quote of \\$0.0000 "
+        "has none."
+    ]
+    # A month out the model value has time value (5.9e-5), and a typed quote at the intrinsic value has none.
+    at = new_app(tab="IV", strike="80", days="30", rate="0").run()
+    _quote(at).set_value(20.0).run()
+    _ok(at)
+    [warning] = [w.value for w in at.warning]
+    assert (
+        "of the option's intrinsic value" in warning and "This is typical deep in the money close to expiry." in warning
+    )
+
+
 def test_iv_cards_wrap_in_pairs_like_the_price_cards(iv_app):
     # The four cards sat in st.columns(4) with no room to grow: at 1,280 px "Model check" read "$10.450…" for the
     # default contract, and with a $10,000,000 underlying every dollar card lost digits even at 1,400 px.

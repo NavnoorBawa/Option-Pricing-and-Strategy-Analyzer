@@ -576,6 +576,28 @@ def test_iv_tab_inverts_the_tree_fallback_at_the_engines_corner(new_app):
     assert _values(model["x"]).size == 41
 
 
+def test_iv_tab_says_when_an_american_quote_has_no_time_value(new_app):
+    # The put struck at 100 with the spot at 60 is exercised at once at every volatility up to 38.5 %, so at the
+    # sidebar's 20 % the engine's value is the exercise value, 40: no time value to identify a volatility from. The
+    # tab used to show 0 % with a warning.
+    at = _run(new_app, tab="IV", spot="60")
+    _iv_type(at).set_value("put").run()
+    _ok(at)
+    assert _quote(at).value == 40.0
+    [warning] = [w.value for w in at.warning]
+    assert warning.startswith(
+        "No implied volatility: this quote has no time value. It is within \\$0.00000000010 (one part in 10¹² of the "
+        "larger of spot and strike) of the option's value at zero volatility (deep in the money, the value of "
+        "exercising now)"
+    )
+    assert "Implied volatility" not in _metrics(at)
+    # A cent of time value is a volatility again.
+    _quote(at).set_value(40.01).run()
+    _ok(at)
+    iv = float(_metrics(at)["Implied volatility"].value.rstrip("%")) / 100
+    assert iv == pytest.approx(implied_vol.implied_volatility_alo(40.01, 60, 100, 1.0, 0.05, 0.0, "put"), abs=5e-6)
+
+
 def test_iv_tab_checks_the_bounds_first_with_the_trees_messages(new_app):
     at = _run(new_app, tab="IV", strike="120")
     _iv_type(at).set_value("put").run()

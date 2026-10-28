@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
@@ -9,6 +11,7 @@ import streamlit as st
 from .. import black_scholes as bs
 from ..binomial import METHODS
 from ..implied_vol import (
+    TIME_VALUE_MARGIN,
     ImpliedVolError,
     american_bounds,
     implied_volatility,
@@ -29,6 +32,44 @@ _ENGINE_LIMIT = "The American engine cannot price this option at the volatilitie
 
 def _reset_quote() -> None:
     st.session_state["iv_quote_generation"] = st.session_state.get("iv_quote_generation", 0) + 1
+
+
+def _small_amount(value: float) -> str:
+    """A small positive amount in fixed point to two significant digits: ``0.00000000010`` for 1e-10.
+
+    Not in scientific notation, whose exponent needs a minus sign the app's font lacks in superscript.
+    """
+    return f"{value:.{max(0, 1 - math.floor(math.log10(value)))}f}"
+
+
+def _no_time_value_text(price: float, lower: float, scale: float, american: bool, model_quote: bool) -> str:
+    """What the tab says for a quote the solvers reject with the reason ``no_time_value``.
+
+    ``lower`` is the no-arbitrage lower bound, zero exactly when the option is worth nothing at zero volatility (out of
+    the money); ``model_quote``: the quote is the model value at the sidebar volatility.
+    """
+    if lower <= 0.0:
+        return md(
+            f"No implied volatility: an out-of-the-money option is worth only its time value, and a quote of "
+            f"{money(price, 4)} has none."
+        )
+    floor = (
+        "value at zero volatility (deep in the money, the value of exercising now)"
+        if american
+        else "intrinsic value, the no-arbitrage lower bound"
+    )
+    why = (
+        "The model value at the sidebar volatility is such a quote: the option is that deep in the money."
+        if model_quote
+        else "This is typical deep in the money close to expiry."
+    )
+    margin = _small_amount(TIME_VALUE_MARGIN * scale)
+    return md(
+        f"No implied volatility: this quote has no time value. It is within ${margin} (one part in 10¹² of the larger "
+        f"of spot and strike) of the option's {floor}, and every volatility from zero up to some level prices the "
+        f"option that close to it, so none can be singled out. {why} For a volatility at this strike, invert the "
+        "out-of-the-money option's quote: it is all time value."
+    )
 
 
 @st.fragment
@@ -132,6 +173,10 @@ def render(inputs: Inputs) -> None:
         else:
             iv = implied_volatility(price, S, K, T, r, q, option_type)
     except ImpliedVolError as exc:
+        if exc.reason == "no_time_value":
+            model_quote = abs(price - model_value) <= 1e-9 * max(S, K)
+            st.warning(_no_time_value_text(price, lower, max(S, K), american, model_quote))
+            return
         at_bound = min(abs(price - lower), abs(price - upper)) <= 1e-9 * max(S, K)
         if at_bound and abs(price - model_value) <= 1e-9 * max(S, K):
             st.info(
@@ -201,12 +246,7 @@ def render(inputs: Inputs) -> None:
             ),
         ],
     )
-    if iv == 0.0:
-        st.warning(
-            "The quote equals the option's zero-volatility value (for an American option, typically the value of "
-            "exercising now), so every volatility up to some level reproduces it and none can be singled out."
-        )
-    elif vega < 1e-4 * max(S, K):
+    if vega < 1e-4 * max(S, K):
         st.warning(
             "Vega is tiny here, so the implied volatility is poorly determined: a small change in the quote "
             "moves it a lot. This is typical for deep in- or out-of-the-money options close to expiry."
@@ -246,7 +286,7 @@ def render(inputs: Inputs) -> None:
     )
     st.caption(
         "The quote is checked against the no-arbitrage bounds first. European quotes are converted to their "
-        "out-of-the-money equivalent through put-call parity and solved with Brent's method; American quotes are "
-        f"solved with Brent's method on {engine_name if alo else 'the ' + tree_name}. Option value increases with "
-        "volatility, so a solution is unique whenever vega is not zero."
+        "out-of-the-money equivalent through put–call parity and inverted with Jäckel's Let's Be Rational; American "
+        f"quotes are solved with Brent's method on {engine_name if alo else 'the ' + tree_name}. Option value "
+        "increases with volatility, so a solution is unique whenever vega is not zero."
     )

@@ -1046,6 +1046,42 @@ def test_bid_ask_quotes_keep_the_out_of_the_money_side_and_drop_impossible_price
     assert fitted.implied_vol_at(1.0, 0.4) == pytest.approx(sigma, abs=0.005)
 
 
+def test_prices_without_time_value_or_an_implied_vol_are_counted_apart_from_those_outside_the_bounds():
+    # A 30-day chain at 25 % plus three prices without an implied vol, each for its own reason: a put below its
+    # intrinsic value, a call at its discounted intrinsic value (no time value; it used to be inverted to 0 and
+    # dropped as "zero implied vol") and a call so close to its upper bound that its vol exceeds 2,000 % (which used
+    # to be counted as outside the bounds). And a put at the forward quoted at 1e-15, out of the money and so
+    # inverted, to a vol below 1e-12, which is zero to machine precision.
+    spot, rate, t = 100.0, 0.04, 30 / 365
+    rows = []
+    for strike in np.arange(80.0, 121.0, 5.0):
+        kind = "call" if strike >= spot * np.exp(rate * t) else "put"  # out of the money
+        price = round(bs.price(spot, strike, t, rate, 0.25, 0.0, kind), 4)
+        rows.append({"Strike": strike, "Days": 30, "Type": kind, "Price": price})
+    intrinsic = spot - 82.5 * np.exp(-rate * t)
+    rows += [
+        {"Strike": 117.5, "Days": 30, "Type": "put", "Price": 1.0},
+        {"Strike": 82.5, "Days": 30, "Type": "call", "Price": intrinsic},
+        {"Strike": 150.0, "Days": 30, "Type": "call", "Price": 99.9999},
+        {"Strike": spot * np.exp(rate * t), "Days": 30, "Type": "put", "Price": 1e-15},
+    ]
+    clean, messages = vs.parse_quotes(pd.DataFrame(rows), spot, rate)
+    assert len(clean) == 9 and np.allclose(clean["iv"], 0.25, atol=0.002)
+    assert [str(m) for m in messages[1:]] == [
+        "Dropped 1 price quote(s) outside the no-arbitrage bounds at spot 100.00, rate 4.00% and dividend yield 0.00% "
+        "(e.g. price 1 is below the no-arbitrage lower bound 17.1143 (discounted intrinsic value); no volatility can "
+        "produce it).",
+        f"Dropped 1 price quote(s) with no time value (e.g. price {intrinsic:.6g} is within 1e-10 (1e-12·max(S, K)) "
+        "of the no-arbitrage lower bound "
+        f"{intrinsic:.6g} (discounted intrinsic value), so it has no time value to identify a volatility from: its "
+        "last digits would decide it).",
+        "Dropped 1 other price quote(s) without an implied vol (e.g. implied volatility exceeds 2000%; check the quote "
+        "and inputs).",
+        "Dropped 1 price quote(s) whose implied vol is zero to machine precision.",
+        "Inverted 9 option price(s) into implied vols with Black-Scholes-Merton (European exercise).",
+    ]
+
+
 def _stacked_calls_and_puts(itm_vol) -> pd.DataFrame:
     """Calls and puts at every strike with a Type column: exact SSVI vols out of the money, ``itm_vol(iv)`` in it."""
     params, r = vs.SSVIParams(), 0.05
