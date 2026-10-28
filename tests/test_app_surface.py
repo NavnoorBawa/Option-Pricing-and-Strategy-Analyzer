@@ -130,6 +130,11 @@ def test_interior_calendar_arbitrage_is_reported(app):
     quotes.loc[quotes["Maturity"] == maturities[4], "ImpliedVol"] *= 0.8
     _upload(app, quotes)
     _ok(app)
+    # The default arbitrage-free calibration holds the arbitrage out of the surface and says so.
+    assert _metric(app, "Calendar arbitrage") == "0"
+    assert any("held free of static arbitrage" in w.value for w in app.warning)
+    app.segmented_control(key="surface_calibration").set_value("Unconstrained").run()
+    _ok(app)
     assert int(_metric(app, "Calendar arbitrage")) > 0  # was 0, with a local vol of exactly 0%
     assert _metric(app, "Local vol defined") == "75.0%"  # two of the eight maturities are left undefined
 

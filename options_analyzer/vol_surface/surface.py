@@ -34,7 +34,7 @@ from .quotes import (
     _strike_text,
 )
 from .ssvi import SSVIParams
-from .svi import SVISlice, fit_svi
+from .svi import SVISlice, fit_svi_pair, spread_weights, static_arbitrage
 
 
 @dataclass(frozen=True)
@@ -49,7 +49,10 @@ class VolSurface:
     quotes gave it, otherwise ``carry T``. Between maturities ``ln(F / S)`` is interpolated
     linearly in ``T``.
     ``forwards`` is the table of :func:`.forwards.implied_forwards` for the fitted
-    maturities when the quotes were option prices. Implied vol is NaN outside a
+    maturities when the quotes were option prices. ``calibration`` says how the SVI
+    slices were fitted (one of :data:`CALIBRATIONS`), and ``fit_rmse_unconstrained`` is
+    each maturity's RMSE without the arbitrage constraints (equal to ``fit_rmse`` where
+    the unconstrained fit had no arbitrage). Implied vol is NaN outside a
     maturity's quoted strike range and local vol is NaN wherever it is undefined.
     """
 
@@ -71,6 +74,8 @@ class VolSurface:
     spot: float | None = None
     discount_factor: np.ndarray | None = None
     forwards: pd.DataFrame | None = None
+    fit_rmse_unconstrained: np.ndarray | None = None
+    calibration: str | None = None
 
     @property
     def strikes_over_spot(self) -> np.ndarray:
@@ -209,20 +214,37 @@ def ssvi_surface(
 MIN_STRIKES_PER_SLICE = 5
 MAX_POINTS_PER_SLICE = 200  # denser slices are averaged into this many bins in y before the SVI fit
 POOR_FIT_RMSE = 0.01
+#: The arbitrage-free calibration is mentioned in a note only where it costs a maturity more than this in RMSE (vol)
+#: and more than a quarter of its unconstrained RMSE: tick-rounded quotes leave many unconstrained smiles a sliver of
+#: negative density just beyond their quotes, which the constraint removes for a few thousandths of a vol point.
+MATERIAL_ARBITRAGE_COST = 2e-4
+#: How :func:`fit_market_surface` fits the SVI slices: free of static arbitrage (the default), or without that
+#: constraint, to see what it costs.
+CALIBRATIONS = ("arbitrage_free", "unconstrained")
 MIN_GRID_POINTS_PER_SLICE = 16  # the K/S grid is refined until every maturity has about this many points in its quotes
 MAX_GRID_POINTS = 301
 FAR_FROM_SPOT = 0.2  # |ln(K/S)| of the nearest quoted strike beyond which the spot looks wrong (about 22%)
 
 
-def _binned(y: np.ndarray, iv: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _binned(
+    y: np.ndarray, iv: np.ndarray, weights: np.ndarray | None = None
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    """Quotes averaged into :data:`MAX_POINTS_PER_SLICE` bins of equal width in ``y``: ``(y, iv, weights)``.
+
+    Without weights each bin's quotes are averaged and every bin weighs the same. With weights each bin's ``iv`` is
+    their mean weighted by ``weight^2`` (a least-squares weight is the root of an inverse variance) and the bin
+    weighs the root mean square of its quotes' weights, so a bin of tight quotes still counts more than one of wide.
+    """
     edges = np.linspace(y.min(), y.max(), MAX_POINTS_PER_SLICE + 1)
     which = np.clip(np.searchsorted(edges, y, side="right") - 1, 0, MAX_POINTS_PER_SLICE - 1)
     counts = np.bincount(which, minlength=MAX_POINTS_PER_SLICE)
     keep = counts > 0
-    return (
-        np.bincount(which, y, MAX_POINTS_PER_SLICE)[keep] / counts[keep],
-        np.bincount(which, iv, MAX_POINTS_PER_SLICE)[keep] / counts[keep],
-    )
+    y_bins = np.bincount(which, y, MAX_POINTS_PER_SLICE)[keep] / counts[keep]
+    if weights is None:
+        return y_bins, np.bincount(which, iv, MAX_POINTS_PER_SLICE)[keep] / counts[keep], None
+    square = np.bincount(which, weights**2, MAX_POINTS_PER_SLICE)[keep]
+    iv_bins = np.bincount(which, weights**2 * iv, MAX_POINTS_PER_SLICE)[keep] / square
+    return y_bins, iv_bins, np.sqrt(square / counts[keep])
 
 
 def _moneyness_grid(ranges: np.ndarray, n_base: int) -> np.ndarray:
@@ -255,6 +277,7 @@ def fit_market_surface(
     n_moneyness: int = 41,
     *,
     forwards: pd.DataFrame | None = None,
+    calibration: str = "arbitrage_free",
 ) -> VolSurface:
     """Fit a surface to cleaned quotes (see :func:`parse_quotes`) and compute local vol.
 
@@ -264,6 +287,11 @@ def fit_market_surface(
     :func:`parse_quotes`), otherwise ``F_T = spot e^{(rate - dividend_yield) T}`` and the
     discount factor ``e^{-rate T}``. ``forwards``, the table :func:`parse_quotes` returns with
     ``return_forwards=True``, is kept on the surface (its rows at the fitted maturities) for display.
+
+    Each quote weighs on its slice's fit as one over the half-spread of its implied vol (its ``price_error`` over its
+    vega; :func:`.svi.spread_weights`), equal weights for quoted implied vols. With ``calibration="arbitrage_free"``
+    (the default) each slice is held free of butterfly arbitrage, and of calendar arbitrage against the slice fitted
+    before it on the overlap of their quotes (:func:`.svi.fit_svi`); ``"unconstrained"`` drops that constraint.
     The result is evaluated at the quoted maturities (no extrapolation in time)
     on a K/S grid spanning the union of the quoted strike ranges, with
     ``n_moneyness`` points across it and more inside narrow ranges
@@ -277,11 +305,13 @@ def fit_market_surface(
     strike spacing, whichever is more); arbitrage in quoted vols that half a :data:`QUOTED_VOL_TICK` of error
     in each price would remove is reported as possible rather than certain.
     """
+    if calibration not in CALIBRATIONS:
+        raise ValueError(f"calibration must be one of {', '.join(map(repr, CALIBRATIONS))}, got {calibration!r}")
     carry = rate - dividend_yield
     notes: list[str] = []
     # _prepare yields one maturity at a time, which _fit_slices fits before the next one is read: on quotes that
     # parse_quotes did not clean, the first maturity the fit fails on decides the error and the warnings.
-    slices = _fit_slices(_prepare(quotes, spot, rate, carry, notes), spot)
+    slices = _fit_slices(_prepare(quotes, spot, rate, carry, notes), spot, calibration == "arbitrage_free")
     if len(slices) < 2:
         n_maturities = quotes["maturity"].nunique()
         raise QuoteParseError(
@@ -307,8 +337,10 @@ def fit_market_surface(
         "Market quotes",
         tuple(notes),
         carry=carry,
-        quotes=clean_quotes[["strike", "maturity", "iv", "moneyness", "fitted_iv"]],
+        quotes=clean_quotes[["strike", "maturity", "iv", "moneyness", "fitted_iv", "vol_half_spread"]],
         fit_rmse=np.array([piece.rmse for piece in slices]),
+        fit_rmse_unconstrained=np.array([piece.rmse_unconstrained for piece in slices]),
+        calibration=calibration,
         svi=tuple(piece.svi for piece in slices),
         quoted_y=quoted_y,
         log_forward_ratio=log_fs,
@@ -342,8 +374,10 @@ class _Prepared:
     quotes: pd.DataFrame  # its rows of the cleaned quotes
     y: np.ndarray  # forward log-moneyness of each quote
     iv: np.ndarray  # implied vol of each quote
-    y_fit: np.ndarray  # what the SVI fit is given: y and iv, or their averages in MAX_POINTS_PER_SLICE bins
+    vol_half_spread: np.ndarray  # how far each quote's vol may be off: its price error over its vega (NaN: unknown)
+    y_fit: np.ndarray  # what the SVI fit is given: y, iv and weights, or their bins (MAX_POINTS_PER_SLICE)
     iv_fit: np.ndarray
+    weights_fit: np.ndarray | None  # see svi.spread_weights; None: equal
 
 
 @dataclass(frozen=True, eq=False)  # holds a table: compared by identity
@@ -357,6 +391,8 @@ class _Slice:
     svi: SVISlice
     quoted: tuple[float, float]  # the range of forward log-moneyness of its quotes
     rmse: float  # implied-vol RMSE of the fit at the quotes
+    rmse_unconstrained: float  # the same without the arbitrage constraints (see svi.fit_svi_pair)
+    held: tuple[bool, bool]  # (butterfly, calendar): arbitrage the unconstrained fit had and the constraints removed
     binned: bool  # whether dense quotes were averaged into MAX_POINTS_PER_SLICE bins before the fit
     spread_arbitrage: bool  # see _spread_arbitrage
     butterflies: tuple[int, tuple[float, float, float] | None]  # see _butterfly_arbitrage
@@ -382,8 +418,30 @@ def _prepare(quotes: pd.DataFrame, spot: float, rate: float, carry: float, notes
         else:
             y = np.log(grp["strike"].to_numpy(float) / forward)
         iv = grp["iv"].to_numpy(float)
-        y_fit, iv_fit = (y, iv) if len(y) <= MAX_POINTS_PER_SLICE else _binned(y, iv)
-        yield _Prepared(T, float(forward), discount_factor, from_rates, grp, y, iv, y_fit, iv_fit)
+        half_spread = _vol_half_spread(grp, y, iv, T, float(forward), discount_factor)
+        weights = spread_weights(half_spread)
+        y_fit, iv_fit, weights_fit = (y, iv, weights) if len(y) <= MAX_POINTS_PER_SLICE else _binned(y, iv, weights)
+        yield _Prepared(
+            T, float(forward), discount_factor, from_rates, grp, y, iv, half_spread, y_fit, iv_fit, weights_fit
+        )
+
+
+def _vol_half_spread(
+    grp: pd.DataFrame, y: np.ndarray, iv: np.ndarray, T: float, forward: float, discount_factor: float
+) -> np.ndarray:
+    """How far each quote's implied vol may be off: its ``price_error`` (half its bid/ask spread, or its price grid's
+    step, see :func:`parse_quotes`) over its Black vega ``DF F sqrt(T) phi(d1)``. NaN where the price error is
+    unknown (quoted implied vols). A price on no grid at all (error 0) counts as one unit of price error, so such
+    quotes are weighted by their vega."""
+    if "price_error" not in grp:
+        return np.full(len(y), np.nan)
+    error = grp["price_error"].to_numpy(float)
+    error = np.where(error > 0, error, np.where(np.isfinite(error), 1.0, np.nan))
+    sd = iv * np.sqrt(T)
+    d1 = -y / sd + 0.5 * sd
+    vega = discount_factor * forward * np.sqrt(T) * np.exp(-0.5 * d1 * d1) / np.sqrt(2.0 * np.pi)
+    with np.errstate(divide="ignore"):
+        return np.where(vega > 0, error / vega, np.inf)
 
 
 def _expiry_carry(grp: pd.DataFrame, spot: float, rate: float, carry: float, T: float) -> tuple[float | None, float]:
@@ -398,17 +456,27 @@ def _expiry_carry(grp: pd.DataFrame, spot: float, rate: float, carry: float, T: 
     return None, float(np.exp(-rate * T))
 
 
-def _fit_slices(prepared: Iterable[_Prepared], spot: float) -> list[_Slice]:
-    """Stage 2 of :func:`fit_market_surface`: the raw-SVI fit of each maturity (:func:`fit_svi`), its RMSE at the
-    quotes, and the model-free static-arbitrage checks of the quotes (:func:`_quote_arbitrage`)."""
-    slices = []
+def _fit_slices(prepared: Iterable[_Prepared], spot: float, arbitrage_free: bool = True) -> list[_Slice]:
+    """Stage 2 of :func:`fit_market_surface`: the raw-SVI fit of each maturity (:func:`fit_svi`), weighted by the
+    quotes' spreads and, with ``arbitrage_free``, held free of butterfly arbitrage and of calendar arbitrage against
+    the maturity fitted before it; its RMSE at the quotes, with and without those constraints; and the model-free
+    static-arbitrage checks of the quotes (:func:`_quote_arbitrage`)."""
+    slices: list[_Slice] = []
     for piece in prepared:
         T, y, iv = piece.T, piece.y, piece.iv
-        svi = fit_svi(piece.y_fit, piece.iv_fit, T)
+        previous = (slices[-1].svi, slices[-1].quoted) if slices else None
+        svi, free = fit_svi_pair(
+            piece.y_fit, piece.iv_fit, T, piece.weights_fit, previous, arbitrage_free=arbitrage_free
+        )
         fitted = np.sqrt(np.maximum(svi.total_variance(y)[0], 0.0) / T)
         rmse = float(np.sqrt(np.mean((fitted - iv) ** 2)))
+        unconstrained = np.sqrt(np.maximum(free.total_variance(y)[0], 0.0) / T)
+        rmse_free = rmse if free is svi else float(np.sqrt(np.mean((unconstrained - iv) ** 2)))
+        held = (False, False) if free is svi else static_arbitrage(free, (y.min(), y.max()), T, previous)
         spread, butterflies, certain = _quote_arbitrage(piece.quotes, iv, T, piece.forward, piece.discount_factor)
-        with_fit = piece.quotes.assign(moneyness=piece.quotes["strike"] / spot, fitted_iv=fitted)
+        with_fit = piece.quotes.assign(
+            moneyness=piece.quotes["strike"] / spot, fitted_iv=fitted, vol_half_spread=piece.vol_half_spread
+        )
         binned = len(piece.y_fit) < len(y)
         slices.append(
             _Slice(
@@ -419,6 +487,8 @@ def _fit_slices(prepared: Iterable[_Prepared], spot: float) -> list[_Slice]:
                 svi,
                 (y.min(), y.max()),
                 rmse,
+                rmse_free,
+                held,
                 binned,
                 spread,
                 butterflies,
@@ -490,6 +560,7 @@ def _diagnostics(
     spread = np.array([piece.spread_arbitrage for piece in slices])
     crossed = (rmse > POOR_FIT_RMSE) & spread
     notes += _poor_fits(Ts, rmse, crossed)
+    notes += _held_arbitrage(slices, Ts)
     notes += _static_arbitrage(slices, Ts, crossed, quotes)
     return notes + _blank_local_vol(values)
 
@@ -537,6 +608,35 @@ def _poor_fits(Ts: np.ndarray, rmse: np.ndarray, crossed: np.ndarray) -> list[st
                 f"maturities {_years(Ts[which])}{cause} The Smiles chart shows how far the fit is from each quote."
             )
     return notes
+
+
+def _held_arbitrage(slices: list[_Slice], Ts: np.ndarray) -> list[str]:
+    """A note on the maturities whose unconstrained SVI fit had static arbitrage that the arbitrage-free calibration
+    removed at a material cost (:data:`MATERIAL_ARBITRAGE_COST`), and what it cost: the quotes there imply the
+    arbitrage, so they deserve a look."""
+    cost = np.array([piece.rmse - piece.rmse_unconstrained for piece in slices])
+    free = np.array([piece.rmse_unconstrained for piece in slices])
+    material = (cost > MATERIAL_ARBITRAGE_COST) & (cost > 0.25 * free)
+    calendar = np.array([piece.held[1] for piece in slices]) & material
+    butterfly = np.array([piece.held[0] for piece in slices]) & material & ~calendar
+    if not (calendar.any() or butterfly.any()):
+        return []
+    parts = []
+    if calendar.any():
+        parts.append(
+            f"at maturities {_years(Ts[calendar])} the quotes' total variance falls below that of the maturity before "
+            "(calendar arbitrage)"
+        )
+    if butterfly.any():
+        parts.append(
+            f"at maturities {_years(Ts[butterfly])} the best smile has a negative density (butterfly arbitrage)"
+        )
+    return [
+        f"The SVI fit was held free of static arbitrage: {'; '.join(parts)}. That moved the fit by up to "
+        f"{cost[calendar | butterfly].max() * 100:.2f} vol point of RMSE (Arbitrage cost in the table below); "
+        "check those quotes, or fit them "
+        "unconstrained to see the arbitrage."
+    ]
 
 
 def _static_arbitrage(slices: list[_Slice], Ts: np.ndarray, crossed: np.ndarray, quotes: pd.DataFrame) -> list[str]:
@@ -641,5 +741,27 @@ def surface_summary(surface: VolSurface) -> pd.DataFrame:
         }
         if surface.fit_rmse is not None:
             row["Fit RMSE (vol pts)"] = surface.fit_rmse[i] * 100
+            row.update(_fit_to_spreads(surface, i))
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+def _fit_to_spreads(surface: VolSurface, i: int) -> dict[str, float]:
+    """How the fit of maturity ``i`` sits against its quotes' spreads: the share of quotes whose fitted vol is within
+    their half-spread in vol (inside the bid/ask, in percent), the median of ``|fit - quote| / half-spread``, and,
+    for an arbitrage-free fit, how much RMSE the constraints cost (vol points). NaN where the spreads are unknown."""
+    row = {"Inside bid/ask (%)": np.nan, "Median |error| / half-spread": np.nan}
+    if surface.quotes is not None and "vol_half_spread" in surface.quotes:
+        quotes = surface.quotes[np.isclose(surface.quotes["maturity"], surface.maturities[i], rtol=0.0, atol=1e-9)]
+        half = quotes["vol_half_spread"].to_numpy(float)
+        known = np.isfinite(half) & (half > 0)
+        if known.any():
+            ratio = np.abs(quotes["fitted_iv"].to_numpy(float) - quotes["iv"].to_numpy(float))[known] / half[known]
+            row = {
+                "Inside bid/ask (%)": 100.0 * float(np.mean(ratio <= 1.0)),
+                "Median |error| / half-spread": float(np.median(ratio)),
+            }
+    if surface.calibration == "arbitrage_free" and surface.fit_rmse_unconstrained is not None:
+        assert surface.fit_rmse is not None
+        row["Arbitrage cost (vol pts)"] = (surface.fit_rmse[i] - surface.fit_rmse_unconstrained[i]) * 100
+    return row

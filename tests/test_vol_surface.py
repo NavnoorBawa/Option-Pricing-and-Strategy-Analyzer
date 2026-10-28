@@ -266,11 +266,12 @@ def test_identical_strikes_with_carry_keep_the_full_quoted_range(low, high, days
 
 
 def test_interior_calendar_arbitrage_is_flagged_and_left_undefined():
-    # PCHIP set dw/dT to exactly 0 at an interior sign change: 0 violations and a local vol of 0%.
+    # PCHIP set dw/dT to exactly 0 at an interior sign change: 0 violations and a local vol of 0%. Fitted without
+    # the arbitrage constraints, so that the surface keeps the quotes' arbitrage (the default holds it out: below).
     quotes, _ = vs.parse_quotes(vs.sample_quotes())
     maturities = np.sort(quotes["maturity"].unique())
     quotes.loc[quotes["maturity"] == maturities[4], "iv"] *= 0.8
-    fitted = vs.fit_market_surface(quotes, 100, 0.04, 0.0)
+    fitted = vs.fit_market_surface(quotes, 100, 0.04, 0.0, calibration="unconstrained")
     assert fitted.calendar_violations > 0
     assert np.isnan(fitted.local_vol[3]).all() and np.isnan(fitted.local_vol[4]).all()  # both ends of the drop
     defined = fitted.local_vol[np.isfinite(fitted.local_vol)]
@@ -281,9 +282,24 @@ def test_calendar_arbitrage_at_the_last_maturity_flags_both_ends():
     quotes, _ = vs.parse_quotes(vs.sample_quotes())
     last = quotes["maturity"].max()
     quotes.loc[quotes["maturity"] == last, "iv"] *= 0.6
-    fitted = vs.fit_market_surface(quotes, 100, 0.04, 0.0)
+    fitted = vs.fit_market_surface(quotes, 100, 0.04, 0.0, calibration="unconstrained")
     assert fitted.calendar_violations > 0
     assert np.isnan(fitted.local_vol[-1]).all() and np.isnan(fitted.local_vol[-2]).all()
+
+
+@pytest.mark.parametrize(("index", "factor"), [(4, 0.8), (-1, 0.6)], ids=["interior", "last"])
+def test_the_arbitrage_free_fit_holds_calendar_arbitrage_out_and_says_what_it_cost(index, factor):
+    """The default calibration keeps the surface free of the quotes' calendar arbitrage, and a note names the
+    maturity, the arbitrage and its cost in RMSE, which the summary's Arbitrage cost column shows too."""
+    quotes, _ = vs.parse_quotes(vs.sample_quotes())
+    maturities = np.sort(quotes["maturity"].unique())
+    quotes.loc[quotes["maturity"] == maturities[index], "iv"] *= factor
+    fitted = vs.fit_market_surface(quotes, 100, 0.04, 0.0)
+    assert fitted.calendar_violations == 0 and fitted.butterfly_violations == 0
+    held = [note for note in fitted.notes if note.startswith("The SVI fit was held free of static arbitrage")]
+    assert len(held) == 1 and f"{maturities[index]:.3g}y the quotes' total variance falls below" in held[0]
+    cost = vs.surface_summary(fitted)["Arbitrage cost (vol pts)"].to_numpy()
+    assert cost[index] > 1.0 and np.delete(cost, index) == pytest.approx(0.0, abs=1e-12)
 
 
 def test_a_steep_noisy_equity_surface_is_fitted_without_a_poor_fit_note():
@@ -427,7 +443,7 @@ def test_implied_vol_is_blank_outside_each_maturitys_quotes_and_local_vol_needs_
 def test_quotes_and_fit_quality_are_kept_on_the_surface():
     quotes, _ = vs.parse_quotes(vs.sample_quotes())
     fitted = vs.fit_market_surface(quotes, 100, 0.04, 0.0)
-    assert list(fitted.quotes.columns) == ["strike", "maturity", "iv", "moneyness", "fitted_iv"]
+    assert list(fitted.quotes.columns) == ["strike", "maturity", "iv", "moneyness", "fitted_iv", "vol_half_spread"]
     assert len(fitted.quotes) == len(quotes)
     assert fitted.fit_rmse.shape == fitted.maturities.shape
     first = fitted.quotes[fitted.quotes["maturity"] == fitted.maturities[0]]

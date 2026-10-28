@@ -12,14 +12,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .svi import QUOTE_PRECISION
+from .svi import QUOTE_PRECISION, durrleman_g
 
 EXTRAPOLATION = 0.25  # a neighbour may be evaluated this fraction of its quoted y-range beyond its quotes
-
-
-def durrleman_g(y, w, w_y, w_yy):
-    """Durrleman's butterfly-arbitrage function (the local-variance denominator)."""
-    return 1.0 - (y / w) * w_y + 0.25 * (-0.25 - 1.0 / w + y**2 / w**2) * w_y**2 + 0.5 * w_yy
 
 
 def _local_vol(y, w, w_y, w_yy, w_t):

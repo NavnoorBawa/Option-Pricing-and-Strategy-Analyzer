@@ -61,6 +61,22 @@ $s$ the smile is linear in $a$, $bs$ and $\rho bs$, solved on a grid of $(m, s)$
 steep, nearly linear equity skews are followed too. SSVI slices are exactly SVI, so noise-free SSVI quotes are
 recovered.
 
+Each quote's vol error is weighted by one over its half-spread in vol (its price error, half the bid/ask spread,
+over its vega), divided by the median weight and capped at five times it, so tight at-the-money quotes count more
+than wing quotes a few ticks wide; quoted implied vols, whose spreads are unknown, weigh equally. Where wing spreads
+in vol are about 15 times the at-the-money ones, the weighted fit's largest error within one standard deviation of
+the money is 0.58 of the unweighted fit's.
+
+By default the calibration is arbitrage-free. Each smile is checked on 200 points over its quoted range widened by
+10% on each side, and where Durrleman's ${g \le 0}$ (a negative density) or its total variance falls below the
+previous expiry's where both are quoted, it is replaced by the nearest smile that meets ${g \ge 0.001}$ and
+${w_T \ge w_{T^-}}$, found by sequential quadratic programming from the unconstrained fit and the quasi-explicit
+starts. On arbitrage-free quotes the constraints do not bind and the fit is unchanged; Gatheral and Jacquier's
+arbitrageable example slice (Vogt's) is fitted 0.64 vol point (RMSE) away with no negative density, and on 200 random
+arbitrage-free surfaces with 0.2 vol point of noise no expiry's RMSE grew by more than 10%. The summary table shows
+what the constraints cost each expiry, and a note names the expiries where the cost is material; the Unconstrained
+calibration shows the quotes' own arbitrage instead.
+
 ### Static arbitrage in the quotes
 The fit can smooth over quotes that are not free of arbitrage, so the quotes themselves are also
 checked without a model: a butterfly of three neighbouring strikes that costs less than nothing even if each

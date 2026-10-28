@@ -136,10 +136,11 @@ def ssvi_surface(params: vol_surface.SSVIParams, rate, dividend_yield, m_range, 
 
 @st.cache_data(show_spinner=False, max_entries=8)
 def market_surface(
-    raw, spot, rate, dividend_yield, forward="parity"
+    raw, spot, rate, dividend_yield, forward="parity", calibration="arbitrage_free"
 ) -> tuple[vol_surface.VolSurface | None, list[str], str | None]:
     """Clean an uploaded quotes table (inverting any prices at each expiry's ``forward``: ``"parity"`` or
-    ``"rates"``, see ``vol_surface.parse_quotes``) and fit it.
+    ``"rates"``, see ``vol_surface.parse_quotes``) and fit it (``calibration``: ``"arbitrage_free"`` or
+    ``"unconstrained"``, see ``vol_surface.fit_market_surface``).
 
     Returns ``(surface, messages, error)`` so the parse messages survive a fit that fails.
     """
@@ -147,7 +148,9 @@ def market_surface(
         raw, spot, rate, dividend_yield, forward=forward, return_forwards=True
     )
     try:
-        surface = vol_surface.fit_market_surface(quotes, spot, rate, dividend_yield, forwards=forwards)
+        surface = vol_surface.fit_market_surface(
+            quotes, spot, rate, dividend_yield, forwards=forwards, calibration=calibration
+        )
         return surface, messages, None
     except ValueError as exc:  # QuoteParseError, or a numerical failure of the fit (numpy's LinAlgError)
         return None, messages, str(exc)

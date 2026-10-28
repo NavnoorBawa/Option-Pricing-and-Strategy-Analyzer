@@ -22,6 +22,8 @@ SSVI = "Parametric (SSVI)"
 QUOTES = "Market quotes (CSV)"
 #: Where each expiry's forward comes from when option prices are inverted (``vol_surface.parse_quotes``).
 FORWARD_CHOICES = {"Put-call parity": "parity", "Sidebar r, q": "rates"}
+#: How the SVI slices are fitted (``vol_surface.fit_market_surface``).
+CALIBRATION_CHOICES = {"Arbitrage-free": "arbitrage_free", "Unconstrained": "unconstrained"}
 COLORSCALES = ("Viridis", "Plasma", "Inferno", "Magma", "Cividis", "Turbo")
 VOL_LIMITS = (0.5, 500.0)
 SURFACE_CHART_WIDTH = 380  # px: two fit side by side in the 804 px main column at 1,280 px with the sidebar open
@@ -188,6 +190,19 @@ def _quote_controls(inputs: Inputs) -> vs.VolSurface | None:
         "use the sidebar.",
     )
     forward = FORWARD_CHOICES[forward_choice]
+    calibration_choice = c2.segmented_control(
+        "Calibration",
+        list(CALIBRATION_CHOICES),
+        default="Arbitrage-free",
+        required=True,
+        key="surface_calibration",
+        persist_state="session",
+        help="Arbitrage-free: each SVI smile is held free of butterfly arbitrage (a negative density) and of calendar "
+        "arbitrage against the expiry before it, where both are quoted; the summary's Arbitrage cost column shows "
+        "what that costs in RMSE. Unconstrained: the best smile through each expiry's quotes, arbitrage and all. "
+        "Either way each quote counts as one over its bid/ask half-spread in vol.",
+    )
+    calibration = CALIBRATION_CHOICES[calibration_choice]
     source = (
         "each expiry's forward and discount factor from put-call parity where calls and puts are quoted at common "
         "strikes, else from the sidebar"
@@ -210,7 +225,7 @@ def _quote_controls(inputs: Inputs) -> vs.VolSurface | None:
         raw = pd.read_csv(io.BytesIO(upload.getvalue()))
         with st.spinner("Fitting an SVI smile to every maturity…"):
             surface, messages, error = cache.market_surface(
-                raw, inputs.spot, inputs.rate, inputs.dividend_yield, forward
+                raw, inputs.spot, inputs.rate, inputs.dividend_yield, forward, calibration
             )
     except pd.errors.EmptyDataError:
         st.error("The uploaded file is empty.")
@@ -534,6 +549,16 @@ def render(inputs: Inputs) -> None:
             "Butterfly (vol pts)": st.column_config.NumberColumn(format="%.2f"),
             "Fit RMSE (vol pts)": st.column_config.NumberColumn(
                 format="%.3f", help="Root-mean-square gap between the SVI smile and the quotes at this maturity."
+            ),
+            "Inside bid/ask (%)": st.column_config.NumberColumn(
+                format="%.0f", help="Share of the quotes whose fitted vol lies within their bid/ask spread in vol."
+            ),
+            "Median |error| / half-spread": st.column_config.NumberColumn(
+                format="%.2f", help="Median gap between fit and quote, in units of the quote's half-spread in vol."
+            ),
+            "Arbitrage cost (vol pts)": st.column_config.NumberColumn(
+                format="%.3f",
+                help="RMSE added by holding this maturity's smile free of static arbitrage (0 where it had none).",
             ),
         },
     )
