@@ -59,7 +59,14 @@ DAYS_PER_YEAR = 365.0
 
 @dataclass(frozen=True)
 class StressScenario:
-    """An instantaneous shock, optionally spread over ``days`` of elapsed time."""
+    """An instantaneous shock, optionally spread over ``days`` of elapsed time.
+
+    A sourced scenario (the historical analogues and the Fed scenario, built with :meth:`sourced`) also keeps the
+    volatility index it was calibrated on and that index's levels at the start and end of the window. Its
+    ``vol_multiplier`` is the ratio ``vol_end / vol_start``, so the shock cannot drift from the levels that its
+    description quotes: a multiplier more than 1e-12 (relative) away from the ratio raises ``ValueError``, as do
+    missing, non-positive or non-finite levels and a sourced shock that is not a one-month shock.
+    """
 
     name: str
     spot_change: float  # relative, e.g. -0.20 = -20 %
@@ -70,87 +77,147 @@ class StressScenario:
     #: True when ``vol_multiplier`` is a one-month (VIX-like) shock, which is
     #: damped for longer tenors; False applies it literally to every leg.
     one_month_vol_shock: bool = False
+    #: A sourced scenario's one-month volatility index ("VIX", or "VXO" before 1990) and its levels in vol points at
+    #: the start and end of the window; empty for a hypothetical shock.
+    vol_index: str = ""
+    vol_start: float | None = None
+    vol_end: float | None = None
+
+    def __post_init__(self) -> None:
+        if not self.vol_index and self.vol_start is None and self.vol_end is None:
+            return  # a hypothetical shock
+        problem = self._sourcing_problem()
+        if problem:
+            raise ValueError(f"{self.name}: {problem}")
+
+    def _sourcing_problem(self) -> str:
+        """What is wrong with a sourced scenario's levels and shock, or "" when they agree."""
+        if not self.vol_index:
+            return "vol_start and vol_end need the vol_index they are levels of"
+        try:
+            start, end = _number("vol_start", self.vol_start), _number("vol_end", self.vol_end)
+        except ValueError as exc:
+            return str(exc)
+        if not (start > 0 and end > 0):
+            return f"vol_start and vol_end must be positive, got {start:g} and {end:g}"
+        if not math.isclose(self.vol_multiplier, end / start, rel_tol=1e-12):
+            return f"vol_multiplier {self.vol_multiplier!r} is not vol_end / vol_start = {end / start!r}"
+        if not self.one_month_vol_shock:
+            return f"a shock calibrated on the {self.vol_index} is a one-month vol shock"
+        return ""
+
+    @classmethod
+    def sourced(
+        cls,
+        name: str,
+        spot_change: float,
+        rate_change: float,
+        days: int,
+        description: str,
+        *,
+        vol_index: str,
+        vol_start: float,
+        vol_end: float,
+    ) -> StressScenario:
+        """A one-month vol shock calibrated on a volatility index: the multiplier is ``vol_end / vol_start``."""
+        try:
+            multiplier = vol_end / vol_start
+        except (TypeError, ZeroDivisionError):
+            multiplier = math.nan  # __post_init__ names the bad level
+        return cls(name, spot_change, multiplier, rate_change, days, description, True, vol_index, vol_start, vol_end)
 
 
-#: Historical analogues, built from S&P 500 closes (Yardeni bull/bear tables,
-#: closing basis), the VIX / VXO (FRED VIXCLS, VXOCLS) and the Fed funds target
-#: (federalreserve.gov open-market archive) over each episode. The implied-vol
-#: multiplier is the ratio of the VIX at the end of the window to its level at
-#: the start, i.e. a shock to one-month implied vol; see :func:`run_stress_tests`
-#: for how it is damped for longer tenors. Rate changes are policy-rate moves
-#: over the window.
+#: Historical analogues, each pinned to its sources by tests/test_scenarios.py. Between two closes: the S&P 500
+#: change (S&P Dow Jones Indices; FRED series SP500 for the last ten years), quoted and applied to 0.1 %; the
+#: implied-vol multiplier, the ratio of the VIX closes (FRED VIXCLS; the VXO, FRED VXOCLS, for 1987, before the VIX
+#: begins), a shock to one-month implied vol that :func:`run_stress_tests` damps for longer tenors; and the change
+#: in the Fed funds target (FRED DFEDTAR, and from 16 Dec 2008 the midpoint of the target range, DFEDTARL to
+#: DFEDTARU). ``days`` counts the calendar days between the two closes, so a one-session move from a Friday close to
+#: a Monday close lasts 3 days.
 HISTORICAL_SCENARIOS: tuple[StressScenario, ...] = (
-    StressScenario(
+    StressScenario.sourced(
         "Black Monday (1987)",
-        -0.205,
-        4.1,
-        -0.005,
-        1,
-        "19 Oct 1987: S&P 500 -20.5% in one session; VXO 36 -> 150.",
-        one_month_vol_shock=True,
+        spot_change=-0.205,
+        rate_change=0.0,
+        days=3,
+        vol_index="VXO",
+        vol_start=36.37,
+        vol_end=150.19,
+        description="16–19 Oct 1987: S&P 500 282.70 → 224.84 (−20.5%) in one session; VXO 36.37 → 150.19; "
+        "Fed funds target unchanged at 7.3125% until 4 Nov.",
     ),
-    StressScenario(
+    StressScenario.sourced(
         "Dot-com bust (2000-02)",
-        -0.491,
-        1.8,
-        -0.0425,
-        929,
-        "24 Mar 2000 - 9 Oct 2002: S&P 500 -49.1%; VIX ~23 -> ~42; Fed funds 6.00% -> 1.75%.",
-        one_month_vol_shock=True,
+        spot_change=-0.491,
+        rate_change=-0.0425,
+        days=929,
+        vol_index="VIX",
+        vol_start=23.31,
+        vol_end=42.13,
+        description="24 Mar 2000 – 9 Oct 2002: S&P 500 1,527.46 → 776.76 (−49.1%); VIX 23.31 → 42.13; "
+        "Fed funds target 6.00% → 1.75%.",
     ),
-    StressScenario(
+    StressScenario.sourced(
         "Global Financial Crisis (2007-09)",
-        -0.568,
-        3.1,
-        -0.046,
-        517,
-        "9 Oct 2007 - 9 Mar 2009: S&P 500 -56.8%; VIX 16 -> 50 (peak close 80.9 in Nov 2008); "
-        "Fed funds 4.75% -> 0-0.25%.",
-        one_month_vol_shock=True,
+        spot_change=-0.568,
+        rate_change=-0.04625,
+        days=517,
+        vol_index="VIX",
+        vol_start=16.12,
+        vol_end=49.68,
+        description="9 Oct 2007 – 9 Mar 2009: S&P 500 1,565.15 → 676.53 (−56.8%); VIX 16.12 → 49.68 "
+        "(peak close 80.86 on 20 Nov 2008); Fed funds target 4.75% → 0–0.25% (midpoint 0.125%).",
     ),
-    StressScenario(
+    StressScenario.sourced(
         "Volmageddon (2018)",
-        -0.041,
-        2.16,
-        0.0,
-        1,
-        "5 Feb 2018: S&P 500 -4.1%; VIX 17.3 -> 37.3, its largest one-day jump at the time.",
-        one_month_vol_shock=True,
+        spot_change=-0.041,
+        rate_change=0.0,
+        days=3,
+        vol_index="VIX",
+        vol_start=17.31,
+        vol_end=37.32,
+        description="2–5 Feb 2018: S&P 500 2,762.13 → 2,648.94 (−4.1%) in one session; VIX 17.31 → 37.32, "
+        "its largest one-day rise at the time; Fed funds target unchanged at 1.25–1.50%.",
     ),
-    StressScenario(
+    StressScenario.sourced(
         "COVID crash (2020)",
-        -0.339,
-        4.3,
-        -0.015,
-        33,
-        "19 Feb - 23 Mar 2020: S&P 500 -33.9% in 23 sessions; VIX 14 -> 62 (record close 82.7 on 16 Mar); "
-        "Fed cut 150 bp.",
-        one_month_vol_shock=True,
+        spot_change=-0.339,
+        rate_change=-0.015,
+        days=33,
+        vol_index="VIX",
+        vol_start=14.38,
+        vol_end=61.59,
+        description="19 Feb – 23 Mar 2020: S&P 500 3,386.15 → 2,237.40 (−33.9%) in 23 sessions; VIX 14.38 → 61.59 "
+        "(record close 82.69 on 16 Mar); Fed funds target 1.50–1.75% → 0–0.25%.",
     ),
-    StressScenario(
+    StressScenario.sourced(
         "2022 rate shock",
-        -0.254,
-        2.0,
-        0.03,
-        282,
-        "3 Jan - 12 Oct 2022: S&P 500 -25.4%; VIX 17 -> 34; Fed funds +300 bp.",
-        one_month_vol_shock=True,
+        spot_change=-0.254,
+        rate_change=0.03,
+        days=282,
+        vol_index="VIX",
+        vol_start=16.60,
+        vol_end=33.57,
+        description="3 Jan – 12 Oct 2022: S&P 500 4,796.56 → 3,577.03 (−25.4%); VIX 16.60 → 33.57; "
+        "Fed funds target 0–0.25% → 3.00–3.25%.",
     ),
-    StressScenario(
+    StressScenario.sourced(
         "Tariff shock (Apr 2025)",
-        -0.121,
-        2.4,
-        0.0,
-        6,
-        "2 - 8 Apr 2025: S&P 500 -12.1% in four sessions; VIX 22 -> 52.",
-        one_month_vol_shock=True,
+        spot_change=-0.121,
+        rate_change=0.0,
+        days=6,
+        vol_index="VIX",
+        vol_start=21.51,
+        vol_end=52.33,
+        description="2–8 Apr 2025: S&P 500 5,670.97 → 4,982.77 (−12.1%) in four sessions; VIX 21.51 → 52.33; "
+        "Fed funds target unchanged at 4.25–4.50%.",
     ),
 )
 
 HYPOTHETICAL_SCENARIOS: tuple[StressScenario, ...] = (
-    StressScenario("Rally +15%, IV -30%", 0.15, 0.7, 0.0, 0, "Relief rally with implied volatility collapsing."),
+    StressScenario("Rally +15%, IV −30%", 0.15, 0.7, 0.0, 0, "Relief rally with implied volatility collapsing."),
     StressScenario(
-        "Vol crush (IV -40%)",
+        "Vol crush (IV −40%)",
         0.0,
         0.6,
         0.0,
@@ -159,17 +226,27 @@ HYPOTHETICAL_SCENARIOS: tuple[StressScenario, ...] = (
     ),
     StressScenario("Vol spike (IV +50%)", 0.0, 1.5, 0.0, 0, "Implied volatility rises 50% with spot unchanged."),
     StressScenario("Rates +200 bp", 0.0, 1.0, 0.02, 0, "Parallel 2-point rise in the risk-free rate."),
-    StressScenario(
+    # Table 2.A of the Fed's document gives the Q4 2025 jump-off and table 4.A the scenario's quarters. Its VIX is
+    # the highest close of each quarter: the 26.4 jump-off is the close of 26.42 on 20 Nov 2025 (FRED VIXCLS); the
+    # narrative rounds it to 26, which would give 2.77 instead of 2.73. The equity index is an end-of-quarter
+    # value, so the window runs from 31 Dec 2025 to 30 Sep 2026. The VIX peaks in Q2 2026 and equities bottom in
+    # Q3 2026, when the Fed's VIX is 70.9: applying both at once puts a vol shock 1.6 % larger than the Fed's
+    # (72.0 / 70.9) on the equity trough.
+    StressScenario.sourced(
         "Fed severely adverse (2026)",
-        -0.58,
-        4.0,
-        -0.036,
-        274,
-        "Federal Reserve 2026 supervisory scenario (federalreserve.gov, Feb 2026): equities fall about 58% from "
-        "Q4 2025 to Q3 2026, the VIX peaks at 72 (about 4x), the 3-month Treasury rate falls from 3.7% to 0.1%.",
-        one_month_vol_shock=True,
+        spot_change=-0.578,
+        rate_change=-0.036,
+        days=273,
+        vol_index="VIX",
+        vol_start=26.4,
+        vol_end=72.0,
+        description="Federal Reserve 2026 supervisory scenario (federalreserve.gov, Feb 2026), from the Q4 2025 "
+        "jump-off: the Dow Jones Total Stock Market Index falls 67,502 → 28,490 (−57.8%) to its Q3 2026 trough; "
+        "the VIX (highest close of the quarter) rises 26.4 → 72.0 to its Q2 2026 peak; the 3-month Treasury rate "
+        "falls 3.7% → 0.1%. The VIX peak and the equity trough come a quarter apart in the Fed's paths; this "
+        "scenario applies both at once.",
     ),
-    StressScenario("Gap down -10%", -0.10, 1.4, 0.0, 0, "Overnight gap lower with a volatility pickup."),
+    StressScenario("Gap down −10%", -0.10, 1.4, 0.0, 0, "Overnight gap lower with a volatility pickup."),
     StressScenario("Gap up +10%", 0.10, 0.9, 0.0, 0, "Overnight gap higher with a mild volatility drop."),
 )
 
