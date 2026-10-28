@@ -586,9 +586,9 @@ def test_iv_tab_says_when_an_american_quote_has_no_time_value(new_app):
     assert _quote(at).value == 40.0
     [warning] = [w.value for w in at.warning]
     assert warning.startswith(
-        "No implied volatility: this quote has no time value. It is within \\$0.00000000010 (one part in 10¹² of the "
-        "larger of spot and strike) of the option's value at zero volatility (deep in the money, the value of "
-        "exercising now)"
+        "No implied volatility: this quote has no time value. It is no more than \\$0.00000000010 (one part in 10¹² "
+        "of the larger of spot and strike) above the option's value at zero volatility (deep in the money, the value "
+        "of exercising now)"
     )
     assert "Implied volatility" not in _metrics(at)
     # A cent of time value is a volatility again.

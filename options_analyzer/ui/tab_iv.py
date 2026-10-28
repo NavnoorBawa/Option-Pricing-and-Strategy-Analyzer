@@ -63,12 +63,14 @@ def _no_time_value_text(price: float, lower: float, scale: float, american: bool
         if model_quote
         else "This is typical deep in the money close to expiry."
     )
-    margin = _small_amount(TIME_VALUE_MARGIN * scale)
+    # The European solver's margin holds on both sides of the bound; the American solvers also take a quote up to
+    # 1e-10·max(S, K) below the zero-volatility value (their engines' error there) as on it.
+    margin = f"${_small_amount(TIME_VALUE_MARGIN * scale)} (one part in 10¹² of the larger of spot and strike)"
+    where = f"no more than {margin} above" if american else f"within {margin} of"
     return md(
-        f"No implied volatility: this quote has no time value. It is within ${margin} (one part in 10¹² of the larger "
-        f"of spot and strike) of the option's {floor}, and every volatility from zero up to some level prices the "
-        f"option that close to it, so none can be singled out. {why} For a volatility at this strike, invert the "
-        "out-of-the-money option's quote: it is all time value."
+        f"No implied volatility: this quote has no time value. It is {where} the option's {floor}, and every "
+        "volatility from zero up to some level prices the option that close to it, so none can be singled out. "
+        f"{why} For a volatility at this strike, invert the out-of-the-money option's quote: it is all time value."
     )
 
 
