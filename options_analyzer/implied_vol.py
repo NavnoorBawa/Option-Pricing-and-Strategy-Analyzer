@@ -7,7 +7,16 @@ The European solver
    returning a meaningless number);
 2. converts in-the-money quotes to the equivalent out-of-the-money option via
    put-call parity, which carries the same time value but is far better
-   conditioned numerically;
+   conditioned numerically. Subtracting the intrinsic value leaves that time
+   value with the absolute rounding of the whole price, so an in-the-money
+   quote within ``1e-12·max(S, K)`` of the lower bound (the margin the bound
+   check already allows below it), like an out-of-the-money quote of zero, has
+   no time value to identify a volatility from: it is rejected with the reason
+   ``"no_time_value"`` instead of being given whatever volatility its last
+   digits imply (a 2-day call struck at 60, spot 100, rate 4 %: 0 % at its
+   intrinsic value, 94.5 % at 1e-13 above it). An out-of-the-money quote is all
+   time value, keeps its full relative precision and is inverted however small
+   it is;
 3. inverts the normalised out-of-the-money price with Peter Jäckel's "Let's Be
    Rational" (:mod:`options_analyzer.lets_be_rational`), which reaches machine
    precision in two Householder steps, and falls back to Brent's method on a
@@ -15,12 +24,17 @@ The European solver
    exists) for any quote where those steps do not report convergence.
 
 :func:`implied_volatility_batch` does the same for arrays of quotes in one
-vectorised pass, with NaN and a reason for each rejected quote.
+vectorised pass, with NaN and a reason for each rejected quote, and the vega at
+each volatility found.
 
 :func:`implied_volatility_american` inverts a binomial tree (Leisen-Reimer by
 default) for American quotes (listed single-stock options), with American
 bounds; :func:`implied_volatility_alo` inverts the Andersen-Lake-Offengenden
-engine (:mod:`options_analyzer.american`) with the same bounds.
+engine (:mod:`options_analyzer.american`) with the same bounds. Both report a
+quote no more than ``1e-12·max(S, K)`` above the option's zero-volatility value
+as having no time value, as the European solver does in the money; they apply
+the margin out of the money too, because their values near zero volatility are
+accurate only in absolute terms (see :func:`implied_volatility_alo`).
 """
 
 from __future__ import annotations
@@ -38,6 +52,7 @@ from . import lets_be_rational as lbr
 
 __all__ = [
     "REJECTION_REASONS",
+    "TIME_VALUE_MARGIN",
     "ImpliedVolBatch",
     "ImpliedVolError",
     "american_bounds",
@@ -52,6 +67,17 @@ __all__ = [
 MIN_VOL = 1e-6  # lower bracket of the American solver (the tree needs a positive volatility)
 MAX_VOL = 20.0
 _VOL_FLOOR = 1e-12  # European volatilities below this are reported as 0 (and it is the Brent fallback's lower bracket)
+#: The margin around the lower bound, relative to ``max(S, K)``. A European quote up to this far below the bound is
+#: taken as on it (the bound carries rounding too), and an in-the-money quote no more than this far above it (for an
+#: American option, above its zero-volatility value) has no time value. Subtracting the intrinsic value leaves the
+#: time value with the absolute rounding of the price and of the intrinsic value, a few ε·max(S, K) (ε = 2.2e-16);
+#: at this margin that is a few 2.2e-4 of the time value, and so deep in the wing the volatility's relative error is
+#: that divided by about 2·ln(1/β) = 55 (β = 1e-12, the normalised time value). Measured on 20,000 random quotes
+#: priced in double precision (tests/test_implied_vol.py): every quote with more time value inverts to within 7.7e-6
+#: (relative) of the volatility that priced it, and the errors fall in proportion to the time value. With less, the
+#: last digits of the price decide the volatility: a 2-day call struck at 60, spot 100, rate 4 %, gives 0 % at its
+#: intrinsic value, 94.5 % at 1e-13 above it and 230 % at half a cent above it.
+TIME_VALUE_MARGIN = 1e-12
 
 #: The codes of :attr:`ImpliedVolError.reason`, with what each means.
 REJECTION_REASONS = {
@@ -59,9 +85,14 @@ REJECTION_REASONS = {
     "not_positive": "the spot or the strike is not positive",
     "expired": "the option has expired",
     "below_lower_bound": "the price is below the no-arbitrage lower bound",
+    "no_time_value": "the price has no time value to identify a volatility from: it is at most 1e-12·max(S, K) above "
+    "the option's value at zero volatility (in the money, the discounted intrinsic value; for an American option, "
+    "typically the value of exercising now) and not below it by more than the solver tolerates, where its last digits "
+    "would decide the volatility; or, for a European option out of the money, it is zero (or underflows to zero once "
+    "divided by √(S e^(-qT)·K e^(-rT)))",
     "at_or_above_upper_bound": "the price is at or above the no-arbitrage upper bound",
     "above_max_vol": f"the implied volatility exceeds {MAX_VOL:.0%}",
-    "below_tree_floor": "the price is below the value at the lowest volatility the binomial tree can represent",
+    "below_tree_floor": "the price is not above the value at the lowest volatility the binomial tree can represent",
     "invalid": "the quote cannot be inverted (the default code, where no specific one applies)",
 }
 _ABOVE_MAX_VOL = f"implied volatility exceeds {MAX_VOL:.0%}; check the quote and inputs"
@@ -136,7 +167,7 @@ def _check_european_quote(price, S, K, T, r, q, phi: int) -> tuple[float, ...]:
         )
     lower = max(phi * (fwd_s - pv_k), 0.0)
     upper = fwd_s if phi > 0 else pv_k
-    if price < lower - 1e-12 * max(S, K):
+    if price < lower - TIME_VALUE_MARGIN * max(S, K):
         raise ImpliedVolError(
             f"price {price:.6g} is below the no-arbitrage lower bound {lower:.6g} "
             "(discounted intrinsic value); no volatility can produce it",
@@ -166,29 +197,48 @@ def implied_volatility(
 
     Raises :class:`ImpliedVolError` with an explanation when the quote is
     outside the no-arbitrage bounds or implies a volatility above
-    ``MAX_VOL`` (2,000 %), and when the discounted spot ``S e^(-qT)`` or
-    strike ``K e^(-rT)`` overflows (reason ``"not_finite"``). The result
-    is accurate to machine precision (Let's Be Rational); ``tol`` is the
-    volatility tolerance of the Brent fallback, used only where Let's Be
-    Rational does not report convergence.
+    ``MAX_VOL`` (2,000 %), when the discounted spot ``S e^(-qT)`` or
+    strike ``K e^(-rT)`` overflows (reason ``"not_finite"``), and when the
+    quote has no time value (reason ``"no_time_value"``): in the money
+    (``ln(F/K)`` of the option's sign), a price within ``1e-12·max(S, K)``
+    of the lower bound, where the last digits of the price would decide the
+    volatility; out of the money, a price of zero (or one so small that it
+    underflows once divided by ``√(S e^(-qT)·K e^(-rT))``, below about
+    ``5e-324`` of that). The result is accurate to machine precision (Let's
+    Be Rational); ``tol`` is the volatility tolerance of the Brent fallback,
+    used only where Let's Be Rational does not report convergence. A
+    volatility below ``1e-12`` (an out-of-the-money quote with that little
+    time value) is returned as 0.
 
     Examples
     --------
     >>> price = bs.price(100, 110, 0.5, 0.03, 0.25, 0.0, "call")
     >>> round(implied_volatility(price, 100, 110, 0.5, 0.03, 0.0, "call"), 14)
     0.25
+    >>> try:  # a 2-day call at its intrinsic value, 100 - 60
+    ...     implied_volatility(40.0, 100, 60, 2 / 365, 0.0)
+    ... except ImpliedVolError as error:
+    ...     print(error.reason)
+    no_time_value
     """
     phi = bs.option_sign(option_type)
     price, S, K, T, r, q, fwd_s, pv_k = _check_european_quote(price, S, K, T, r, q, phi)
 
-    # Work with the out-of-the-money side: same time value, better conditioning.
+    # Work with the out-of-the-money side: same time value, better conditioning. In the money (ln(F/K) of the
+    # option's sign) that means subtracting the intrinsic value, which leaves the time value with the absolute
+    # rounding of the whole price; out of the money the price is all time value, with its full relative precision.
+    # (A hair from the forward, where the intrinsic value is below the margin too, the two sides differ only for
+    # quotes below the margin, which mean a total volatility below about 2.5e-12: no time value on the in-the-money
+    # side, a volatility of about that, 0 below 1e-12, on the other.)
     x = _log_moneyness(S, K, T, r, q)
-    otm_phi = -1 if x >= 0 else 1
-    otm_price = price if otm_phi == phi else price - phi * _forward_intrinsic(fwd_s, pv_k, x)
-    if otm_price <= 0.0:
-        return 0.0  # no time value: the quote sits exactly on the lower bound
+    in_the_money = phi * x > 0
+    otm_price = price - phi * _forward_intrinsic(fwd_s, pv_k, x) if in_the_money else price
+    if otm_price <= (TIME_VALUE_MARGIN * max(S, K) if in_the_money else 0.0):
+        raise _no_time_value(price, S, K, phi, fwd_s, pv_k, in_the_money, underflow=False)
     # The undiscounted out-of-the-money price over √(FK); with time value left, both forwards are positive (and finite).
     beta = otm_price / (math.sqrt(fwd_s) * math.sqrt(pv_k))
+    if beta == 0.0:  # a time value below about 5e-324·√(FK): the division leaves none
+        raise _no_time_value(price, S, K, phi, fwd_s, pv_k, in_the_money, underflow=True)
     try:
         s, converged = lbr._lets_be_rational_s(beta, -abs(x))
     except (ArithmeticError, ValueError):  # math over- or underflows on extreme inputs
@@ -216,6 +266,35 @@ def _forward_intrinsic(fwd_s: float, pv_k: float, x: float) -> float:
     out-of-the-money price (low volatility, short expiry).
     """
     return pv_k * math.expm1(x) if abs(x) < 1 else fwd_s - pv_k
+
+
+def _no_time_value(
+    price: float, S: float, K: float, phi: float, fwd_s: float, pv_k: float, in_the_money: bool, *, underflow: bool
+) -> ImpliedVolError:
+    """The :class:`ImpliedVolError` of a European quote with no time value (reason ``"no_time_value"``).
+
+    ``underflow``: the time value is positive but its normalised value is 0. :func:`implied_volatility_batch`
+    builds its messages with this function from the same floats, so the two paths say the same.
+    """
+    if underflow:
+        return ImpliedVolError(
+            f"the time value of price {price:.6g} underflows to zero once divided by √(S e^(-qT)·K e^(-rT)) = "
+            f"{math.sqrt(fwd_s) * math.sqrt(pv_k):.6g}: no volatility can be identified from it",
+            "no_time_value",
+        )
+    if in_the_money:
+        lower = max(phi * (fwd_s - pv_k), 0.0)  # as _check_european_quote
+        return ImpliedVolError(
+            f"price {price:.6g} is within {TIME_VALUE_MARGIN * max(S, K):.2g} (1e-12·max(S, K)) of the no-arbitrage "
+            f"lower bound {lower:.6g} (discounted intrinsic value), so it has no time value to identify a volatility "
+            "from: its last digits would decide it",
+            "no_time_value",
+        )
+    return ImpliedVolError(
+        f"price {price:.6g} of an out-of-the-money option, which is worth only its time value, has no time value: "
+        "no volatility can be identified from it",
+        "no_time_value",
+    )
 
 
 def _accept(vol: float) -> float:
@@ -260,10 +339,24 @@ class ImpliedVolBatch(NamedTuple):
     """The :data:`REJECTION_REASONS` code of each rejected quote, ``""`` where it was solved."""
     message: np.ndarray
     """The :class:`ImpliedVolError` message :func:`implied_volatility` gives for the quote, ``""`` where solved."""
+    vega: np.ndarray
+    """Black-Scholes-Merton vega at the implied volatility, ``∂price/∂σ = S e^(-qT)·φ(d₁)·√T``, in price units per
+    unit of volatility (1.00 = 100 vol points; divide by 100 for the vega per vol point); NaN where the quote was
+    rejected. A price error ``δ`` moves the volatility by about ``δ/vega``, so a bid-ask spread divided by vega is
+    the spread in volatility: the weight of the quote in a fit to implied volatilities."""
 
 
 # Index 0 is a solved quote; the others are the European rejection codes.
-_CODES = ("", "not_finite", "not_positive", "expired", "below_lower_bound", "at_or_above_upper_bound", "above_max_vol")
+_CODES = (
+    "",
+    "not_finite",
+    "not_positive",
+    "expired",
+    "below_lower_bound",
+    "at_or_above_upper_bound",
+    "above_max_vol",
+    "no_time_value",
+)
 
 
 def _option_signs(option_type: ArrayLike) -> np.ndarray:
@@ -320,11 +413,11 @@ def implied_volatility_batch(
     """Black-Scholes-Merton implied volatilities of many quotes at once.
 
     The inputs broadcast against each other. Each quote gets the volatility (and the checks and error) of
-    :func:`implied_volatility`, computed in one vectorised Let's Be Rational pass. The bound checks repeat the scalar
-    path's arithmetic exactly. :func:`implied_volatility` itself solves the rare quote whose outcome the vectorised
-    pass could judge differently: where the Householder steps do not report convergence (the Brent fallback), the
-    out-of-the-money price is within ``1e-12`` (relative) of its maximum, or the volatility is within 1 % of
-    ``MAX_VOL``. Near those edges a last-bit difference between NumPy's ``exp`` and the C library's, which the
+    :func:`implied_volatility`, computed in one vectorised Let's Be Rational pass. The bound and time-value checks
+    repeat the scalar path's arithmetic exactly. :func:`implied_volatility` itself solves the rare quote whose outcome
+    the vectorised pass could judge differently: where the Householder steps do not report convergence (the Brent
+    fallback), the out-of-the-money price is within ``1e-12`` (relative) of its maximum, or the volatility is within
+    1 % of ``MAX_VOL``. Near those edges a last-bit difference between NumPy's ``exp`` and the C library's, which the
     scalar path uses, would decide between a volatility and "exceeds 2000%".
 
     Parameters
@@ -341,15 +434,15 @@ def implied_volatility_batch(
         ``"call"``/``"put"`` (or ``"c"``/``"p"``), one for all quotes or one per quote; another value raises
         ``ValueError`` as :func:`implied_volatility` does.
     return_reasons : bool, default False
-        Also return, per quote, why it was rejected.
+        Also return, per quote, why it was rejected, and the vega at each volatility found.
 
     Returns
     -------
     numpy.ndarray or ImpliedVolBatch
         The implied volatilities (decimal) with NaN for rejected quotes, in the broadcast shape of the inputs; with
-        ``return_reasons`` an :class:`ImpliedVolBatch` ``(vol, reason, message)`` whose ``reason`` holds the
-        :attr:`ImpliedVolError.reason` code and ``message`` the error message that :func:`implied_volatility`
-        raises for that quote.
+        ``return_reasons`` an :class:`ImpliedVolBatch` ``(vol, reason, message, vega)`` whose ``reason`` holds the
+        :attr:`ImpliedVolError.reason` code, ``message`` the error message that :func:`implied_volatility`
+        raises for that quote and ``vega`` the Black-Scholes-Merton vega at ``vol`` (per unit of volatility).
 
     Examples
     --------
@@ -361,6 +454,9 @@ def implied_volatility_batch(
     array([nan, nan])
     >>> result.reason.tolist()
     ['below_lower_bound', 'at_or_above_upper_bound']
+    >>> result = implied_volatility_batch([40.0, 10.0], 100, [60, 100], 1.0, 0.0, return_reasons=True)
+    >>> result.reason.tolist(), result.vega.round(4)  # at the money: vega 100·φ(σ√T/2)·√T at σ = 25.13 %
+    (['no_time_value', ''], array([    nan, 39.5805]))
     """
     phi = _option_signs(option_type)
     arrays = np.broadcast_arrays(*(np.asarray(v, dtype=float) for v in (prices, S, K, T, r, q)), phi)
@@ -369,6 +465,9 @@ def implied_volatility_batch(
     vol = np.full(price.size, np.nan)
     code = np.zeros(price.size, dtype=np.int8)  # index into _CODES
     messages: dict[int, str] = {}
+    # For the messages of quotes with no time value: in the money, and positive time value that β = 0 lost.
+    in_the_money, underflow = np.zeros(price.size, dtype=bool), np.zeros(price.size, dtype=bool)
+    log_moneyness, root_fk = np.full(price.size, np.nan), np.full(price.size, np.nan)  # for the vega
 
     with np.errstate(all="ignore"):
         # The scalar path's checks in its order, so that each quote gets the same (first) reason.
@@ -381,7 +480,7 @@ def implied_volatility_batch(
         fwd_s = s_ * _libm(_exp, -q_ * t_)  # as _discounted
         pv_k = k_ * _libm(_exp, -r_ * t_)
         overflow = ~(np.isfinite(fwd_s) & np.isfinite(pv_k))
-        below = ~overflow & (p < np.maximum(ph * (fwd_s - pv_k), 0.0) - 1e-12 * np.maximum(s_, k_))
+        below = ~overflow & (p < np.maximum(ph * (fwd_s - pv_k), 0.0) - TIME_VALUE_MARGIN * np.maximum(s_, k_))
         above = ~overflow & ~below & (p >= np.where(ph > 0, fwd_s, pv_k))
         code[rows[overflow]] = _CODES.index("not_finite")
         code[rows[below]] = _CODES.index("below_lower_bound")
@@ -391,15 +490,23 @@ def implied_volatility_batch(
         rows, p, s_, k_, t_, r_, q_, ph = (a[keep] for a in (rows, p, s_, k_, t_, r_, q_, ph))
         fwd_s, pv_k = fwd_s[keep], pv_k[keep]
         x = _log_ratio_libm(s_, k_) + (r_ - q_) * t_  # as _log_moneyness
+        itm = ph * x > 0
         intrinsic = fwd_s - pv_k  # as _forward_intrinsic
         small = np.abs(x) < 1
         intrinsic[small] = pv_k[small] * _libm(math.expm1, x[small])
-        otm_phi = np.where(x >= 0, -1.0, 1.0)
-        otm_price = np.where(otm_phi == ph, p, p - ph * intrinsic)
-        vol[rows] = 0.0  # no time value; overwritten below where there is some
-        live = otm_price > 0
-        rows, t_, ax = rows[live], t_[live], np.abs(x[live])
-        beta = otm_price[live] / (np.sqrt(fwd_s[live]) * np.sqrt(pv_k[live]))
+        otm_price = np.where(itm, p - ph * intrinsic, p)
+        root = np.sqrt(fwd_s) * np.sqrt(pv_k)
+        beta = otm_price / root
+        # As implied_volatility: in the money no more than the margin of time value, out of the money none (or none
+        # left once divided by √(FK)).
+        flat = otm_price <= np.where(itm, TIME_VALUE_MARGIN * np.maximum(s_, k_), 0.0)
+        no_time_value = flat | (beta == 0)
+        code[rows[no_time_value]] = _CODES.index("no_time_value")
+        in_the_money[rows], underflow[rows] = itm, ~flat & (beta == 0)
+        live = ~no_time_value
+        rows, t_, x, root, beta = rows[live], t_[live], x[live], root[live], beta[live]
+        log_moneyness[rows], root_fk[rows] = x, root
+        ax = np.abs(x)
         s, converged = lbr._lets_be_rational_v(beta, -ax)
         sigma = s / np.sqrt(t_)
         # implied_volatility decides the rows whose outcome it could see differently (see the docstring).
@@ -422,13 +529,25 @@ def implied_volatility_batch(
     for i in np.flatnonzero(code).tolist():
         if i in messages:  # from implied_volatility itself
             message[i] = messages[i]
-            continue
-        try:  # a bound check: the same checks on the same floats as implied_volatility, hence the same message
-            _check_european_quote(price[i], S[i], K[i], T[i], r[i], q[i], int(phi[i]))
-        except ImpliedVolError as error:
-            message[i] = str(error)
+        elif _CODES[code[i]] == "no_time_value":  # the same floats as implied_volatility, hence the same message
+            quote, spot, strike, sign = float(price[i]), float(S[i]), float(K[i]), int(phi[i])
+            discounted = _discounted(spot, strike, float(T[i]), float(r[i]), float(q[i]))
+            itm_i, underflow_i = bool(in_the_money[i]), bool(underflow[i])
+            message[i] = str(_no_time_value(quote, spot, strike, sign, *discounted, itm_i, underflow=underflow_i))
+        else:
+            try:  # a bound check: the same checks on the same floats as implied_volatility, hence the same message
+                _check_european_quote(price[i], S[i], K[i], T[i], r[i], q[i], int(phi[i]))
+            except ImpliedVolError as error:
+                message[i] = str(error)
+    # Vega S e^(-qT)·φ(d₁)·√T = √(S e^(-qT)·K e^(-rT))·b'(x, σ√T)·√T, b' the normalised vega (the same for calls and
+    # puts), at the volatility found; NaN stays NaN where there is none.
+    vega = np.full(price.size, np.nan)
+    found = np.flatnonzero(~np.isnan(vol))
+    with np.errstate(all="ignore"):
+        sqrt_t = np.sqrt(T[found])
+        vega[found] = root_fk[found] * sqrt_t * lbr.normalised_vega(log_moneyness[found], vol[found] * sqrt_t)
     reason = np.asarray(_CODES, dtype=object)[code]
-    return ImpliedVolBatch(vol_shaped, reason.reshape(shape), message.reshape(shape))
+    return ImpliedVolBatch(vol_shaped, reason.reshape(shape), message.reshape(shape), vega.reshape(shape))
 
 
 def american_bounds(S: float, K: float, T: float, r: float, q: float = 0.0, option_type: str = "call"):
@@ -474,6 +593,15 @@ def implied_volatility_american(
     for quotes outside the American bounds or below the zero-volatility value
     (which already includes the value of optimal early exercise). On a CRR
     tree the search starts at :func:`lowest_tree_volatility`.
+
+    A quote no more than ``1e-12·max(S, K)`` above the tree's value at :data:`MIN_VOL` (the zero-volatility value,
+    for example the value of exercising at once), or up to ``1e-10·max(S, K)`` below it (the tree's own error
+    there), has no time value (reason ``"no_time_value"``), as in :func:`implied_volatility`: every volatility up
+    to some level gives that value (deep in the money, every volatility at which exercising at once stays optimal),
+    so the quote cannot single one out. The margin applies out of the money too, where the tree is accurate only in
+    absolute terms (see :func:`implied_volatility_alo`). On a CRR tree that cannot represent volatilities that low,
+    a quote not above the value at its lowest volatility (to the same margin) is rejected with the reason
+    ``"below_tree_floor"``.
     """
     price, S, K, T, r, q = _check_american_quote(price, S, K, T, r, q, option_type)
     scale = max(S, K)
@@ -483,17 +611,16 @@ def implied_volatility_american(
 
     lowest = lowest_tree_volatility(T, r, q, steps, method)
     floor = objective(lowest)
-    if floor >= 0.0:
-        if floor <= 1e-10 * scale:
-            # The quote equals the zero-volatility value (e.g. immediate exercise is optimal): every
-            # volatility up to some level reproduces it, so report zero like the European solver does.
-            return 0.0
-        if lowest > MIN_VOL:
+    if floor >= -TIME_VALUE_MARGIN * scale:  # no more than the margin above the value at the lowest volatility
+        if lowest > MIN_VOL:  # a CRR tree's floor: the volatility may be anywhere below what the tree represents
+            where = "below" if floor > 0.0 else f"no more than {TIME_VALUE_MARGIN * scale:.2g} above"
             raise ImpliedVolError(
-                f"price {price:.6g} is below {price + floor:.6g}, the value at {lowest:.4%} volatility, the lowest "
+                f"price {price:.6g} is {where} {price + floor:.6g}, the value at {lowest:.4%} volatility, the lowest "
                 f"a {steps}-step CRR tree can represent; use more steps or the Leisen-Reimer tree",
                 "below_tree_floor",
             )
+        if floor <= 1e-10 * scale:
+            raise _american_no_time_value(price, price + floor, scale)
         raise _below_zero_volatility(price, price + floor)
     hi = _upper_bracket(objective)
     return float(brentq(objective, lowest, hi, xtol=tol, maxiter=200))
@@ -516,9 +643,19 @@ def implied_volatility_alo(
 
     The quote is checked against the American bounds first, with the messages of
     :func:`implied_volatility_american`. The engine values zero volatility exactly (the best deterministic
-    exercise date), so the bracket starts at 0; a quote at that value is reported as zero volatility, and one
-    below it is rejected. Brent's method then solves on ``[0, hi]``, ``hi`` the first of 1, 2, 4, ... up to
-    :data:`MAX_VOL` where the value reaches the quote.
+    exercise date), so the bracket starts at 0. A quote no more than ``1e-12·max(S, K)`` above that value, or up to
+    ``1e-10·max(S, K)`` below it, has no time value (reason ``"no_time_value"``, with the tree solver's message),
+    and one further below is rejected. Brent's method then solves on ``[0, hi]``, ``hi`` the first of 1, 2, 4, ...
+    up to :data:`MAX_VOL` where the value reaches the quote.
+
+    Unlike :func:`implied_volatility`, which inverts a tiny out-of-the-money European quote to full relative
+    precision, both American solvers apply the margin out of the money too: near zero volatility their engines are
+    accurate only in absolute terms, far more coarsely than a quote's rounding. This engine values a total
+    volatility ``σ√T`` below 1e-8 at zero volatility (an error up to about 4e-9·S), and the 501-step tree values a
+    one-year at-the-money put (rate 5 %) at 0.046 % volatility at 1.3e-13 where this engine gives 7.8e-5. Just above
+    the margin a volatility is only as good as the engine there: that put quoted 1e-9 above its zero-volatility
+    value of 0 gives about 0.0005 % here (the digits after that move with the NumPy and SciPy versions) and 0.06 %
+    on the tree.
 
     Examples
     --------
@@ -533,9 +670,9 @@ def implied_volatility_alo(
         return float(american.price(S, K, T, r, vol, q, option_type=option_type, scheme=scheme)) - price
 
     floor = objective(0.0)
-    if floor >= 0.0:
+    if floor >= -TIME_VALUE_MARGIN * max(S, K):
         if floor <= 1e-10 * max(S, K):
-            return 0.0  # the zero-volatility value, as in implied_volatility_american
+            raise _american_no_time_value(price, price + floor, max(S, K))  # as in implied_volatility_american
         raise _below_zero_volatility(price, price + floor)
     hi = _upper_bracket(objective)
     return float(brentq(objective, 0.0, hi, xtol=tol, rtol=4 * np.finfo(float).eps, maxiter=200))
@@ -546,7 +683,7 @@ def _check_american_quote(price, S, K, T, r, q, option_type: str) -> tuple[float
     the inputs as floats."""
     price, S, K, T, r, q = _check_contract(price, S, K, T, r, q)
     lower, upper = american_bounds(S, K, T, r, q, option_type)
-    if price < lower - 1e-12 * max(S, K):
+    if price < lower - TIME_VALUE_MARGIN * max(S, K):
         raise ImpliedVolError(
             f"price {price:.6g} is below the American lower bound {lower:.6g} (immediate exercise value); "
             "no volatility can produce it",
@@ -557,6 +694,15 @@ def _check_american_quote(price, S, K, T, r, q, option_type: str) -> tuple[float
             f"price {price:.6g} is at or above the American upper bound {upper:.6g}", "at_or_above_upper_bound"
         )
     return price, S, K, T, r, q
+
+
+def _american_no_time_value(price: float, floor: float, scale: float) -> ImpliedVolError:
+    return ImpliedVolError(
+        f"price {price:.6g} is no more than {TIME_VALUE_MARGIN * scale:.2g} (1e-12·max(S, K)) above the "
+        f"zero-volatility American value {floor:.6g}, which every volatility up to some level gives, so it has no "
+        "time value to identify a volatility from",
+        "no_time_value",
+    )
 
 
 def _below_zero_volatility(price: float, floor: float) -> ImpliedVolError:

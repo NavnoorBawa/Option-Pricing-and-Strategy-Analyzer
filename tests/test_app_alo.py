@@ -606,8 +606,13 @@ def test_alo_implied_volatility_round_trips_and_shares_the_tree_solvers_messages
         with pytest.raises(implied_vol.ImpliedVolError) as tree:
             implied_vol.implied_volatility_american(quote, 80, 100, 1.0, 0.05, 0.0, "put")
         assert (str(alo.value), alo.value.reason) == (str(tree.value), tree.value.reason)
-    # The value of exercising now is the zero-volatility value: zero, as the tree solver reports it.
-    assert implied_vol.implied_volatility_alo(40.0, 60, 100, 1.0, 0.05, 0.0, "put") == 0.0
+    # The value of exercising now is the zero-volatility value, which every volatility up to 38.5 % gives: no time
+    # value, as the tree solver reports it (both used to return zero).
+    with pytest.raises(implied_vol.ImpliedVolError) as alo:
+        implied_vol.implied_volatility_alo(40.0, 60, 100, 1.0, 0.05, 0.0, "put")
+    with pytest.raises(implied_vol.ImpliedVolError) as tree:
+        implied_vol.implied_volatility_american(40.0, 60, 100, 1.0, 0.05, 0.0, "put")
+    assert (str(alo.value), alo.value.reason) == (str(tree.value), "no_time_value")
     # A put with q > r > 0 is worth most at zero volatility when exercised at a date before expiry (here 25 at
     # 13.9 years), above its bounds (23.25): a quote between the two has no volatility.
     assert american.price(100, 100, 20.0, 0.05, 0.0, 0.10, option_type="put") == pytest.approx(25.0, abs=1e-9)
