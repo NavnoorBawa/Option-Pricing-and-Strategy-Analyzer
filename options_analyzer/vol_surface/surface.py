@@ -43,7 +43,13 @@ class VolSurface:
 
     Market surfaces also carry the cleaned quotes (with the fitted vol at each
     quote), the per-maturity SVI fits, their implied-vol RMSE and the quoted
-    forward log-moneyness range of every maturity. Implied vol is NaN outside a
+    forward log-moneyness range of every maturity, and the forward of every maturity
+    (``log_forward_ratio``, ``ln(F / S)``, with the ``spot`` it is relative to and the
+    ``discount_factor``; :attr:`log_forward` is ``ln F``): from put-call parity when the
+    quotes gave it, otherwise ``carry T``. Between maturities ``ln(F / S)`` is interpolated
+    linearly in ``T``.
+    ``forwards`` is the table of :func:`.forwards.implied_forwards` for the fitted
+    maturities when the quotes were option prices. Implied vol is NaN outside a
     maturity's quoted strike range and local vol is NaN wherever it is undefined.
     """
 
@@ -61,10 +67,31 @@ class VolSurface:
     svi: tuple[SVISlice, ...] = ()
     quoted_y: np.ndarray | None = None
     ssvi: SSVIParams | None = None
+    log_forward_ratio: np.ndarray | None = None
+    spot: float | None = None
+    discount_factor: np.ndarray | None = None
+    forwards: pd.DataFrame | None = None
 
     @property
     def strikes_over_spot(self) -> np.ndarray:
         return self.moneyness
+
+    @property
+    def log_forward(self) -> np.ndarray | None:
+        """``ln F`` at every maturity of a market surface (None for SSVI, whose forward is ``S e^{carry T}``)."""
+        if self.log_forward_ratio is None or self.spot is None:
+            return None
+        return np.log(self.spot) + self.log_forward_ratio
+
+    def _log_fs(self) -> np.ndarray:
+        """``ln(F / S)`` at every maturity: the forwards of a market surface, else ``carry T``."""
+        return self.carry * self.maturities if self.log_forward_ratio is None else self.log_forward_ratio
+
+    def _log_fs_at(self, maturity: float) -> float:
+        """``ln(F / S)`` at ``maturity``, linear in ``T`` between the surface's maturities."""
+        if self.log_forward_ratio is None:
+            return self.carry * maturity
+        return float(np.interp(maturity, self.maturities, self.log_forward_ratio))
 
     @property
     def quoted_points(self) -> int:
@@ -103,7 +130,7 @@ class VolSurface:
         snap = abs(Ts[nearest] - T) <= MATURITY_TOLERANCE
         if snap:
             T = float(Ts[nearest])
-        y = np.log(moneyness) - self.carry * T
+        y = np.log(moneyness) - self._log_fs_at(T)
         j = nearest if snap else int(np.searchsorted(Ts, T)) - 1
         around = [j] if snap else [j, j + 1]
         if any(not self.quoted_y[k, 0] - 1e-9 <= y <= self.quoted_y[k, 1] + 1e-9 for k in around):
@@ -129,7 +156,7 @@ class VolSurface:
             outside = (levels < self.moneyness[0] - 1e-12) | (levels > self.moneyness[-1] + 1e-12)
             return np.where(outside, np.nan, np.sqrt(w / T)), np.where(outside, np.nan, local)
         if self.svi and self.quoted_y is not None:
-            values = _market_values(self.svi, self.maturities, self.quoted_y, self.carry, levels)
+            values = _market_values(self.svi, self.maturities, self.quoted_y, self._log_fs(), levels)
             return values.implied, values.local
         m = self.moneyness
         outside = (levels < m[0]) | (levels > m[-1])
@@ -226,10 +253,17 @@ def fit_market_surface(
     rate: float,
     dividend_yield: float,
     n_moneyness: int = 41,
+    *,
+    forwards: pd.DataFrame | None = None,
 ) -> VolSurface:
     """Fit a surface to cleaned quotes (see :func:`parse_quotes`) and compute local vol.
 
-    Every maturity with enough strikes is fitted with raw SVI (:func:`fit_svi`).
+    Every maturity with enough strikes is fitted with raw SVI (:func:`fit_svi`) in forward
+    log-moneyness ``y = ln(K / F_T)``: with the forward of each quote's expiry where the
+    quotes carry ``forward`` and ``discount_factor`` columns (put-call parity, see
+    :func:`parse_quotes`), otherwise ``F_T = spot e^{(rate - dividend_yield) T}`` and the
+    discount factor ``e^{-rate T}``. ``forwards``, the table :func:`parse_quotes` returns with
+    ``return_forwards=True``, is kept on the surface (its rows at the fitted maturities) for display.
     The result is evaluated at the quoted maturities (no extrapolation in time)
     on a K/S grid spanning the union of the quoted strike ranges, with
     ``n_moneyness`` points across it and more inside narrow ranges
@@ -247,7 +281,7 @@ def fit_market_surface(
     notes: list[str] = []
     # _prepare yields one maturity at a time, which _fit_slices fits before the next one is read: on quotes that
     # parse_quotes did not clean, the first maturity the fit fails on decides the error and the warnings.
-    slices = _fit_slices(_prepare(quotes, spot, carry, notes), spot, rate, carry)
+    slices = _fit_slices(_prepare(quotes, spot, rate, carry, notes), spot)
     if len(slices) < 2:
         n_maturities = quotes["maturity"].nunique()
         raise QuoteParseError(
@@ -257,7 +291,10 @@ def fit_market_surface(
         )
     Ts = np.array([piece.T for piece in slices])
     quoted_y = np.array([piece.quoted for piece in slices])
-    moneyness, values = _evaluate_grid(slices, Ts, quoted_y, carry, n_moneyness)
+    # ln(F/S) of each maturity: carry T exactly where it came from the rate and dividend yield (as before parity
+    # forwards existed), ln(F/S) of the parity forward elsewhere.
+    log_fs = np.array([carry * piece.T if piece.from_rates else np.log(piece.forward / spot) for piece in slices])
+    moneyness, values = _evaluate_grid(slices, Ts, quoted_y, log_fs, n_moneyness)
     notes += _diagnostics(slices, Ts, values, quotes, spot)
     clean_quotes = pd.concat([piece.quotes for piece in slices]).reset_index(drop=True)
     return VolSurface(
@@ -274,7 +311,19 @@ def fit_market_surface(
         fit_rmse=np.array([piece.rmse for piece in slices]),
         svi=tuple(piece.svi for piece in slices),
         quoted_y=quoted_y,
+        log_forward_ratio=log_fs,
+        spot=float(spot),
+        discount_factor=np.array([piece.discount_factor for piece in slices]),
+        forwards=_fitted_forwards(forwards, Ts),
     )
+
+
+def _fitted_forwards(table: pd.DataFrame | None, Ts: np.ndarray) -> pd.DataFrame | None:
+    """The rows of a table of forwards (see :func:`parse_quotes`) at the fitted maturities ``Ts``, or None."""
+    if table is None or table.empty:
+        return None
+    near = np.abs(table["maturity"].to_numpy(float)[:, None] - Ts[None, :]).min(axis=1) <= 1e-9
+    return table[near].reset_index(drop=True)
 
 
 # The stages of fit_market_surface, in the order it runs them: _prepare (each maturity's quotes), _fit_slices (an SVI
@@ -287,6 +336,9 @@ class _Prepared:
     """One maturity's quotes, ready for the SVI fit (stage 1 of :func:`fit_market_surface`)."""
 
     T: float
+    forward: float  # F_T, and the discount factor of the expiry
+    discount_factor: float
+    from_rates: bool  # whether they came from the rate and dividend yield (no forward columns in the quotes)
     quotes: pd.DataFrame  # its rows of the cleaned quotes
     y: np.ndarray  # forward log-moneyness of each quote
     iv: np.ndarray  # implied vol of each quote
@@ -299,6 +351,9 @@ class _Slice:
     """One maturity's SVI fit and the checks of its quotes (stage 2 of :func:`fit_market_surface`)."""
 
     T: float
+    forward: float  # F_T, and the discount factor of the expiry
+    discount_factor: float
+    from_rates: bool  # whether they came from the rate and dividend yield (no forward columns in the quotes)
     svi: SVISlice
     quoted: tuple[float, float]  # the range of forward log-moneyness of its quotes
     rmse: float  # implied-vol RMSE of the fit at the quotes
@@ -309,23 +364,41 @@ class _Slice:
     quotes: pd.DataFrame  # its rows of the cleaned quotes, with their K/S (moneyness) and fitted vol (fitted_iv)
 
 
-def _prepare(quotes: pd.DataFrame, spot: float, carry: float, notes: list[str]) -> Iterator[_Prepared]:
-    """Stage 1 of :func:`fit_market_surface`: each maturity's forward log-moneyness and vols, and those the SVI fit is
-    given (dense quotes averaged into :data:`MAX_POINTS_PER_SLICE` bins, :func:`_binned`), yielded in order of
-    maturity as they are read; a maturity with fewer than :data:`MIN_STRIKES_PER_SLICE` strikes is skipped with a
-    note, appended to ``notes``."""
+def _prepare(quotes: pd.DataFrame, spot: float, rate: float, carry: float, notes: list[str]) -> Iterator[_Prepared]:
+    """Stage 1 of :func:`fit_market_surface`: each maturity's forward and discount factor (:func:`_expiry_carry`),
+    forward log-moneyness and vols, and those the SVI fit is given (dense quotes averaged into
+    :data:`MAX_POINTS_PER_SLICE` bins, :func:`_binned`), yielded in order of maturity as they are read; a maturity
+    with fewer than :data:`MIN_STRIKES_PER_SLICE` strikes is skipped with a note, appended to ``notes``."""
     for maturity, grp in quotes.groupby("maturity"):
         T = float(cast(float, maturity))
         if grp["strike"].nunique() < MIN_STRIKES_PER_SLICE:
             notes.append(f"Skipped maturity {T:.4g}y: fewer than {MIN_STRIKES_PER_SLICE} strikes.")
             continue
-        y = np.log(grp["strike"].to_numpy(float) / spot) - carry * T
+        forward, discount_factor = _expiry_carry(grp, spot, rate, carry, T)
+        from_rates = forward is None
+        if forward is None:
+            y = np.log(grp["strike"].to_numpy(float) / spot) - carry * T
+            forward = spot * np.exp(carry * T)
+        else:
+            y = np.log(grp["strike"].to_numpy(float) / forward)
         iv = grp["iv"].to_numpy(float)
         y_fit, iv_fit = (y, iv) if len(y) <= MAX_POINTS_PER_SLICE else _binned(y, iv)
-        yield _Prepared(T, grp, y, iv, y_fit, iv_fit)
+        yield _Prepared(T, float(forward), discount_factor, from_rates, grp, y, iv, y_fit, iv_fit)
 
 
-def _fit_slices(prepared: Iterable[_Prepared], spot: float, rate: float, carry: float) -> list[_Slice]:
+def _expiry_carry(grp: pd.DataFrame, spot: float, rate: float, carry: float, T: float) -> tuple[float | None, float]:
+    """The forward and discount factor of one maturity's quotes: their ``forward`` and ``discount_factor`` columns
+    (one value per expiry) where present and valid, else ``(None, e^{-rate T})`` (the forward is then
+    ``spot e^{carry T}``, computed in log-moneyness exactly as before parity forwards existed)."""
+    if "forward" in grp and "discount_factor" in grp:
+        forward = float(np.median(grp["forward"].to_numpy(float)))
+        discount_factor = float(np.median(grp["discount_factor"].to_numpy(float)))
+        if forward > 0 and discount_factor > 0 and np.isfinite(forward) and np.isfinite(discount_factor):
+            return forward, discount_factor
+    return None, float(np.exp(-rate * T))
+
+
+def _fit_slices(prepared: Iterable[_Prepared], spot: float) -> list[_Slice]:
     """Stage 2 of :func:`fit_market_surface`: the raw-SVI fit of each maturity (:func:`fit_svi`), its RMSE at the
     quotes, and the model-free static-arbitrage checks of the quotes (:func:`_quote_arbitrage`)."""
     slices = []
@@ -334,15 +407,30 @@ def _fit_slices(prepared: Iterable[_Prepared], spot: float, rate: float, carry: 
         svi = fit_svi(piece.y_fit, piece.iv_fit, T)
         fitted = np.sqrt(np.maximum(svi.total_variance(y)[0], 0.0) / T)
         rmse = float(np.sqrt(np.mean((fitted - iv) ** 2)))
-        spread, butterflies, certain = _quote_arbitrage(piece.quotes, iv, T, spot * np.exp(carry * T), rate)
+        spread, butterflies, certain = _quote_arbitrage(piece.quotes, iv, T, piece.forward, piece.discount_factor)
         with_fit = piece.quotes.assign(moneyness=piece.quotes["strike"] / spot, fitted_iv=fitted)
         binned = len(piece.y_fit) < len(y)
-        slices.append(_Slice(T, svi, (y.min(), y.max()), rmse, binned, spread, butterflies, certain, with_fit))
+        slices.append(
+            _Slice(
+                T,
+                piece.forward,
+                piece.discount_factor,
+                piece.from_rates,
+                svi,
+                (y.min(), y.max()),
+                rmse,
+                binned,
+                spread,
+                butterflies,
+                certain,
+                with_fit,
+            )
+        )
     return slices
 
 
 def _quote_arbitrage(
-    grp: pd.DataFrame, iv: np.ndarray, T: float, forward: float, rate: float
+    grp: pd.DataFrame, iv: np.ndarray, T: float, forward: float, discount_factor: float
 ) -> tuple[bool, tuple[int, tuple[float, float, float] | None], bool]:
     """Vertical-spread and butterfly arbitrage in one maturity's quotes (:func:`_spread_arbitrage`,
     :func:`_butterfly_arbitrage`), and whether it is beyond what rounding the prices behind quoted vols to
@@ -352,7 +440,7 @@ def _quote_arbitrage(
     # MIN_PRICE_ERROR, whichever is more.
     known = grp["price_error"].to_numpy(float) if "price_error" in grp else np.full(len(grp), np.nan)
     unknown = ~np.isfinite(known)
-    growth = np.exp(rate * T)
+    growth = 1.0 / discount_factor
     strike = grp["strike"].to_numpy(float)
     # Strikes on a sub-cent grid (FX, penny stocks) are priced in sub-cent ticks: scale both floors with the
     # strike spacing, or a half-cent floor hides gross arbitrage on an underlying priced near 1.
@@ -374,12 +462,12 @@ def _quote_arbitrage(
 
 
 def _evaluate_grid(
-    slices: list[_Slice], Ts: np.ndarray, quoted_y: np.ndarray, carry: float, n_moneyness: int
+    slices: list[_Slice], Ts: np.ndarray, quoted_y: np.ndarray, log_fs: np.ndarray, n_moneyness: int
 ) -> tuple[np.ndarray, _MarketValues]:
     """Stage 3 of :func:`fit_market_surface`: the K/S grid (:func:`_moneyness_grid`), and implied and local vol on it
-    (:func:`_market_values`)."""
-    moneyness = _moneyness_grid(np.exp(quoted_y + carry * Ts[:, None]), n_moneyness)
-    return moneyness, _market_values([piece.svi for piece in slices], Ts, quoted_y, carry, moneyness)
+    (:func:`_market_values`); ``log_fs`` is ``ln(F / S)`` at each maturity."""
+    moneyness = _moneyness_grid(np.exp(quoted_y + log_fs[:, None]), n_moneyness)
+    return moneyness, _market_values([piece.svi for piece in slices], Ts, quoted_y, log_fs, moneyness)
 
 
 def _diagnostics(

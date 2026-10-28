@@ -826,19 +826,16 @@ def test_fit_recovers_the_generator_atm_vols_from_the_liquid_core(seed):
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="needs spread-weighted calibration (SF-4): the unweighted SVI fit is pulled off the money by the cheap "
-    "wing quotes, worth a few ticks with vol errors of several points",
-)
 def test_fit_recovers_the_generator_atm_vols_from_the_whole_chain():
     """Acceptance (3) on the whole chain, as uploaded: every quote with a bid, the generator's rate and yield.
 
-    Measured on the four valuation times and the noise settings of the test above: the worst errors are 0.086, 0.86,
-    1.9 and 0.095 vol point at the model mids, and 0.57, 1.4, 2.3 and 0.31 with noise, the largest at the expiries
-    one and a quarter days and six hours away; 14 of the 16 runs miss 0.1 vol point somewhere, up to 7 of 17 expiries
-    at once. Thirty minutes before an AM settlement the miss reaches 3.2 vol points.
+    Before parity forwards (SF-3) the worst errors over the four valuation times were 0.086, 0.86, 1.9 and 0.095 vol
+    point at the model mids, and 0.57, 1.4, 2.3 and 0.31 with noise: 14 of the 16 runs missed 0.1 vol point
+    somewhere. The cause was not the unweighted SVI fit, as first thought, but the in-the-money quotes in the wings,
+    kept where their out-of-the-money side has a zero bid: their time value lies within their spread, and they were
+    inverted into vols several points off. Parsing now drops them, and each expiry's forward and discount factor come
+    from put-call parity. Measured over the same 16 runs: the worst error is 0.090 vol point (30 October, 10:00, noise
+    seed 2, the expiry six hours away), every other run below 0.017, with the largest fit RMSE 0.17 vol point.
     """
     misses = []
     for as_of in FIT_TIMES:
@@ -848,12 +845,6 @@ def test_fit_recovers_the_generator_atm_vols_from_the_whole_chain():
     assert misses == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="needs forwards and discount factors per expiry from put-call parity (SF-3): today the forward comes from "
-    "the sidebar rate and dividend yield",
-)
 @pytest.mark.parametrize(
     ("rate_curve", "dividends"),
     [(UST, YIELD), (lambda T: 0.035 + 0.01 * T, [(date(2026, 12, 18), 20.0), (date(2027, 3, 19), 19.0)])],
@@ -862,14 +853,15 @@ def test_fit_recovers_the_generator_atm_vols_from_the_whole_chain():
 def test_fit_recovers_forwards_and_atm_vols_with_the_sidebar_rate(rate_curve, dividends):
     """Acceptance (3), the part that needs SF-3: parsed with the sidebar's Treasury rate and no dividend yield, the
     surface fitted to the liquid core recovers each expiry's forward within 2e-4 and its ATM vol within 0.1 vol
-    point."""
+    point, because both come from put-call parity, not from the sidebar. Measured over noise seeds 0-3: forwards
+    within 0.26 bp (0.21 bp with the rate curve and cash dividends), ATM vols within 0.0095 vol point. Before SF-3
+    the sidebar forward was 45 bp a year off (the box rate) and the dividends were missing."""
     chain = sample_chain(SPOT, rate_curve, dividends, as_of=AS_OF)
     parsed, _ = vs.parse_quotes(to_quotes(chain.quotes, as_of=AS_OF), SPOT, UST, 0.0)
     surface = vs.fit_market_surface(_liquid_core(parsed, SPOT, UST, 0.0), SPOT, UST, 0.0)
-    log_forward = getattr(surface, "log_forward", None)  # SF-3 stores the forward of each maturity
+    assert surface.log_forward is not None and len(surface.maturities) == len(chain.expiries)
     for i, row in enumerate(chain.expiries.itertuples()):
-        forward = math.exp(log_forward[i]) if log_forward is not None else SPOT * math.exp(surface.carry * row.maturity)
-        assert forward == pytest.approx(row.forward, rel=2e-4), row.expiry
+        assert math.exp(surface.log_forward[i]) == pytest.approx(row.forward, rel=2e-4), row.expiry
         assert surface.implied_vol_at(row.forward / SPOT, row.maturity) == pytest.approx(row.atm_vol, abs=0.001)
 
 

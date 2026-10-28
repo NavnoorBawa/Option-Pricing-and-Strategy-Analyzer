@@ -1040,10 +1040,17 @@ def test_bid_ask_quotes_keep_the_out_of_the_money_side_and_drop_impossible_price
     clean, messages = vs.parse_quotes(frame, spot, r, q)
     text = " ".join(messages)
     assert "out-of-the-money" in text and "no-arbitrage" in text and "zero bid" in text and "trading volume" in text
-    assert len(clean) == 27  # one option per strike and expiry
+    # One option per strike and expiry, less the 30-day 80 call: its put (worth 0.0013) has a negative bid, and its
+    # own time value, 0.0013, is within its 0.01 half-spread, so it says nothing about the vol.
+    assert len(clean) == 26
+    assert "Dropped 1 in-the-money quote(s) whose time value at the expiry's forward is within their" in text
     assert np.allclose(clean["iv"], sigma, atol=0.01)
     fitted = vs.fit_market_surface(clean, spot, r, q)
     assert fitted.implied_vol_at(1.0, 0.4) == pytest.approx(sigma, abs=0.005)
+    # Read with the sidebar rate and dividend yield, as before parity forwards, the call is inverted (to a vol 3.5
+    # points off, within the 0.01 tolerance above only because its time value is so small).
+    by_rates, _ = vs.parse_quotes(frame, spot, r, q, forward="rates")
+    assert len(by_rates) == 27
 
 
 def _stacked_calls_and_puts(itm_vol) -> pd.DataFrame:
