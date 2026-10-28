@@ -6,6 +6,8 @@ The functions from :func:`signed` on are the desk number-format standard:
   digit in IBM Plex, so signed columns line up) and no sign at zero: never ``−0.00``.
 * Greeks keep at least three significant digits (:func:`greek`), so small second-order Greeks never read
   ``0.000000``; dollar Greeks have one explicit definition each (:func:`dollar_delta` and the functions after it).
+  Time decay heads a card or table as theta / 365 or as the one-day decay by repricing, by one rule
+  (:func:`decay_leads`), under one of two names (:func:`decay_label`).
 * Dates read ``20-Oct-27 (365d)`` (:func:`expiry`), money in accounting style ``($1,234.56)`` where a column of
   amounts needs it (:func:`accounting`), and position sizes are whole numbers (:func:`quantity`).
 
@@ -224,8 +226,9 @@ def dollar_rho(rho: float, units: float) -> float:
 
 
 #: Theta / 365 stays the headline while it is within this fraction of the one-day decay by repricing, measured
-#: against the larger of the two in size. At-the-money (100, 20 % volatility, 5 % rate) the two differ by 8.7 % at 3
-#: days to expiry and by 14 % at 2 days; on the panel's 7-day SPX iron condor by 9.5 % ($137.50 against $151.97).
+#: against the larger of the two in size. At the money (100, 20 % volatility, 5 % rate) the two differ by 8.7 % (call)
+#: and 9.7 % (put) at 3 days to expiry and by 14.1 % and 15.2 % at 2 days; on the panel's 7-day SPX-like iron condor
+#: by 9.5 % ($137.50 against $151.97), so that one keeps theta.
 DECAY_SWITCH = 0.10
 
 

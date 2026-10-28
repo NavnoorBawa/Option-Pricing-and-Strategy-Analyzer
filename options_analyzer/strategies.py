@@ -543,8 +543,9 @@ def time_decay(strategy: Strategy, market: Market, *, days: float = 1.0, multipl
     implied volatility unchanged, and the result is the later value minus the value now: what holding the position
     over that time makes or loses if nothing else moves. A leg whose expiry falls inside the period is worth its
     intrinsic value at the current spot (``max(S - K, 0)`` for a call, ``max(K - S, 0)`` for a put), which is what
-    it settles at if the spot does not move; shares gain the dividends they accrue (see the module notes). The
-    legs are differenced one by one, so a large position loses no precision to the size of its value.
+    it settles at if the spot does not move; shares gain the dividends they accrue (see the module notes). Each
+    leg's two values are differenced on their own, so a small decay is not lost in the rounding of a large total
+    value (a box, or a hedged book).
 
     Theta (:func:`position_greeks`, :attr:`PositionRisk.theta`) is the instantaneous rate of this change, and
     theta / 365 is close to the one-day decay only while every option has well over a day left: for a 1-day

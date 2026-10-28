@@ -505,6 +505,18 @@ def test_the_tree_greeks_add_the_trees_own_decay(new_app, lattice, later_steps):
         closed = bs.price(100, 100, 6 * DAY, 0.05, 0.2, 0, kind) - bs.price(100, 100, 7 * DAY, 0.05, 0.2, 0, kind)
         assert _greeks(at).loc["1-day decay", kind.capitalize()] == pytest.approx(closed, rel=1e-12)
     assert any(f"with {later_steps} steps" in c.value for c in at.caption) is (method == "crr")
+    assert any("by Black-Scholes-Merton (the tree's own is in its Greeks below)" in c.value for c in at.caption)
+
+
+def test_the_tree_decays_to_its_intrinsic_value_within_a_day(new_app):
+    at = new_app(days=1, strike=95, model="Binomial tree", style="American").run()
+    _ok(at)
+    tree = next(d.value for d in at.dataframe if "Div. rho / 1%" in d.value.columns).set_index("Option")
+    for kind, intrinsic in (("call", 5.0), ("put", 0.0)):
+        now = binomial.price(100, 95, DAY, 0.05, 0.2, 0, kind, 501, True, "lr")
+        assert tree.loc[kind.capitalize(), "Decay to expiry"] == pytest.approx(intrinsic - now, rel=1e-12, abs=1e-15)
+    note = "the decay to expiry is the intrinsic value at expiry minus the tree value"
+    assert any(note in c.value for c in at.caption)
 
 
 def test_monte_carlo_uses_the_closed_form_decay(new_app):

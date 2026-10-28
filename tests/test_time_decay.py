@@ -179,7 +179,9 @@ def test_decay_is_linear_in_the_legs_and_the_multiplier(quantity, multiplier, da
     legs = [S.Strategy("one", (leg,)) for leg in book.legs]
     whole = S.time_decay(book, market, days=days, multiplier=multiplier)
     parts = sum(S.time_decay(leg, market, days=days, multiplier=multiplier) for leg in legs)
-    assert whole == pytest.approx(parts, rel=1e-12, abs=1e-12 * abs(multiplier) * 1e4)
+    # Rounding of a sum of leg decays below 1e4 times the multiplier; a floor for multipliers so small that the
+    # products leave the normal range of doubles.
+    assert whole == pytest.approx(parts, rel=1e-12, abs=max(1e-8 * abs(multiplier), 1e-290))
     single = S.Strategy("x", (S.Leg("put", quantity, 98, 9 / 365),))
     unit = S.Strategy("x", (S.Leg("put", 1, 98, 9 / 365),))
     assert S.time_decay(single, market, days=days, multiplier=multiplier) == pytest.approx(
