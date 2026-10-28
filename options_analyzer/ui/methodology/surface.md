@@ -67,15 +67,24 @@ than wing quotes a few ticks wide; quoted implied vols, whose spreads are unknow
 in vol are about 15 times the at-the-money ones, the weighted fit's largest error within one standard deviation of
 the money is 0.58 of the unweighted fit's.
 
-By default the calibration is arbitrage-free. Each smile is checked on 200 points over its quoted range widened by
-10% on each side, and where Durrleman's ${g \le 0}$ (a negative density) or its total variance falls below the
-previous expiry's where both are quoted, it is replaced by the nearest smile that meets ${g \ge 0.001}$ and
-${w_T \ge w_{T^-}}$, found by sequential quadratic programming from the unconstrained fit and the quasi-explicit
-starts. On arbitrage-free quotes the constraints do not bind and the fit is unchanged; Gatheral and Jacquier's
-arbitrageable example slice (Vogt's) is fitted 0.64 vol point (RMSE) away with no negative density, and on 200 random
-arbitrage-free surfaces with 0.2 vol point of noise no expiry's RMSE grew by more than 10%. The summary table shows
-what the constraints cost each expiry, and a note names the expiries where the cost is material; the Unconstrained
-calibration shows the quotes' own arbitrage instead.
+By default the calibration is arbitrage-free. Each smile must keep Durrleman's ${g > 0}$ (a positive density) over
+its quoted range widened by 10% and out to its wing reach, four at-the-money standard deviations ${4\sqrt{w(0)}}$ (at
+most ${|\ln K/F| = 1.5}$), and its total variance must not fall below the previous expiry's where both are quoted.
+Both are checked on 2,001 points (more around the smile's vertex); where either fails, the smile is replaced by the
+nearest one that meets ${g \ge 0.001}$ and ${w_T \ge w_{T^-}}$, found by sequential quadratic programming with
+analytic gradients from the unconstrained fit (and from the quasi-explicit starts when that ends worse), with any
+point that still fails added to the constraints. On arbitrage-free quotes nothing binds and the fit is unchanged;
+Gatheral and Jacquier's arbitrageable example slice (Vogt's) is fitted 0.63 vol point (RMSE) away with a positive
+density, and over 200 random arbitrage-free surfaces with 0.2 vol point of noise no expiry's RMSE grew by more
+than 9% and the slowest surface took 0.65 s. The summary table shows what the constraints cost each expiry, a
+note names the expiries where the cost is material, and the Unconstrained calibration shows the quotes' own
+arbitrage instead.
+
+### Wing extrapolation
+Beyond its quotes a smile is read off its SVI wings out to the same reach of four standard deviations, where the
+density is held positive; an SVI wing grows linearly with a total-variance slope ${b(1+|\rho|) \le 2}$, Lee's
+moment bound. Extrapolated vols are labelled as such (the contract readout says "extrapolated"); local vol is not
+extrapolated.
 
 ### Static arbitrage in the quotes
 The fit can smooth over quotes that are not free of arbitrage, so the quotes themselves are also

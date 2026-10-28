@@ -299,7 +299,9 @@ def test_the_arbitrage_free_fit_holds_calendar_arbitrage_out_and_says_what_it_co
     held = [note for note in fitted.notes if note.startswith("The SVI fit was held free of static arbitrage")]
     assert len(held) == 1 and f"{maturities[index]:.3g}y the quotes' total variance falls below" in held[0]
     cost = vs.surface_summary(fitted)["Arbitrage cost (vol pts)"].to_numpy()
-    assert cost[index] > 1.0 and np.delete(cost, index) == pytest.approx(0.0, abs=1e-12)
+    # Elsewhere the constraints cost nothing material (keeping the wings' density positive out to |ln K/F| = 1.5
+    # costs one expiry 0.003 vol point).
+    assert cost[index] > 1.0 and np.delete(cost, index).max() < 0.01
 
 
 def test_a_steep_noisy_equity_surface_is_fitted_without_a_poor_fit_note():
@@ -1378,7 +1380,7 @@ def test_vertical_spread_arbitrage_in_the_quotes_is_reported_even_when_the_fit_i
     quotes.loc[(quotes["maturity"] == 30 / 365) & (quotes["strike"] == 110.0), "iv"] += 0.06
     fitted = vs.fit_market_surface(quotes, 100.0, 0.05, 0.0)
     assert fitted.fit_rmse[1] < vs.POOR_FIT_RMSE
-    notes = [note for note in fitted.notes if "static arbitrage" in note]
+    notes = [note for note in fitted.notes if note.startswith("The quotes have static arbitrage")]
     assert (
         len(notes) == 1 and "a call more than one at a lower strike, even if each quote is 1 vol point off" in notes[0]
     )

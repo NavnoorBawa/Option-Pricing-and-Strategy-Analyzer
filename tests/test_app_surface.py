@@ -169,8 +169,18 @@ def test_sidebar_contract_at_the_first_expiry_of_the_sample_file_gets_an_implied
     _upload(app, vol_surface.sample_quotes(100, 0.05, 0.0))
     _ok(app)
     readout = [i.value for i in app.info if "the surface's implied vol is" in i.value]
-    assert readout and "expiry 30 days" in readout[0]
-    assert not any("outside the surface's quoted region" in c.value for c in app.caption)
+    assert readout and "expiry 30 days" in readout[0] and "extrapolated" not in readout[0]
+    assert not any("gives no implied vol" in c.value for c in app.caption)
+
+
+def test_a_sidebar_strike_beyond_the_quotes_reads_an_extrapolated_vol(app):
+    """The sample quotes run from K/S 0.7 to 1.3; a strike of 140 is read off the SVI wing and labelled."""
+    app.sidebar.number_input(key="days").set_value(91).run()
+    app.sidebar.number_input(key="strike").set_value(140.0).run()
+    _upload(app, vol_surface.sample_quotes(100, 0.05, 0.0))
+    _ok(app)
+    readout = [i.value for i in app.info if "the surface's implied vol is" in i.value]
+    assert readout and "extrapolated beyond the quoted strikes" in readout[0]
 
 
 def test_an_expiration_date_column_next_to_days_to_expiry_builds_a_surface(app):

@@ -18,9 +18,24 @@ QUOTE_PRECISION = 1e-4  # implied-vol precision of a quote: differences below it
 #: An arbitrage-free fit holds Durrleman's g at least this high on its constraint grid, so that the surface's own
 #: check (g <= 0 is butterfly arbitrage) never sees a rounding-level violation.
 G_MARGIN = 1e-3
-#: The constraint grid: this many points over the quoted range widened by this fraction of its width on each side.
-CONSTRAINT_POINTS = 200
+#: The constraint grids start sparse: this many points over the quoted range widened by CONSTRAINT_REACH of its width
+#: on each side (and on the calendar overlap); the dense checks add the points where a solution still fails.
+CONSTRAINT_POINTS = 40
 CONSTRAINT_REACH = 0.10
+#: Extrapolated vols are read beyond the quotes out to |k| = |ln K/F| of WING_SDS at-the-money standard deviations
+#: sqrt(w(0)), at most WING_CAP (roadmap item SF-8; :func:`wing_reach`), and the butterfly constraint holds out to
+#: there too, on WING_POINTS points in each wing. A cap of 1.5 alone is a hundred standard deviations for a six-hour
+#: expiry: holding the density positive that far bent the short smiles 0.3 vol point off at the money. Four
+#: standard deviations lie well beyond a 1-delta strike (about 2.3); on 200 random noisy SSVI surfaces the worst
+#: expiry's RMSE then grows by 6 % under the constraints, against 12 % at five and 14 % at six.
+WING_CAP = 1.5
+WING_SDS = 4.0
+WING_POINTS = 15
+#: A fit meets the constraints only if it does on a dense grid as well (DENSE_POINTS over the constrained range, and
+#: points a fraction of s apart around the smile's vertex m, where g can turn within a width of s): points where it
+#: fails are added to the constraint grid and the fit solved again (at most CUTTING_ROUNDS times).
+DENSE_POINTS = 2001
+CUTTING_ROUNDS = 4
 #: The calendar constraint holds where the two slices' quoted ranges overlap, widened by this fraction of their
 #: widths. Zero, as the roadmap's prototype found: over 200 random arbitrage-free SSVI surfaces with 0.2 vol point of
 #: noise, holding it 25 % beyond the quotes (where the surface's calendar check also compares slices for local vol)
@@ -59,6 +74,12 @@ def spread_weights(half_spread) -> np.ndarray | None:
     return np.minimum(np.where(known, weights / median, 1.0), MAX_WEIGHT)
 
 
+def wing_reach(fit: SVISlice) -> float:
+    """How far beyond the quotes a smile is read, in ``|ln K/F|``: :data:`WING_SDS` at-the-money standard deviations
+    ``sqrt(w(0))``, at most :data:`WING_CAP`."""
+    return float(min(WING_CAP, WING_SDS * np.sqrt(max(float(fit.total_variance(0.0)[0]), 0.0))))
+
+
 def _vols(fit: SVISlice, y: np.ndarray, T: float) -> np.ndarray:
     return np.sqrt(np.maximum(fit.total_variance(y)[0], 0.0) / T)
 
@@ -86,6 +107,25 @@ class SVISlice:
         w_y = self.b * (self.rho + z / root)
         w_yy = self.b * self.s * self.s / root**3
         return w, w_y, w_yy
+
+    def parameter_derivatives(self, y) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """The derivatives of ``(w, dw/dy, d2w/dy2)`` at ``y`` with respect to ``(a, b, rho, m, s)``: three arrays
+        of shape ``(len(y), 5)``, for the gradients of the arbitrage constraints (:func:`fit_svi`)."""
+        z = np.asarray(y, dtype=float) - self.m
+        s2 = self.s * self.s
+        root = np.sqrt(z * z + s2)
+        r3, r5 = root**3, root**5
+        zeros, ones = np.zeros_like(z), np.ones_like(z)
+        dw = np.column_stack(
+            [ones, self.rho * z + root, self.b * z, -self.b * (self.rho + z / root), self.b * self.s / root]
+        )
+        dw_y = np.column_stack(
+            [zeros, self.rho + z / root, self.b * ones, -self.b * s2 / r3, -self.b * z * self.s / r3]
+        )
+        dw_yy = np.column_stack(
+            [zeros, s2 / r3, zeros, 3.0 * self.b * s2 * z / r5, self.b * (2.0 * self.s / r3 - 3.0 * self.s**3 / r5)]
+        )
+        return dw, dw_y, dw_yy
 
     @property
     def min_variance(self) -> float:
@@ -178,13 +218,15 @@ def fit_svi(
     the best fit is kept. Noise-free SVI (hence SSVI) quotes are recovered to
     solver precision.
 
-    With ``arbitrage_free`` (the default) the fit is then checked for static arbitrage on
-    :data:`CONSTRAINT_POINTS` points over the quoted range widened by :data:`CONSTRAINT_REACH` of its width on each
-    side: butterfly arbitrage where Durrleman's ``g`` (:func:`durrleman_g`) is negative, and calendar arbitrage where
-    the total variance falls below that of ``previous``, the fit of the previous (shorter) maturity with its quoted
-    range of ``y``, on the overlap of the two quoted ranges only (enforcing it beyond the quotes over-constrains the
-    smile). Where either fails, the nearest smile that holds ``g`` at :data:`G_MARGIN` or above and ``w`` at or above
-    the previous slice's is found by sequential quadratic programming from that optimum, so on arbitrage-free quotes
+    With ``arbitrage_free`` (the default) the fit is then checked for static arbitrage, on
+    :data:`DENSE_POINTS` points: butterfly arbitrage where Durrleman's ``g`` (:func:`durrleman_g`) is not positive,
+    over the quoted range widened by :data:`CONSTRAINT_REACH` of its width on each side and out to the smile's
+    :func:`wing_reach` (where extrapolated vols are read); and calendar arbitrage where the total variance falls
+    below that of ``previous``, the fit of the previous (shorter) maturity with its quoted range of ``y``, by more
+    than the quotes' precision, on the overlap of the two quoted ranges only (enforcing it beyond the quotes
+    over-constrains the smile). Where either fails, the nearest smile that holds ``g`` at :data:`G_MARGIN` or above
+    and ``w`` at or above the previous slice's is found by sequential quadratic programming with analytic gradients,
+    from that optimum and, if it ends 10 % of RMSE worse, from the quasi-explicit starts; so on arbitrage-free quotes
     the result is the unconstrained fit itself.
     """
     return fit_svi_pair(y, iv, T, weights, previous, arbitrage_free=arbitrage_free)[0]
@@ -290,7 +332,7 @@ def fit_svi_pair(
     unconstrained = SVISlice(*map(float, unpack(best.x)))
     if not arbitrage_free:
         return unconstrained, unconstrained
-    constraints = _Constraints.build(lo, hi, T, previous)
+    constraints = _Constraints.build(lo, hi, T, previous, wing_reach(unconstrained))
     if constraints.met(unconstrained):
         return unconstrained, unconstrained
     # The nearest arbitrage-free smile: sequential quadratic programming on the raw parameters with the constraints
@@ -298,29 +340,45 @@ def fit_svi_pair(
     # them. A penalty method (constraint rows added to the least squares) was tried first: on 200 random
     # arbitrage-free SSVI surfaces with 0.2 vol point of noise it left some fits 6 times worse than unconstrained;
     # this keeps every maturity within 10 %. The unconstrained optimum alone, as the start, left one at 24 %.
-    candidates = [unconstrained, *(SVISlice(*map(float, x)) for x in _svi_start_points(y, iv, T, weights=weight))]
-    feasible = [fit for fit in (constraints.nearest(y, iv, T, weight, start) for start in candidates) if fit]
+    weights = np.ones_like(y) if weight is None else weight
+
+    def cost(fit: SVISlice) -> float:
+        return float(np.sum((weights * (_vols(fit, y, T) - iv)) ** 2))
+
+    nearest = constraints.nearest(y, iv, T, weight, unconstrained)
+    # From the unconstrained optimum the search usually ends next to it; only a fit that lost more than 10 % of
+    # RMSE (21 % of squared error) is worth the other starts.
+    if nearest is not None and cost(nearest) <= 1.21 * cost(unconstrained):
+        return nearest, unconstrained
+    starts = (SVISlice(*map(float, x)) for x in _svi_start_points(y, iv, T, weights=weight))
+    feasible = [fit for fit in (nearest, *(constraints.nearest(y, iv, T, weight, start) for start in starts)) if fit]
     if not feasible:
         return unconstrained, unconstrained  # no start reached an arbitrage-free smile: the surface's checks report it
-    weights = np.ones_like(y) if weight is None else weight
-    return min(feasible, key=lambda fit: float(np.sum((weights * (_vols(fit, y, T) - iv)) ** 2))), unconstrained
+    return min(feasible, key=cost), unconstrained
 
 
 @dataclass(frozen=True, eq=False)  # holds arrays: compared by identity
 class _Constraints:
-    """The static-arbitrage constraints of one slice's fit (see :func:`fit_svi`): Durrleman's g on ``grid``, and
-    the previous slice's total variance ``w_previous`` on ``overlap``."""
+    """The static-arbitrage constraints of one slice's fit (see :func:`fit_svi`): Durrleman's g on the sparse
+    ``grid`` and densely over ``span``; the total variance at or above the previous slice's (``previous``) on the
+    sparse ``overlap`` and densely over ``overlap_span``."""
 
+    T: float
+    span: tuple[float, float]  # where the density must stay positive: the quotes widened, and the wings
     grid: np.ndarray
+    previous: SVISlice | None
+    overlap_span: tuple[float, float] | None  # the overlap of the two slices' quoted ranges
     overlap: np.ndarray
-    w_previous: np.ndarray
-    tolerance: np.ndarray  # how far w may fall below w_previous: the two slices' quote precision in variance
 
     @classmethod
-    def build(cls, lo: float, hi: float, T: float, previous) -> _Constraints:
+    def build(cls, lo: float, hi: float, T: float, previous, wing: float = 0.0) -> _Constraints:
         reach = CONSTRAINT_REACH * max(hi - lo, 1e-4)
         grid = np.linspace(lo - reach, hi + reach, CONSTRAINT_POINTS)
-        overlap = w_previous = tolerance = np.empty(0)
+        if grid[0] > -wing:
+            grid = np.concatenate([np.linspace(-wing, grid[0], WING_POINTS, endpoint=False), grid])
+        if grid[-1] < wing:
+            grid = np.concatenate([grid, np.linspace(wing, grid[-1], WING_POINTS, endpoint=False)[::-1]])
+        fit, overlap_span, overlap = None, None, np.empty(0)
         if previous is not None:
             fit, (previous_lo, previous_hi) = previous
             reach_now, reach_before = (
@@ -331,12 +389,12 @@ class _Constraints:
                 min(hi + reach_now, previous_hi + reach_before),
             )
             if start < end:
+                overlap_span = (float(start), float(end))
                 overlap = np.linspace(start, end, CONSTRAINT_POINTS)
-                w_previous = fit.total_variance(overlap)[0]
-                # As the surface's calendar check (local_vol._time_derivative): each slice's quotes are precise to
-                # QUOTE_PRECISION in vol, which is 2 sqrt(w T) of it in total variance; this slice's T bounds both.
-                tolerance = 2.0 * np.sqrt(np.maximum(w_previous, 0.0) * T) * QUOTE_PRECISION
-        return cls(grid, overlap, w_previous, tolerance)
+        return cls(float(T), (float(grid[0]), float(grid[-1])), grid, fit, overlap_span, overlap)
+
+    def _w_previous(self, y: np.ndarray) -> np.ndarray:
+        return self.previous.total_variance(y)[0] if self.previous is not None and len(y) else np.zeros(len(y))
 
     def nearest(
         self, y: np.ndarray, iv: np.ndarray, T: float, weight: np.ndarray | None, start: SVISlice
@@ -345,63 +403,152 @@ class _Constraints:
         ``start``, or None where the solver ends without meeting them.
 
         Inequalities: ``g >= G_MARGIN`` on the grid, ``w >= w_previous`` on the overlap, a non-negative minimum
-        variance, and Lee's bound ``b (1 + |rho|) <= 2`` as its two smooth halves ``b (1 +- rho) <= 2``.
+        variance, and Lee's bound ``b (1 + |rho|) <= 2`` as its two smooth halves ``b (1 +- rho) <= 2``. A solution
+        that meets them on the sparse grids but not on the dense checks (:meth:`_failing`, :meth:`_falling`) has the
+        points where it fails added to the grids and is solved again from there (cutting planes): with all 520
+        points from the start, the solver's quadratic subproblems took 15 of the 16 seconds of the slowest of 200
+        noisy surfaces.
         """
         weights = np.ones_like(y) if weight is None else weight
         lo, hi = y.min(), y.max()
         width = max(hi - lo, 1e-4)
+        centre = 0.5 * (lo + hi)
         variance_scale = float(np.mean(iv * iv * T))
+        # The solver works in parameters of order one: a in units of the quotes' total variance, b in that per unit
+        # of the quoted width, m and s in units of the width. In raw units a six-hour expiry's variances (1e-5) left
+        # the finite differences and the line search so badly scaled that one fit collapsed to w = 0.
+        scale = np.array([variance_scale, variance_scale / width, 1.0, width, width])
+        offset = np.array([0.0, 0.0, 0.0, centre, 0.0])
 
-        def cost(p):
-            w = np.maximum(SVISlice(*p).total_variance(y)[0], 1e-300)
+        def raw(x):
+            return x * scale + offset
+
+        def cost(x):
+            w = np.maximum(SVISlice(*raw(x)).total_variance(y)[0], 1e-300)
             return float(np.mean((weights * (np.sqrt(w / T) - iv)) ** 2)) * 1e4  # in squared vol points
 
-        def inequalities(p):
+        def cost_gradient(x):
+            fit = SVISlice(*raw(x))
+            w = np.maximum(fit.total_variance(y)[0], 1e-300)
+            vol = np.sqrt(w / T)
+            # d/dp mean((wt (vol - iv))^2) = mean(2 wt^2 (vol - iv) dvol/dw dw/dp), dvol/dw = 1 / (2 sqrt(w T)).
+            factor = 2.0 * weights**2 * (vol - iv) / (2.0 * np.sqrt(w * T))
+            return (factor @ fit.parameter_derivatives(y)[0]) / len(y) * 1e4 * scale
+
+        def inequalities(x, grid, overlap):
+            p = raw(x)
             fit = SVISlice(*p)
-            w, w_y, w_yy = fit.total_variance(self.grid)
+            w, w_y, w_yy = fit.total_variance(grid)
             with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-                g = np.nan_to_num(durrleman_g(self.grid, np.maximum(w, 1e-300), w_y, w_yy), nan=-1.0, neginf=-1e3)
-            calendar = (fit.total_variance(self.overlap)[0] - self.w_previous) / variance_scale
+                g = durrleman_g(grid, np.maximum(w, 1e-300), w_y, w_yy)
+            # Bounded, so that the solver stays finite where w is near zero on the way.
+            g = np.clip(np.nan_to_num(g, nan=-1.0), -1e3, 1e3)
+            calendar = (fit.total_variance(overlap)[0] - self._w_previous(overlap)) / variance_scale
             a, b, rho, _, s = p
             minimum = (a + b * s * np.sqrt(max(1.0 - rho * rho, 0.0))) / variance_scale
             return np.concatenate([g - G_MARGIN, calendar, [minimum, 2.0 - b * (1.0 + rho), 2.0 - b * (1.0 - rho)]])
+
+        def inequality_jacobian(x, grid, overlap):
+            p = raw(x)
+            fit = SVISlice(*p)
+            w, w_y, _ = fit.total_variance(grid)
+            w = np.maximum(w, 1e-300)
+            dw, dw_y, dw_yy = fit.parameter_derivatives(grid)
+            with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+                # g = 1 - (y/w) w' + (-1/4 - 1/w + y^2/w^2) w'^2 / 4 + w''/2, differentiated in w, w' and w''.
+                g_w = grid * w_y / w**2 + 0.25 * (1.0 / w**2 - 2.0 * grid**2 / w**3) * w_y**2
+                g_wy = -grid / w + 0.5 * (-0.25 - 1.0 / w + grid**2 / w**2) * w_y
+                rows_g = g_w[:, None] * dw + g_wy[:, None] * dw_y + 0.5 * dw_yy
+            rows_g = np.clip(np.nan_to_num(rows_g, nan=0.0), -1e8, 1e8)
+            rows_calendar = fit.parameter_derivatives(overlap)[0] / variance_scale
+            _, b, rho, _, s = p
+            q = np.sqrt(max(1.0 - rho * rho, 1e-300))
+            rows_bounds = np.array(
+                [
+                    [
+                        1.0 / variance_scale,
+                        s * q / variance_scale,
+                        -b * s * rho / q / variance_scale,
+                        0.0,
+                        b * q / variance_scale,
+                    ],
+                    [0.0, -(1.0 + rho), -b, 0.0, 0.0],
+                    [0.0, -(1.0 - rho), b, 0.0, 0.0],
+                ]
+            )
+            return np.vstack([rows_g, rows_calendar, rows_bounds]) * scale
 
         bounds = [(None, None), (0.0, None), (-_RHO_MAX, _RHO_MAX), (lo - 3.5 * width, hi + 3.5 * width)]
         bounds.append((width * np.exp(_LOG_S_RANGE[0]), width * np.exp(_LOG_S_RANGE[1])))
         low = np.array([-np.inf if b[0] is None else b[0] for b in bounds])
         high = np.array([np.inf if b[1] is None else b[1] for b in bounds])
-        x0 = np.clip([start.a, start.b, start.rho, start.m, start.s], low, high)
-        result = minimize(
-            cost,
-            x0,
-            method="SLSQP",
-            bounds=bounds,
-            constraints=[{"type": "ineq", "fun": inequalities}],
-            options={"maxiter": 300, "ftol": 1e-12},
-        )
-        fit = SVISlice(*map(float, result.x))
-        if not self.met(fit):
-            return None
-        return fit
+        x = (np.clip([start.a, start.b, start.rho, start.m, start.s], low, high) - offset) / scale
+        scaled_bounds = list(zip((low - offset) / scale, (high - offset) / scale, strict=True))
+        grid, overlap = self.grid, self.overlap
+        for _ in range(CUTTING_ROUNDS):
+            result = minimize(
+                cost,
+                x,
+                jac=cost_gradient,
+                method="SLSQP",
+                bounds=scaled_bounds,
+                constraints=[
+                    {"type": "ineq", "fun": inequalities, "jac": inequality_jacobian, "args": (grid, overlap)}
+                ],
+                options={"maxiter": 300, "ftol": 1e-12},
+            )
+            x = result.x
+            fit = SVISlice(*map(float, raw(x)))
+            # A smile whose variance has collapsed far below the quotes' is a failed search, not a fit.
+            if float(np.min(fit.total_variance(y)[0])) < 1e-3 * variance_scale:
+                return None
+            butterfly, calendar = self._failing(fit), self._falling(fit)
+            if not (butterfly.size or calendar.size):
+                return fit
+            grid, overlap = np.union1d(grid, butterfly), np.union1d(overlap, calendar)
+        return None
+
+    def _dense(self, fit: SVISlice) -> np.ndarray:
+        """Where the density is checked: :data:`DENSE_POINTS` over the span, and 161 points s / 10 apart around the
+        vertex m (within the span)."""
+        dense = np.linspace(*self.span, DENSE_POINTS)
+        vertex = fit.m + fit.s * np.linspace(-8.0, 8.0, 161)
+        return np.concatenate([dense, vertex[(vertex >= self.span[0]) & (vertex <= self.span[1])]])
+
+    def _failing(self, fit: SVISlice) -> np.ndarray:
+        """The points of the dense check where ``w <= 0`` or ``g <= 0``."""
+        y = self._dense(fit)
+        w, w_y, w_yy = fit.total_variance(y)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            g = durrleman_g(y, w, w_y, w_yy)
+        return y[(w <= 0) | ~(g > 0)]
+
+    def _falling(self, fit: SVISlice) -> np.ndarray:
+        """The points of a dense check of the overlap (:data:`DENSE_POINTS`) where the total variance falls below the
+        previous slice's by more than the quotes' precision: each slice's quotes are precise to
+        :data:`QUOTE_PRECISION` in vol, ``2 sqrt(w T)`` of it in total variance (as the surface's own calendar check,
+        ``local_vol._time_derivative``; this slice's ``T`` bounds both)."""
+        if self.overlap_span is None:
+            return np.empty(0)
+        y = np.linspace(*self.overlap_span, DENSE_POINTS)
+        w_previous = self._w_previous(y)
+        tolerance = 2.0 * np.sqrt(np.maximum(w_previous, 0.0) * self.T) * QUOTE_PRECISION
+        return y[fit.total_variance(y)[0] - w_previous < -tolerance]
 
     def met(self, fit: SVISlice) -> bool:
-        """No butterfly arbitrage on the grid (g > 0) and no fall below the previous slice beyond the precision."""
+        """No butterfly arbitrage over the span (g > 0) and no fall below the previous slice beyond the precision."""
         return not any(self.broken(fit))
 
     def broken(self, fit: SVISlice) -> tuple[bool, bool]:
-        """``(butterfly, calendar)``: whether ``fit`` has butterfly arbitrage on the grid (g <= 0, or w <= 0) and
-        whether its total variance falls below the previous slice's by more than the quotes' precision."""
-        w, w_y, w_yy = fit.total_variance(self.grid)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            butterfly = bool(np.any(w <= 0) or np.any(durrleman_g(self.grid, w, w_y, w_yy) <= 0))
-        calendar = bool(np.any(fit.total_variance(self.overlap)[0] - self.w_previous < -self.tolerance))
-        return butterfly, calendar
+        """``(butterfly, calendar)``: whether ``fit`` has butterfly arbitrage on the dense check (g <= 0, or w <= 0)
+        and whether its total variance falls below the previous slice's by more than the quotes' precision."""
+        return bool(self._failing(fit).size), bool(self._falling(fit).size)
 
 
 def static_arbitrage(
     fit: SVISlice, quoted: tuple[float, float], T: float, previous: tuple[SVISlice, tuple[float, float]] | None
 ) -> tuple[bool, bool]:
     """``(butterfly, calendar)``: whether ``fit`` breaks the constraints :func:`fit_svi` holds an arbitrage-free fit
-    to, on the same grid: butterfly arbitrage over its ``quoted`` range of ``y`` widened by :data:`CONSTRAINT_REACH`,
-    calendar arbitrage against ``previous`` on the overlap of the two quoted ranges."""
-    return _Constraints.build(quoted[0], quoted[1], T, previous).broken(fit)
+    to: butterfly arbitrage over its ``quoted`` range of ``y`` widened by :data:`CONSTRAINT_REACH` and out to its
+    :func:`wing_reach`, calendar arbitrage against ``previous`` on the overlap of the two quoted ranges."""
+    return _Constraints.build(quoted[0], quoted[1], T, previous, wing_reach(fit)).broken(fit)

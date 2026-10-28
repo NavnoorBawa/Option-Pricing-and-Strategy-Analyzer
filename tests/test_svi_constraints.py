@@ -69,7 +69,9 @@ def test_acceptance_2_crossing_slices_are_held_apart_and_the_cost_reported():
     w1, w2 = held.svi[0].total_variance(y)[0], held.svi[1].total_variance(y)[0]
     assert (w2 - w1).min() >= -2e-4 * math.sqrt(w1.max() * T2)  # within the quotes' precision (see svi._Constraints)
     cost = vs.surface_summary(held)["Arbitrage cost (vol pts)"]
-    assert cost.iloc[0] == 0.0 and cost.iloc[1] > 0.05
+    # The early smile is a parabola, which SVI's straight wings can follow inside the quotes only by bending into a
+    # negative density beyond them: keeping the density positive out to |ln K/F| = 1.5 costs it 0.06 vol point.
+    assert cost.iloc[0] < 0.1 and cost.iloc[1] > 0.05
     assert any("total variance falls below that of the maturity before" in note for note in held.notes)
 
 
@@ -97,7 +99,7 @@ def test_acceptance_3_random_arbitrage_free_surfaces_with_noise():
     """200 random arbitrage-free SSVI surfaces, six expiries from two weeks to a year, 15 strikes each from -2 to
     +1.2 standard deviations, with 0.2 vol point of noise: 28 of the unconstrained fits have static arbitrage, none
     of the arbitrage-free ones has a butterfly point or a calendar point where both expiries are quoted, and no
-    expiry's RMSE grows by more than 10 % (measured: 7 % at most, 1.2 % for a whole surface).
+    expiry's RMSE grows by more than 10 % (measured: 6 % at most, 1.1 % for a whole surface).
 
     The surface's calendar count also compares each expiry with its neighbours' smiles up to 25 % of their quoted
     range beyond their quotes, where local vol extrapolates them: there 9 of the 200 surfaces keep 1 to 3 grid points
@@ -219,3 +221,61 @@ def test_quotes_with_prices_are_weighted_by_their_spreads_and_report_the_fit_aga
 def test_the_calibration_is_checked():
     with pytest.raises(ValueError, match="calibration must be one of 'arbitrage_free', 'unconstrained'"):
         vs.fit_market_surface(_random_surface(np.random.default_rng(0))[1], 100.0, 0.0, 0.0, calibration="free")
+
+
+# --- Wing extrapolation within Lee's bound (roadmap item SF-8) -------------------------------------------------------
+
+
+def _fitted_surfaces() -> list[vs.VolSurface]:
+    rng = np.random.default_rng(7)
+    surfaces = [vs.fit_market_surface(_random_surface(rng)[1], 100.0, 0.0, 0.0) for _ in range(8)]
+    vogt = pd.DataFrame(
+        [
+            {"strike": 100 * math.exp(k), "maturity": T, "iv": math.sqrt(float(VOGT.total_variance(k)[0] + s) / T)}
+            for T, s in ((1.0, 0.0), (1.5, 0.02))
+            for k in np.linspace(-1.5, 1.5, 61)
+        ]
+    )
+    return [*surfaces, vs.fit_market_surface(vogt, 100.0, 0.0, 0.0)]
+
+
+def test_extrapolated_wings_keep_lees_slope_and_a_positive_density():
+    """Every fitted smile's total variance grows with a slope of at most 2 out to |ln K/F| = 3 (Lee's moment bound:
+    SVI's wing slope is b (1 + |rho|), which the fit holds to 2), and, fitted arbitrage-free, keeps Durrleman's
+    g > 0 out to its reach (four at-the-money standard deviations, at most 1.5), checked on 4,001 points. Without
+    the wing points in the constraint grid, 96 of 411 fitted smiles had g <= 0 somewhere between their quotes and
+    |ln K/F| = 3 (worst -9.1)."""
+    y = np.linspace(-3.0, 3.0, 1201)
+    for surface in _fitted_surfaces():
+        for fit, reach, (lo, hi) in zip(surface.svi, surface.wing_reach, surface.quoted_y, strict=True):
+            assert reach == svi.wing_reach(fit) or reach == pytest.approx(svi.wing_reach(fit), rel=0.2)
+            assert np.abs(fit.total_variance(y)[1]).max() <= 2.0 + 1e-12
+            wings = np.linspace(min(lo, -reach), max(hi, reach), 4001)
+            assert fit.total_variance(wings)[0].min() > 0 and _g(fit, wings).min() > 0
+
+
+def test_extrapolation_is_off_by_default_and_flagged_when_on():
+    surface = vs.fit_market_surface(vs.parse_quotes(vs.sample_quotes())[0], 100.0, 0.04, 0.0)
+    T = float(surface.maturities[2])
+    far = 1.45  # K/S beyond the quoted 0.7-1.3
+    assert np.isnan(surface.implied_vol_at(far, T)) and not surface.is_extrapolated(1.0, T)
+    wing = surface.implied_vol_at(far, T, extrapolate=True)
+    k = math.log(far) - surface.log_forward_ratio[2]
+    assert wing == pytest.approx(math.sqrt(float(surface.svi[2].total_variance(k)[0]) / T), rel=1e-12)
+    assert surface.is_extrapolated(far, T)
+    reach = float(surface.wing_reach[2])
+    beyond = math.exp(surface.log_forward_ratio[2] + reach + 0.01)
+    assert np.isnan(surface.implied_vol_at(beyond, T, extrapolate=True))  # beyond the reach
+    levels = np.array([0.5, 1.0, far])
+    inside, local = surface.at_moneyness(levels)
+    outside, local_out = surface.at_moneyness(levels, extrapolate=True)
+    assert np.isnan(inside[:, [0, 2]]).all() and np.isfinite(outside[:, 1]).all()
+    # Off the quotes, a K/S is read only where it lies within four standard deviations of the forward: 0.5 and 1.45
+    # at the longer expiries, neither at the first (30 days).
+    for column, level in ((0, 0.5), (2, far)):
+        reachable = np.abs(np.log(level) - surface.log_forward_ratio) <= surface.wing_reach
+        assert (np.isfinite(outside[:, column]) == reachable).all() and reachable[-1] and not reachable[0]
+    assert np.array_equal(inside[:, 1], outside[:, 1]) and np.array_equal(local, local_out, equal_nan=True)
+    assert (surface.quoted_mask(levels) == np.isfinite(inside)).all()
+    ssvi = vs.ssvi_surface(vs.SSVIParams(), 0.04, 0.0, np.linspace(0.8, 1.2, 9), np.array([0.25, 0.5]))
+    assert np.isnan(ssvi.implied_vol_at(1.4, 0.25)) and ssvi.is_extrapolated(1.4, 0.25)

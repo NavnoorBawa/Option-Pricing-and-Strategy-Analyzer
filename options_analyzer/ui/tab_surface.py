@@ -338,18 +338,21 @@ def _maturity_labels(maturities: np.ndarray) -> list[str]:
 
 def _contract_readout(surface: vs.VolSurface, inputs: Inputs) -> None:
     moneyness = inputs.strike / inputs.spot
-    iv = surface.implied_vol_at(moneyness, inputs.expiry)
+    iv = surface.implied_vol_at(moneyness, inputs.expiry, extrapolate=True)
     where = f"strike {inputs.strike:,.2f} (K/S = {moneyness:.3f}) and expiry {inputs.days} days"
+    region = "quoted strikes" if surface.quotes is not None else "grid"
     if np.isfinite(iv):
+        extrapolated = surface.is_extrapolated(moneyness, inputs.expiry)
+        how = f", extrapolated beyond the {region}" if extrapolated else ""
         st.info(
-            f"At the sidebar {where}, the surface's implied vol is **{iv:.2%}** "
+            f"At the sidebar {where}, the surface's implied vol is **{iv:.2%}**{how} "
             f"(sidebar volatility {inputs.volatility:.2%}).",
             icon=":material/my_location:",
         )
     else:
-        region = "quoted region" if surface.quotes is not None else "grid"
         st.caption(
-            f"The sidebar {where} lies outside the surface's {region}, so the surface gives no implied vol for it."
+            f"The sidebar {where} lies outside the surface's maturities or more than |ln K/F| = "
+            f"{vs.svi.WING_CAP:g} beyond its {region}, so the surface gives no implied vol for it."
         )
 
 

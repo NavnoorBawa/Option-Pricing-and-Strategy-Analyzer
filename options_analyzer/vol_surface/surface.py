@@ -34,7 +34,7 @@ from .quotes import (
     _strike_text,
 )
 from .ssvi import SSVIParams
-from .svi import SVISlice, fit_svi_pair, spread_weights, static_arbitrage
+from .svi import WING_CAP, WING_SDS, SVISlice, fit_svi_pair, spread_weights, static_arbitrage, wing_reach
 
 
 @dataclass(frozen=True)
@@ -52,7 +52,8 @@ class VolSurface:
     maturities when the quotes were option prices. ``calibration`` says how the SVI
     slices were fitted (one of :data:`CALIBRATIONS`), and ``fit_rmse_unconstrained`` is
     each maturity's RMSE without the arbitrage constraints (equal to ``fit_rmse`` where
-    the unconstrained fit had no arbitrage). Implied vol is NaN outside a
+    the unconstrained fit had no arbitrage). ``wing_reach`` is how far beyond its quotes
+    each maturity's smile is read when extrapolating (:func:`.svi.wing_reach`). Implied vol is NaN outside a
     maturity's quoted strike range and local vol is NaN wherever it is undefined.
     """
 
@@ -76,6 +77,7 @@ class VolSurface:
     forwards: pd.DataFrame | None = None
     fit_rmse_unconstrained: np.ndarray | None = None
     calibration: str | None = None
+    wing_reach: np.ndarray | None = None
 
     @property
     def strikes_over_spot(self) -> np.ndarray:
@@ -92,11 +94,35 @@ class VolSurface:
         """``ln(F / S)`` at every maturity: the forwards of a market surface, else ``carry T``."""
         return self.carry * self.maturities if self.log_forward_ratio is None else self.log_forward_ratio
 
+    def _reach(self) -> np.ndarray:
+        """How far beyond its quotes (beyond the K/S grid for SSVI) each maturity's smile is read, in ``|ln K/F|``."""
+        if self.wing_reach is not None:
+            return self.wing_reach
+        if self.ssvi is not None:
+            return np.minimum(WING_CAP, WING_SDS * np.sqrt(self.ssvi.theta(self.maturities)))
+        return np.zeros(len(self.maturities))
+
+    def _reach_at(self, maturity: float) -> float:
+        """:meth:`_reach` at ``maturity``: the smaller of the two maturities around it (that of a snapped one)."""
+        Ts, reach = self.maturities, self._reach()
+        if self.ssvi is not None:
+            return float(min(WING_CAP, WING_SDS * np.sqrt(self.ssvi.theta(maturity))))
+        j = int(np.clip(np.searchsorted(Ts, maturity), 0, len(Ts) - 1))
+        nearest = int(np.argmin(np.abs(Ts - maturity)))
+        if abs(Ts[nearest] - maturity) <= MATURITY_TOLERANCE:
+            return float(reach[nearest])
+        return float(min(reach[max(j - 1, 0)], reach[j]))
+
     def _log_fs_at(self, maturity: float) -> float:
         """``ln(F / S)`` at ``maturity``, linear in ``T`` between the surface's maturities."""
         if self.log_forward_ratio is None:
             return self.carry * maturity
         return float(np.interp(maturity, self.maturities, self.log_forward_ratio))
+
+    def quoted_mask(self, levels) -> np.ndarray:
+        """Where :meth:`at_moneyness` reads each maturity (rows) at K/S ``levels`` inside its quotes (inside the K/S
+        grid for SSVI): the points that ``extrapolate=True`` adds are the others."""
+        return np.isfinite(self.at_moneyness(levels)[0])
 
     @property
     def quoted_points(self) -> int:
@@ -112,7 +138,7 @@ class VolSurface:
             "LocalVol": pd.DataFrame(self.local_vol, index=index, columns=columns),
         }
 
-    def implied_vol_at(self, moneyness: float, maturity: float) -> float:
+    def implied_vol_at(self, moneyness: float, maturity: float, *, extrapolate: bool = False) -> float:
         """Implied vol at ``K/S = moneyness`` and ``T = maturity``; NaN outside the surface's quoted region.
 
         Market surfaces interpolate total variance linearly in maturity at fixed
@@ -120,14 +146,21 @@ class VolSurface:
         and only where both slices were quoted at that strike. A maturity within
         half a day of a quoted one is read off that slice (quote files often
         round maturities, e.g. 30 days to 0.0822 years).
+
+        With ``extrapolate=True`` the smiles are also read beyond their quotes (beyond the K/S grid for SSVI), out
+        to a forward log-moneyness ``|ln K/F|`` of four at-the-money standard deviations, at most
+        :data:`.svi.WING_CAP` (roadmap item SF-8; :func:`.svi.wing_reach`): an SVI wing grows at most linearly, with
+        a total-variance slope within Lee's bound of 2, and an arbitrage-free fit keeps a positive density out to
+        there. :meth:`is_extrapolated` says whether a point is read that way.
         """
         T, Ts = float(maturity), self.maturities
         if not (moneyness > 0 and Ts[0] - MATURITY_TOLERANCE <= T <= Ts[-1] + MATURITY_TOLERANCE):
             return np.nan
         if self.ssvi is not None:
-            if not self.moneyness[0] <= moneyness <= self.moneyness[-1]:
-                return np.nan
             y = np.log(moneyness) - self.carry * T
+            inside = self.moneyness[0] <= moneyness <= self.moneyness[-1]
+            if not (inside or (extrapolate and abs(y) <= self._reach_at(T))):
+                return np.nan
             return float(np.sqrt(self.ssvi.total_variance(y, T)[0] / T))
         if not self.svi or self.quoted_y is None:
             return np.nan
@@ -138,19 +171,29 @@ class VolSurface:
         y = np.log(moneyness) - self._log_fs_at(T)
         j = nearest if snap else int(np.searchsorted(Ts, T)) - 1
         around = [j] if snap else [j, j + 1]
-        if any(not self.quoted_y[k, 0] - 1e-9 <= y <= self.quoted_y[k, 1] + 1e-9 for k in around):
+        quoted = all(self.quoted_y[k, 0] - 1e-9 <= y <= self.quoted_y[k, 1] + 1e-9 for k in around)
+        if not (quoted or (extrapolate and abs(y) <= self._reach_at(T))):
             return np.nan
         variances = [float(self.svi[k].total_variance(y)[0]) for k in around]
         w = variances[0] if snap else variances[0] + (variances[1] - variances[0]) * (T - Ts[j]) / (Ts[j + 1] - Ts[j])
         return float(np.sqrt(w / T)) if w > 0 else np.nan
 
-    def at_moneyness(self, levels) -> tuple[np.ndarray, np.ndarray]:
+    def is_extrapolated(self, moneyness: float, maturity: float) -> bool:
+        """Whether :meth:`implied_vol_at` with ``extrapolate=True`` reads ``(moneyness, maturity)`` beyond the quotes
+        (beyond the K/S grid for SSVI) rather than inside them; False where it gives no vol at all."""
+        if not np.isfinite(self.implied_vol_at(moneyness, maturity, extrapolate=True)):
+            return False
+        return not np.isfinite(self.implied_vol_at(moneyness, maturity))
+
+    def at_moneyness(self, levels, *, extrapolate: bool = False) -> tuple[np.ndarray, np.ndarray]:
         """``(implied, local)`` vol at K/S ``levels`` on every maturity of the surface (rows).
 
         Evaluated from the model itself (SSVI, or the SVI slices with the same
         ``dw/dT`` as the grid), not interpolated on the grid, so a coarse grid
         does not bias them. NaN outside the surface's K/S range (SSVI), outside
         a maturity's quoted strikes (market quotes), or where local vol is undefined.
+        With ``extrapolate=True`` implied vol is also given beyond them, out to each maturity's reach (see
+        :meth:`implied_vol_at`); local vol is not, and :meth:`quoted_mask` tells the extrapolated points apart.
         """
         levels = np.asarray(levels, dtype=float)
         if self.ssvi is not None:
@@ -159,10 +202,17 @@ class VolSurface:
             w, w_y, w_yy, w_t = self.ssvi.total_variance(y, T)
             local = _local_vol(y, w, w_y, w_yy, w_t)[0]
             outside = (levels < self.moneyness[0] - 1e-12) | (levels > self.moneyness[-1] + 1e-12)
-            return np.where(outside, np.nan, np.sqrt(w / T)), np.where(outside, np.nan, local)
+            reach = (np.abs(y) <= self._reach()[:, None]) if extrapolate else ~outside
+            return np.where(reach | ~outside, np.sqrt(w / T), np.nan), np.where(outside, np.nan, local)
         if self.svi and self.quoted_y is not None:
             values = _market_values(self.svi, self.maturities, self.quoted_y, self._log_fs(), levels)
-            return values.implied, values.local
+            if not extrapolate:
+                return values.implied, values.local
+            y = np.log(levels)[None, :] - self._log_fs()[:, None]
+            w = np.array([fit.total_variance(row)[0] for fit, row in zip(self.svi, y, strict=True)])
+            wings = (np.abs(y) <= self._reach()[:, None]) & (w > 0) & ~np.isfinite(values.implied)
+            implied = np.where(wings, np.sqrt(np.maximum(w, 0.0) / self.maturities[:, None]), values.implied)
+            return implied, values.local
         m = self.moneyness
         outside = (levels < m[0]) | (levels > m[-1])
 
@@ -341,6 +391,7 @@ def fit_market_surface(
         fit_rmse=np.array([piece.rmse for piece in slices]),
         fit_rmse_unconstrained=np.array([piece.rmse_unconstrained for piece in slices]),
         calibration=calibration,
+        wing_reach=np.array([piece.reach for piece in slices]),
         svi=tuple(piece.svi for piece in slices),
         quoted_y=quoted_y,
         log_forward_ratio=log_fs,
@@ -393,6 +444,7 @@ class _Slice:
     rmse: float  # implied-vol RMSE of the fit at the quotes
     rmse_unconstrained: float  # the same without the arbitrage constraints (see svi.fit_svi_pair)
     held: tuple[bool, bool]  # (butterfly, calendar): arbitrage the unconstrained fit had and the constraints removed
+    reach: float  # how far beyond its quotes the smile is read (svi.wing_reach of the unconstrained fit)
     binned: bool  # whether dense quotes were averaged into MAX_POINTS_PER_SLICE bins before the fit
     spread_arbitrage: bool  # see _spread_arbitrage
     butterflies: tuple[int, tuple[float, float, float] | None]  # see _butterfly_arbitrage
@@ -489,6 +541,7 @@ def _fit_slices(prepared: Iterable[_Prepared], spot: float, arbitrage_free: bool
                 rmse,
                 rmse_free,
                 held,
+                wing_reach(free),
                 binned,
                 spread,
                 butterflies,
