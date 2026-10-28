@@ -27,7 +27,7 @@ maturities are quoted near the same forward moneyness.
 ### Forwards and discounting
 Option prices are inverted at each expiry's own forward $F$ and discount factor $D$, read from the quotes by
 put–call parity: for European options ${C(K) - P(K) = D\,(F - K)}$ at every strike, so the call-minus-put prices of
-an expiry lie on a line in $K$ with slope $-D$ and root $F$. The line is fitted by weighted least squares to the
+an expiry lie on a line in $K$ with slope ${-D}$ and root $F$. The line is fitted by weighted least squares to the
 call/put pairs within the wider of 8% and 1.5 standard deviations ($\sigma\sqrt{T}$, read from the at-the-money
 straddle) of a first-guess forward, each pair weighted by ${1/(e_C + e_P)^2}$ with $e$ half its bid/ask spread, and
 pairs more than 3.5 scaled median absolute deviations from the line (and outside their own spreads) are removed.
