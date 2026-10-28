@@ -420,22 +420,33 @@ def _prices_to_vols(
             f"the file has {len(data):,} option prices to invert; at most {MAX_PRICE_QUOTES:,} are supported, "
             "so filter the chain (for example to fewer expiries) first"
         )
-    vols, reasons = [], []
+    vols, reasons, no_time_value = [], [], 0
     for price, strike, T, kind in data[["price", "strike", "maturity", "type"]].itertuples(index=False):
         try:
             vols.append(implied_volatility(price, spot, strike, T, rate, dividend_yield, kind))
         except ImpliedVolError as exc:
             vols.append(np.nan)
-            reasons.append(str(exc))
+            if exc.reason == "no_time_value":
+                no_time_value += 1
+            else:
+                reasons.append(str(exc))
     data = data.assign(iv=vols)
     if reasons:
         messages.append(
             f"Dropped {len(reasons)} price quote(s) outside the no-arbitrage bounds at spot {spot:,.2f}, "
             f"rate {rate:.2%} and dividend yield {dividend_yield:.2%} (e.g. {reasons[0]})."
         )
-    no_time_value = int((data["iv"] == 0).sum())
     if no_time_value:
-        messages.append(f"Dropped {no_time_value} price quote(s) with no time value (zero implied vol).")
+        # In the money within 1e-12·max(S, K) of the intrinsic value, the last bits of a price decide its implied
+        # vol (anything from 0 to 100 % and more for a short expiry), so such a quote would only add noise to the fit.
+        messages.append(
+            f"Dropped {no_time_value} price quote(s) with no time value: each is within one part in 10¹² (of the "
+            "larger of spot and strike) of its intrinsic value, the no-arbitrage lower bound, so its implied vol "
+            "cannot be determined."
+        )
+    zero_vol = int((data["iv"] == 0).sum())
+    if zero_vol:  # time value so small that the volatility is below 1e-12 (an out-of-the-money quote near zero)
+        messages.append(f"Dropped {zero_vol} price quote(s) whose implied vol is zero to machine precision.")
     data = data[data["iv"] > 0]
     messages.append(
         f"Inverted {len(data)} option price(s) into implied vols with Black-Scholes-Merton (European exercise)."

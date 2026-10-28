@@ -17,7 +17,7 @@ from ..implied_vol import (
 )
 from . import cache, charts
 from .components import card_row, current_key
-from .format import md, money, pct
+from .format import level, md, money, pct
 from .inputs import Inputs
 
 _TREE_LIMIT = (
@@ -29,6 +29,27 @@ _ENGINE_LIMIT = "The American engine cannot price this option at the volatilitie
 
 def _reset_quote() -> None:
     st.session_state["iv_quote_generation"] = st.session_state.get("iv_quote_generation", 0) + 1
+
+
+def _no_time_value_text(price: float, lower: float, scale: float, american: bool) -> str:
+    """What the tab says for a quote the solvers reject with the reason ``no_time_value``."""
+    if not american and lower <= 0.0:
+        return md(
+            f"No implied volatility: an out-of-the-money option is worth only its time value, and a quote of "
+            f"{money(price, 4)} leaves none, so no volatility can be identified from it."
+        )
+    if american:
+        floor = "zero-volatility value (for a deep in-the-money option, the value of exercising now)"
+        advice = ""
+    else:
+        floor = "intrinsic value, the no-arbitrage lower bound above"
+        advice = " Invert the out-of-the-money option at this strike instead: put–call parity gives it this time value."
+    return md(
+        "No implied volatility: this quote has no time value. It is no more than "
+        f"${level(1e-12 * scale)} (one part in 10¹² of the larger of spot and strike) above the option's {floor}, "
+        "so volatilities from zero up to some level all give this price to within its rounding, and none can be "
+        f"singled out. This is typical deep in the money close to expiry.{advice}"
+    )
 
 
 @st.fragment
@@ -132,6 +153,9 @@ def render(inputs: Inputs) -> None:
         else:
             iv = implied_volatility(price, S, K, T, r, q, option_type)
     except ImpliedVolError as exc:
+        if exc.reason == "no_time_value":
+            st.warning(_no_time_value_text(price, lower, max(S, K), american))
+            return
         at_bound = min(abs(price - lower), abs(price - upper)) <= 1e-9 * max(S, K)
         if at_bound and abs(price - model_value) <= 1e-9 * max(S, K):
             st.info(
@@ -201,10 +225,9 @@ def render(inputs: Inputs) -> None:
             ),
         ],
     )
-    if iv == 0.0:
+    if iv == 0.0:  # a European quote whose time value only a volatility below 1e-12 gives (none at all: rejected)
         st.warning(
-            "The quote equals the option's zero-volatility value (for an American option, typically the value of "
-            "exercising now), so every volatility up to some level reproduces it and none can be singled out."
+            "The implied volatility is zero to machine precision (below 10⁻¹⁰ %): the quote's time value is that small."
         )
     elif vega < 1e-4 * max(S, K):
         st.warning(
@@ -246,7 +269,7 @@ def render(inputs: Inputs) -> None:
     )
     st.caption(
         "The quote is checked against the no-arbitrage bounds first. European quotes are converted to their "
-        "out-of-the-money equivalent through put-call parity and solved with Brent's method; American quotes are "
-        f"solved with Brent's method on {engine_name if alo else 'the ' + tree_name}. Option value increases with "
-        "volatility, so a solution is unique whenever vega is not zero."
+        "out-of-the-money equivalent through put–call parity and inverted with Jäckel's Let's Be Rational; American "
+        f"quotes are solved with Brent's method on {engine_name if alo else 'the ' + tree_name}. Option value "
+        "increases with volatility, so a solution is unique whenever vega is not zero."
     )

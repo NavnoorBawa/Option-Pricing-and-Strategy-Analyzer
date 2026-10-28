@@ -36,9 +36,16 @@ def test_grid_size():
 @pytest.mark.parametrize(("K", "T", "sigma", "r", "q", "kind"), GRID)
 def test_round_trip(K, T, sigma, r, q, kind):
     price = bs.price(100, K, T, r, sigma, q, kind)
-    iv = implied_volatility(price, 100, K, T, r, q, kind)
-    # Where vega is negligible the volatility is not identifiable; the price must still be reproduced.
-    assert abs(iv - sigma) < 1e-6 or abs(bs.price(100, K, T, r, iv, q, kind) - price) < 1e-10
+    lower, _ = no_arbitrage_bounds(100, K, T, r, q, kind)
+    try:
+        iv = implied_volatility(price, 100, K, T, r, q, kind)
+    except ImpliedVolError as error:
+        # In the money with no time value beyond 1e-12·max(S, K) (682 of the 2,520 cases, at most 0.75 of that):
+        # there the last bits of the price decided the volatility, which used to be anything that repriced them.
+        assert error.reason == "no_time_value" and price - lower <= 1e-12 * max(100, K), error
+        return
+    # Measured: at most 1.0e-6, a 5-year call struck at 50 at 5 % volatility with 3.4e-10 of time value.
+    assert iv == pytest.approx(sigma, rel=1e-5)
 
 
 @pytest.mark.parametrize(
@@ -60,9 +67,16 @@ def test_arbitrage_violations_raise():
         implied_volatility(5.0, 100, 90, 0.0, 0.05)
 
 
-def test_zero_time_value_gives_zero_vol():
+def test_a_quote_at_the_lower_bound_has_no_time_value():
+    # It used to give 0.0, while 1e-13 more gave 94.5 % (the 2-day call below): no volatility, and a reason.
     lower, _ = no_arbitrage_bounds(100, 80, 1, 0.05, 0.0, "call")
-    assert implied_volatility(lower, 100, 80, 1, 0.05) == 0.0
+    with pytest.raises(ImpliedVolError) as error:
+        implied_volatility(lower, 100, 80, 1, 0.05)
+    assert error.value.reason == "no_time_value" and "no_time_value" in REJECTION_REASONS
+    assert str(error.value) == (
+        "price 23.9016 is no more than 1e-10 (1e-12·max(S, K)) above the no-arbitrage lower bound 23.9016 "
+        "(discounted intrinsic value): too little time value is left to identify a volatility"
+    )
 
 
 def test_tiny_but_positive_price_is_solved():
@@ -79,10 +93,14 @@ def test_american_round_trip(K, T, sigma, kind, q):
     from options_analyzer import binomial
 
     price = binomial.price(100, K, T, 0.05, sigma, q, kind, 501, american=True, method="lr")
-    iv = implied_volatility_american(price, 100, K, T, 0.05, q, kind)
-    reproduced = binomial.price(100, K, T, 0.05, max(iv, 1e-6), q, kind, 501, american=True, method="lr")
-    # Quotes equal to the zero-volatility value (e.g. immediate exercise) are not identifiable: IV = 0.
-    assert abs(iv - sigma) < 1e-5 or (iv == 0.0 and reproduced == pytest.approx(price, abs=1e-9))
+    try:
+        iv = implied_volatility_american(price, 100, K, T, 0.05, q, kind)
+    except ImpliedVolError as error:
+        # A quote equal to the zero-volatility value (here the value of exercising now) is not identifiable.
+        floor = binomial.price(100, K, T, 0.05, 1e-6, q, kind, 501, american=True, method="lr")
+        assert error.reason == "no_time_value" and abs(price - floor) <= 1e-12 * max(100, K), error
+        return
+    assert abs(iv - sigma) < 1e-5
 
 
 def test_american_bounds_reject_impossible_quotes():
@@ -215,39 +233,53 @@ def _exact_quote(S, K, T, r, q, sigma, kind):
         return price, min(float(1 + abs(price / (v * vega))), 1e300), float((price - intrinsic) / (EPS * price))
 
 
+def _exact_time_value(price, S, K, T, r, q, kind):
+    """``price`` (a double) less the discounted intrinsic value ``max(±(S e^(-qT) - K e^(-rT)), 0)``, at 60 digits."""
+    mp = pytest.importorskip("mpmath")
+    with mp.workdps(60):
+        s, k, t, rr, qq = (mp.mpf(float(v)) for v in (S, K, T, r, q))
+        phi = 1 if kind == "call" else -1
+        return float(mp.mpf(float(price)) - max(phi * (s * mp.exp(-qq * t) - k * mp.exp(-rr * t)), 0))
+
+
 def _price_level_study(n, seed):
     """implied_volatility on exactly priced quotes: the relative error must be at most max(1e-14, 8·cond·ε).
 
     8 rather than 4 (as for the normalised inversion in test_lets_be_rational.py) because converting spot,
-    strike, rate, dividend yield and expiry to ln(F/K) and an out-of-the-money forward price rounds too. Where an
-    in-the-money quote's time value is below two units in its last place the volatility is not recoverable and
-    the result must reprice the quote instead (backward stability); a quote that rounds onto the upper bound
-    (a call worth the discounted spot to 16 digits) must be rejected as such.
+    strike, rate, dividend yield and expiry to ln(F/K) and an out-of-the-money forward price rounds too. An
+    in-the-money quote whose rounded price keeps no more than 1e-12·max(S, K) of time value must be rejected as
+    having none (the margin of 1e-3 of that either side, where the rounding of the intrinsic value can tip it, takes
+    either outcome); a quote that rounds onto the upper bound (a call worth the discounted spot to 16 digits) must be
+    rejected as such. Returns the failures, the worst error over its tolerance and how many quotes were solved.
     """
     K, T, sigma, r, q, kind = _random_quotes(n, seed)
-    failures, worst = [], 0.0
+    failures, worst, solved = [], 0.0, 0
     for i in range(n):
-        price, cond, time_value_ulps = _exact_quote(100.0, K[i], T[i], r[i], q[i], sigma[i], kind[i])
+        price, cond, _ = _exact_quote(100.0, K[i], T[i], r[i], q[i], sigma[i], kind[i])
         if price < 1e-300:
             continue
+        quote, margin = float(price), 1e-12 * max(100.0, K[i])
+        forward = 100.0 * math.exp((r[i] - q[i]) * T[i])
+        in_the_money = forward > K[i] if kind[i] == "call" else forward < K[i]
+        time_value = _exact_time_value(quote, 100.0, K[i], T[i], r[i], q[i], kind[i])
         try:
-            vol = implied_volatility(float(price), 100.0, K[i], T[i], r[i], q[i], kind[i])
+            vol = implied_volatility(quote, 100.0, K[i], T[i], r[i], q[i], kind[i])
         except ImpliedVolError as error:
             _, upper = no_arbitrage_bounds(100.0, K[i], T[i], r[i], q[i], kind[i])
-            if not (error.reason == "at_or_above_upper_bound" and float(price) >= upper):
+            expected = error.reason == "at_or_above_upper_bound" and quote >= upper
+            expected |= error.reason == "no_time_value" and in_the_money and time_value <= margin * (1 + 1e-3)
+            if not expected:
                 failures.append(f"K={K[i]!r} T={T[i]!r} sigma={sigma[i]!r} {kind[i]}: {error}")
             continue
+        solved += 1
+        if in_the_money and time_value < margin * (1 - 1e-3):
+            failures.append(f"K={K[i]!r} T={T[i]!r} sigma={sigma[i]!r} {kind[i]}: {vol!r} without time value")
         error = abs(vol - sigma[i]) / sigma[i]
-        if time_value_ulps >= 2:
-            tolerance = max(1e-14, 8 * cond * EPS)
-            worst = max(worst, error / tolerance)
-            if not error <= tolerance:
-                failures.append(f"K={K[i]!r} T={T[i]!r} sigma={sigma[i]!r} {kind[i]}: {error:.3g} > {tolerance:.3g}")
-        else:
-            repriced, _, _ = _exact_quote(100.0, K[i], T[i], r[i], q[i], vol, kind[i])
-            if not abs(float(repriced) - float(price)) <= 4 * EPS * float(price):
-                failures.append(f"K={K[i]!r} T={T[i]!r} sigma={sigma[i]!r} {kind[i]}: {vol!r} does not reprice")
-    return failures, worst
+        tolerance = max(1e-14, 8 * cond * EPS)
+        worst = max(worst, error / tolerance)
+        if not error <= tolerance:
+            failures.append(f"K={K[i]!r} T={T[i]!r} sigma={sigma[i]!r} {kind[i]}: {error:.3g} > {tolerance:.3g}")
+    return failures, worst, solved
 
 
 @pytest.mark.oracle
