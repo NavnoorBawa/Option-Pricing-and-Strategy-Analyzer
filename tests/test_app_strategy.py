@@ -1,6 +1,7 @@
 """Strategy and Risk tabs: app behaviour (streamlit.testing) and their display helpers."""
 
 import base64
+import dataclasses
 import json
 import re
 import urllib.parse
@@ -13,12 +14,15 @@ from streamlit.proto.WidgetStates_pb2 import WidgetState
 from streamlit.testing.v1 import AppTest
 
 from options_analyzer import black_scholes as bs
-from options_analyzer import risk
+from options_analyzer import risk, scenarios
 from options_analyzer import strategies as strat
-from options_analyzer.ui import charts, tab_risk, tab_strategy
+from options_analyzer.ui import cache, charts, tab_risk, tab_strategy
 from options_analyzer.ui.app import TABS
+from options_analyzer.ui.format import md, money
 
 NO_EDITS = {"edited_rows": {}, "added_rows": [], "deleted_rows": []}
+#: The Risk tab's default implied-vol dynamics in the VaR simulation, an index's (VIX-like).
+INDEX_VOL = {"vol_of_vol": 1.0, "spot_vol_correlation": -0.7}
 
 
 def _ok(at: AppTest) -> None:
@@ -281,10 +285,15 @@ def test_a_link_to_the_risk_tab_analyses_the_linked_template():
     condor = [("put", 1, 80), ("put", -1, 90), ("call", -1, 110), ("call", 1, 120)]
     _assert_heatmap_of(at, 200, condor)
     strategy = strat.Strategy("Iron Condor", strat.build_template("Iron Condor", 100, 10, 1.0).legs, fees=4 * 0.0065)
-    config = risk.VaRConfig(confidence=0.99, horizon_days=1, n_paths=100_000, seed=7)
-    var = risk.value_at_risk(strategy, strat.Market(100, 0.05, 0.2, 1.0), config, 200)
-    assert _metric(at, "VaR 99.0%").value == tab_strategy.money_short(var.var)
-    assert _metric(at, "Expected Shortfall 99.0%").value == tab_strategy.money_short(var.expected_shortfall)
+    # The VaR with the default index implied-vol dynamics, and beside it the spot-only VaR (implied vol frozen).
+    frozen = risk.VaRConfig(confidence=0.99, horizon_days=1, n_paths=100_000, seed=7)
+    for config, var_label, es_label in (
+        (dataclasses.replace(frozen, **INDEX_VOL), "VaR 99.0%", "Expected Shortfall 99.0%"),
+        (frozen, "Spot-only VaR 99.0%", "Spot-only ES 99.0%"),
+    ):
+        var = risk.value_at_risk(strategy, strat.Market(100, 0.05, 0.2, 1.0), config, 200)
+        assert _metric(at, var_label).value == tab_strategy.money_short(var.var)
+        assert _metric(at, es_label).value == tab_strategy.money_short(var.expected_shortfall)
 
 
 CONDOR = "**Iron Condor** — Long 1 × 80 Put, Short 1 × 90 Put, Short 1 × 110 Call, Long 1 × 120 Call"
@@ -1168,6 +1177,126 @@ def test_stress_table_and_var_cards():
     at.selectbox(key="var_dist").set_value("student_t").run()
     full = next(c.value for c in at.caption if c.value.startswith("Full revaluation"))
     assert "ν ≤ 4" in full
+
+
+def _stress_frame(at: AppTest):
+    return next(df for df in at.dataframe if "Scenario" in df.value.columns)
+
+
+def test_the_stress_table_marks_damped_iv_shocks_in_text():
+    # Review panel (designer, finding 8): "IV damped" was a CheckboxColumn, which drew live-looking toggles in a
+    # read-only table. It is text now: "yes" where a one-month (historical or Fed) shock is damped for longer-dated
+    # legs, "—" where a hypothetical shock applies as it is.
+    at = _app("Risk")
+    frame = _stress_frame(at)
+    assert json.loads(frame.proto.columns)["IV damped"]["type_config"] == {"type": "text"}
+    every = (*scenarios.HISTORICAL_SCENARIOS, *scenarios.HYPOTHETICAL_SCENARIOS)
+    marks = dict(zip(frame.value["Scenario"], frame.value["IV damped"], strict=True))
+    assert marks == {sc.name: "yes" if sc.one_month_vol_shock else "—" for sc in every}
+    assert set(marks.values()) == {"yes", "—"}
+    at.toggle(key="stress_damp").set_value(False).run()
+    _ok(at)
+    assert set(_stress_frame(at).value["IV damped"]) == {"—"}
+
+
+#: The review panel's VaR case (market maker, finding 2): a 45-day at-the-money short straddle on an index, one
+#: contract of 100 shares.
+SPX_STRADDLE = {
+    "spot": 5800,
+    "strike": 5800,
+    "days": 45,
+    "vol": 16,
+    "rate": 4.3,
+    "div": 1.3,
+    "strategy": "Short Straddle",
+}
+
+
+def _var_configs(monkeypatch) -> list[risk.VaRConfig]:
+    """The configuration of every VaR simulation from now on, in order (the cache is cleared, so none hides there)."""
+    configs = []
+    real = risk.value_at_risk
+    monkeypatch.setattr(
+        risk, "value_at_risk", lambda s, m, config, n=1.0: configs.append(config) or real(s, m, config, n)
+    )
+    cache.value_at_risk.clear()
+    return configs
+
+
+def _var_cards(at: AppTest) -> list[tuple[str, str, str]]:
+    """Label, value and delta line of every VaR and ES card."""
+    return [(m.label, m.value, m.delta) for m in at.metric if re.search(r"VaR|ES |Shortfall", m.label)]
+
+
+def test_var_simulates_index_implied_vol_dynamics_by_default(monkeypatch):
+    # Review panel (market maker, finding 2): implied vol was frozen unless a toggle was switched on, so the VaR of a
+    # short straddle left out its vega risk. Implied-vol moves are on by default now, with index (VIX-like)
+    # dynamics, and the spot-only run beside them is the same simulation with implied vol frozen: same seed, paths,
+    # confidence, horizon and return model.
+    configs = _var_configs(monkeypatch)
+    at = _app("Risk")
+    toggle = at.toggle(key="var_volmoves")
+    assert toggle.value is True and "index (VIX-like) dynamics" in toggle.help
+    assert at.number_input(key="var_vov").value == 100.0 and at.slider(key="var_corr").value == -0.7
+    moving = risk.VaRConfig(confidence=0.99, horizon_days=1, n_paths=100_000, seed=7, **INDEX_VOL)
+    assert configs == [dataclasses.replace(moving, vol_of_vol=0.0), moving]
+    full = next(c.value for c in at.caption if c.value.startswith("Full revaluation"))
+    assert "implied vol moving (vol of vol 100% a year, correlation −0.70 with spot)" in full
+
+
+def test_var_cards_show_the_spot_only_var_beside_the_var_with_implied_vol_moves():
+    # The panel's numbers: with implied vol frozen (the old default) VaR $2,833 and ES $3,683; with index dynamics
+    # $3,862 and $4,737, 27 % more. Both pairs are shown, and the headline cards say what the vol moves add.
+    at = _app("Risk", **SPX_STRADDLE)
+    assert _var_cards(at) == [
+        ("VaR 99.0%", "$3,862", md("+$1,029 vs spot only")),
+        ("Expected Shortfall 99.0%", "$4,737", md("+$1,054 vs spot only")),
+        ("Spot-only VaR 99.0%", "$2,833", "implied vol frozen"),
+        ("Spot-only ES 99.0%", "$3,683", "implied vol frozen"),
+    ]
+    # The library's numbers for the link's market, as the sidebar builds it, at the tab's defaults.
+    market = strat.Market(5800, 4.3 / 100, 16 / 100, 45 / 365, 1.3 / 100)
+    straddle = strat.build_template("Short Straddle", 5800, 10)
+    frozen = risk.VaRConfig(0.99, 1, 100_000, seed=7)
+    spot_only = risk.value_at_risk(straddle, market, frozen, 100)
+    moving = risk.value_at_risk(straddle, market, dataclasses.replace(frozen, **INDEX_VOL), 100)
+    shown = [moving.var, moving.expected_shortfall, spot_only.var, spot_only.expected_shortfall]
+    assert [card[1] for card in _var_cards(at)] == [tab_strategy.money_short(x) for x in shown]
+    # A short straddle is short vega: the vol moves add to both measures.
+    assert moving.var >= spot_only.var and moving.expected_shortfall >= spot_only.expected_shortfall
+    helps = {m.label: m.proto.help for m in at.metric}
+    assert md(f"Exact: {money(moving.var)}") in helps["VaR 99.0%"]
+    assert md(f"Exact: {money(spot_only.var)}") in helps["Spot-only VaR 99.0%"]
+    assert "implied vol frozen" in helps["Spot-only VaR 99.0%"]
+    # The delta-normal VaR, a card before, is in the table of statistics.
+    stats = next(df.value for df in at.dataframe if "Statistic" in df.value.columns).set_index("Statistic")
+    assert stats.loc["Delta-normal VaR 99.0%", "Value"] == money(moving.delta_normal_var)
+
+
+def test_implied_vol_moves_switched_off_show_the_spot_only_run_from_the_cache(monkeypatch):
+    # Off, the tab shows one pair of cards, with implied vol frozen; that run is the spot-only one already simulated.
+    # The spot-only run does not depend on the vol dynamics, so changing them re-runs only the other one: one
+    # simulation per change, as before the spot-only run was added.
+    configs = _var_configs(monkeypatch)
+    at = _app("Risk", **SPX_STRADDLE)
+    assert [c.vol_of_vol for c in configs] == [0.0, 1.0]
+    at.toggle(key="var_volmoves").set_value(False).run()
+    _ok(at)
+    assert _var_cards(at) == [
+        ("VaR 99.0%", "$2,833", "implied vol frozen"),
+        ("Expected Shortfall 99.0%", "$3,683", "implied vol frozen"),
+    ]
+    assert "implied vol frozen (no vega risk)" in _metric(at, "VaR 99.0%").proto.help
+    assert "time decay and implied vol frozen" in next(c.value for c in at.caption if c.value.startswith("Full"))
+    at.toggle(key="var_volmoves").set_value(True).run()
+    _ok(at)
+    assert len(configs) == 2  # both runs came from the cache
+    at.number_input(key="var_vov").set_value(150.0).run()
+    at.slider(key="var_corr").set_value(-0.5).run()
+    _ok(at)
+    assert [(c.vol_of_vol, c.spot_vol_correlation) for c in configs[2:]] == [(1.5, -0.7), (1.5, -0.5)]
+    assert [label for label, *_ in _var_cards(at)][2:] == ["Spot-only VaR 99.0%", "Spot-only ES 99.0%"]
+    assert _var_cards(at)[2][1] == "$2,833"  # the spot-only VaR does not depend on the vol dynamics
 
 
 # --- Chart and label helpers ---------------------------------------------------------------------------------

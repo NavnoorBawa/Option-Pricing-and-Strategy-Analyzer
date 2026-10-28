@@ -122,8 +122,11 @@ def mc_terminal(S, T, r, sigma, q, n_paths, seed, antithetic) -> np.ndarray:
     return monte_carlo.terminal_prices(S, T, r, sigma, q, min(n_paths, 200_000), seed, antithetic)
 
 
-@st.cache_data(show_spinner=False, max_entries=12)
+@st.cache_data(show_spinner=False, max_entries=24)
 def value_at_risk(strategy: Strategy, market: Market, config: risk.VaRConfig, multiplier: float) -> risk.VaRResult:
+    """``risk.value_at_risk``. The Risk tab makes two runs per view, with implied vol moving and with it frozen (one
+    seed), so the cache holds 24 entries: the last 12 views, as many as when a view made one run. Each entry keeps its
+    P&L sample, 0.8 MB at the default 100,000 paths and 4 MB at the most, 500,000."""
     return risk.value_at_risk(strategy, market, config, multiplier)
 
 

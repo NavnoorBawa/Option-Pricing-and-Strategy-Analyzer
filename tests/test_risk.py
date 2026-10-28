@@ -1,7 +1,10 @@
+from pathlib import Path
+
 import numpy as np
 import pytest
 from scipy.stats import norm
 
+from options_analyzer import black_scholes as bs
 from options_analyzer import risk
 from options_analyzer import strategies as S
 
@@ -92,8 +95,6 @@ def test_config_validation(kwargs):
 
 
 def test_legs_expiring_before_the_horizon_settle_on_their_expiry_day():
-    from options_analyzer import black_scholes as bs
-
     market = S.Market(100, 0.05, 0.30, 7 / 365)
     calendar = S.build_template("Long Call Calendar", 100, 10, market.expiry)
     res = risk.value_at_risk(calendar, market, risk.VaRConfig(0.99, 10, 200_000, "normal", seed=1), 100)
@@ -181,3 +182,101 @@ def test_legs_expiring_during_the_last_day_count_as_settled(days, horizon, settl
         )
         expected = 100 * (payoff - float(S.position_value(condor, market)))
         assert res.pnl == pytest.approx(expected, abs=1e-9)
+
+
+# --- Implied vol frozen and moving (the Risk tab shows both) -------------------------------------------------------
+
+#: The case of the review panel's market maker (docs/reviews/panel-v3.0.md, finding 2): a 45-day at-the-money
+#: short straddle on an index.
+SPX = S.Market(5800, 0.043, 0.16, 45 / 365, 0.013)
+STRADDLE = S.build_template("Short Straddle", 5800, 10)
+#: The Risk tab's default implied-vol dynamics, an index's (VIX-like): vol of vol 100 % a year, correlation -0.7.
+INDEX_VOL = {"vol_of_vol": 1.0, "spot_vol_correlation": -0.7}
+
+
+def test_frozen_implied_vol_var_is_full_revaluation_on_the_simulated_spot():
+    # vol_of_vol = 0 (the library default and the Risk tab's spot-only run): the P&L is the straddle re-priced in
+    # closed form, one trading day later at the same implied vol, on the seed's Gaussian spot draws. Rebuilt here from
+    # the model's definition, not from risk.py: the paths agree to 3e-10 dollars (measured; the straddle is worth
+    # about $26,000 and the two sides order the floating-point operations differently), VaR and ES to rounding. A
+    # change to the frozen-vol run, such as a vol shock drawn before the spot shocks, fails here.
+    K, r, q, sigma, T, h = 5800.0, 0.043, 0.013, 0.16, 45 / 365, 1 / 252
+    z = np.random.default_rng(7).standard_normal(100_000)
+    spot = 5800.0 * np.exp((-q - 0.5 * sigma**2) * h + sigma * np.sqrt(h) * z)
+
+    def straddle(s, t):
+        return bs.price(s, K, t, r, sigma, q, "call") + bs.price(s, K, t, r, sigma, q, "put")
+
+    pnl = -100 * (straddle(spot, T - h) - straddle(5800.0, T))
+    worst = np.sort(pnl)[:1000]  # the floor(100,000 x 1 %) worst outcomes
+    res = risk.value_at_risk(STRADDLE, SPX, risk.VaRConfig(0.99, 1, 100_000, "normal", seed=7), 100)
+    np.testing.assert_allclose(res.pnl, pnl, rtol=0, atol=1e-8)
+    assert res.var == pytest.approx(-worst[-1], rel=1e-12)
+    assert res.expected_shortfall == pytest.approx(-worst.mean(), rel=1e-12)
+
+
+def test_frozen_implied_vol_understates_the_var_of_a_short_straddle_by_27_percent():
+    # The panel's numbers, one contract (100 shares), one day, 99 %, 100,000 paths, seed 7: VaR $2,833 and ES $3,683
+    # with implied vol frozen (vol_of_vol = 0, unchanged by making index dynamics the Risk tab's default), against
+    # $3,862 and $4,737 with index dynamics. Pinned to 1e-9 relative: far above rounding (the frozen run's VaR and ES
+    # match the rebuild above to 3e-16) and far below any change of the model. They rest on NumPy's Generator giving
+    # a seed the same normal draws in every supported NumPy, which the surface goldens (seeded sample_quotes noise)
+    # rely on too; should that ever change, the rebuild above still checks the frozen run.
+    frozen = risk.value_at_risk(STRADDLE, SPX, risk.VaRConfig(0.99, 1, 100_000, seed=7), 100)
+    moving = risk.value_at_risk(STRADDLE, SPX, risk.VaRConfig(0.99, 1, 100_000, seed=7, **INDEX_VOL), 100)
+    assert (frozen.var, frozen.expected_shortfall) == pytest.approx((2832.9076587059944, 3683.1833471947934), rel=1e-9)
+    assert (moving.var, moving.expected_shortfall) == pytest.approx((3861.9450277254145, 4737.131879977531), rel=1e-9)
+    assert 1 - frozen.var / moving.var == pytest.approx(0.2665, abs=1e-4)
+    # Far outside the simulation noise: even the two 95 % intervals are apart (the runs share their spot paths, so
+    # the noise of the gap itself is smaller still).
+    assert frozen.var_ci95[1] < moving.var_ci95[0]
+    # The Methodology quotes this case: its numbers must be these.
+    text = " ".join((Path(risk.__file__).parent / "ui" / "methodology" / "risk.md").read_text(encoding="utf-8").split())
+    assert rf"VaR is \${moving.var:,.0f} with implied-vol moves and \${frozen.var:,.0f} without them" in text
+    assert f"understates it by {100 * (1 - frozen.var / moving.var):.0f} %" in text
+
+
+@pytest.mark.parametrize(
+    ("days", "vol", "cfg"),
+    [
+        (7, 0.16, {}),
+        (45, 0.16, {}),
+        (180, 0.30, {}),
+        (365, 0.16, {"horizon_days": 10}),
+        (45, 0.16, {"horizon_days": 5, "distribution": "student_t", "dof": 4}),
+        (45, 0.16, {"horizon_days": 5, "distribution": "garch"}),
+        (45, 0.16, {"spot_vol_correlation": 0.0}),
+    ],
+)
+def test_index_vol_dynamics_add_to_the_var_and_es_of_a_short_straddle(days, vol, cfg):
+    # Short vega and short gamma: implied-vol moves widen the loss tail, so the VaR and ES with them exceed the
+    # spot-only ones on the same spot paths. The smallest gap here is the 7-day straddle's VaR, +1.2 % (a week from
+    # expiry, vega is small next to gamma); the 45-day one gains 36 % at this seed, and 46 % without the correlation.
+    market = S.Market(5800, 0.043, vol, days / 365, 0.013)
+    base = {"confidence": 0.99, "horizon_days": 1, "n_paths": 50_000, "spot_vol_correlation": -0.7, "seed": 3} | cfg
+    moving = risk.value_at_risk(STRADDLE, market, risk.VaRConfig(**(base | {"vol_of_vol": 1.0})), 100)
+    frozen = risk.value_at_risk(STRADDLE, market, risk.VaRConfig(**(base | {"vol_of_vol": 0.0})), 100)
+    assert moving.var > frozen.var
+    assert moving.expected_shortfall > frozen.expected_shortfall
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        {"distribution": "normal"},
+        {"distribution": "student_t", "dof": 4},
+        {"distribution": "garch", "horizon_days": 10},
+    ],
+)
+def test_implied_vol_moves_leave_the_spot_paths_unchanged(cfg):
+    # The Risk tab calls the gap between its two VaRs the vega risk. That holds because one seed gives both runs the
+    # same spot paths: the simulation draws every spot shock first, and vol shocks only for a positive vol of vol.
+    # So a position without vega (stock) has the same P&L, path by path, either way.
+    base = {"confidence": 0.99, "horizon_days": 5, "n_paths": 20_000, "seed": 11} | cfg
+    moving, frozen = risk.VaRConfig(**base, **INDEX_VOL), risk.VaRConfig(**base)
+    spot_moving, multiplier = risk.simulate_horizon(MARKET, moving)
+    spot_frozen, ones = risk.simulate_horizon(MARKET, frozen)
+    assert np.array_equal(spot_moving, spot_frozen)
+    assert np.all(ones == 1.0) and multiplier.std() > 0.1
+    pnl_moving, pnl_frozen = (risk.value_at_risk(STOCK, MARKET, config, 100).pnl for config in (moving, frozen))
+    assert np.array_equal(pnl_moving, pnl_frozen)

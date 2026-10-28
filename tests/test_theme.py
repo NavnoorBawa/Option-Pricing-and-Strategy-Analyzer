@@ -864,8 +864,8 @@ def _lines(cards: list[dict]) -> list[list[dict]]:
 @pytest.mark.slow
 @pytest.mark.parametrize(
     ("width", "query", "three_up"),
-    # Phones (Android and iPhone widths) and a laptop with the sidebar open (the strategy and Greek rows 2 + 2, the
-    # three-card rows 3 across), and on a phone a 100,000-lot position, whose amounts are in millions ("$46.62M").
+    # Phones (Android and iPhone widths) and a laptop with the sidebar open (the strategy, Greek and VaR rows 2 + 2,
+    # the three-card row 3 across), and on a phone a 100,000-lot position, whose amounts are in millions ("$46.62M").
     [
         pytest.param(360, "", False, id="360"),
         pytest.param(390, "", False, id="390"),
@@ -876,8 +876,9 @@ def _lines(cards: list[dict]) -> list[list[dict]]:
 def test_card_rows_line_up(chromium, app_url, width, query, three_up):
     # The cards of each line of a row have one width, one height and one value baseline; a card is as wide on a
     # line of its own (2 + 1) as above it; and no value or label runs out of its card's content box. Every value is
-    # at the theme's full size, and on a line of three cards no label takes more than two lines. The rows of three
-    # go 2 + 1 on phones, and the Strategy summary and Greek rows wrap together with their cards lined up.
+    # at the theme's full size, and on a line of three cards no label takes more than two lines. The row of three
+    # goes 2 + 1 on phones, the rows of two pairs (the VaR row among them: implied vol moving, and frozen) 2 + 2,
+    # and the Strategy summary and Greek rows wrap together with their cards lined up.
     # (The subgrid and stretch rules of ui/components.py depend on Streamlit's DOM: the bordered stMetric box, the
     # padded box inside it and the element container around it.)
     page = _open(chromium, app_url + query, "light", width)
@@ -905,9 +906,8 @@ def test_card_rows_line_up(chromium, app_url, width, query, three_up):
                 # set it at the card's right edge then: 46 to 54 px after "Call ITM probability" at 360-375 px).
                 if card["iconGap"] is not None:
                     assert 0 <= card["iconGap"] <= 8 and card["iconOnLastLine"], (key, card)
-        for key in ("expectation_cards", "var_cards"):
-            assert [len(line) for line in _lines(rows[key])] == ([3] if three_up else [2, 1]), key
-        for key in ("strategy_cards", "greek_cards"):
+        assert [len(line) for line in _lines(rows["expectation_cards"])] == ([3] if three_up else [2, 1])
+        for key in ("strategy_cards", "greek_cards", "var_cards"):
             assert [len(line) for line in _lines(rows[key])] == [2, 2], key
 
         def boxes(key: str) -> list[list[tuple[int, int]]]:

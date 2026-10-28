@@ -293,7 +293,7 @@ ROWS = {
     "strategy_cards": [["Net premium", "Max profit"], ["Max loss", "Probability of profit"]],
     "greek_cards": [["Delta (shares)", "Gamma"], ["Theta / day", "Vega / vol pt"]],
     "expectation_cards": [["Expected P&L at expiry", "P&L standard deviation", "Drift used"]],
-    "var_cards": [["VaR 99.0%", "Expected Shortfall 99.0%", "Delta-normal VaR"]],
+    "var_cards": [["VaR 99.0%", "Expected Shortfall 99.0%"], ["Spot-only VaR 99.0%", "Spot-only ES 99.0%"]],
     "surface_cards": [["Grid", "Calendar arbitrage"], ["Butterfly arbitrage", "Local vol defined"]],
     "iv_cards": [["Implied volatility", "Model check"], ["Vega at IV", "Time value"]],
 }
@@ -330,23 +330,23 @@ def test_the_four_card_rows_stay_two_by_two_on_a_phone(states):
             style = next(s for s in _styles(at) if f".st-key-{row} {{ container:" in s)
             assert _layout(style, PHONE_ROW)[0] == 2, (state, row)
             checked.add(row)
-    assert checked == {"price_cards", "strategy_cards", "greek_cards", "surface_cards", "iv_cards"}
+    assert checked == {"price_cards", "strategy_cards", "greek_cards", "var_cards", "surface_cards", "iv_cards"}
 
 
 @pytest.mark.parametrize(
     ("phone", "expected"),
-    # Cards per line of the three-card rows at the default URL on common phone widths (360 px Android, 375 and 390
+    # Cards per line of the three-card row at the default URL on common phone widths (360 px Android, 375 and 390
     # px iPhone, 412, 430 and 440 px large phones). The expected-P&L cards go 3 across from a 409 px row (phones of
     # 437 px and up), where each card has room for its value at full size and "EXPECTED P&L" over "AT EXPIRY" in
-    # the labels' small capitals; the VaR cards need a 460 px row ("EXPECTED" over "SHORTFALL 99.0%"), so they go
-    # 2 + 1 on every phone.
+    # the labels' small capitals. (The VaR cards were a row of three, 2 + 1 on every phone; they are two pairs now,
+    # the spot-only VaR and ES beside the VaR and ES with implied-vol moves.)
     [
-        (360, {"expectation_cards": 2, "var_cards": 2}),
-        (375, {"expectation_cards": 2, "var_cards": 2}),
-        (390, {"expectation_cards": 2, "var_cards": 2}),
-        (412, {"expectation_cards": 2, "var_cards": 2}),
-        (430, {"expectation_cards": 2, "var_cards": 2}),
-        (440, {"expectation_cards": 3, "var_cards": 2}),
+        (360, {"expectation_cards": 2}),
+        (375, {"expectation_cards": 2}),
+        (390, {"expectation_cards": 2}),
+        (412, {"expectation_cards": 2}),
+        (430, {"expectation_cards": 2}),
+        (440, {"expectation_cards": 3}),
     ],
 )
 def test_the_three_card_rows_on_a_phone(states, phone, expected):
