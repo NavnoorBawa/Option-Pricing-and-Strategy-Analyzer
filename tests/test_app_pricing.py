@@ -9,7 +9,7 @@ import pytest
 from scipy.special import ndtr
 from streamlit.testing.v1 import AppTest
 
-from options_analyzer import binomial, monte_carlo
+from options_analyzer import american, binomial, monte_carlo
 from options_analyzer import black_scholes as bs
 from options_analyzer.ui import charts, components, tab_pricing
 
@@ -410,6 +410,123 @@ def test_greek_names_get_a_column_wide_enough_for_the_longest(app):
     # so the name was cut at 1,280 px and on phones ("Epsilon (di", and "Vomma (vo" with the higher-order Greeks).
     table = next(d for d in app.dataframe if "Greek" in d.value.columns)
     assert json.loads(table.proto.columns)["Greek"]["width"] == "medium"
+
+
+# --- One-day decay beside theta / 365 -----------------------------------------------------------------------------
+
+#: The panel's 1-day SPX-like contract (docs/reviews/panel-v3.0.md, market maker, finding 3).
+SPX_1D = {"spot": 5800, "strike": 5800, "rate": 4.3, "div": 1.3, "vol": 18, "days": 1}
+DAY = 1 / 365
+
+
+def _greeks(at: AppTest):
+    """The Greeks table, indexed by the Greek's name."""
+    return next(d.value for d in at.dataframe if "Greek" in d.value.columns).set_index("Greek")
+
+
+def _first(names: list[str], a: str, b: str) -> str:
+    """Which of the adjacent rows ``a`` and ``b`` comes first."""
+    assert abs(names.index(a) - names.index(b)) == 1, names
+    return a if names.index(a) < names.index(b) else b
+
+
+def test_a_one_day_at_the_money_put_decays_by_its_whole_premium(new_app):
+    # The panel: worth 21.56, theta -10.66 a day, and the whole premium lost by expiry tomorrow.
+    at = new_app(**SPX_1D).run()
+    _ok(at)
+    table = _greeks(at)
+    assert _first(list(table.index), "Decay to expiry", "Theta Θ") == "Decay to expiry"  # the headline
+    put = bs.price(5800, 5800, DAY, 0.043, 0.18, 0.013, "put")
+    assert _dollars(_metrics(at)["Put value"]) == pytest.approx(21.56, abs=0.005)
+    assert table.loc["Decay to expiry", "Put"] == pytest.approx(-put, rel=1e-12)  # intrinsic value 0 at the money
+    assert table.loc["Theta Θ", "Put"] == pytest.approx(-10.66, abs=0.005)
+    assert table.loc["Decay to expiry", "Unit"] == "until expiry, by repricing"
+    # The chain says the same at its at-the-money row.
+    chain = next(d.value for d in at.dataframe if "Strike" in d.value.columns).set_index("Strike")
+    assert chain.loc[5800.0, "Put decay to expiry"] == pytest.approx(-put, rel=1e-12)
+    assert "Call 1-day decay" not in chain.columns
+
+
+def test_a_one_day_out_of_the_money_put_decays_by_less_than_theta_says(new_app):
+    # The panel: the 5,750 put shows theta -6.97 a day, against a true decay of -5.19 (its whole value).
+    at = new_app(**(SPX_1D | {"strike": 5750})).run()
+    table = _greeks(at)
+    assert table.loc["Decay to expiry", "Put"] == pytest.approx(-5.19, abs=0.005)
+    assert table.loc["Theta Θ", "Put"] == pytest.approx(-6.97, abs=0.005)
+    # The in-the-money call ends at its intrinsic value, 50.
+    call = bs.price(5800, 5750, DAY, 0.043, 0.18, 0.013, "call")
+    assert table.loc["Decay to expiry", "Call"] == pytest.approx(50 - call, rel=1e-12)
+
+
+@pytest.mark.parametrize(("days", "first"), [(45, "Theta Θ"), (3, "Theta Θ"), (2, "1-day decay")])
+def test_the_decay_leads_the_table_only_beyond_ten_percent(new_app, days, first):
+    # At the money (spot = strike = 100, 20 % volatility, 5 % rate) theta / 365 and the 1-day decay differ by about
+    # under 1 % at 45 days, 8.7 % (call) and 9.7 % (put) at 3 days, 14 % and 15 % at 2 days.
+    at = new_app(days=days).run()
+    _ok(at)
+    table = _greeks(at)
+    assert _first(list(table.index), "Theta Θ", "1-day decay") == first
+    T = days * DAY
+    for kind in ("call", "put"):
+        decay = bs.price(100, 100, T - DAY, 0.05, 0.2, 0, kind) - bs.price(100, 100, T, 0.05, 0.2, 0, kind)
+        assert table.loc["1-day decay", kind.capitalize()] == pytest.approx(decay, rel=1e-12)
+    assert any("it is listed first when it differs from the theta row" in c.value for c in at.caption)
+
+
+def test_the_decay_follows_the_american_engine(new_app):
+    at = new_app(days=7, model="American (ALO)", div=3).run()
+    _ok(at)
+    table = _greeks(at)
+    for kind in ("call", "put"):
+        later = american.price(100, 100, 6 * DAY, 0.05, 0.2, 0.03, option_type=kind)
+        now = american.price(100, 100, 7 * DAY, 0.05, 0.2, 0.03, option_type=kind)
+        assert table.loc["1-day decay", kind.capitalize()] == pytest.approx(later - now, rel=1e-12)
+        assert _dollars(_metrics(at)[f"{kind.capitalize()} value"]) == pytest.approx(now, abs=5e-5)
+    # Within a day of expiry: the intrinsic value (zero at the money) minus the engine's value.
+    at = new_app(days=1, model="American (ALO)").run()
+    put = american.price(100, 100, DAY, 0.05, 0.2, 0.0, option_type="put")
+    assert _greeks(at).loc["Decay to expiry", "Put"] == pytest.approx(-put, rel=1e-12)
+
+
+@pytest.mark.parametrize(("lattice", "later_steps"), [("Leisen-Reimer", 501), ("Cox-Ross-Rubinstein", 431)])
+def test_the_tree_greeks_add_the_trees_own_decay(new_app, lattice, later_steps):
+    # The Greeks table stays Black-Scholes-Merton's; the tree's table adds the decay on a tree one day shorter
+    # (tab_pricing.later_tree_steps: 501 x 6/7 = 429.4, up to the odd 431 for CRR).
+    at = new_app(days=7, model="Binomial tree", tree=lattice, style="American").run()
+    _ok(at)
+    method = "lr" if lattice == "Leisen-Reimer" else "crr"
+    tree = next(d.value for d in at.dataframe if "Div. rho / 1%" in d.value.columns).set_index("Option")
+    names = list(tree.columns)
+    assert names.index("1-day decay") == names.index("Theta / day") + 1
+    for kind in ("call", "put"):
+        later = binomial.price(100, 100, 6 * DAY, 0.05, 0.2, 0, kind, later_steps, True, method)
+        now = binomial.price(100, 100, 7 * DAY, 0.05, 0.2, 0, kind, 501, True, method)
+        assert tree.loc[kind.capitalize(), "1-day decay"] == pytest.approx(later - now, rel=1e-12)
+        closed = bs.price(100, 100, 6 * DAY, 0.05, 0.2, 0, kind) - bs.price(100, 100, 7 * DAY, 0.05, 0.2, 0, kind)
+        assert _greeks(at).loc["1-day decay", kind.capitalize()] == pytest.approx(closed, rel=1e-12)
+    assert any(f"with {later_steps} steps" in c.value for c in at.caption) is (method == "crr")
+
+
+def test_monte_carlo_uses_the_closed_form_decay(new_app):
+    at = new_app(days=1, model="Monte Carlo").run()
+    _ok(at)
+    call = bs.price(100, 100, DAY, 0.05, 0.2, 0, "call")
+    assert _greeks(at).loc["Decay to expiry", "Call"] == pytest.approx(-call, rel=1e-12)
+    assert any("by Black-Scholes-Merton, whose value the simulation estimates" in c.value for c in at.caption)
+
+
+def test_the_sensitivity_explorer_plots_the_decay_against_the_days_left(app):
+    app.selectbox(key="sens_quantity").set_value("1-day decay").run()
+    app.selectbox(key="sens_axis").set_value("Days to expiry").run()
+    _ok(app)
+    chart = _chart(app, "sensitivity_chart")
+    days = _values(chart["data"][0]["x"])
+    call = _values(chart["data"][0]["y"])
+    assert days[0] == 1 and call[0] == pytest.approx(-bs.price(100, 100, DAY, 0.05, 0.2, 0, "call"), rel=1e-12)
+    T = days[-1] * DAY
+    expected = bs.price(100, 100, T - DAY, 0.05, 0.2, 0, "call") - bs.price(100, 100, T, 0.05, 0.2, 0, "call")
+    assert call[-1] == pytest.approx(expected, rel=1e-12)
+    assert chart["layout"]["yaxis"]["title"]["text"] == "1-day decay ($)"
 
 
 # --- IV tab ------------------------------------------------------------------------------------------------------

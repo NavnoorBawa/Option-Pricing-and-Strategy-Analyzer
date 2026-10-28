@@ -14,8 +14,8 @@ from .. import risk, scenarios
 from .. import strategies as strat
 from . import cache, charts
 from .components import card_row, current_key
-from .format import md, money, money_short
-from .tab_strategy import Position
+from .format import decay_label, md, money, money_short, signed
+from .tab_strategy import Position, expires_within_a_day
 
 CONFIDENCE_LEVELS = (0.95, 0.975, 0.99, 0.995, 0.999)
 PATH_CHOICES = (10_000, 25_000, 50_000, 100_000, 250_000, 500_000)
@@ -156,12 +156,15 @@ def _time_decay(position: Position, front_days: float) -> None:
         key="time_decay",
         alt="The position's P&L ($) against days from today, for spot moves of up to one standard deviation",
     )
-    theta = strat.position_greeks(position.strategy, position.market)["theta"] * position.units / 365
+    strategy, market = position.strategy, position.market
+    theta = strat.position_greeks(strategy, market)["theta"] * position.units / 365
+    decay = strat.time_decay(strategy, market, multiplier=position.units)
     st.caption(
         md(
             "Mark-to-market P&L as time passes with implied volatility unchanged, for spot moves of half and one "
             f"standard deviation of the price at the front expiry (σ√T = {sigma_t:.1%}). "
-            f"Current theta: {money(theta, signed=True)} per day."
+            f"{decay_label(expires_within_a_day(strategy, market))} by repricing at today's spot: "
+            f"{signed(decay, 2, '$')}; theta / 365, the instantaneous rate: {signed(theta, 2, '$')} per day."
         )
     )
 
@@ -194,6 +197,12 @@ def _greek_profiles(position: Position, front_days: float) -> None:
     st.caption(
         "Position Greeks of the whole position across ±3 standard deviations of the price at the front expiry, "
         "today and at later dates with implied volatility unchanged (analytical Black-Scholes-Merton Greeks)."
+        + (
+            " Theta is theta / 365, the instantaneous rate: close to expiry a day costs more, as the decay by "
+            "repricing under the time-decay chart shows."
+            if name == "theta"
+            else ""
+        )
     )
 
 

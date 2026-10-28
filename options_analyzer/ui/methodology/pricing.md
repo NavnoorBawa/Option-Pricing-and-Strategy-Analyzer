@@ -78,3 +78,16 @@ the control variate on (the residuals are then constant). Calls and puts share
 draws and a fixed seed makes results reproducible. The sample-path chart draws the first 60 of these
 scenarios, each filled in from today to its sampled $S_T$ with a Brownian bridge (exact for GBM given the
 end point).
+
+### One-day decay
+The Greeks table, the option chain and the sensitivity explorer show the *1-day decay* beside theta per day (see
+Conventions): the value with one calendar day less to expiry minus the value now, all else equal, or the intrinsic
+value minus the value now when the option expires within the day. It uses the model of the table it is in: the
+closed form for Black–Scholes–Merton, and the engine for the American engine. Under a binomial tree the Greeks
+table stays Black–Scholes–Merton's, and the tree's Greeks add the tree's own decay. A Leisen–Reimer tree one day
+shorter keeps its steps: its error is smooth in $T$, so the two trees' errors cancel, to within ${3 \times 10^{-6}}$
+of the closed-form decay on European options (2 to 3,650 days, 501 steps, decays of at least one cent). A
+Cox–Ross–Rubinstein tree one day shorter keeps the time step and the parity of the step count instead, so that its
+final nodes stay where they were: within 1.5 % of the closed form, where the same steps were off by up to 5 %, as
+its error swings with the strike's place among the final nodes. Under Monte Carlo the decay is the closed-form one:
+the simulation estimates that same value, and the difference of two simulations would only add sampling error.

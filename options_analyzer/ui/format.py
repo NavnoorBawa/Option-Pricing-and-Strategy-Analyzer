@@ -223,6 +223,36 @@ def dollar_rho(rho: float, units: float) -> float:
     return rho * 0.01 * units
 
 
+#: Theta / 365 stays the headline while it is within this fraction of the one-day decay by repricing, measured
+#: against the larger of the two in size. At-the-money (100, 20 % volatility, 5 % rate) the two differ by 8.7 % at 3
+#: days to expiry and by 14 % at 2 days; on the panel's 7-day SPX iron condor by 9.5 % ($137.50 against $151.97).
+DECAY_SWITCH = 0.10
+
+
+def decay_label(to_expiry: bool) -> str:
+    """The name of the one-day decay by repricing: ``Decay to expiry`` when the (front) expiry falls within the day,
+    so that the figure is the whole remaining time value, and ``1-day decay`` otherwise."""
+    return "Decay to expiry" if to_expiry else "1-day decay"
+
+
+def decay_leads(theta_per_day: float, decay: float, to_expiry: bool = False) -> bool:
+    """Whether the one-day decay by repricing is the headline rather than theta / 365.
+
+    Theta / 365 is the instantaneous rate; the decay is the change in value over the next calendar day, spot and
+    implied volatility unchanged. The decay leads when the (front) expiry falls within the day, where a rate per day
+    means nothing, and when the two differ by more than :data:`DECAY_SWITCH` of the larger in size:
+    ``|decay − θ/365| > 0.10 · max(|decay|, |θ/365|)``. Two zeros agree.
+
+    Examples
+    --------
+    >>> decay_leads(-10.66, -21.56), decay_leads(137.50, 151.97), decay_leads(-0.01757, -0.01758)
+    (True, False, False)
+    >>> decay_leads(-0.01757, -0.01758, to_expiry=True)
+    True
+    """
+    return bool(to_expiry or abs(decay - theta_per_day) > DECAY_SWITCH * max(abs(decay), abs(theta_per_day)))
+
+
 def level(value: float) -> str:
     """A price level (spot, strike, forward): ``5,812.37``, ``0.0420`` or ``0.00004087``.
 

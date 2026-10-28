@@ -8,7 +8,8 @@ longer tenors by $(T/\text{1M})^{-0.25}$ by default, since long-dated volatility
 one-month volatility in a crisis; hypothetical IV shocks and the heatmap apply literally to every leg.
 The spot × date grid, the time-decay curves and the position-Greek profiles move the spot in standard
 deviations $\sigma\sqrt{T}$ of the log price at the front expiry, so their range follows the volatility and
-the time left.
+the time left. Under the time-decay curves the one-day decay by repricing stands beside theta / 365 (see
+Conventions); the theta profile is the instantaneous rate.
 
 ### Value-at-Risk and Expected Shortfall
 Full revaluation on simulated spot (and optionally implied-vol) paths:

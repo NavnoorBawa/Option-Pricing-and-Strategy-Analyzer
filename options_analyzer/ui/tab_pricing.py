@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -11,9 +12,10 @@ from scipy.special import ndtr
 
 from .. import black_scholes as bs
 from ..american import AmericanPrice
+from ..strategies import ONE_DAY
 from . import cache, charts
 from .components import card_row
-from .format import md, money, pct
+from .format import DECAY_SWITCH, decay_label, decay_leads, md, money, pct
 from .inputs import Inputs
 
 #: Monte Carlo scenarios drawn on the sample-paths chart.
@@ -269,7 +271,116 @@ def _european_note(inputs: Inputs) -> str:
     )
 
 
-def _greeks_table(inputs: Inputs, higher_order: bool) -> pd.DataFrame:
+# --- One-day decay --------------------------------------------------------------------------------------------
+# Theta / 365 is the instantaneous rate of decay. Inside a few days of expiry it is far from what a day costs: a
+# 1-day at-the-money SPX put (5,800, 18 % volatility, rate 4.3 %, dividend yield 1.3 %) worth $21.56 shows theta
+# -$10.66 a day, and loses all $21.56 by expiry. The decay below reprices the option instead.
+
+
+def to_expiry(expiry: float) -> bool:
+    """Whether an option with ``expiry`` years left expires within the next calendar day, so that its one-day decay
+    is its decay to expiry."""
+    return expiry <= ONE_DAY
+
+
+def closed_form_decay(S, K, T, r, sigma, q, option_type: str):
+    """Black-Scholes-Merton one-day decay ($ per share): the value with one calendar day less to expiry, all else
+    equal, minus the value now. With a day or less to expiry, the value at expiry (the intrinsic value
+    ``max(±(S − K), 0)``) minus the value now. Broadcasts like :func:`black_scholes.price`."""
+    later = bs.price(S, K, np.maximum(np.asarray(T, dtype=float) - ONE_DAY, 0.0), r, sigma, q, option_type)
+    return later - bs.price(S, K, T, r, sigma, q, option_type)
+
+
+def later_tree_steps(steps: int, expiry: float, method: str) -> int:
+    """Steps of the tree that values an option one calendar day later (``steps`` and ``expiry`` are the current
+    tree's).
+
+    Measured on European options (spot 100, strikes 80 to 120, 20 % volatility, rate 5 %, 2 to 3,650 days, 501
+    steps), on every one-day decay of at least 1 cent per share. Leisen-Reimer keeps its steps: its error is smooth
+    in the expiry, so the two trees' errors cancel, to within 3e-6 of the closed-form decay (median 2e-7). The
+    Cox-Ross-Rubinstein error swings with the strike's place among the final nodes, and with the same steps the two
+    errors did not cancel: up to 5.0 % of the decay (median 0.18 %), and, counting smaller decays too, up to 21 times
+    the tree's own price error. The shorter tree therefore keeps the time step and the parity of the step count (the
+    next count up with that parity), which keeps the final nodes where they were: at most 1.5 % (median 0.05 %), and
+    3.8 times the price error. Its time step is never longer than the current tree's, so it is arbitrage-free
+    whenever the current tree is (p lies in (0, 1) exactly while |r − q| Δt < σ√Δt).
+    """
+    if method != "crr":
+        return steps
+    later = max(1, math.ceil(steps * (expiry - ONE_DAY) / expiry - 1e-9))  # a whole number is not rounded up
+    return later + (later - steps) % 2
+
+
+def greeks_decay(inputs: Inputs, prices: Prices) -> dict[str, float]:
+    """One-day decay of the call and the put ($ per share) by the model of the Greeks table: the American engine
+    under that model, Black-Scholes-Merton otherwise.
+
+    Under a binomial tree or Monte Carlo the Greeks table is Black-Scholes-Merton's, so its decay is too: the tree's
+    own is in the tree's Greeks (:func:`tree_decay`), and Monte Carlo estimates the Black-Scholes-Merton value,
+    whose decay the closed form gives exactly, where the difference of two simulations would add sampling error.
+    """
+    S, K, T, r, sigma, q = (
+        inputs.spot,
+        inputs.strike,
+        inputs.expiry,
+        inputs.rate,
+        inputs.volatility,
+        inputs.dividend_yield,
+    )
+    if inputs.model.kind != "alo":
+        return {kind: float(closed_form_decay(S, K, T, r, sigma, q, kind)) for kind in cache.KINDS}
+    decay = {}
+    for kind, res in prices.alo.items():
+        if to_expiry(T):
+            later = max(bs.option_sign(kind) * (S - K), 0.0)
+        else:
+            later = cache.alo_value(S, K, T - ONE_DAY, r, sigma, q, kind, inputs.model.scheme)
+        decay[kind] = later - res.value
+    return decay
+
+
+def tree_decay(inputs: Inputs, prices: Prices) -> dict[str, float]:
+    """One-day decay of the call and the put ($ per share) on the sidebar's tree: the value on a tree one calendar
+    day shorter (:func:`later_tree_steps`) minus the value on the tree now, with the tree's exercise style; with a
+    day or less to expiry, the intrinsic value minus the value now."""
+    model = inputs.model
+    S, K, T, r, sigma, q = (
+        inputs.spot,
+        inputs.strike,
+        inputs.expiry,
+        inputs.rate,
+        inputs.volatility,
+        inputs.dividend_yield,
+    )
+    if to_expiry(T):
+        later = {kind: max(bs.option_sign(kind) * (S - K), 0.0) for kind in cache.KINDS}
+    else:
+        steps = later_tree_steps(prices.tree["call"].steps, T, model.tree_method)
+        later = cache.tree_prices(S, K, T - ONE_DAY, r, sigma, q, steps, model.american, model.tree_method)
+    return {kind: later[kind] - prices.tree[kind].price for kind in cache.KINDS}
+
+
+def _decay_row(decay: dict[str, float], expiring: bool) -> dict:
+    """The one-day decay as a row of the Greeks table."""
+    return {
+        "Greek": decay_label(expiring),
+        "Call": decay["call"],
+        "Put": decay["put"],
+        "Unit": "until expiry, by repricing" if expiring else "over the next calendar day, by repricing",
+        "Definition": "V(expiry) − V" if expiring else "V(T − 1 day) − V(T)",
+        "Order": 1,
+    }
+
+
+def _with_decay(rows: list[dict], theta: dict[str, float], decay: dict[str, float], expiring: bool) -> list[dict]:
+    """``rows`` with the one-day decay next to the theta row: before it when it leads (:func:`decay_leads`) for the
+    call or the put, after it otherwise. ``theta`` is theta / 365 of each option."""
+    leads = any(decay_leads(theta[kind], decay[kind], expiring) for kind in cache.KINDS)
+    at = next(i for i, row in enumerate(rows) if row["Greek"].startswith("Theta")) + (0 if leads else 1)
+    return [*rows[:at], _decay_row(decay, expiring), *rows[at:]]
+
+
+def _greeks_table(inputs: Inputs, higher_order: bool, decay: dict[str, float]) -> pd.DataFrame:
     args = (inputs.spot, inputs.strike, inputs.expiry, inputs.rate, inputs.volatility, inputs.dividend_yield)
     call = bs.greeks(*args, "call")
     put = bs.greeks(*args, "put")
@@ -287,10 +398,11 @@ def _greeks_table(inputs: Inputs, higher_order: bool) -> pd.DataFrame:
                 "Order": info.order,
             }
         )
-    return pd.DataFrame(rows)
+    theta = {"call": call["theta"] / 365.0, "put": put["theta"] / 365.0}
+    return pd.DataFrame(_with_decay(rows, theta, decay, to_expiry(inputs.expiry)))
 
 
-def _alo_greeks_table(prices: Prices) -> pd.DataFrame:
+def _alo_greeks_table(inputs: Inputs, prices: Prices, decay: dict[str, float]) -> pd.DataFrame:
     """The American engine's Greeks (``american.greeks``) in the layout and units of
     :func:`_greeks_table`."""
     rows = []
@@ -306,7 +418,8 @@ def _alo_greeks_table(prices: Prices) -> pd.DataFrame:
                 "Order": info.order,
             }
         )
-    return pd.DataFrame(rows)
+    theta = {kind: prices.alo_greeks[kind]["theta"] / 365.0 for kind in cache.KINDS}
+    return pd.DataFrame(_with_decay(rows, theta, decay, to_expiry(inputs.expiry)))
 
 
 #: How the Greeks table under the American engine is computed (american.GREEK_BUMPS).
@@ -334,7 +447,7 @@ def _alo_greeks_note(inputs: Inputs, prices: Prices) -> str:
     """The caption of the Greeks table under the American engine: how they are computed, and for which option
     each exception holds (``AmericanGreeks.basis`` and ``one_sided``, and the fallback to the tree)."""
     greeks, details = prices.alo_greeks, prices.alo
-    notes = [ALO_GREEKS_NOTE]
+    notes = [ALO_GREEKS_NOTE, _decay_note(inputs)]
     closed = [kind for kind in cache.KINDS if greeks[kind].basis == "closed form"]
     if len(closed) == 2:
         notes.append(
@@ -371,6 +484,9 @@ def _sensitivity(inputs: Inputs) -> None:
         "Delta": ("delta", 1.0, "Delta"),
         "Gamma": ("gamma", 1.0, "Gamma"),
         "Theta / day": ("theta", 1 / 365, "Theta ($ per day)"),
+        # Repriced one calendar day later (closed_form_decay): against the days to expiry it shows where theta / 365
+        # stops being the cost of a day.
+        "1-day decay": ("decay", 1.0, "1-day decay ($)"),
         "Vega / vol pt": ("vega", 0.01, "Vega ($ per vol point)"),
         "Rho / 1%": ("rho", 0.01, "Rho ($ per 1% rate)"),
     }
@@ -403,6 +519,8 @@ def _sensitivity(inputs: Inputs) -> None:
     def curve(option_type):
         if name == "value":
             return bs.price(*args, option_type)
+        if name == "decay":
+            return closed_form_decay(*args, option_type)
         return bs.greeks(*args, option_type)[name] * scale
 
     x_plot = x * 100 if kind == "vol" else x
@@ -438,15 +556,18 @@ def _chain(inputs: Inputs) -> None:
     strikes = np.unique(np.round(inputs.strike * np.linspace(0.8, 1.2, 9), 2))
     call = bs.greeks(S, strikes, T, r, sigma, q, "call")
     put = bs.greeks(S, strikes, T, r, sigma, q, "put")
+    decay = decay_label(to_expiry(T))
     chain = pd.DataFrame(
         {
             "Call value": bs.price(S, strikes, T, r, sigma, q, "call"),
             "Call delta": call["delta"],
             "Call theta / day": call["theta"] / 365,
+            f"Call {decay.lower()}": closed_form_decay(S, strikes, T, r, sigma, q, "call"),
             "Strike": strikes,
             "Put value": bs.price(S, strikes, T, r, sigma, q, "put"),
             "Put delta": put["delta"],
             "Put theta / day": put["theta"] / 365,
+            f"Put {decay.lower()}": closed_form_decay(S, strikes, T, r, sigma, q, "put"),
             "Gamma": call["gamma"],
             "Vega / vol pt": call["vega"] / 100,
         }
@@ -462,12 +583,16 @@ def _chain(inputs: Inputs) -> None:
             "Put delta": st.column_config.NumberColumn(format="%.3f"),
             "Call theta / day": st.column_config.NumberColumn(format="%.4f"),
             "Put theta / day": st.column_config.NumberColumn(format="%.4f"),
+            f"Call {decay.lower()}": st.column_config.NumberColumn(format="%.4f"),
+            f"Put {decay.lower()}": st.column_config.NumberColumn(format="%.4f"),
             "Gamma": st.column_config.NumberColumn(format="%.5f"),
             "Vega / vol pt": st.column_config.NumberColumn(format="%.4f"),
         },
     )
     st.caption(
-        "Strikes from 80% to 120% of the sidebar strike, flat volatility (no smile), same expiry. "
+        "Strikes from 80% to 120% of the sidebar strike, flat volatility (no smile), same expiry. Theta / day is "
+        f"theta / 365; the {decay.lower()} reprices each option "
+        + ("at expiry (its intrinsic value). " if to_expiry(T) else "with one calendar day less to expiry. ")
         + _european_note(inputs)
     )
 
@@ -483,6 +608,9 @@ def _tree_diagnostics(inputs: Inputs, prices: Prices) -> None:
     )
     model = inputs.model
     st.markdown("**Tree Greeks** (on the lattice, so they include the early-exercise feature)")
+    decay = tree_decay(inputs, prices)
+    expiring = to_expiry(T)
+    label = decay_label(expiring)
     rows = [
         {
             "Option": kind.capitalize(),
@@ -490,6 +618,7 @@ def _tree_diagnostics(inputs: Inputs, prices: Prices) -> None:
             "Delta": res.delta,
             "Gamma": res.gamma,
             "Theta / day": res.theta / 365,
+            label: decay[kind],
             "Vega / vol pt": res.vega / 100,
             "Rho / 1%": res.rho / 100,
             "Div. rho / 1%": res.epsilon / 100,
@@ -505,14 +634,26 @@ def _tree_diagnostics(inputs: Inputs, prices: Prices) -> None:
             "Delta": st.column_config.NumberColumn(format="%.4f"),
             "Gamma": st.column_config.NumberColumn(format="%.5f"),
             "Theta / day": st.column_config.NumberColumn(format="%.4f"),
+            label: st.column_config.NumberColumn(format="%.4f"),
             "Vega / vol pt": st.column_config.NumberColumn(format="%.4f"),
             "Rho / 1%": st.column_config.NumberColumn(format="%.4f"),
             "Div. rho / 1%": st.column_config.NumberColumn(format="%.4f"),
         },
     )
+    if expiring:
+        repriced = "the intrinsic value at expiry minus the tree value"
+    elif model.tree_method == "crr":
+        later = later_tree_steps(steps_used, T, "crr")
+        repriced = (
+            f"the value on a tree one day shorter with {later:,} steps, the same time step, minus the value now "
+            "(the same final nodes, so the trees' oscillating errors cancel)"
+        )
+    else:
+        repriced = "the value on a tree one day shorter with the same steps minus the value now"
     st.caption(
         f"Dollars per share on a {steps_used:,}-step tree. Delta and gamma come from its first two time steps, "
-        "theta from the second step (CRR) or from repricing with the expiry moved (Leisen-Reimer). Vega, rho and "
+        "theta from the second step (CRR) or from repricing with the expiry moved (Leisen-Reimer). Theta / day is "
+        f"theta / 365; the {label.lower()} is {repriced}. Vega, rho and "
         "dividend rho (per 1% move in the dividend yield) reprice on a tree with the same steps, with the "
         "volatility moved ±0.5 vol pt and the rates ±25 bp."
     )
@@ -742,21 +883,41 @@ def _model_diagnostics(inputs: Inputs, prices: Prices) -> None:
         )
 
 
+def _decay_note(inputs: Inputs) -> str:
+    """The sentence of the Greeks table's caption on its one-day decay row."""
+    expiring = to_expiry(inputs.expiry)
+    value = "the engine's value" if inputs.model.kind == "alo" else "the value"
+    later = "the intrinsic value at expiry" if expiring else f"{value} with one calendar day less to expiry"
+    model = {
+        "binomial": " by Black-Scholes-Merton (the tree's own is in its Greeks below)",
+        "monte_carlo": " by Black-Scholes-Merton, whose value the simulation estimates",
+    }.get(inputs.model.kind, "")
+    first = (
+        "it is listed first, as the option expires within the day"
+        if expiring
+        else f"it is listed first when it differs from the theta row (theta / 365) by more than {DECAY_SWITCH:.0%} "
+        "of the larger, for the call or the put"
+    )
+    return f"{decay_label(expiring)}: {later} minus {value} now{model}, all else equal; {first}."
+
+
 def render(inputs: Inputs, prices: Prices) -> None:
     st.subheader("Greeks")
+    decay = greeks_decay(inputs, prices)
     if inputs.model.kind == "alo":
-        table = _alo_greeks_table(prices)
+        table = _alo_greeks_table(inputs, prices, decay)
         note = _alo_greeks_note(inputs, prices)
     else:
         higher = st.toggle(
             "Show second- and third-order Greeks", value=False, key="higher_greeks", persist_state="session"
         )
-        table = _greeks_table(inputs, higher)
+        table = _greeks_table(inputs, higher, decay)
         note = (
             "Analytical Black-Scholes-Merton Greeks for European exercise, in the units shown "
             "(theta and the other time Greeks per calendar day of elapsed time). "
+            + _decay_note(inputs)
             + (
-                "Tree Greeks for the American option, including vega and rho, are under *Model diagnostics* below."
+                " Tree Greeks for the American option, including vega and rho, are under *Model diagnostics* below."
                 if inputs.model.american and inputs.model.kind == "binomial"
                 else ""
             )

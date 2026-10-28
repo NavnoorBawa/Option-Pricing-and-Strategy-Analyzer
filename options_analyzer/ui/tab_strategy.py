@@ -16,7 +16,18 @@ from .. import black_scholes as bs
 from .. import strategies as strat
 from . import cache, charts
 from .components import Card, card_row, current_key, link_match
-from .format import md, money, money_short, number, number_short, shown_decimals
+from .format import (
+    DECAY_SWITCH,
+    decay_label,
+    decay_leads,
+    md,
+    money,
+    money_short,
+    number,
+    number_short,
+    shown_decimals,
+    signed,
+)
 from .inputs import Inputs
 
 CUSTOM = "Custom"
@@ -721,12 +732,13 @@ LEGS_TABLE_DECIMALS = {
     "Delta": 2,
     "Gamma": 4,
     "Theta/day": 2,
+    "1-day decay": 2,
     "Vega/pt": 2,
 }
 #: Whole-position columns of the legs table. Like the metric cards, they show fewer decimals as their largest value
 #: grows (whole dollars from $10,000; the narrower dollar cards switch at $1,000), so that an index-sized position
 #: fits the page on a laptop.
-LEGS_TABLE_DOLLARS = ("Cost", "Theta/day", "Vega/pt")
+LEGS_TABLE_DOLLARS = ("Cost", "Theta/day", "1-day decay", "Vega/pt")
 LEGS_TABLE_COUNTS = ("Delta", "Gamma")
 
 
@@ -738,7 +750,7 @@ def legs_table(strategy: strat.Strategy, market: strat.Market, units: float) -> 
     the browser would truncate it. No value shows as a negative zero (``-$0.00`` reads as a credit).
     """
     table = pd.DataFrame(strat.leg_table(strategy, market)).drop(columns="Leg")
-    for col in ("Cost", "Delta", "Gamma", "Theta / day", "Vega / vol pt"):
+    for col in ("Cost", "Delta", "Gamma", "Theta / day", "1-day decay", "Vega / vol pt"):
         table[col] = table[col] * units
     table = table.rename(columns={"Days to expiry": "Days", "Theta / day": "Theta/day", "Vega / vol pt": "Vega/pt"})
     if all(leg.premium is None for leg in strategy.legs):
@@ -752,6 +764,42 @@ def legs_table(strategy: strat.Strategy, market: strat.Market, units: float) -> 
     for col, d in decimals.items():
         table[col] = table[col].mask(table[col].abs() < 0.5 * 10**-d, 0.0)
     return table, decimals
+
+
+def expires_within_a_day(strategy: strat.Strategy, market: strat.Market) -> bool:
+    """Whether an option leg of the position expires within the next calendar day."""
+    has_options = any(leg.is_option for leg in strategy.legs)
+    return has_options and strat.front_expiry(strategy, market) <= strat.ONE_DAY
+
+
+def decay_card(theta: float, decay: float, expiring: bool) -> Card:
+    """The time-decay card of the whole position ($): theta / 365 (``theta``) or the one-day decay by repricing
+    (``decay``, :func:`~options_analyzer.strategies.time_decay`), whichever leads (:func:`~.format.decay_leads`),
+    with both figures to the cent in its help. ``expiring`` says that an option leg expires within the day.
+
+    Examples
+    --------
+    >>> decay_card(-10.66, -21.56, False)[:2], decay_card(137.5, 151.97, False)[:2]
+    (('1-day decay', '-$21.56'), ('Theta / day', '+$137.50'))
+    >>> decay_card(-10.66, -21.56, True)[:2]
+    ('Decay to expiry', '-$21.56')
+    """
+    leads = decay_leads(theta, decay, expiring)
+    label = decay_label(expiring)
+    expired = " (a leg that expires within the day at its intrinsic value)" if expiring else ""
+    repriced = (
+        f"{label}: {signed(decay, 2, '$')}, the change in the position's value over the next calendar day by "
+        f"repricing every leg{expired}, spot and implied volatility unchanged."
+    )
+    rate = f"Theta / day: {signed(theta, 2, '$')}, theta / 365, the rate at which the value changes as time passes."
+    if not leads:
+        why = f"They differ by {DECAY_SWITCH:.0%} of the larger or less, so the card shows theta."
+        return "Theta / day", money_short(theta, signed=True), {"help": md(f"{rate} {repriced} {why}")}
+    if expiring:
+        why = "An option expires within the day, so the card shows the repriced figure."
+    else:
+        why = f"They differ by more than {DECAY_SWITCH:.0%} of the larger, so the card shows the repriced figure."
+    return label, money_short(decay, signed=True), {"help": md(f"{repriced} {rate} {why}")}
 
 
 def _dollar_column(decimals: int, help: str):
@@ -840,11 +888,7 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
             {"help": _number_help(delta, 2, "Share-equivalent exposure: P&L change for a $1 move in the underlying.")},
         ),
         ("Gamma", number_short(gamma, 4), {"help": _number_help(gamma, 4, "Change in delta per $1 move.")}),
-        (
-            "Theta / day",
-            money_short(theta, signed=True),
-            {"help": _money_help(theta, "P&L from one calendar day passing, all else equal.", signed=True)},
-        ),
+        decay_card(theta, strat.time_decay(strategy, market, multiplier=units), expires_within_a_day(strategy, market)),
         (
             "Vega / vol pt",
             money_short(vega, signed=True),
@@ -1001,7 +1045,12 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
             "Gamma": st.column_config.NumberColumn(
                 format=f"%.{decimals['Gamma']}f", help="Whole position, per $1 move."
             ),
-            "Theta/day": _dollar_column(decimals["Theta/day"], "Whole position, per calendar day."),
+            "Theta/day": _dollar_column(decimals["Theta/day"], "Whole position: theta / 365, per calendar day."),
+            "1-day decay": _dollar_column(
+                decimals["1-day decay"],
+                "Whole position: the change in the leg's value over the next calendar day by repricing, spot and "
+                "implied volatility unchanged. A leg that expires within the day is worth its intrinsic value.",
+            ),
             "Vega/pt": _dollar_column(decimals["Vega/pt"], "Whole position, per vol point."),
         },
     )

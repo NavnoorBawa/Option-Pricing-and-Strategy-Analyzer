@@ -882,7 +882,7 @@ def test_index_sized_short_premium_cards_fit_at_laptop_width():
     _ok(at)
     theta = _metric(at, "Theta / day")
     assert theta.value == "+$2,737"
-    assert "Exact: +\\$2,737.18" in theta.proto.help
+    assert "Theta / day: +\\$2,737.18" in theta.proto.help
     for label in ("Net premium", "Max profit", "Max loss", "Delta (shares)", "Gamma", "Theta / day", "Vega / vol pt"):
         assert _card_width(_metric(at, label).value) <= CARD_WIDTH, (label, _metric(at, label).value)
 
@@ -905,16 +905,19 @@ def test_cards_stay_readable_at_the_input_limits(category, name):
         strategy_category=category,
         **{f"strategy_{category}": name},
     )
-    shortened = ["Net premium", "Max profit", "Max loss", "Delta (shares)", "Theta / day", "Vega / vol pt"]
-    for label in [*shortened, "Gamma", "Probability of profit"]:
+    shortened = ["Net premium", "Max profit", "Max loss", "Delta (shares)", "Vega / vol pt"]
+    for label in [*shortened, "Decay to expiry", "Gamma", "Probability of profit"]:
         value = _metric(at, label).value
         assert len(value) <= 9 and _card_width(value) <= CARD_WIDTH, (label, value)
     for label in shortened:
         value = _metric(at, label).value
         assert value in ("Unlimited", "No loss", "No profit") or "Exact:" in _metric(at, label).proto.help, label
     if name == "Short Straddle":
-        assert _metric(at, "Theta / day").value == "+$1.0e+15"
-        assert "Exact: +\\$1,03" in _metric(at, "Theta / day").proto.help
+        # The decay to expiry is the whole value of the straddle, about twice theta / 365.
+        decay = _metric(at, "Decay to expiry")
+        assert decay.value == "+$2.1e+15"
+        assert "Decay to expiry: +\\$2,082,072,717,212,0" in decay.proto.help
+        assert "Theta / day: +\\$1,034,965,609,384,7" in decay.proto.help
 
 
 def test_shortened_amounts_at_the_input_limits_keep_the_exact_value_in_the_help():
@@ -961,6 +964,7 @@ def test_legs_table_has_no_negative_zeros():
         "Delta": 2,
         "Gamma": 4,
         "Theta/day": 2,
+        "1-day decay": 2,
         "Vega/pt": 2,
     }
     for col, decimals in shown_decimals.items():
@@ -992,6 +996,91 @@ def test_number_has_no_negative_zero():
     assert tab_strategy.number(-1e-12, 2) == "0.00"
     assert tab_strategy.number(-0.004, 2) == "0.00"
     assert tab_strategy.number(-0.006, 2) == "-0.01"
+
+
+# --- One-day decay beside theta / 365 (docs/reviews/panel-v3.0.md, market maker, finding 3) --------------------
+
+#: The panel's SPX-like market (rates and volatility in percent, as the sidebar takes them).
+SPX = {"spot": 5800, "strike": 5800, "rate": 4.3, "div": 1.3}
+DECAY_LABELS = ("Theta / day", "1-day decay", "Decay to expiry")
+
+
+def _decay_card(at: AppTest):
+    """The time-decay card, whichever of its labels it has."""
+    (card,) = [m for m in at.metric if m.label in DECAY_LABELS]
+    return card
+
+
+def _single(name: str, **query) -> AppTest:
+    return _app(strategy_category="Single option", **{"strategy_Single option": name}, **query)
+
+
+def test_a_one_day_put_shows_its_decay_to_expiry():
+    # The panel: a 1-day at-the-money put worth $21.56 a share shows theta -$10.66 a day and loses all of it.
+    at = _single("Long Put", vol=18, days=1, **SPX)
+    card = _decay_card(at)
+    market = strat.Market(5800, 0.043, 0.18, 1 / 365, 0.013)
+    premium = 100 * bs.price(5800, 5800, 1 / 365, 0.043, 0.18, 0.013, "put")
+    assert (card.label, card.value) == ("Decay to expiry", "-$2,156")
+    assert premium == pytest.approx(2156.11, abs=0.005)
+    assert f"Decay to expiry: −\\${premium:,.2f}" in card.proto.help  # minus the whole premium
+    theta = strat.position_risk(strat.Strategy("p", (strat.Leg("put", 1, 5800),)), market, multiplier=100).theta
+    assert theta == pytest.approx(-1066.05, abs=0.005)
+    assert "Theta / day: −\\$1,066.05" in card.proto.help
+    assert "An option expires within the day" in card.proto.help
+    table = _legs_table(at).value
+    assert table["1-day decay"].tolist() == [pytest.approx(-premium, rel=1e-12)]
+
+
+@pytest.mark.parametrize(("days", "label"), [(45, "Theta / day"), (3, "Theta / day"), (2, "1-day decay")])
+def test_the_card_shows_the_decay_beyond_ten_percent(days, label):
+    # Spot = strike = 100, 20 % volatility, 5 % rate: the put's theta / 365 and 1-day decay differ by 0.7 % at
+    # 45 days, 9.7 % at 3 days and 15.2 % at 2 days. The card's help gives both figures either way.
+    at = _single("Long Put", days=days)
+    card = _decay_card(at)
+    T = days / 365
+    decay = 100 * (bs.price(100, 100, T - 1 / 365, 0.05, 0.2, 0, "put") - bs.price(100, 100, T, 0.05, 0.2, 0, "put"))
+    theta = 100 * bs.greeks(100, 100, T, 0.05, 0.2, 0, "put")["theta"] / 365
+    assert card.label == label
+    assert card.value == tab_strategy.money_short(theta if label == "Theta / day" else decay, signed=True)
+    assert f"1-day decay: −\\${-decay:,.2f}" in card.proto.help
+    assert f"Theta / day: −\\${-theta:,.2f}" in card.proto.help
+
+
+def test_the_panels_seven_day_condor_keeps_theta_with_the_decay_in_its_help():
+    # The panel's 7-day condor: theta / 365 +$137.50 against +$151.97 by repricing, 9.5 % of the larger apart, so
+    # theta stays the headline under the 10 % rule; the legs table's decays add up to the card's.
+    at = _app(strategy_category="Range-bound", **{"strategy_Range-bound": "Iron Condor"}, vol=16, days=7, **SPX)
+    card = _decay_card(at)
+    assert (card.label, card.value) == ("Theta / day", "+$137.50")
+    assert "1-day decay: +\\$151.97" in card.proto.help
+    assert "They differ by 10% of the larger or less" in card.proto.help
+    table = _legs_table(at).value
+    assert table["1-day decay"].sum() == pytest.approx(151.97, abs=0.005)
+    names = list(table.columns)
+    assert names.index("1-day decay") == names.index("Theta/day") + 1
+
+
+def test_the_risk_tab_gives_the_decay_beside_theta():
+    # A 1-day short straddle: repricing gains its whole value, $4,359.89, where theta / 365 says $2,179.76 a day.
+    at = _app("Risk", strategy_category="Volatility", strategy_Volatility="Short Straddle", vol=18, days=1, **SPX)
+    caption = next(c.value for c in at.caption if c.value.startswith("Mark-to-market P&L as time passes"))
+    value = 100 * sum(bs.price(5800, 5800, 1 / 365, 0.043, 0.18, 0.013, kind) for kind in ("call", "put"))
+    assert value == pytest.approx(4359.89, abs=0.005)
+    assert "Decay to expiry by repricing at today's spot: +\\$4,359.89" in caption
+    assert "theta / 365, the instantaneous rate: +\\$2,179.76 per day" in caption
+    at.segmented_control(key="risk_greek").set_value("Theta").run()
+    assert any("Theta is theta / 365, the instantaneous rate" in c.value for c in at.caption)
+
+
+def test_a_position_of_shares_alone_has_no_decay_to_expiry():
+    # No option expires, whatever the sidebar's days: the card keeps its usual names.
+    market = strat.Market(100, 0.05, 0.2, 1 / 365, 0.02)
+    shares = strat.Strategy("s", (strat.Leg("stock", 100),))
+    assert not tab_strategy.expires_within_a_day(shares, market)
+    assert tab_strategy.expires_within_a_day(strat.Strategy("c", (strat.Leg("call", 1, 100),)), market)
+    label, value, _ = tab_strategy.decay_card(0.5, 0.5, tab_strategy.expires_within_a_day(shares, market))
+    assert (label, value) == ("Theta / day", "+$0.50")
 
 
 # --- Descriptions and valuation notes --------------------------------------------------------------------------
