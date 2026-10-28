@@ -24,10 +24,32 @@ say) cannot resolve $\partial_T w$ and is not used, and where no secant is left 
 Implied vol is shown only inside each maturity's quoted strikes, and local vol only where the neighbouring
 maturities are quoted near the same forward moneyness.
 
+### Forwards and discounting
+Option prices are inverted at each expiry's own forward $F$ and discount factor $D$, read from the quotes by
+put–call parity: for European options ${C(K) - P(K) = D\,(F - K)}$ at every strike, so the call-minus-put prices of
+an expiry lie on a line in $K$ with slope $-D$ and root $F$. The line is fitted by weighted least squares to the
+call/put pairs within the wider of 8% and 1.5 standard deviations ($\sigma\sqrt{T}$, read from the at-the-money
+straddle) of a first-guess forward, each pair weighted by ${1/(e_C + e_P)^2}$ with $e$ half its bid/ask spread, and
+pairs more than 3.5 scaled median absolute deviations from the line (and outside their own spreads) are removed.
+Where the slope is too uncertain (standard error above 0.0005, typical of short expiries with few strikes), $D$
+comes from the sidebar rate plus the spread over it that the other expiries measured — options discount at a
+financing (box) rate tens of basis points above Treasuries — and $F$ is the weighted mean of ${K + (C-P)/D}$. An
+expiry with fewer than six strikes quoted on both sides keeps the sidebar rate and dividend yield. Black-76 with
+$F$ and $D$ is Black–Scholes–Merton at the rate ${-\ln D / T}$ and the yield ${-\ln D / T - \ln(F/S)/T}$, so the
+existing solver inverts each quote at its own expiry's carry; the Forwards and discounting table on the Surface
+tab lists them with the gap to the sidebar forward in basis points. On the synthetic SPX chain read with the
+Treasury rate and no dividend yield, the forwards come out within 0.3 bp and the at-the-money vols within 0.01 vol
+point of the generator's; with the sidebar forward 135 quotes fell outside the no-arbitrage bounds and the fit
+reported 26 calendar violations. Parity is an equality only for European exercise.
+
+In-the-money quotes whose time value at the expiry's forward is within their own bid/ask spread are dropped: they
+are the in-the-money side at strikes whose out-of-the-money option has no bid, and say nothing about the vol.
+
 ### SSVI and SVI fits
 The parametric surface is SSVI (Gatheral & Jacquier, 2014), arbitrage-free when ${\eta(1+|\rho|) \le 2}$. Uploaded
-quotes (implied vols, or option prices inverted with Black–Scholes–Merton; where a Type column gives both a call
-and a put at one strike, the out-of-the-money one is used) are fitted per maturity with Gatheral's raw SVI smile
+quotes (implied vols, or option prices inverted with Black-76 at each expiry's forward; where a Type column gives
+both a call and a put at one strike, the out-of-the-money one against that forward is used) are fitted per
+maturity with Gatheral's raw SVI smile
 
 $$
 w(y) = a + b\left(\rho\,(y-m) + \sqrt{(y-m)^2 + s^2}\right)

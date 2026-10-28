@@ -3,6 +3,7 @@
 import io
 import json
 import zipfile
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -10,6 +11,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from options_analyzer import black_scholes, implied_vol, vol_surface
+from options_analyzer.market_data import sample_chain, to_quotes
 from options_analyzer.ui import charts, tab_surface
 
 
@@ -96,7 +98,10 @@ def test_option_prices_build_a_surface_with_quote_markers_and_fit_quality(app):
     _ok(app)
     captions = " ".join(c.value for c in app.caption)
     assert "Inverted 104 option price(s)" in captions
-    assert "spot (100.00), rate (5.00%) and dividend yield (0.00%)" in captions
+    assert "spot (100.00) and each expiry's forward and discount factor from put-call parity" in captions
+    assert "else from the sidebar rate (5.00%) and dividend yield (0.00%)" in captions
+    # Only out-of-the-money options are quoted, so no strike has a call and a put: every forward is the sidebar's.
+    assert any("put-call parity needs a call and a put quoted at 6+ common strikes" in c for c in captions.split("  "))
     assert _metric(app, "Calendar arbitrage") == "0" and _metric(app, "Local vol defined") == "100%"
     names = _trace_names(app)
     assert {"Quotes · 30d", "Quotes · 273d", "Quotes · 2.00y"} <= set(names)
@@ -447,3 +452,31 @@ def test_the_3d_surfaces_wrap_instead_of_squeezing_into_narrow_columns(app):
 def test_the_kept_file_size_reads_as_the_uploader_shows_it(n_bytes, shown):
     # Streamlit's uploader (outside Windows) moves to the next decimal unit above 500 and shows one decimal.
     assert tab_surface._size(n_bytes) == shown
+
+
+def _forwards_table(at: AppTest) -> pd.DataFrame:
+    return next(d.value for d in at.dataframe if "Gap to sidebar (bp)" in d.value.columns)
+
+
+def test_parity_forwards_are_shown_and_a_sidebar_carry_the_quotes_contradict_is_flagged(new_app):
+    """A synthetic SPX chain (box rate 4.45 %, dividend yield 1.3 %) read with a sidebar of 4 % and no yield: each
+    expiry's forward comes from put-call parity, within 0.5 bp of the generator's, and the warning says that the
+    sidebar's carry is contradicted by the quotes. With "Sidebar r, q" the forwards are the sidebar's, no warning."""
+    as_of = datetime(2026, 10, 26, 10, 0)
+    chain = sample_chain(6000.0, 0.04, 0.013, as_of=as_of)
+    at = new_app(tab="Surface", spot=6000, rate=4.0, div=0.0).run()
+    _upload(at, to_quotes(chain.quotes, as_of=as_of))
+    _ok(at)
+    table = _forwards_table(at)
+    assert len(table) == len(chain.expiries) and (table["Source"] == "parity").all()
+    assert table["Forward"].to_numpy() == pytest.approx(chain.expiries["forward"].to_numpy(), rel=5e-5)
+    assert table["Implied rate (%)"].iloc[-1] == pytest.approx(4.45, abs=0.05)
+    assert table["Implied yield (%)"].iloc[-1] == pytest.approx(1.3, abs=0.05)
+    assert any("forward that put-call parity reads from the quotes" in w.value for w in at.warning)
+    assert _metric(at, "Calendar arbitrage") == "0" and _metric(at, "Butterfly arbitrage") == "0"
+
+    at.segmented_control(key="surface_forward").set_value("Sidebar r, q").run()
+    _ok(at)
+    table = _forwards_table(at)
+    assert (table["Source"] == "sidebar").all() and table["Gap to sidebar (bp)"].abs().max() < 1e-9
+    assert not any("put-call parity reads" in w.value for w in at.warning)

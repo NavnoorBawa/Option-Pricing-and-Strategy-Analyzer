@@ -20,6 +20,8 @@ from .inputs import Inputs
 
 SSVI = "Parametric (SSVI)"
 QUOTES = "Market quotes (CSV)"
+#: Where each expiry's forward comes from when option prices are inverted (``vol_surface.parse_quotes``).
+FORWARD_CHOICES = {"Put-call parity": "parity", "Sidebar r, q": "rates"}
 COLORSCALES = ("Viridis", "Plasma", "Inferno", "Magma", "Cividis", "Turbo")
 VOL_LIMITS = (0.5, 500.0)
 SURFACE_CHART_WIDTH = 380  # px: two fit side by side in the 804 px main column at 1,280 px with the sidebar open
@@ -173,9 +175,28 @@ def _quote_controls(inputs: Inputs) -> vs.VolSurface | None:
             key=key,
             width="stretch",
         )
+    forward_choice = c2.segmented_control(
+        "Forwards",
+        list(FORWARD_CHOICES),
+        default="Put-call parity",
+        required=True,
+        key="surface_forward",
+        persist_state="session",
+        help="Where each expiry's forward and discount factor come from when option prices are inverted: put-call "
+        "parity on the expiry's calls and puts (C − P = DF·(F − K), fitted near the money), or the sidebar rate and "
+        "dividend yield. Parity needs a call and a put quoted at 6 or more common strikes of an expiry; the others "
+        "use the sidebar.",
+    )
+    forward = FORWARD_CHOICES[forward_choice]
+    source = (
+        "each expiry's forward and discount factor from put-call parity where calls and puts are quoted at common "
+        "strikes, else from the sidebar"
+        if forward == "parity"
+        else "the sidebar"
+    )
     context = (
-        f"Quotes are read with the sidebar spot ({inputs.spot:,.2f}), rate ({inputs.rate:.2%}) and dividend yield "
-        f"({inputs.dividend_yield:.2%}); prices are inverted with Black-Scholes-Merton (European exercise)."
+        f"Quotes are read with the sidebar spot ({inputs.spot:,.2f}) and {source} rate ({inputs.rate:.2%}) and "
+        f"dividend yield ({inputs.dividend_yield:.2%}); prices are inverted with Black-76 (European exercise)."
     )
     kept = st.session_state.get("quotes_upload")
     if upload is None and kept is not None:
@@ -188,7 +209,9 @@ def _quote_controls(inputs: Inputs) -> vs.VolSurface | None:
     try:
         raw = pd.read_csv(io.BytesIO(upload.getvalue()))
         with st.spinner("Fitting an SVI smile to every maturity…"):
-            surface, messages, error = cache.market_surface(raw, inputs.spot, inputs.rate, inputs.dividend_yield)
+            surface, messages, error = cache.market_surface(
+                raw, inputs.spot, inputs.rate, inputs.dividend_yield, forward
+            )
     except pd.errors.EmptyDataError:
         st.error("The uploaded file is empty.")
         return None
@@ -206,6 +229,74 @@ def _quote_controls(inputs: Inputs) -> vs.VolSurface | None:
     if error:
         st.error(f"Could not build a surface from this file: {error}")
     return surface
+
+
+FORWARD_SOURCE_LABELS = {"parity": "parity", "parity_forward": "parity (DF: rate)", "rates": "sidebar"}
+
+
+def _forwards(surface: vs.VolSurface, inputs: Inputs) -> None:
+    """The forward and discount factor of every fitted expiry, and a warning where the quotes resolve a forward
+    that the sidebar rate and dividend yield miss (``vol_surface.carry_gaps``)."""
+    table = surface.forwards
+    if table is None or table.empty:
+        return
+    gaps = vs.carry_gaps(table)
+    if gaps.any():
+        worst = float(np.max(np.abs(table["gap_bp"].to_numpy(float)[gaps])))
+        st.warning(
+            f"At {int(gaps.sum())} of {len(table)} expiries the forward that put-call parity reads from the quotes "
+            f"is more than {vs.forwards.MIN_CARRY_GAP_BP:g} bp, and more than half the at-the-money spread, from the "
+            f"sidebar's (rate {inputs.rate:.2%}, dividend yield {inputs.dividend_yield:.2%}); up to {worst:,.1f} bp. "
+            "The surface uses the parity forwards; the other tabs still price with the sidebar rate and yield.",
+            icon=":material/compare_arrows:",
+        )
+    shown = pd.DataFrame(
+        {
+            "Days": table["maturity"].to_numpy(float) * 365,
+            "Forward": table["forward"],
+            "Discount factor": table["discount_factor"],
+            "Implied rate (%)": table["rate"] * 100,
+            "Implied yield (%)": table["dividend_yield"] * 100,
+            "Gap to sidebar (bp)": table["gap_bp"],
+            "Pairs": table["pairs"],
+            "Residual": table["residual"],
+            "Source": table["source"].map(FORWARD_SOURCE_LABELS),
+        }
+    )
+    with st.expander("Forwards and discounting", icon=":material/compare_arrows:"):
+        st.dataframe(
+            shown,
+            hide_index=True,
+            column_config={
+                "Days": st.column_config.NumberColumn(format="%.2f", help="Calendar days to expiry."),
+                "Forward": st.column_config.NumberColumn(format="%.2f"),
+                "Discount factor": st.column_config.NumberColumn(format="%.6f"),
+                "Implied rate (%)": st.column_config.NumberColumn(
+                    format="%.2f", help="−ln(DF) / T: the rate the options are discounted at (the box rate)."
+                ),
+                "Implied yield (%)": st.column_config.NumberColumn(
+                    format="%.2f", help="Implied rate − ln(F / S) / T: the dividend yield that gives this forward."
+                ),
+                "Gap to sidebar (bp)": st.column_config.NumberColumn(
+                    format="%+.1f", help="ln(F / sidebar forward), in basis points of the forward."
+                ),
+                "Pairs": st.column_config.NumberColumn(
+                    format="%d", help="Call/put pairs near the money used for the fit, after outliers are removed."
+                ),
+                "Residual": st.column_config.NumberColumn(
+                    format="%.4f", help="Root-mean-square gap of C − P from the fitted line DF·(F − K), in price units."
+                ),
+                "Source": st.column_config.TextColumn(
+                    help="parity: forward and discount factor fitted to the pairs; parity (DF: rate): forward from "
+                    "parity, discount factor from the sidebar rate plus the spread measured at the other expiries "
+                    "(the strikes span too little to fit it); sidebar: too few pairs."
+                ),
+            },
+        )
+        st.caption(
+            "Black-76 with this forward F and discount factor DF is Black-Scholes-Merton at the implied rate and "
+            "yield, so each quote is inverted at its own expiry's carry."
+        )
 
 
 def _local_vol_share(valid: int, quoted: int) -> str:
@@ -387,6 +478,7 @@ def render(inputs: Inputs) -> None:
             ),
         ],
     )
+    _forwards(surface, inputs)
     for note in surface.notes:
         st.warning(note)
     if valid < quoted:

@@ -426,8 +426,8 @@ def _with_forwards(
 
     With ``method="parity"`` the rows also get their expiry's ``forward`` and ``discount_factor``, from put-call
     parity where it can be read and from the rate and dividend yield elsewhere. With ``method="rates"`` they get
-    no such columns, so every later stage uses the rate and dividend yield exactly as before parity forwards
-    existed (the table then holds the forwards those give, for display).
+    no such columns, so every later stage uses the rate and dividend yield as before parity forwards existed (the
+    table then holds the forwards those give, for display).
     """
     labels = _expiries(data["maturity"])
     data = data.assign(_expiry=labels)
@@ -483,8 +483,8 @@ def _prices_to_vols(
             f"the file has {len(data):,} option prices to invert; at most {MAX_PRICE_QUOTES:,} are supported, "
             "so filter the chain (for example to fewer expiries) first"
         )
+    data = _drop_itm_without_time_value(data, spot, rate, dividend_yield, messages)
     if "forward" in data:
-        data = _drop_itm_without_time_value(data, messages)
         T = data["maturity"].to_numpy(float)
         carry_rate = -np.log(data["discount_factor"].to_numpy(float)) / T
         carry_yield = carry_rate - np.log(data["forward"].to_numpy(float) / spot) / T
@@ -519,17 +519,25 @@ def _prices_to_vols(
     return data
 
 
-def _drop_itm_without_time_value(data: pd.DataFrame, messages: list[str]) -> pd.DataFrame:
+def _drop_itm_without_time_value(
+    data: pd.DataFrame, spot: float, rate: float, dividend_yield: float, messages: list[str]
+) -> pd.DataFrame:
     """Drop in-the-money quotes whose time value at their expiry's forward does not exceed their price error.
 
     Such a quote is the in-the-money side at a strike whose out-of-the-money side has no usable quote (a zero bid in
     the wings): its time value, the price less ``DF max(phi (F - K), 0)``, is within its bid/ask spread or below
-    zero, so it says nothing about the vol and inverting it would only report it as outside the no-arbitrage
-    bounds. Rows whose price error is unknown are kept.
+    zero, so it says nothing about the vol. Inverted, it gave vols several points off the smile, or was reported as
+    outside the no-arbitrage bounds. The forward and discount factor are each row's (put-call parity), else those of
+    ``rate`` and ``dividend_yield``. Rows whose price error is unknown are kept.
     """
+    T = data["maturity"].to_numpy(float)
+    if "forward" in data:
+        forward, discount = data["forward"].to_numpy(float), data["discount_factor"].to_numpy(float)
+    else:
+        forward, discount = spot * np.exp((rate - dividend_yield) * T), np.exp(-rate * T)
     phi = np.where(data["type"] == "call", 1.0, -1.0)
-    intrinsic = phi * (data["forward"].to_numpy(float) - data["strike"].to_numpy(float))
-    time_value = data["price"].to_numpy(float) - data["discount_factor"].to_numpy(float) * np.maximum(intrinsic, 0.0)
+    intrinsic = phi * (forward - data["strike"].to_numpy(float))
+    time_value = data["price"].to_numpy(float) - discount * np.maximum(intrinsic, 0.0)
     drop = (intrinsic > 0) & (time_value <= data["price_error"].to_numpy(float))
     if drop.any():
         messages.append(

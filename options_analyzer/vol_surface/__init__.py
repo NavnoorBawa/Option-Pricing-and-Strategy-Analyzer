@@ -23,7 +23,9 @@ Two sources are supported:
   structure - free of static arbitrage by construction when
   ``eta (1 + |rho|) <= 2``;
 * **market quotes** (strike, maturity and an implied vol, or an option price
-  that is inverted with Black-Scholes-Merton). Each maturity is fitted with
+  that is inverted with Black-76 at its expiry's forward and discount factor,
+  read from put-call parity where calls and puts are quoted at common strikes,
+  else from the rate and dividend yield). Each maturity is fitted with
   Gatheral's raw SVI smile, which gives ``w'`` and ``w''`` analytically.
   ``dw/dT`` at fixed ``y`` comes from secants between neighbouring maturities
   evaluated at the same ``y``: their Fritsch-Butland weighted harmonic mean
@@ -37,6 +39,7 @@ The package's modules, each importing only those before it:
 * :mod:`.svi` - the raw SVI smile and its calibration (:func:`fit_svi`);
 * :mod:`.ssvi` - the SSVI surface (:class:`SSVIParams`) and :func:`sample_quotes`;
 * :mod:`.local_vol` - Durrleman's ``g``, Gatheral's local variance and ``dw/dT`` between SVI slices;
+* :mod:`.forwards` - each expiry's forward and discount factor from put-call parity (:func:`implied_forwards`);
 * :mod:`.quotes` - reading a quotes table (:func:`parse_quotes`) and model-free static-arbitrage checks of the quotes;
 * :mod:`.surface` - :class:`VolSurface`, :func:`ssvi_surface`, :func:`fit_market_surface` and :func:`surface_summary`.
 
@@ -61,6 +64,7 @@ from scipy.special import ndtr
 
 from .. import black_scholes as bs
 from ..implied_vol import ImpliedVolError, implied_volatility
+from .forwards import FORWARD_SOURCES, carry_gaps, implied_forwards
 from .local_vol import EXTRAPOLATION, _local_vol, _market_values, _MarketValues, _time_derivative, durrleman_g
 from .quotes import (
     _ALIAS_KEYS,
@@ -77,6 +81,7 @@ from .quotes import (
     _UNITS,
     _WEAK_IV,
     FLY_CHECK_VOL,
+    FORWARD_METHODS,
     MATURITY_TOLERANCE,
     MAX_DAYS,
     MAX_PRICE_QUOTES,
@@ -129,13 +134,17 @@ from .surface import (
 from .svi import _LOG_S_RANGE, _RHO_FACE, _RHO_MAX, QUOTE_PRECISION, SVISlice, _svi_start_points, fit_svi
 
 __all__ = [
+    "FORWARD_METHODS",
+    "FORWARD_SOURCES",
     "QuoteParseError",
     "QuoteWarning",
     "SSVIParams",
     "SVISlice",
     "VolSurface",
+    "carry_gaps",
     "fit_market_surface",
     "fit_svi",
+    "implied_forwards",
     "parse_quotes",
     "sample_quotes",
     "ssvi_surface",

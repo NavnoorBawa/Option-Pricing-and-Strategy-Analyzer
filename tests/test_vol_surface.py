@@ -1047,10 +1047,9 @@ def test_bid_ask_quotes_keep_the_out_of_the_money_side_and_drop_impossible_price
     assert np.allclose(clean["iv"], sigma, atol=0.01)
     fitted = vs.fit_market_surface(clean, spot, r, q)
     assert fitted.implied_vol_at(1.0, 0.4) == pytest.approx(sigma, abs=0.005)
-    # Read with the sidebar rate and dividend yield, as before parity forwards, the call is inverted (to a vol 3.5
-    # points off, within the 0.01 tolerance above only because its time value is so small).
+    # So is it with the sidebar rate and dividend yield instead of parity forwards.
     by_rates, _ = vs.parse_quotes(frame, spot, r, q, forward="rates")
-    assert len(by_rates) == 27
+    assert len(by_rates) == 26
 
 
 def _stacked_calls_and_puts(itm_vol) -> pd.DataFrame:

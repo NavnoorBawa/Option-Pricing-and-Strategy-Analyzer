@@ -55,7 +55,9 @@ __all__ = [
     "FORWARD_COLUMNS",
     "FORWARD_SOURCES",
     "MAX_DISCOUNT_SE",
+    "MIN_CARRY_GAP_BP",
     "MIN_PARITY_PAIRS",
+    "carry_gaps",
     "implied_forwards",
 ]
 
@@ -78,6 +80,10 @@ RATE_LIMITS = (-0.10, 0.50)
 TRIM_MADS = 3.5
 TRIM_ROUNDS = 5
 _MAD_SCALE = 1.4826  # a median absolute deviation times this estimates the standard deviation of normal noise
+
+#: A parity forward this far from the given rates' forward (basis points of the forward), or half the at-the-money
+#: spread where that is wider, says the rate or dividend yield given does not match the quotes.
+MIN_CARRY_GAP_BP = 5.0
 
 #: How each expiry's forward and discount factor were obtained.
 FORWARD_SOURCES = {
@@ -120,7 +126,7 @@ def _pair_prices(group: pd.DataFrame, floor: float) -> pd.DataFrame:
     sides["price"] = sides["weighted"] / sides["weight"]
     sides["error"] = 1.0 / np.sqrt(sides["weight"])
     wide = sides[["price", "error"]].unstack("call").dropna()
-    if wide.empty:
+    if wide.empty or ("price", True) not in wide or ("price", False) not in wide:
         return pd.DataFrame(columns=["strike", "call", "put", "call_error", "put_error"])
     return pd.DataFrame(
         {
@@ -189,7 +195,9 @@ def _trimmed_fit(pairs: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarra
         spread = _MAD_SCALE * np.median(np.abs(standardised[kept] - centre))
         if not spread > 0:
             break
-        keep = kept & (np.abs(standardised - centre) <= TRIM_MADS * spread)
+        # A pair within its own price error of the line is never an outlier, however small the scatter of the
+        # others (exact model prices scatter by rounding only).
+        keep = kept & (np.abs(standardised - centre) <= max(TRIM_MADS * spread, 1.0))
         if keep.sum() == kept.sum() or keep.sum() < MIN_PARITY_PAIRS:
             break
         kept = keep
@@ -383,3 +391,20 @@ def implied_forwards(
     table["dividend_yield"] = table["rate"] - np.log(forward / spot) / T
     table["gap_bp"] = 1e4 * (np.log(forward / spot) - (rate - dividend_yield) * T)
     return table.sort_values("maturity", kind="stable").reset_index(drop=True)
+
+
+def carry_gaps(table: pd.DataFrame) -> np.ndarray:
+    """Which expiries of :func:`implied_forwards`' table have a parity forward more than :data:`MIN_CARRY_GAP_BP`,
+    or half the at-the-money call and put spreads where that is wider, from the forward of the given rate and
+    dividend yield: the quotes resolve the difference, so the given carry does not match them.
+
+    Examples
+    --------
+    >>> table = pd.DataFrame({"gap_bp": [3.0, -12.0, 12.0, 40.0], "atm_half_spread_bp": [1.0, 2.0, 15.0, 1.0],
+    ...                       "source": ["parity", "parity", "parity", "rates"]})
+    >>> carry_gaps(table).tolist()
+    [False, True, False, False]
+    """
+    gap = np.abs(table["gap_bp"].to_numpy(float))
+    allowed = np.fmax(MIN_CARRY_GAP_BP, table["atm_half_spread_bp"].to_numpy(float))
+    return (table["source"] != "rates").to_numpy() & (gap > allowed)
