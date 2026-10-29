@@ -6,6 +6,7 @@ import re
 import urllib.parse
 
 import numpy as np
+import pyarrow as pa
 import pytest
 from _apptest import make_app
 from scipy.stats import lognorm, norm
@@ -1156,6 +1157,11 @@ def test_stress_table_headers_are_short_with_the_full_name_in_the_help():
     config = json.loads(frame.proto.columns)
     assert "IV shock damped" in config["IV damped"]["help"]
     assert "basis points" in config["Rate Δ (bp)"]["help"]
+    # The rate change is signed with the minus sign U+2212 and has no sign at zero (a format string gave "+0").
+    shown = pa.ipc.open_stream(frame.proto.arrow_data.styler.display_values).read_all().to_pandas()["Rate Δ (bp)"]
+    rates = frame.value["Rate Δ (bp)"]
+    assert shown.tolist() == [("" if r == 0 else "+" if r > 0 else "\u2212") + f"{abs(r):,.0f}" for r in rates]
+    assert (rates < 0).any() and (rates == 0).any()
 
 
 def test_stress_table_and_var_cards():

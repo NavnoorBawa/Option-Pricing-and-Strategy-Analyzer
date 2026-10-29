@@ -6,6 +6,8 @@ re-prices it leg by leg, so the numbers are consistent across the app.
 
 from __future__ import annotations
 
+import functools
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -14,7 +16,7 @@ from .. import risk, scenarios
 from .. import strategies as strat
 from . import cache, charts
 from .components import card_row, current_key
-from .format import md, money, money_short
+from .format import md, money, money_short, signed
 from .tab_strategy import Position
 
 CONFIDENCE_LEVELS = (0.95, 0.975, 0.99, 0.995, 0.999)
@@ -253,8 +255,12 @@ def _stress_tests(position: Position) -> None:
     if elapsed or custom_on:
         columns += ["Days elapsed", "Legs expired"]
     st.dataframe(
-        # Short headers so that every one fits its narrow column; the help gives the full name.
-        table[columns].rename(columns=STRESS_HEADERS),
+        # Short headers so that every one fits its narrow column; the help gives the full name. The rate change is
+        # signed with the minus sign U+2212 and no sign at zero (a format string gives "-" and "+0"); a Styler's text
+        # is shown only in a column whose config has no format, and sorts by the number.
+        table[columns]
+        .rename(columns=STRESS_HEADERS)
+        .style.format(functools.partial(signed, decimals=0), subset=["Rate Δ (bp)"]),
         hide_index=True,
         height=35 * (len(table) + 1) + 3,  # show every scenario without an inner scrollbar
         column_config={
@@ -268,7 +274,7 @@ def _stress_tests(position: Position) -> None:
                 help="IV shock damped: a one-month shock, damped for longer-dated legs (see the toggle above).",
             ),
             "Rate Δ (bp)": st.column_config.NumberColumn(
-                format="%+.0f", width="small", help="Rate change in basis points (100 bp = 1 percentage point)."
+                width="small", help="Rate change in basis points (100 bp = 1 percentage point)."
             ),
             "P&L": st.column_config.NumberColumn(format="dollar", width="small"),
             "Days elapsed": st.column_config.NumberColumn(width="small"),

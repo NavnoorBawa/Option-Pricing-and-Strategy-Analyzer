@@ -704,11 +704,15 @@ def smile_chart(
     spot_line: float | None = 1.0,
     quotes: Sequence[tuple[np.ndarray, np.ndarray, np.ndarray] | None] | None = None,
     palette: dict[str, str] | None = None,
+    wings: Sequence[np.ndarray | None] | None = None,
 ):
-    """Implied (solid) and local (dashed) volatility per slice, sharing a colour.
+    """Implied (solid) and local (dashed) volatility per slice, sharing a colour, and implied vol extrapolated beyond
+    the quotes (dotted).
 
     ``quotes`` (aligned with ``slices``) adds the market quotes as markers:
     ``(moneyness, quoted implied vol, fitted implied vol)`` or ``None`` for a slice without quotes.
+    ``wings`` (aligned with ``slices``) adds each implied-vol smile's extrapolated part as a dotted line (dashes are
+    local vol's): implied vols on ``x``, NaN where the smile is not extrapolated; ``None`` or all NaN for none.
     """
     colors = palette or desk_theme.palette()
     series = desk_theme.categorical(colors)
@@ -719,6 +723,18 @@ def smile_chart(
         fig.add_trace(
             go.Scatter(x=x, y=local, name=f"Local · {label}", line=dict(color=color, width=LINE_WIDTH, dash="dash"))
         )
+        if wings is not None and (wing := wings[i]) is not None and np.isfinite(wing).any():
+            fig.add_trace(
+                go.Scatter(
+                    x=x,
+                    y=wing,
+                    name=f"Extrapolated · {label}",
+                    line=dict(color=color, width=LINE_WIDTH, dash="dot"),
+                    # The point that joins a wing to its smile is the smile's last quoted one, not extrapolated.
+                    customdata=np.where(np.isfinite(np.asarray(implied, dtype=float)), "quoted", "extrapolated"),
+                    hovertemplate="%{y:.2%} · %{customdata}",
+                )
+            )
         if quotes is not None and (quote := quotes[i]) is not None:
             qx, qiv, fitted = quote
             fig.add_trace(
