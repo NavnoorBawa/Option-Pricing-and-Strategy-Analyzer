@@ -1,5 +1,9 @@
+import math
 import re
 from dataclasses import replace
+from datetime import date, timedelta
+from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import pytest
@@ -73,14 +77,6 @@ def test_hypothetical_iv_shocks_are_literal_and_match_the_heatmap():
     assert not row["IV shock damped"]
 
 
-def test_scenario_data_matches_sources():
-    by_name = {x.name: x for x in (*sc.HISTORICAL_SCENARIOS, *sc.HYPOTHETICAL_SCENARIOS)}
-    assert by_name["Dot-com bust (2000-02)"].rate_change == pytest.approx(-0.0425)  # Fed funds 6.00% -> 1.75%
-    fed = by_name["Fed severely adverse (2026)"]
-    assert (fed.spot_change, fed.rate_change) == (pytest.approx(-0.58), pytest.approx(-0.036))
-    assert all(x.one_month_vol_shock for x in sc.HISTORICAL_SCENARIOS)
-
-
 def test_legs_expiring_during_an_episode_are_flagged():
     strategy = S.build_template("Long Call Calendar", 100, 10, 0.1)
     episode = [sc.StressScenario("long", -0.1, 1.0, 0.0, days=60)]
@@ -94,6 +90,283 @@ def test_pnl_grid_accepts_a_single_day_and_rejects_ambiguous_shapes():
     assert sc.pnl_grid(calendar, market, np.array([0.0, 0.1]), days=5).shape == (1, 2)
     with pytest.raises(ValueError, match="single number"):
         sc.pnl_grid(calendar, market, np.array([0.0]), np.array([0.0]), days=np.array([5]))
+
+
+# --- Stress scenarios pinned to their sources ----------------------------------------------------------------------
+
+
+class Source(NamedTuple):
+    """A sourced scenario's numbers as its sources print them, typed here and not copied from the module."""
+
+    start: str  # date of the first close (ISO); for the Fed scenario the last day of its jump-off quarter
+    end: str  # date of the last close; for the Fed scenario the last day of its trough quarter
+    equity: tuple[str, str, str]  # equity index and its closes
+    vol: tuple[str, str, str]  # volatility index and the two levels the shock is calibrated between
+    rate: tuple[float, float]  # rate (%) at the start and the end; the midpoint of a target range
+    rate_text: str  # how the description states the rate
+    sessions: int | None = None  # trading sessions between the two closes, where the description counts them
+    peak: tuple[str, str] | None = None  # the vol index's highest close inside the window and its date, where quoted
+
+
+#: S&P 500 closes: S&P Dow Jones Indices (and FRED SP500 for 2018 on). VIX and VXO closes: FRED VIXCLS and VXOCLS. Fed
+#: funds target: FRED DFEDTAR, and from 16 Dec 2008 the range DFEDTARL to DFEDTARU. Fed scenario: Federal Reserve, 2026
+#: Stress Test Scenarios (Feb 2026), table 2.A for the Q4 2025 jump-off (its VIX of 26.4 is the quarter's highest
+#: close, 26.42 on 20 Nov 2025 in FRED VIXCLS) and table 4.A for the trough of the Dow Jones Total Stock Market Index
+#: (Q3 2026), the VIX peak (Q2 2026) and the 3-month Treasury rate (Q2 2026 on).
+SOURCES = {
+    "Black Monday (1987)": Source(
+        "1987-10-16", "1987-10-19", ("S&P 500", "282.70", "224.84"), ("VXO", "36.37", "150.19"), (7.3125, 7.3125),
+        "Fed funds target unchanged at 7.3125% until 4 Nov", sessions=1,
+    ),
+    "Dot-com bust (2000–02)": Source(
+        "2000-03-24", "2002-10-09", ("S&P 500", "1,527.46", "776.76"), ("VIX", "23.31", "42.13"), (6.00, 1.75),
+        "Fed funds target 6.00% → 1.75%",
+    ),
+    "Global Financial Crisis (2007–09)": Source(
+        "2007-10-09", "2009-03-09", ("S&P 500", "1,565.15", "676.53"), ("VIX", "16.12", "49.68"), (4.75, 0.125),
+        "Fed funds target 4.75% → 0–0.25% (midpoint 0.125%)", peak=("80.86", "2008-11-20"),
+    ),
+    "Volmageddon (2018)": Source(
+        "2018-02-02", "2018-02-05", ("S&P 500", "2,762.13", "2,648.94"), ("VIX", "17.31", "37.32"), (1.375, 1.375),
+        "Fed funds target unchanged at 1.25–1.50%", sessions=1,
+    ),
+    "COVID crash (2020)": Source(
+        "2020-02-19", "2020-03-23", ("S&P 500", "3,386.15", "2,237.40"), ("VIX", "14.38", "61.59"), (1.625, 0.125),
+        "Fed funds target 1.50–1.75% → 0–0.25%", sessions=23, peak=("82.69", "2020-03-16"),
+    ),
+    "2022 rate shock": Source(
+        "2022-01-03", "2022-10-12", ("S&P 500", "4,796.56", "3,577.03"), ("VIX", "16.60", "33.57"), (0.125, 3.125),
+        "Fed funds target 0–0.25% → 3.00–3.25%",
+    ),
+    "Tariff shock (Apr 2025)": Source(
+        "2025-04-02", "2025-04-08", ("S&P 500", "5,670.97", "4,982.77"), ("VIX", "21.51", "52.33"), (4.375, 4.375),
+        "Fed funds target unchanged at 4.25–4.50%", sessions=4,
+    ),
+    "Fed severely adverse (2026)": Source(
+        "2025-12-31", "2026-09-30", ("Dow Jones Total Stock Market Index", "67,502", "28,490"), ("VIX", "26.4", "72.0"),
+        (3.7, 0.1), "3-month Treasury rate falls 3.7% → 0.1%",
+    ),
+}  # fmt: skip
+
+FED = "Fed severely adverse (2026)"
+_PRESETS = {x.name: x for x in (*sc.HISTORICAL_SCENARIOS, *sc.HYPOTHETICAL_SCENARIOS)}
+#: The Methodology's section on risk, which repeats the Fed scenario's numbers.
+RISK_METHODOLOGY = Path(sc.__file__).with_name("ui") / "methodology" / "risk.md"
+_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def _level(text: str) -> float:
+    return float(text.replace(",", ""))
+
+
+def _percent(change: float) -> str:
+    """A change as the descriptions quote it, with the minus sign U+2212: ``−20.5%``."""
+    return f"{change:+.1%}".replace("-", "−")
+
+
+def _day(day: date, *, year: bool = True) -> str:
+    """A date as the descriptions write it: ``20 Nov 2008``, or ``16 Mar`` inside a window that names its year once."""
+    return f"{day.day} {_MONTHS[day.month - 1]}" + (f" {day.year}" if year else "")
+
+
+def _window(start: date, end: date) -> str:
+    """The dates a historical description opens with: ``16–19 Oct 1987``, ``19 Feb – 23 Mar 2020`` or
+    ``24 Mar 2000 – 9 Oct 2002``."""
+    if start.year != end.year:
+        return f"{_day(start)} – {_day(end)}"
+    if start.month != end.month:
+        return f"{_day(start, year=False)} – {_day(end)}"
+    return f"{start.day}–{_day(end)}"
+
+
+def _sessions(count: int) -> str:
+    """A number of sessions as the descriptions write it, in words below ten: ``one session``, ``23 sessions``."""
+    words = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine"]
+    return (words[count - 1] if count < 10 else str(count)) + (" session" if count == 1 else " sessions")
+
+
+def _quarter(day: date) -> str:
+    return f"Q{(day.month - 1) // 3 + 1} {day.year}"
+
+
+def _dates(name: str) -> tuple[date, date]:
+    return date.fromisoformat(SOURCES[name].start), date.fromisoformat(SOURCES[name].end)
+
+
+def test_every_sourced_scenario_has_its_sources():
+    sourced = {x.name for x in _PRESETS.values() if x.vol_index}
+    assert sourced == set(SOURCES)
+    assert {x.name for x in sc.HISTORICAL_SCENARIOS} <= sourced
+    # Hypothetical IV shocks apply literally to every leg, as the Methodology and the damping toggle's help say.
+    assert not any(x.one_month_vol_shock for x in _PRESETS.values() if not x.vol_index)
+
+
+@pytest.mark.parametrize("name", list(SOURCES))
+def test_scenarios_are_pinned_to_their_sourced_numbers(name):
+    # Validator finding 3: the Fed scenario's vol multiplier was 4.0 ("the VIX peaks at 72, about 4x") against the
+    # Fed's 72.0 / 26.4 = 2.73, and three historical multipliers disagreed with the levels their descriptions quoted
+    # (COVID 4.3 against 62 / 14 = 4.43). Every number is now checked against its source.
+    scenario, source = _PRESETS[name], SOURCES[name]
+    (equity, e0, e1), (index, v0, v1), (r0, r1) = source.equity, source.vol, source.rate
+    assert (scenario.vol_index, scenario.vol_start, scenario.vol_end) == (index, _level(v0), _level(v1))
+    # The multiplier is the ratio of the closes itself, not a rounded copy of it.
+    assert scenario.vol_multiplier == _level(v1) / _level(v0)
+    # The equity change is quoted and applied to 0.1 %, so it is within 0.05 % of spot of the exact change.
+    assert scenario.spot_change == round(_level(e1) / _level(e0) - 1, 3)
+    # Rates in percent with at most four decimals: the change in decimal agrees to rounding error.
+    assert scenario.rate_change == pytest.approx((r1 - r0) / 100, abs=1e-15)
+    start, end = _dates(name)
+    assert scenario.days == (end - start).days
+    # The description states the same numbers, each pair of levels after its index in the same clause.
+    for series, levels in ((equity, f"{e0} → {e1} ({_percent(scenario.spot_change)})"), (index, f"{v0} → {v1}")):
+        assert re.search(rf"{re.escape(series)}\b[^;]*{re.escape(levels)}", scenario.description), (levels, series)
+    assert source.rate_text in scenario.description
+
+
+@pytest.mark.parametrize("name", [x.name for x in sc.HISTORICAL_SCENARIOS])
+def test_historical_descriptions_state_their_dates_and_sessions(name):
+    # A reviewer moved Black Monday to "12–19 Nov 1988" and COVID to "in 3 sessions" with every test passing: the
+    # dates, the session counts and the peak closes are now checked too.
+    scenario, source = _PRESETS[name], SOURCES[name]
+    start, end = _dates(name)
+    assert np.is_busday(start) and np.is_busday(end)  # both ends are closes
+    assert scenario.description.startswith(f"{_window(start, end)}: ")
+    if source.sessions is None:
+        assert "session" not in scenario.description
+    else:
+        # Sessions after the first close up to the last one: the weekdays, as no NYSE holiday falls inside these
+        # windows (Presidents' Day, 17 Feb 2020, and Good Friday, 18 Apr 2025, fall outside theirs).
+        assert np.busday_count(start, end) == source.sessions
+        assert f" in {_sessions(source.sessions)};" in scenario.description
+    if source.peak is None:
+        assert "close" not in scenario.description
+    else:
+        level, day = source.peak[0], date.fromisoformat(source.peak[1])
+        assert start < day < end and _level(level) > _level(source.vol[2])
+        assert f" close {level} on {_day(day, year=start.year != end.year)})" in scenario.description
+
+
+def test_the_fed_scenario_states_its_jump_off_and_its_timing():
+    # The Fed's VIX peaks in Q2 2026 (table 4.A) and its equities bottom in Q3 2026; the scenario applies both at once
+    # and says so. The equity index is an end-of-quarter value, so the window runs between two quarter ends.
+    fed, (start, end) = _PRESETS[FED], _dates(FED)
+    for day in (start, end):
+        assert day.month % 3 == 0 and (day + timedelta(days=1)).day == 1
+    assert fed.vol_multiplier == pytest.approx(2.727, abs=5e-4)
+    for text in (
+        "(federalreserve.gov, Feb 2026)",
+        f"from the {_quarter(start)} jump-off",
+        f"to its {_quarter(end)} trough",
+        "the VIX (highest close of the quarter)",
+        "to its Q2 2026 peak",
+        "a quarter apart",
+        "applies both at once",
+    ):
+        assert text in fed.description, text
+
+
+def test_the_methodology_quotes_the_fed_scenario_as_the_preset_holds_it():
+    # The Methodology repeats the Fed scenario's numbers, so they are checked against the preset (and through it
+    # against SOURCES); a reviewer found they could drift.
+    text = " ".join(RISK_METHODOLOGY.read_text(encoding="utf-8").split())
+    fed, (start, end), (r0, r1) = _PRESETS[FED], _dates(FED), SOURCES[FED].rate
+    for phrase in (
+        f"from their {_quarter(start)} jump-off: equities {_percent(fed.spot_change)} at the {_quarter(end)} trough",
+        f"the VIX from {fed.vol_start} to its Q2 2026 peak of {fed.vol_end} (a multiplier of {fed.vol_multiplier:.2f})",
+        f"3-month Treasury rate from {r0}% to {r1}%",
+        # A ratio, not a level: 15% x 72.0 / 26.4 = 40.9% (a one-month leg takes the whole shock, undamped).
+        f"a one-month leg marked at a calm 15% goes to {0.15 * fed.vol_multiplier:.0%}, "
+        f"not to the Fed's {fed.vol_end:.0f}%",
+        f"$(T/\\text{{1M}})^{{-{sc.DEFAULT_VOL_TENOR_DECAY}}}$",
+    ):
+        assert phrase in text, phrase
+
+
+def _put(spot: float, strike: float, tau: float, rate: float, vol: float, dividend: float) -> float:
+    """Black-Scholes-Merton put, in closed form with math.erfc (independent of options_analyzer.black_scholes)."""
+    d1 = (math.log(spot / strike) + (rate - dividend + vol**2 / 2) * tau) / (vol * math.sqrt(tau))
+    d2 = d1 - vol * math.sqrt(tau)
+    # N(-d) = erfc(d / sqrt 2) / 2
+    return (
+        strike * math.exp(-rate * tau) * math.erfc(d2 / math.sqrt(2)) / 2
+        - spot * math.exp(-dividend * tau) * math.erfc(d1 / math.sqrt(2)) / 2
+    )
+
+
+@pytest.mark.parametrize("name", list(SOURCES))
+def test_stress_pnl_reprices_with_the_sourced_shocks(name):
+    # A one-month put takes the whole one-month vol shock (the damping weight min(1, (T / 1M)^-0.25) is 1), so its
+    # stress P&L is the closed-form put at the sourced spot, vol and rate minus today's. Both sides are double-precision
+    # Black-Scholes on P&L of 5 to 55: the worst measured difference is 1.4e-14 (4 ulps of Black Monday's 20.8);
+    # 1e-12 leaves room for another platform's erfc.
+    source, tau = SOURCES[name], 30 / 365
+    (_, e0, e1), (_, v0, v1), (r0, r1) = source.equity, source.vol, source.rate
+    market = S.Market(100, 0.04, 0.25, tau, 0.015)
+    put = S.Strategy("put", (S.Leg("put", 1, 100),))
+    pnl = sc.run_stress_tests(put, market, [_PRESETS[name]])[0]["P&L"]
+    shocked = _put(
+        100 * (1 + round(_level(e1) / _level(e0) - 1, 3)),
+        100,
+        tau,
+        0.04 + (r1 - r0) / 100,
+        0.25 * _level(v1) / _level(v0),
+        0.015,
+    )
+    assert pnl == pytest.approx(shocked - _put(100, 100, tau, 0.04, 0.25, 0.015), abs=1e-12)
+
+
+def test_ui_text_of_the_presets_uses_the_minus_sign_and_the_en_dash():
+    # One minus sign (U+2212) in UI text, and an en dash in a range ("2000–02", which "2000-02" would also read as
+    # February 2000): the names and descriptions are shown in the Risk tab.
+    for scenario in _PRESETS.values():
+        for text in (scenario.name, scenario.description):
+            assert not re.search(r"(?<![\w])-\d|->|\d-\d", text), text
+
+
+_FED = _PRESETS[FED]
+
+
+def _sourced(**levels):
+    return sc.StressScenario.sourced(
+        "x", spot_change=0.0, rate_change=0.0, days=0, description="", vol_index="VIX", **levels
+    )
+
+
+@pytest.mark.parametrize(
+    ("make", "message"),
+    [
+        (lambda: replace(_FED, vol_multiplier=4.0), "vol_multiplier 4.0 is not vol_end / vol_start = 2.72727"),
+        (lambda: replace(_FED, vol_end=75.0), "vol_multiplier 2.7272727272727275 is not vol_end / vol_start = 2.8409"),
+        (lambda: replace(_FED, one_month_vol_shock=False), "a shock calibrated on the VIX is a one-month vol shock"),
+        (lambda: replace(_FED, vol_index=""), "vol_start and vol_end need the vol_index they are levels of"),
+        (lambda: replace(_FED, vol_start=None), "Fed severely adverse (2026): vol_start must be a number, got None"),
+        (lambda: sc.StressScenario("x", 0, 1, 0, vol_end=20.0), "x: vol_start and vol_end need the vol_index"),
+        (lambda: _sourced(vol_start=0.0, vol_end=20), "x: vol_start and vol_end must be positive, got 0 and 20"),
+        (lambda: _sourced(vol_start=14, vol_end=-1), "vol_start and vol_end must be positive, got 14 and -1"),
+        (lambda: _sourced(vol_start="14", vol_end=20), "x: vol_start must be a number, got '14'"),
+        (lambda: _sourced(vol_start=14, vol_end=math.inf), "x: vol_end must be a finite number, got inf"),
+        (lambda: _sourced(vol_start=np.array([14.0, 15.0]), vol_end=20), "x: vol_start must be a single number"),
+    ],
+    ids=["drifted multiplier", "drifted level", "not one-month", "no index", "no start", "levels without index",
+         "zero start", "negative end", "string start", "infinite end", "array start"],
+)  # fmt: skip
+def test_a_sourced_scenario_refuses_levels_that_disagree_with_its_shock(make, message):
+    # The levels are the only copy of the shock: a multiplier that drifts from them cannot be built.
+    with pytest.raises(ValueError, match=re.escape(message)):
+        make()
+
+
+def test_a_sourced_scenario_keeps_its_levels_and_reprices_like_a_plain_one():
+    levels = {"vol_index": "VIX", "vol_start": 20.0, "vol_end": 30.0}
+    scenario = sc.StressScenario.sourced("x", spot_change=-0.1, rate_change=0.0, days=0, description="", **levels)
+    assert (scenario.vol_multiplier, scenario.one_month_vol_shock) == (1.5, True)
+    # Everything but the name is keyword-only: the constructor takes the vol multiplier third, so a positional call
+    # by analogy used to build a rate change of +41,000 bp from Black Monday's 4.1.
+    with pytest.raises(TypeError, match="positional argument"):
+        sc.StressScenario.sourced("x", -0.205, 4.1, 3, "", **levels)
+    plain = sc.StressScenario("x", -0.1, 1.5, 0.0, one_month_vol_shock=True)
+    straddle = S.build_template("Long Straddle", 100, 10)
+    assert sc.run_stress_tests(straddle, MARKET, [scenario]) == sc.run_stress_tests(straddle, MARKET, [plain])
 
 
 # --- RK-1: scenario cube and pnl_grid volatility modes -------------------------------------------------------------

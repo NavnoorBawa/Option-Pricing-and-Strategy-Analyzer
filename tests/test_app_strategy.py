@@ -1160,6 +1160,15 @@ def test_stress_table_headers_are_short_with_the_full_name_in_the_help():
 
 def test_stress_table_and_var_cards():
     at = _app("Risk")
+    # The Fed scenario's vol shock is the Fed's own jump-off-to-peak VIX ratio, and its source line says so
+    # (validator finding 3: the table showed 4.00x).
+    table = next(df for df in at.dataframe if "Scenario" in df.value.columns).value.set_index("Scenario")
+    assert table.loc["Fed severely adverse (2026)", "IV multiplier"] == pytest.approx(72.0 / 26.4, rel=1e-15)
+    assert any("rises 26.4 → 72.0 to its Q2 2026 peak" in m.value for m in at.markdown)
+    # The caption names the 1987 index and the rate the analogues shift, and says the ratio is not a level.
+    sources = next(c.value for c in at.caption if c.value.startswith("Historical analogues"))
+    for text in ("(the VXO for 1987)", "change in the Fed funds target", "does not set it to the index's level"):
+        assert text in sources
     labels = [m.label for m in at.metric]
     assert "VaR 95% CI (simulation)" not in labels
     assert any("95% confidence interval of the VaR estimate" in c.value for c in at.caption)
