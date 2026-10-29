@@ -12,17 +12,18 @@ from scipy.special import ndtr
 
 from .. import black_scholes as bs
 from ..american import AmericanPrice
+from ..monte_carlo import RELIABLE_PATHS, RELIABLE_SAMPLES, MonteCarloResult
 from ..strategies import ONE_DAY
 from . import cache, charts
 from .components import card_row
-from .format import DECAY_SWITCH, decay_label, decay_leads, md, money, pct
+from .format import DECAY_SWITCH, MINUS, decay_label, decay_leads, md, money, pct
 from .inputs import Inputs
 
 #: Monte Carlo scenarios drawn on the sample-paths chart.
 SAMPLE_PATHS = 60
 #: The confidence interval of a simulated price, in no-break spaces: it never splits over two lines (on a phone "SE"
 #: stood alone on the second line of the caption under the price cards).
-_CI_FORMULA = "95% CI = price ± 1.96 SE".replace(" ", "\xa0")
+_CI_FORMULA = "95% interval = price ± 1.96 SE".replace(" ", "\xa0")
 #: What a heavy-tailed Monte Carlo sample does instead of the usual estimator (see ``monte_carlo``).
 HEAVY_TAIL_NOTE = (
     "Heavy-tailed sample (large σ√T): the put is averaged directly and the call follows from put-call parity"
@@ -101,15 +102,7 @@ def compute_prices(inputs: Inputs) -> Prices:
         )
     if model.kind == "monte_carlo":
         mc = cache.mc_results(S, K, T, r, sigma, q, model.n_paths, model.seed, model.antithetic, model.control_variate)
-        notes = {
-            kind: (f"{HEAVY_TAIL_NOTE}. " if res.heavy_tailed else "")
-            + (
-                f"95% CI {money(res.ci95[0], 3)} – {money(res.ci95[1], 3)} · SE {money(res.std_error, 4)}"
-                if np.isfinite(res.std_error)
-                else "Every simulated price finished on one side of the strike: the error cannot be estimated"
-            )
-            for kind, res in mc.items()
-        }
+        notes = {kind: (f"{HEAVY_TAIL_NOTE}. " if res.heavy_tailed else "") + _mc_note(res) for kind, res in mc.items()}
         return Prices(mc["call"].price, mc["put"].price, notes["call"], notes["put"], mc=mc)
     if model.kind == "alo":
         details, greeks = cache.alo_results(S, K, T, r, sigma, q, model.scheme)
@@ -123,6 +116,66 @@ def compute_prices(inputs: Inputs) -> Prices:
             alo_greeks=greeks,
         )
     return Prices(bs_call, bs_put, "Closed-form European value", "Closed-form European value")
+
+
+def mc_interval(res: MonteCarloResult, dollars: bool = True, short: bool = False) -> str:
+    """The 95% interval of a simulated price, ``$10.4237 – $10.4582, 95%`` (``10.4237 – 10.4582`` without
+    ``dollars``, for a table of plain amounts), or, when the result is not reliable, why it is not shown:
+    ``Interval unreliable: 12 of 100,000 paths finish in the money`` in the diagnostics table and the card's tooltip,
+    and ``short`` on the card itself, ``Interval unreliable: 12 ITM paths`` (the long form made the card 387 px wide,
+    so at 1440 px with the sidebar open the four price cards went 2 + 2 instead of 4 across, which leaves 249 px a
+    card; the short form is at most 232 px)."""
+    if res.reliable:
+        low, high = (money(bound, 4).replace("-", MINUS) for bound in res.ci95)
+        return f"{low} – {high}, 95%" if dollars else f"{low} – {high}".replace("$", "")
+    card, sentence, _ = _withheld(res)
+    return card if short else sentence
+
+
+def _withheld(res: MonteCarloResult) -> tuple[str, str, str]:
+    """Why an unreliable result's interval is not shown (``MonteCarloResult.reliable``): the card's line, the full
+    sentence and the reason, with the coverage measured below the threshold (``monte_carlo.RELIABLE_PATHS`` and
+    ``RELIABLE_SAMPLES``)."""
+    if res.n_samples < RELIABLE_SAMPLES:  # never in the app: its fewest paths, 10,000, are 5,000 antithetic pairs
+        needed = RELIABLE_SAMPLES * (2 if res.antithetic else 1)
+        return (
+            "Interval unreliable: too few paths",
+            f"Interval unreliable: {res.n_paths:,} paths, fewer than {needed:,}",
+            f"with fewer than {RELIABLE_SAMPLES:,} independent samples ({needed:,} paths"
+            + (" in antithetic pairs" if res.antithetic else "")
+            + ") the standard error is itself too uncertain, and the interval covers the value in less than 95% of "
+            "runs (93 to 94% with 500 antithetic pairs and the control variate)",
+        )
+    count, side = _scarce_side(res)
+    return (
+        f"Interval unreliable: {count:,} {'ITM' if side == 'in' else 'OTM'} paths",
+        f"Interval unreliable: {count:,} of {res.n_paths:,} paths finish {side} the money",
+        f"with fewer than {RELIABLE_PATHS} paths finishing {side} the money it covers the value in less than 95% of "
+        "runs (88% with 10 such paths, 92% with 30, 94% with 100)",
+    )
+
+
+def _scarce_side(res: MonteCarloResult) -> tuple[int, str]:
+    """The simulated prices on the scarcer side of the strike, and which side: ``(12, "in")`` or ``(12, "out of")``.
+
+    It is the side an unreliable result's flag counts (``MonteCarloResult.reliable``) whenever there are at least
+    ``RELIABLE_SAMPLES`` independent samples, so at least 5,000 paths: a payoff averaged as it is fails on its
+    in-the-money paths only when fewer than 300 of them, so fewer than half, finish in the money."""
+    out = res.n_paths - res.n_itm
+    return (res.n_itm, "in") if res.n_itm <= out else (out, "out of")
+
+
+def _mc_note(res: MonteCarloResult) -> str:
+    """The tooltip of a Monte Carlo price card: its standard error, and why its interval is not shown if it is not."""
+    if not np.isfinite(res.std_error):
+        return "Every simulated price finished on one side of the strike: the error cannot be estimated"
+    if res.reliable:
+        return f"Standard error {money(res.std_error, 4)}; {_CI_FORMULA}"
+    _, sentence, reason = _withheld(res)
+    return (
+        f"{sentence}. Standard error {money(res.std_error, 4)}. The 95% interval, price ± 1.96 SE, is not shown: "
+        f"{reason}."
+    )
 
 
 def _alo_note(kind: str, res: AmericanPrice) -> str:
@@ -213,7 +266,10 @@ def _model_card(inputs: Inputs, prices: Prices) -> tuple[str, str, str, str]:
         return (
             "Std. error",
             money(max(finite), 4) if finite else "–",
-            f"Standard error: call {money(se['call'], 4)}, put {money(se['put'], 4)}; {_CI_FORMULA}"
+            f"Standard error: call {money(se['call'], 4)}, put {money(se['put'], 4)}"
+            # The interval's formula only where a card shows an interval: where both withhold it, it invited the user
+            # to work out by hand what the app had just declined to show.
+            + (f"; {_CI_FORMULA}" if any(res.reliable for res in prices.mc.values()) else "")
             + (f". {HEAVY_TAIL_NOTE}." if heavy else ""),
             "Standard error of the simulated prices, after any variance reduction in use (the header's badge names "
             "it: AV for antithetic variates, CV for a control variate). The larger of the call's and the put's is "
@@ -243,12 +299,20 @@ def render_price_cards(inputs: Inputs, prices: Prices) -> None:
     label, value, caption, help_text = _model_card(inputs, prices)
     # The per-option notes are in the tooltips so the cards stay short on narrow screens.
     cards = [
-        ("Call value", money(prices.call, 4), md(prices.call_note)),
-        ("Put value", money(prices.put, 4), md(prices.put_note)),
-        ("Forward price", money(forward, 4), f"F = S·e^((r−q)T). Discount factor e^(−rT) = {np.exp(-r * T):.6f}."),
-        (label, value, md(help_text)),
+        ("Call value", money(prices.call, 4), {"help": md(prices.call_note)}),
+        ("Put value", money(prices.put, 4), {"help": md(prices.put_note)}),
+        (
+            "Forward price",
+            money(forward, 4),
+            {"help": f"F = S·e^((r−q)T). Discount factor e^(−rT) = {np.exp(-r * T):.6f}."},
+        ),
+        (label, value, {"help": md(help_text)}),
     ]
-    card_row(*PRICE_CARDS, [(name, text, {"help": help_text}) for name, text, help_text in cards])
+    if prices.mc:
+        # A simulated price carries its 95% interval, or why it is not shown, on the card's small grey line.
+        for (_, _, options), kind in zip(cards, ("call", "put"), strict=False):
+            options.update(delta=md(mc_interval(prices.mc[kind], short=True)), delta_color="off", delta_arrow="off")
+    card_row(*PRICE_CARDS, cards)
     # The header's badge names the model, so the caption only adds what the cards do not show.
     if caption:
         st.caption(md(caption))
@@ -834,8 +898,7 @@ def _monte_carlo_diagnostics(inputs: Inputs, prices: Prices) -> None:
             "Option": kind.capitalize(),
             "Monte Carlo": res.price,
             "Std. error": res.std_error,
-            "95% CI low": res.ci95[0],
-            "95% CI high": res.ci95[1],
+            "95% interval": mc_interval(res, dollars=False),
             "BSM": bs.price(S, K, T, r, sigma, q, kind),
             "Error / SE": (res.price - bs.price(S, K, T, r, sigma, q, kind)) / res.std_error
             if res.std_error > 0
@@ -848,18 +911,18 @@ def _monte_carlo_diagnostics(inputs: Inputs, prices: Prices) -> None:
         pd.DataFrame(rows),
         hide_index=True,
         placeholder="",  # undefined values are left blank, as the caption says (Streamlit would write "None")
-        column_config={
-            c: st.column_config.NumberColumn(format="%.4f")
-            for c in ("Monte Carlo", "Std. error", "95% CI low", "95% CI high", "BSM")
-        }
+        column_config={c: st.column_config.NumberColumn(format="%.4f") for c in ("Monte Carlo", "Std. error", "BSM")}
         | {
             "Error / SE": st.column_config.NumberColumn(format="%.2f"),
             "In the money": st.column_config.NumberColumn(format="percent"),
         },
     )
     st.caption(
-        "Terminal prices are sampled exactly from the log-normal distribution (no time-stepping bias). "
-        "|Error / SE| below about 2 is consistent with an unbiased estimator. The standard error is left blank "
+        "Dollars per share. Terminal prices are sampled exactly from the log-normal distribution (no time-stepping "
+        "bias). |Error / SE| below about 2 is consistent with an unbiased estimator. The 95% interval is the price "
+        f"± 1.96 SE; it is not shown when fewer than {RELIABLE_PATHS} paths finish on the side of the strike that "
+        "the error rests on (the Methodology says which), where it covers the value in less than 95% of runs (88% "
+        "with 10 such paths, 92% with 30, 94% with 100). The standard error is left blank "
         "when the sample cannot estimate it: every price finished out of the money, or every one in the money "
         "with the control variate on. At very large σ√T (hundreds of percent of volatility over years) the mean of "
         "the price at expiry rests on scenarios too rare to draw: when the simulated discounted prices miss their "

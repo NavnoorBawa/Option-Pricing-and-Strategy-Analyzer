@@ -229,12 +229,24 @@ def test_card_width_estimate_covers_the_rendered_card(label, value, measured):
 
 
 @pytest.mark.parametrize(
-    ("delta", "measured"),
-    # max-content widths in Chromium of the implied-volatility card (value 20.000%) with its delta line, in px
-    [("+0.00 vol pts vs sidebar", 169.3), ("-12.34 vol pts vs sidebar", 174.2), ("+123.45 vol pts vs sidebar", 184.0)],
+    ("label", "value", "delta", "measured"),
+    # max-content widths in Chromium of cards with a delta line (in a pill), rounded up, in px: the implied-volatility
+    # card, and the Monte Carlo price cards with their interval (the model made that pill 13 px too narrow at first)
+    # or the reason it is not shown. (The long reason, "Interval unreliable: 85 of 100,000 paths finish out of the
+    # money", made its card 387.3 px wide, and at 1440 px the row of four, 249 px a card, went 2 + 2.)
+    [
+        ("Implied volatility", "20.000%", "+0.00 vol pts vs sidebar", 169.3),
+        ("Implied volatility", "20.000%", "-12.34 vol pts vs sidebar", 174.2),
+        ("Implied volatility", "20.000%", "+123.45 vol pts vs sidebar", 184.0),
+        ("Call value", "$10.4409", r"\$10.4237 – \$10.4582, 95%", 193.3),
+        ("Put value", "$5.5639", r"\$5.5466 – \$5.5811, 95%", 178.6),
+        ("Call value", "$0.0018", "Interval unreliable: 85 ITM paths", 219.5),
+        ("Put value", "$19.5097", "Interval unreliable: 85 OTM paths", 223.1),
+    ],
 )
-def test_card_width_estimate_covers_the_delta_line(delta, measured):
-    assert measured <= components._card_width("Implied volatility", "20.000%", delta=delta) <= measured + 20
+def test_card_width_estimate_covers_the_delta_line(label, value, delta, measured):
+    # Never narrower than the card (its delta would be cut with an ellipsis), and within 2 px of it.
+    assert measured <= components._card_width(label, value, delta=delta) <= measured + 2
 
 
 # --- Pricing tab -------------------------------------------------------------------------------------------------
@@ -404,6 +416,87 @@ def test_monte_carlo_diagnostics_leave_undefined_cells_blank(new_app):
     assert table.value["Std. error"].isna().all() and table.value["Error / SE"].isna().all()
     assert table.proto.HasField("placeholder") and table.proto.placeholder == ""
     assert any("The standard error is left blank" in c.value for c in at.caption)
+    # The interval column says why there is no interval: no path finished in the money.
+    assert list(table.value["95% interval"]) == [
+        "Interval unreliable: 0 of 10,000 paths finish in the money",
+        "Interval unreliable: 0 of 10,000 paths finish out of the money",
+    ]
+
+
+def _shown(text: str) -> str:
+    """A card's delta line as the browser shows it (Markdown escapes removed)."""
+    return text.replace("\\$", "$")
+
+
+def test_monte_carlo_price_cards_show_the_95_percent_interval(new_app):
+    # The cards showed the standard error only ("STD. ERROR $0.0088" and "95% CI = price ± 1.96 SE"), so the user had
+    # to work the interval out; the diagnostics table far below had it.
+    at = new_app(model="Monte Carlo").run()
+    _ok(at)
+    res = monte_carlo.price_european(100, 100, 1, 0.05, 0.2, 0, n_paths=100_000, seed=42)
+    cards = {m.label: m for m in at.metric}
+    table = next(d for d in at.dataframe if "Error / SE" in d.value.columns).value.set_index("Option")
+    for kind, r in res.items():
+        assert r.reliable
+        low, high = r.price - 1.959963984540054 * r.std_error, r.price + 1.959963984540054 * r.std_error
+        card = cards[f"{kind.capitalize()} value"]
+        assert _shown(card.delta) == f"${low:.4f} – ${high:.4f}, 95%"
+        # Grey and without an arrow: a caption, not a change.
+        assert card.proto.color == card.proto.MetricColor.GRAY
+        assert card.proto.direction == card.proto.MetricDirection.NONE
+        assert table.loc[kind.capitalize(), "95% interval"] == f"{low:.4f} – {high:.4f}"
+        assert f"Standard error ${r.std_error:.4f}" in _shown(card.proto.help)
+    assert _shown(cards["Call value"].delta) == "$10.4237 – $10.4582, 95%"  # the panel's example
+    assert not cards["Forward price"].delta and not cards["Std. error"].delta
+
+
+def test_monte_carlo_price_cards_flag_an_unreliable_interval(new_app):
+    # With about 100 of 100,000 paths in the money (a 30-day call struck at 120), price ± 1.96 SE covers the value in
+    # about 94% of runs, and in 88% with 10 such paths: the cards said "95% CI" whenever the standard error was finite.
+    # The put on the same draws, deep in the money, is just as uncertain: with the control variate the two estimates
+    # differ by a constant.
+    at = new_app(model="Monte Carlo", strike=120, days=30).run()
+    _ok(at)
+    res = monte_carlo.price_european(100, 120, 30 / 365, 0.05, 0.2, 0, n_paths=100_000, seed=42)
+    n_itm = res["call"].n_itm
+    assert 0 < n_itm < monte_carlo.RELIABLE_PATHS and not res["call"].reliable and not res["put"].reliable
+    cards = {m.label: m for m in at.metric}
+    table = next(d for d in at.dataframe if "Error / SE" in d.value.columns).value.set_index("Option")
+    # The card says it in short, so that the four cards stay on one line at 1440 px; its tooltip and the diagnostics
+    # table say it in full.
+    expected = {"Call": ("ITM", "in"), "Put": ("OTM", "out of")}
+    for option, (scarce, side) in expected.items():
+        card, sentence = cards[f"{option} value"], f"{n_itm} of 100,000 paths finish {side} the money"
+        assert _shown(card.delta) == f"Interval unreliable: {n_itm} {scarce} paths"
+        assert table.loc[option, "95% interval"] == f"Interval unreliable: {sentence}"
+        assert _shown(card.proto.help) == (
+            f"Interval unreliable: {sentence}. Standard error ${res['call'].std_error:.4f}. The 95% interval, price ± "
+            f"1.96 SE, is not shown: with fewer than 300 paths finishing {side} the money it covers the value in less "
+            "than 95% of runs (88% with 10 such paths, 92% with 30, 94% with 100)."
+        )
+    # The prices and the standard error are still shown, but not the interval's formula, which invited the user to
+    # work out by hand the interval the cards withhold.
+    assert _dollars(cards["Call value"].value) == pytest.approx(res["call"].price, abs=5e-5)
+    assert _dollars(cards["Std. error"].value) == pytest.approx(res["call"].std_error, abs=5e-5)
+    assert not any("1.96" in c.value for c in at.caption if c.value.startswith("Standard error"))
+    assert any(f"fewer than {monte_carlo.RELIABLE_PATHS} paths" in c.value for c in at.caption)
+
+
+def test_monte_carlo_interval_withheld_for_too_few_independent_samples():
+    # The sidebar draws 10,000 paths or more (5,000 antithetic pairs, the fewest for which an interval is shown), but
+    # the text says why for any result: here 500 pairs, with thousands of paths on each side of the strike.
+    res = monte_carlo.price_european(100, 100, 1, 0.05, 0.2, 0, n_paths=1_000, seed=1)["call"]
+    assert not res.reliable and min(res.n_itm, res.n_paths - res.n_itm) >= monte_carlo.RELIABLE_PATHS
+    assert tab_pricing.mc_interval(res, short=True) == "Interval unreliable: too few paths"
+    assert tab_pricing.mc_interval(res, dollars=False) == "Interval unreliable: 1,000 paths, fewer than 10,000"
+    assert tab_pricing._mc_note(res).endswith(
+        "is not shown: with fewer than 5,000 independent samples (10,000 paths in antithetic pairs) the standard error "
+        "is itself too uncertain, and the interval covers the value in less than 95% of runs (93 to 94% with 500 "
+        "antithetic pairs and the control variate)."
+    )
+    plain = monte_carlo.price_european(100, 100, 1, 0.05, 0.2, 0, n_paths=1_000, seed=1, antithetic=False)["call"]
+    assert tab_pricing.mc_interval(plain) == "Interval unreliable: 1,000 paths, fewer than 5,000"
+    assert "(5,000 paths) the standard error" in tab_pricing._mc_note(plain)
 
 
 def test_greek_names_get_a_column_wide_enough_for_the_longest(app):

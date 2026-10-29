@@ -397,11 +397,11 @@ def _advances(weight: str) -> dict[str, float]:
 def test_the_card_width_model_covers_every_card_row_in_plex_sans(states):
     # Every card of a row is based on the row's widest card in the model. It must not be narrower than the widest
     # card's real text (Plex Sans advance widths): the value in Medium at 22.75 px, the label in Regular capitals at
-    # 10.08 px with its letter-spacing (plus its help icon) and the delta in Regular at 12.25 px, on one line or on
-    # two (a line of three cards on a phone), and the value at 16 px with the label one word per line (a pair on a
-    # phone). And no value is modelled narrower than it is, as the compact rows size their values from the model:
-    # "$46.62M" was modelled 0.11 em too narrow ("M" is 0.814 em wide), so on a 390 px phone it ran 2.6 px into its
-    # card's padding.
+    # 10.08 px with its letter-spacing (plus its help icon) and the delta in Regular at 12.25 px (plus its pill's
+    # padding), on one line or on two (a line of three cards on a phone), and the value at 16 px with the label one
+    # word per line (a pair on a phone). And no value is modelled narrower than it is, as the compact rows size their
+    # values from the model: "$46.62M" was modelled 0.11 em too narrow ("M" is 0.814 em wide), so on a 390 px phone
+    # it ran 2.6 px into its card's padding.
     medium, regular = _advances("Medium"), _advances("Regular")
     tracking = components._LABEL_TRACKING_EM * components._LABEL_PX
 
@@ -431,7 +431,9 @@ def test_the_card_width_model_covers_every_card_row_in_plex_sans(states):
 
         label_px = wrapped(metric.label, label) + components._HELP_ICON_PX
         value_width = text(metric.value, medium, value_px)
-        return max(value_width, label_px, wrapped(metric.proto.delta, delta)) + components._CARD_CHROME_PX
+        # A delta sits in a pill, with its padding on either side.
+        pill = wrapped(metric.proto.delta, delta) + components._DELTA_PADDING_PX if metric.proto.delta else 0.0
+        return max(value_width, label_px, pill) + components._CARD_CHROME_PX
 
     for at in states.values():
         for row, groups in _card_rows(at).items():
