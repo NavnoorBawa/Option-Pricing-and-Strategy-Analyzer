@@ -231,7 +231,10 @@ def _differences(kind: str, **inputs) -> dict[str, float]:
 def test_the_greeks_are_finite_differences_of_the_engine_in_the_tabs_units(new_app):
     at = _run(new_app, div="2")
     table = _table(at, "Greek").set_index("Greek")
-    assert list(table.index) == [f"{bs.GREEKS[n].label} {bs.GREEKS[n].symbol}" for n in GREEKS]
+    names = [f"{bs.GREEKS[n].label} {bs.GREEKS[n].symbol}" for n in GREEKS]
+    # The engine's 1-day decay follows theta: with a year to expiry the two agree to well within 10 % of the larger.
+    assert list(table.index) == [*names[:3], "1-day decay", *names[3:]]
+    table = table.drop(index="1-day decay")
     assert list(table["Unit"]) == [bs.GREEKS[n].unit for n in GREEKS]  # the units of the European table
     for kind in ("call", "put"):
         expected = _differences(kind, q=0.02)
@@ -294,7 +297,7 @@ def test_at_zero_rate_and_yield_rho_and_dividend_rho_are_black_scholes_mertons(k
 
 def test_at_zero_rate_and_yield_the_table_is_black_scholes_mertons_and_says_one_sided(new_app):
     at = _run(new_app, rate="0")
-    table = _table(at, "Greek").set_index("Greek")
+    table = _table(at, "Greek").set_index("Greek").drop(index="1-day decay")
     for kind in ("call", "put"):
         exact = bs.greeks(100, 100, 1.0, 0.0, 0.2, 0.0, kind)
         for name, shown in zip(GREEKS, table[kind.capitalize()], strict=True):
@@ -366,7 +369,9 @@ def test_an_option_exercised_at_once_has_the_greeks_of_its_exercise_value(new_ap
     assert call.basis == "exercise value" and call["delta"] == 1.0 and call["gamma"] == 0.0
     at = _run(new_app, spot="60")
     table = _table(at, "Greek").set_index("Greek")
-    assert list(table["Put"]) == [-1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # Exercised at once today and a day later, it is worth K - S at both: its 1-day decay (after theta) is zero too.
+    assert list(table["Put"]) == [-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert list(table.index)[3] == "1-day decay"
     [note] = [c.value for c in at.caption if c.value.startswith("American Greeks of the sidebar engine")]
     assert (
         "The put is exercised at once at this spot (at or below its critical spot), so its Greeks are those of its "

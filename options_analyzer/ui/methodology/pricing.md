@@ -78,3 +78,26 @@ the control variate on (the residuals are then constant). Calls and puts share
 draws and a fixed seed makes results reproducible. The sample-path chart draws the first 60 of these
 scenarios, each filled in from today to its sampled $S_T$ with a Brownian bridge (exact for GBM given the
 end point).
+
+### One-day decay
+The Greeks table, the option chain and the sensitivity explorer (dashed, in its theta view) show the *1-day decay*
+beside theta per day (see Conventions): the value with one calendar day less to expiry minus the value now, all else
+equal, or the intrinsic value minus the value now when the option expires within the day. It uses the model of the
+table it is in: the closed form for Black–Scholes–Merton, and the engine for the American engine. Under a binomial
+tree the Greeks table stays Black–Scholes–Merton's for European exercise, decay included, so with American exercise
+it is not the decay of the tree's American value in the price cards; the tree's Greeks give that one, and put it
+first by the same 10 % rule against the tree's own theta. Under Monte Carlo the decay is the closed-form one: the
+simulation estimates that same value, and the difference of two simulations would only add sampling error.
+
+On a tree the decay is the difference of two trees, so how the shorter tree is built decides its accuracy. Measured
+against the closed-form decay of European options (spot 100, strikes 80 to 120 in steps of 0.5, rate 5 %, no
+dividends, every expiry from 2 to 60 days and 13 more out to 3,650 days, 501 steps, decays of at least one cent) at
+10 %, 20 % and 50 % volatility: a Leisen–Reimer tree one day shorter keeps its steps, and as its error is smooth in
+$T$ the two errors cancel, to within ${1.6 \times 10^{-6}}$, ${4.0 \times 10^{-6}}$ and ${1.2 \times 10^{-5}}$ of
+the decay. The Cox–Ross–Rubinstein error swings with the strike's place among the final nodes, so the same steps
+were off by up to 4.4 %, 8.5 % and 6.0 %. Its shorter tree keeps the time step instead, which keeps the final nodes
+in place: the value is interpolated, linearly in the step count, between the two trees with the step count's parity
+whose time steps bracket the current one. That is within 0.55 %, 1.5 % and 0.66 % of the decay (99 % of cases within
+0.08 %, 0.12 % and 0.19 %); the nearest of those two trees alone was off by up to 1.1 %, 2.3 % and 2.2 %. Both
+trees' errors grow as the steps fall: at 20 % volatility and 101 steps, up to 11 % for Cox–Ross–Rubinstein (99 % of
+cases within 1.2 %) and ${9.7 \times 10^{-5}}$ for Leisen–Reimer; at 2,000 steps, 0.06 % and ${1.7 \times 10^{-7}}$.

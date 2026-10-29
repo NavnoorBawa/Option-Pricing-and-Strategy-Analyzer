@@ -309,11 +309,16 @@ def states():
 def test_every_metric_of_every_tab_is_in_a_card_row(states):
     # The Strategy, Risk and Surface tabs drew their metrics in st.columns, which stack one card per row on a phone.
     found = {}
-    for at in states.values():
+    for state, at in states.items():
         for row, groups in _card_rows(at).items():
-            found[row] = [[m.label for m in group] for group in groups]
             assert all(m.proto.show_border for group in groups for m in group), row
             assert any(f".st-key-{row} {{ container:" in s for s in _styles(at)), f"{row} has no stylesheet"
+            labels = [[m.label for m in group] for group in groups]
+            if state == "limits" and row == "greek_cards":
+                # One day to expiry: the decay to expiry takes theta's place (tab_strategy.decay_card).
+                assert labels == [["Delta (shares)", "Gamma"], ["Decay to expiry", "Vega / vol pt"]]
+                continue
+            found[row] = labels
     assert found == ROWS
 
 
