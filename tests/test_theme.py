@@ -934,7 +934,7 @@ def test_a_click_on_a_tab_runs_that_tab_and_puts_it_in_the_link(chromium, app_ur
     # the first) and keeps the Strategy tab's position while another tab is open: it reopens the same view.
     from options_analyzer.ui.app import TABS
 
-    page = _open(chromium, app_url, "light", 1440)
+    page = _open(chromium, f"{app_url}/?preset=Textbook", "light", 1440)
     try:
         for tab in (*TABS[1:], TABS[0]):
             _tab(page, tab)
@@ -950,7 +950,7 @@ def test_a_click_on_a_tab_runs_that_tab_and_puts_it_in_the_link(chromium, app_ur
         contracts.press("Enter")
         _settle(page)
         _tab(page, "Risk")
-        assert _query(page) == {"contracts": ["3"], "tab": ["Risk"]}
+        assert _query(page) == {"preset": ["Textbook"], "contracts": ["3"], "tab": ["Risk"]}
         analysed = "Long 1 × 100 Call, Short 1 × 110 Call · 3 × 100 multiplier"
         assert analysed in page.get_by_text("Analysing").inner_text()
         link = _open(chromium, page.url, "light", 1440)
@@ -969,25 +969,25 @@ def test_a_click_on_a_tab_runs_that_tab_and_puts_it_in_the_link(chromium, app_ur
 def test_a_hand_typed_link_opens_the_tab_and_template_it_names(chromium, app_url):
     # Streamlit reads a bound parameter verbatim and drops any other value; the app rewrites such a link before any
     # widget reads it, in one step: the address bar then shows the app's own link, one history entry later.
-    plain = _open(chromium, f"{app_url}/?tab=Risk", "light", 1440)
+    plain = _open(chromium, f"{app_url}/?tab=Risk&preset=Textbook", "light", 1440)
     entries = plain.evaluate("history.length")
     plain.close()
-    page = _open(chromium, f"{app_url}/?tab=risk&strategy=Iron+Condor", "light", 1440)
+    page = _open(chromium, f"{app_url}/?tab=risk&strategy=Iron+Condor&preset=Textbook", "light", 1440)
     try:
         page.locator(".st-key-var_hist [data-testid=stPlotlyChart]").wait_for(state="visible", timeout=120_000)
         assert page.locator("[role=tab][aria-selected=true]").inner_text().strip() == "Risk"
         condor = "Iron Condor — Long 1 × 80 Put, Short 1 × 90 Put, Short 1 × 110 Call, Long 1 × 120 Call"
         assert condor in page.get_by_text("Analysing").inner_text()
-        assert _query(page) == {"tab": ["Risk"], "strategy_category": ["Range-bound"],
+        assert _query(page) == {"tab": ["Risk"], "preset": ["Textbook"], "strategy_category": ["Range-bound"],
                                 "strategy_Range-bound": ["Iron Condor"]}  # fmt: skip
         assert page.evaluate("history.length") == entries + 1
         assert not page.locator("[data-testid=stAlertContentWarning]").count()
     finally:
         page.close()
-    page = _open(chromium, f"{app_url}/?tab=Risk&tab=IV&strategy=Iron+Condr", "light", 1440)
+    page = _open(chromium, f"{app_url}/?tab=Risk&tab=IV&strategy=Iron+Condr&preset=Textbook", "light", 1440)
     try:
         assert page.locator("[role=tab][aria-selected=true]").inner_text().strip() == "IV"
-        assert _query(page) == {"tab": ["IV"]}
+        assert _query(page) == {"tab": ["IV"], "preset": ["Textbook"]}
         note = page.locator("[data-testid=stAlertContentWarning]")
         assert "a strategy named Iron Condr, which is not one of the templates" in note.inner_text()
         assert note.locator("code").inner_text() == "Iron Condr" and not note.locator("a").count()
@@ -1006,7 +1006,7 @@ def _net_premium(page) -> str:
 def test_a_leg_edit_is_kept_when_another_tab_is_clicked_before_enter(chromium, app_url, tab):
     # The legs editor commits a cell when it loses the focus: a value typed into a cell and left by clicking another
     # tab arrives with the run that opens that tab, where the editor is not drawn. Clicking Pricing lost it.
-    page = _open(chromium, f"{app_url}/?tab=Strategy", "light", 1440)
+    page = _open(chromium, f"{app_url}/?tab=Strategy&preset=Textbook", "light", 1440)
     try:
         assert _net_premium(page) == "$441.05"  # long the 100 call, short the 110 call, for 100 shares
         grid = page.locator("[data-testid=stMain] [data-testid=stDataFrame]").first
@@ -1246,9 +1246,13 @@ def test_the_desk_shell_on_a_phone(chromium, app_url, inputs):
                 assert page.get_by_role("button", name=name).count() == 1, name
             lines = page.evaluate(_IDENTITY_LINES)
             assert len(lines) <= (2 if inputs == "default" and width == 390 else 3), (width, lines)
-            assert len(_items(lines[-1])) >= 2, (width, lines)  # balanced lines: no item alone on the last one
-            # A column beside the brand would need a line more on a phone: the ticker flows under the brand.
-            assert all(abs(start) < 1 for start in page.evaluate(_IDENTITY_STARTS)[1:]), width
+            # Balanced lines: no item alone on the last one, unless the ticker has two (the index's time and level).
+            items = sum(len(_items(line)) for line in lines)
+            assert len(_items(lines[-1])) >= min(2, items - 1), (width, lines)
+            # A column beside the brand would need a line more on a phone: the ticker flows under the brand. The
+            # index's two items (time and level) fit in two lines beside it, which start one under the other.
+            if inputs != "default":
+                assert all(abs(start) < 1 for start in page.evaluate(_IDENTITY_STARTS)[1:]), width
     finally:
         page.close()
 
@@ -1297,14 +1301,14 @@ def test_the_header_wraps_cleanly_on_a_laptop(chromium, app_url, inputs):
 @pytest.mark.e2e
 @pytest.mark.slow
 def test_the_share_link_reopens_this_view(chromium, app_url):
-    page = _open(chromium, f"{app_url}/?tab=Risk", "dark", 1440)
+    page = _open(chromium, f"{app_url}/?tab=Risk&preset=Textbook", "dark", 1440)
     try:
         page.locator("[data-testid=stSidebar] [data-testid=stNumberInputStepUp]").first.click()
         page.wait_for_function("() => location.search.includes('spot=101')", timeout=60_000)
         _settle(page)
         page.get_by_role("button", name="Share").click()
         link = page.locator("[data-testid=stPopoverBody] code").inner_text(timeout=30_000).strip()
-        assert link == page.url == f"{app_url}/?spot=101&tab=Risk"
+        assert link == page.url and _query(page) == {"spot": ["101"], "tab": ["Risk"], "preset": ["Textbook"]}
         page.keyboard.press("Escape")
         other = chromium.new_page(viewport={"width": 1440, "height": 900})
         try:

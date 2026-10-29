@@ -88,6 +88,21 @@
   white-space: nowrap;
 }
 
+/* The index preset's contract: the header strip's last row, under the identity and the actions, in the ticker's
+   monospaced figures, wrapping between items only (ui/header.py contract_line joins them with no-break spaces). */
+.st-key-desk_header > :has(> .st-key-contract_line) {
+  flex: 1 0 100% !important;
+}
+
+
+/* (The paragraph keeps its bottom margin: Streamlit's Markdown container takes it back with a negative one.) */
+.st-key-contract_line p {
+  line-height: 1.4;
+  font-family: 'IBM Plex Mono', 'IBM Plex Sans', monospace;
+  font-size: clamp(0.72rem, 2.8cqi, 0.8125rem);
+  font-variant-numeric: tabular-nums slashed-zero;
+}
+
 /* Compact buttons, a little shorter than the default 2.5rem. */
 .st-key-desk_actions button {
   min-height: 2rem;

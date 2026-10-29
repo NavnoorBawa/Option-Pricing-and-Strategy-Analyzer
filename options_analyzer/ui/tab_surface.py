@@ -14,12 +14,14 @@ import streamlit as st
 
 from .. import vol_surface as vs
 from . import cache, charts
+from . import market as mk
 from .components import card_row, current_key
 from .format import md_code
-from .inputs import Inputs
+from .inputs import Inputs, days_text
 
 SSVI = "Parametric (SSVI)"
 QUOTES = "Market quotes (CSV)"
+CHAIN = "Synthetic chain"
 #: Where each expiry's forward comes from when option prices are inverted (``vol_surface.parse_quotes``).
 FORWARD_CHOICES = {"Put-call parity": "parity", "Sidebar r, q": "rates"}
 #: How the SVI slices are fitted (``vol_surface.fit_market_surface``).
@@ -246,17 +248,49 @@ def _quote_controls(inputs: Inputs) -> vs.VolSurface | None:
     return surface
 
 
+def _chain_surface(inputs: Inputs) -> vs.VolSurface:
+    """The index preset's surface: the one fitted to the synthetic chain at the valuation time, which the sidebar's
+    contract reads its vol, forward and carry from (:mod:`.market`)."""
+    context = inputs.context
+    assert context is not None  # offered under the index preset only
+    quotes = context.quotes
+    expiries = quotes["Maturity (years)"].nunique()
+    st.caption(
+        f"{mk.SYNTHETIC_NOTE} The {mk.INDEX_ROOT} chain at {context.as_of:%d %b %Y %H:%M} ET: {len(quotes):,} bid/ask "
+        f"quotes over {expiries} expiries, read like an upload: each expiry's forward and discount factor from "
+        "put-call parity, prices inverted with Black-76, and an arbitrage-free SVI smile fitted to each expiry with "
+        "spread weights. The sidebar's contract takes its vol, forward and carry from this surface."
+    )
+    with st.expander(f"How the chain was read ({len(context.messages)} notes)", icon=":material/info:"):
+        for message in context.messages:
+            st.caption(message)
+    st.download_button(
+        "Download the chain (CSV)",
+        quotes.to_csv(index=False).encode(),
+        f"{mk.INDEX_ROOT.lower()}_chain_SYNTHETIC_{context.as_of:%Y%m%dT%H%M}.csv",
+        "text/csv",
+        on_click="ignore",
+        icon=":material/download:",
+        key="chain_csv",
+        help="The quotes this surface is fitted to, in the layout the Market quotes source reads.",
+    )
+    return context.surface
+
+
 FORWARD_SOURCE_LABELS = {"parity": "parity", "parity_forward": "parity (DF: rate)", "rates": "sidebar"}
 
 
 def _forwards(surface: vs.VolSurface, inputs: Inputs) -> None:
     """The forward and discount factor of every fitted expiry, and a warning where the quotes resolve a forward
-    that the sidebar rate and dividend yield miss (``vol_surface.carry_gaps``)."""
+    that the sidebar rate and dividend yield miss (``vol_surface.carry_gaps``). Not for the index preset's chain:
+    there every tab prices each expiry at its own parity forward, and the chain was read with the Treasury curve,
+    so the gap is the box spread, not a sidebar error."""
     table = surface.forwards
     if table is None or table.empty:
         return
+    chain = surface is getattr(inputs.context, "surface", None)
     gaps = vs.carry_gaps(table)
-    if gaps.any():
+    if gaps.any() and not chain:
         worst = float(np.max(np.abs(table["gap_bp"].to_numpy(float)[gaps])))
         st.warning(
             f"At {int(gaps.sum())} of {len(table)} expiries the forward that put-call parity reads from the quotes "
@@ -278,6 +312,8 @@ def _forwards(surface: vs.VolSurface, inputs: Inputs) -> None:
             "Source": table["source"].map(FORWARD_SOURCE_LABELS),
         }
     )
+    if chain:
+        shown = shown.drop(columns="Gap to sidebar (bp)")
     with st.expander("Forwards and discounting", icon=":material/compare_arrows:"):
         st.dataframe(
             shown,
@@ -339,7 +375,7 @@ def _maturity_labels(maturities: np.ndarray) -> list[str]:
 def _contract_readout(surface: vs.VolSurface, inputs: Inputs) -> None:
     moneyness = inputs.strike / inputs.spot
     iv = surface.implied_vol_at(moneyness, inputs.expiry, extrapolate=True)
-    where = f"strike {inputs.strike:,.2f} (K/S = {moneyness:.3f}) and expiry {inputs.days} days"
+    where = f"strike {inputs.strike:,.2f} (K/S = {moneyness:.3f}) and expiry {days_text(inputs.days)}"
     region = "quoted strikes" if surface.quotes is not None else "grid"
     if np.isfinite(iv):
         extrapolated = surface.is_extrapolated(moneyness, inputs.expiry)
@@ -451,10 +487,14 @@ def _smiles(surface: vs.VolSurface) -> None:
 
 @st.fragment
 def render(inputs: Inputs) -> None:
+    sources = [CHAIN, QUOTES, SSVI] if inputs.context is not None else [SSVI, QUOTES]
     source = st.segmented_control(
-        "Surface source", [SSVI, QUOTES], default=SSVI, required=True, key="surface_source", persist_state="session"
+        "Surface source", sources, default=sources[0], required=True, key="surface_source", persist_state="session"
     )
-    surface = _ssvi_controls(inputs) if source == SSVI else _quote_controls(inputs)
+    if source == CHAIN:
+        surface = _chain_surface(inputs)
+    else:
+        surface = _ssvi_controls(inputs) if source == SSVI else _quote_controls(inputs)
     if surface is None:
         return
 

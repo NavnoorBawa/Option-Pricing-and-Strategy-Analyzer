@@ -7,7 +7,7 @@ import urllib.parse
 
 import numpy as np
 import pytest
-from _apptest import make_app
+from _apptest import TEXTBOOK, make_app
 from scipy.stats import lognorm, norm
 from streamlit.proto.WidgetStates_pb2 import WidgetState
 from streamlit.testing.v1 import AppTest
@@ -299,7 +299,7 @@ def test_the_short_link_to_a_template_analyses_it_on_the_risk_tab():
     assert _editor_id(at) is None and _chart(at, "var_hist")
     _assert_heatmap_of(at, 100, [("put", 1, 80), ("put", -1, 90), ("call", -1, 110), ("call", 1, 120)])
     # The link now holds the parameters the Strategy tab's menus are bound to, so a copy of it reopens the same view.
-    assert at.query_params == {"tab": "Risk", **CONDOR_LINK}
+    assert at.query_params == {"tab": "Risk", **CONDOR_LINK} | TEXTBOOK
     assert not at.warning
     _open(at, "Strategy")
     assert at.selectbox(key="strategy_category").value == "Range-bound"
@@ -340,7 +340,7 @@ def test_a_short_link_to_a_strategy_that_is_not_a_template_is_ignored_with_a_not
     assert (
         _analysed(at) == "Analysing **Bull Call Spread** — Long 1 × 100 Call, Short 1 × 110 Call · 1 × 100 multiplier"
     )
-    assert at.query_params == {"tab": "Risk"}
+    assert at.query_params == {"tab": "Risk"} | TEXTBOOK
     assert [w.value for w in at.warning] == notes
     at.number_input(key="contracts").set_value(2).run()  # the note is shown once
     assert not at.warning
@@ -376,7 +376,7 @@ def test_build_position_reads_a_link_as_the_controls_do(monkeypatch, query):
     monkeypatch.setattr(tab_risk, "render", lambda position: analysed.append(position) or real(position))
     _app("Risk", **query)
     page = AppTest.from_string(WITHOUT_CONTROLS)
-    page.query_params.update(query)
+    page.query_params.update(query | TEXTBOOK)
     page.run()
     assert not page.exception, [e.value for e in page.exception]
     assert not page.main.children  # nothing drawn in the main area

@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime
 
 import streamlit as st
 
-from .. import __version__
+from .. import __version__, clock
 from . import header, tab_iv, tab_methodology, tab_pricing, tab_risk, tab_strategy, tab_surface, theme
+from . import market as mk
 from .components import link_match
 from .format import md_code
-from .inputs import sidebar
+from .inputs import ASOF_RANGE, market_notes, sidebar
 from .model_config import ALO_SCHEMES, MODEL_ALIASES, MODELS, ModelConfig
 
 REPO_URL = "https://github.com/NavnoorBawa/Option-Pricing-and-Strategy-Analyzer"
@@ -29,6 +31,11 @@ TAB_ALIASES = {
     "Implied vol": "IV",
     "Implied volatility": "IV",
 }
+#: Other names a link may give a market preset (``?preset=index``).
+PRESET_ALIASES = {"index": mk.INDEX, "synthetic": mk.INDEX, "spx": mk.INDEX}
+#: Parameters that only the textbook market has: a link with any of them and no preset (a link from version 2)
+#: opens the textbook market, so that it reproduces the numbers it was made with.
+TEXTBOOK_PARAMS = ("spot", "days", "rate", "div")
 #: Session-state keys: the link was read (on the session's first run), and its notes, shown once.
 _LINK_READ, _LINK_NOTES = "link_read", "link_notes"
 #: Session-state key: the header's Methodology button was clicked, so this run opens the Methodology drawer.
@@ -40,6 +47,22 @@ def _shown(value: str) -> str:
     characters."""
     value = " ".join(value.split())
     return md_code(value if len(value) <= 40 else value[:39] + "…")
+
+
+def _link_asof(value: str) -> datetime | None:
+    """A valuation time typed in a link, as New York wall time on its 5-minute step: ``2026-10-23T16:00`` (the
+    widget's own form), with seconds or a time zone, or a date alone (``2026-10-23``: that day's close, or the close
+    of the trading day before it). None when it is not a date or is out of range."""
+    try:
+        moment = datetime.fromisoformat(value.strip().replace(" ", "T"))
+    except ValueError:
+        return None
+    if len(value.strip()) == 10:  # a date alone
+        moment = clock.market_close(clock.previous_trading_day(moment.date())).replace(tzinfo=None)
+    elif moment.tzinfo is not None:
+        moment = clock.to_new_york(moment)
+    moment = mk.snap(moment)
+    return moment if ASOF_RANGE[0] <= moment <= ASOF_RANGE[1] else None
 
 
 def _read_link() -> None:
@@ -89,6 +112,39 @@ def _read_link() -> None:
                 notes.append(
                     f"This link asks for a {what} named {_shown(value)}, which does not exist, so {default} is used."
                 )
+    # The market: a preset by its label or a short name (?preset=textbook), a version-2 link's typed inputs, and
+    # the valuation time in any ISO form.
+    if "preset" in params:
+        value = params.pop("preset")[-1]
+        preset = link_match(value, mk.PRESETS, aliases=PRESET_ALIASES)
+        if preset is not None:
+            if preset != mk.PRESETS[0]:  # the default preset has no parameter
+                params["preset"] = [preset]
+        elif value.strip():
+            notes.append(
+                f"This link asks for a market named {_shown(value)}, which does not exist, so the {mk.PRESETS[0]} "
+                "market is used."
+            )
+    elif any(key in params for key in TEXTBOOK_PARAMS):
+        params["preset"] = [mk.TEXTBOOK]
+    # SPX options are European: the index offers no American engine (model_config.model_sidebar).
+    if params.get("preset", [mk.INDEX])[-1] == mk.INDEX and params.get("model", [None])[-1] == MODELS["alo"]:
+        params.pop("model")
+        params.pop("scheme", None)
+        notes.append(
+            f"This link asks for the American engine, but options on the {mk.INDEX} are European-exercise (as SPX "
+            f"options are), so {MODELS['bsm']} is used. The American engine prices the Textbook market."
+        )
+    if "asof" in params:
+        value = params.pop("asof")[-1]
+        moment = _link_asof(value)
+        if moment is not None:
+            params["asof"] = [f"{moment:%Y-%m-%dT%H:%M}"]
+        elif value.strip():
+            notes.append(
+                f"This link asks for a valuation time {_shown(value)}, which is not a date and time between 2000 "
+                "and 2097 (2026-10-23T16:00), so the last close is used."
+            )
     if "strategy" in params:
         name = params.pop("strategy")[-1]
         selection = tab_strategy.link_selection(name)
@@ -147,6 +203,8 @@ def run() -> None:
     drawer = st.session_state.pop(_DRAWER, False)
     for note in st.session_state.pop(_LINK_NOTES, ()):
         st.warning(note, icon=":material/link_off:")
+    for note in market_notes():
+        st.info(note, icon=":material/event:")
     if fallback:
         st.warning(fallback, icon=":material/warning:")
     tab_pricing.render_price_cards(inputs, prices)
@@ -184,7 +242,9 @@ def run() -> None:
         with methodology:
             tab_methodology.render()
     # Last, once every widget bound to the URL has written its value there.
-    header.fill_share(share)
+    header.fill_share(
+        share, pinned={"asof": f"{inputs.context.as_of:%Y-%m-%dT%H:%M}"} if inputs.context is not None else None
+    )
     # The Methodology drawer, over the open tab (which stays as it was), starting with that tab's section.
     if drawer:
         tab_methodology.drawer(next(label for label, tab in zip(TABS, tabs, strict=True) if tab.open))

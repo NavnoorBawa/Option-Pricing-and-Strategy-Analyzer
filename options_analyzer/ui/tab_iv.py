@@ -18,7 +18,7 @@ from ..implied_vol import (
 from . import cache, charts
 from .components import card_row, current_key
 from .format import md, money, pct
-from .inputs import Inputs
+from .inputs import Inputs, describe
 
 _TREE_LIMIT = (
     "The sidebar's binomial tree has too few steps to price this option at the volatilities needed; "
@@ -49,7 +49,7 @@ def render(inputs: Inputs) -> None:
     tree_name = f"{steps:,}-step {METHODS[method]} tree"
     engine_name = f"the sidebar's American engine ({model.scheme} scheme)"
     st.caption(
-        f"Uses the sidebar contract: S = {S:,.2f}, K = {K:,.2f}, {inputs.days} days, r = {r:.2%}, q = {q:.2%}. "
+        f"Uses the sidebar contract: {describe(inputs)}, S = {S:,.2f}, r = {r:.2%}, q = {q:.2%}. "
         "The quote starts at the model value at the sidebar volatility and is kept when you change the volatility "
         "or the exercise style; it starts again when the contract changes."
     )

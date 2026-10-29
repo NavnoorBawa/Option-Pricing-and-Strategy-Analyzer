@@ -4,6 +4,7 @@ import json
 import re
 
 import pytest
+from _apptest import TEXTBOOK
 from streamlit.proto.WidgetStates_pb2 import WidgetState
 from streamlit.testing.v1 import AppTest
 
@@ -227,7 +228,7 @@ def test_a_link_names_a_tab_without_case_or_punctuation(new_app, asked, tab):
     at = new_app(tab=asked).run()
     _ok(at)
     _assert_only_open(at, tab)
-    assert at.query_params == ({} if tab == TABS[0] else {"tab": tab})
+    assert at.query_params == ({} if tab == TABS[0] else {"tab": tab}) | TEXTBOOK
     assert not at.warning
 
 
@@ -236,7 +237,7 @@ def test_a_link_to_a_tab_that_does_not_exist_opens_the_first_with_a_note(new_app
     at = new_app(tab=asked).run()
     _ok(at)
     _assert_only_open(at, TABS[0])
-    assert at.query_params == {}
+    assert at.query_params == TEXTBOOK
     # An empty value asks for nothing. Any other is quoted as typed, in a code span: never a link.
     expected = f"This link asks for a tab named `{asked}`, which does not exist, so the Pricing tab is open."
     assert [w.value for w in at.warning] == ([expected] if asked.strip() else [])
@@ -252,7 +253,7 @@ def test_a_repeated_tab_parameter_gives_its_last_value(new_app, asked, tab):
     at.run()
     _ok(at)
     _assert_only_open(at, tab or TABS[0])
-    assert at.query_params == ({"tab": tab} if tab else {})
+    assert at.query_params == ({"tab": tab} if tab else {}) | TEXTBOOK
 
 
 def test_a_link_is_read_once_per_session(new_app, monkeypatch):
@@ -268,7 +269,7 @@ def test_a_link_is_read_once_per_session(new_app, monkeypatch):
     assert len(runs) == 2  # the first run stopped before the sidebar
     _open(at, "IV")
     assert len(runs) == 3 and at.query_params == {"tab": "IV", "strategy_category": "Range-bound",
-                                                  "strategy_Range-bound": "Iron Condor"}  # fmt: skip
+                                                  "strategy_Range-bound": "Iron Condor"} | TEXTBOOK  # fmt: skip
 
 
 def test_switching_tabs_runs_each_tab_in_turn(app):

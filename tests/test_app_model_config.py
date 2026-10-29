@@ -58,11 +58,12 @@ def test_model_labels(settings, label):
 def test_sidebar_takes_its_model_from_model_sidebar(monkeypatch):
     # inputs.sidebar() draws the market inputs and leaves the model section to model_config.model_sidebar().
     chosen = ModelConfig(kind="binomial", steps=2000, american=True)
-    monkeypatch.setattr(inputs, "model_sidebar", lambda: chosen)
-    assert inputs.sidebar().model is chosen  # outside a running app the market widgets return their defaults
+    monkeypatch.setattr(inputs, "model_sidebar", lambda **_: chosen)
+    # Outside a running app the market widgets return their defaults: the synthetic index at the last close.
+    assert inputs.sidebar().model is chosen
 
 
-MARKET = ["# Market", "Spot price", "Strike price", "Days to expiry", "Volatility (%)", "Risk-free rate (%)",
+MARKET = ["# Market", "Market", "Spot price", "Strike price", "Days to expiry", "Volatility (%)", "Risk-free rate (%)",
           "Dividend yield (%)", "# Pricing model", "Model"]  # fmt: skip
 
 

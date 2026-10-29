@@ -51,7 +51,7 @@ if TYPE_CHECKING:
 # pytester runs a separate pytest session inside a test (tests/test_harness.py checks this file's guards with it).
 pytest_plugins = ["pytester"]
 
-from _apptest import make_app  # noqa: E402  (shared with the test modules)
+from _apptest import ASOF, make_app  # noqa: E402  (shared with the test modules)
 from _oracles import ORACLE_LIBRARIES  # noqa: E402
 
 # --------------------------------------------------------------------------------------------- AppTest fixtures
@@ -61,15 +61,27 @@ from _oracles import ORACLE_LIBRARIES  # noqa: E402
 def new_app() -> Callable[..., AppTest]:
     """Factory for an app that has not run yet: ``new_app(spot=105, model="Monte Carlo")``.
 
-    Keyword arguments become URL query parameters (values are converted to text), exactly as in a shared link.
+    Keyword arguments become URL query parameters (values are converted to text), exactly as in a shared link. The
+    app opens on the textbook market unless ``preset`` is given (``_apptest.make_app``).
     """
     return make_app
 
 
 @pytest.fixture
 def app(new_app: Callable[..., AppTest]) -> AppTest:
-    """The app at its default URL, after its first run, with no exception raised."""
+    """The app on the textbook market (S = K = 100, one year, σ 20%, r 5%, q 0), after its first run, with no
+    exception raised."""
     at = new_app()
+    at.run()
+    assert not at.exception, at.exception
+    return at
+
+
+@pytest.fixture
+def index_app(new_app: Callable[..., AppTest]) -> AppTest:
+    """The app as a visitor first sees it, on the synthetic index, at the valuation time the tests pin
+    (``_apptest.ASOF``), after its first run, with no exception raised."""
+    at = new_app(preset=None, asof=ASOF)
     at.run()
     assert not at.exception, at.exception
     return at

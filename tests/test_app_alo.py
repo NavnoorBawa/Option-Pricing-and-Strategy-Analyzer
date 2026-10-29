@@ -181,7 +181,7 @@ def test_the_share_link_reopens_the_same_engine_and_scheme(new_app):
     _ok(at)
     assert at.sidebar.segmented_control(key="scheme").value == "high"
     [code] = _block(at, "desk_share").code
-    assert code.value == "?model=American+%28ALO%29&scheme=High"
+    assert code.value == "?model=American+%28ALO%29&scheme=High&preset=Textbook"
     # The link it shares opens the same model, scheme and values.
     again = new_app(**dict(urllib.parse.parse_qsl(code.value.removeprefix("?")))).run()
     _ok(again)

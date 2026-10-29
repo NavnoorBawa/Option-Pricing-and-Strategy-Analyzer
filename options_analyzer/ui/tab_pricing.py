@@ -239,11 +239,21 @@ def render_price_cards(inputs: Inputs, prices: Prices) -> None:
     S, T, r, q = inputs.spot, inputs.expiry, inputs.rate, inputs.dividend_yield
     forward = S * np.exp((r - q) * T)
     label, value, caption, help_text = _model_card(inputs, prices)
+    # An index option is quoted in cents (SPX ticks are $0.05 and $0.10); the textbook values keep four decimals.
+    decimals = 2 if inputs.context is not None else 4
+    if inputs.context is not None:
+        forward_help = (
+            "The expiry's forward from put-call parity on its quotes (C − P = DF·(F − K), fitted near the money), "
+            f"with discount factor {np.exp(-r * T):.6f}; the rate and dividend yield the models use are implied by "
+            "the two."
+        )
+    else:
+        forward_help = f"F = S·e^((r−q)T). Discount factor e^(−rT) = {np.exp(-r * T):.6f}."
     # The per-option notes are in the tooltips so the cards stay short on narrow screens.
     cards = [
-        ("Call value", money(prices.call, 4), md(prices.call_note)),
-        ("Put value", money(prices.put, 4), md(prices.put_note)),
-        ("Forward price", money(forward, 4), f"F = S·e^((r−q)T). Discount factor e^(−rT) = {np.exp(-r * T):.6f}."),
+        ("Call value", money(prices.call, decimals), md(prices.call_note)),
+        ("Put value", money(prices.put, decimals), md(prices.put_note)),
+        ("Forward price", money(forward, decimals), forward_help),
         (label, value, md(help_text)),
     ]
     card_row(*PRICE_CARDS, [(name, text, {"help": help_text}) for name, text, help_text in cards])
@@ -397,7 +407,7 @@ def _sensitivity(inputs: Inputs) -> None:
         x = np.linspace(0.01, max(1.0, 2.5 * sigma), 301)
         args, current, strike_x, x_title = (S, K, T, r, x, q), sigma * 100, None, "Volatility (%)"
     else:
-        x = np.linspace(1, max(inputs.days * 1.5, 30), 301)
+        x = np.linspace(min(1.0, inputs.days / 2), max(inputs.days * 1.5, 30), 301)
         args, current, strike_x, x_title = (S, K, x / 365.0, r, sigma, q), inputs.days, None, "Days to expiry"
 
     def curve(option_type):

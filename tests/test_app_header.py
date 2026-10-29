@@ -16,7 +16,7 @@ from streamlit.errors import StreamlitAPIException
 from streamlit.proto.WidgetStates_pb2 import WidgetState
 from streamlit.testing.v1 import AppTest
 
-from options_analyzer.ui import header
+from options_analyzer.ui import header, market
 from options_analyzer.ui.app import TABS
 from options_analyzer.ui.inputs import Inputs
 from options_analyzer.ui.model_config import ModelConfig
@@ -165,7 +165,9 @@ def test_the_share_popover_holds_the_link_to_this_view(new_app):
     at = new_app(spot=105, tab="Risk", strategy="Iron Condor").run()
     _ok(at)
     [code] = _block(at, "desk_share").code
-    assert code.value == "?spot=105&tab=Risk&strategy_category=Range-bound&strategy_Range-bound=Iron+Condor"
+    assert code.value == (
+        "?spot=105&tab=Risk&preset=Textbook&strategy_category=Range-bound&strategy_Range-bound=Iron+Condor"
+    )
     captions = [c.value for c in _block(at, "desk_share").caption]
     assert captions == ["Add this to the app's address to open this view:", header.SHARE_NOTE]
 
@@ -173,7 +175,10 @@ def test_the_share_popover_holds_the_link_to_this_view(new_app):
 #: Each URL parameter of the app (the key of a widget bound to the URL), and the words of the Share note that name
 #: it. The Strategy tab's template has one parameter per category, ``strategy_<category>``.
 LINK_WORDS = {
-    **dict.fromkeys(("spot", "strike", "days", "vol", "rate", "div"), "the market inputs"),
+    "preset": "the preset",
+    "asof": "valuation time",
+    **dict.fromkeys(("spot", "days", "rate", "div"), "typed inputs"),
+    **dict.fromkeys(("strike", "vol", "vol_src"), "the contract"),
     "model": "the pricing model",
     **dict.fromkeys(("tree", "steps", "style", "paths", "seed", "antithetic", "control_variate"), "its settings"),
     "scheme": "its settings",
@@ -215,17 +220,33 @@ def test_the_share_link_holds_the_strategy_settings(new_app):
     _ok(at)
     [code] = _block(at, "desk_share").code
     assert code.value == (
-        "?strategy_width_pct=5.00&contracts=3&multiplier=50&commission=0.65"
+        "?strategy_width_pct=5.00&contracts=3&multiplier=50&commission=0.65&preset=Textbook"
         "&strategy_category=Range-bound&strategy_Range-bound=Iron+Condor"
     )
 
 
-def test_the_share_popover_at_the_default_view(app):
-    assert not _block(app, "desk_share").code
-    assert [c.value for c in _block(app, "desk_share").caption] == [
-        "The app's address opens this view: every input is at its default.",
-        header.SHARE_NOTE,
-    ]
+def test_the_share_popover_at_the_default_view(new_app):
+    # The default view still gets a link with its valuation time: the default (the last close) moves with the
+    # clock, and the link must reopen the same numbers on another day.
+    at = new_app(preset=None).run()
+    _ok(at)
+    [code] = _block(at, "desk_share").code
+    assert code.value == f"?asof={market.last_close():%Y-%m-%dT%H:%M}"
+
+
+def test_the_share_popover_with_no_parameter_says_so():
+    # The textbook market's link always names its preset, and the index's its valuation time; with neither (a page
+    # with no market), the popover says that the address alone opens the view.
+    def page():
+        import streamlit as st
+
+        from options_analyzer.ui import header
+
+        header.fill_share(st.popover("Share"))
+
+    at = AppTest.from_function(page).run()
+    assert not at.code
+    assert at.caption[0].value == "The app's address opens this view: every input is at its default."
 
 
 def test_the_page_settings(new_app, monkeypatch):

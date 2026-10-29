@@ -76,12 +76,18 @@ class ModelConfig:
         return "Black-Scholes-Merton (closed form)"
 
 
-def model_sidebar() -> ModelConfig:
+def model_sidebar(*, european_only: bool = False) -> ModelConfig:
     """Draw the sidebar's "Pricing model" section and return the chosen model.
 
     The model radio and the settings of the chosen model (lattice, steps and exercise for a tree; paths, seed and
     variance reductions for Monte Carlo; the scheme of the American engine) are bound to the URL's query
     parameters, so a shared link reopens the same model.
+
+    Parameters
+    ----------
+    european_only : bool
+        The contract is European-exercise (the synthetic index: SPX options are): the American engine is not
+        offered and a tree values European exercise.
 
     Returns
     -------
@@ -98,9 +104,12 @@ def model_sidebar() -> ModelConfig:
     """
     sb = st.sidebar
     sb.header("Pricing model")
+    kinds = [kind for kind in MODELS if not (european_only and kind == "alo")]
+    if st.session_state.get("model") not in (None, *kinds):
+        st.session_state["model"] = kinds[0]  # the American engine, from the textbook market
     kind = sb.radio(
         "Model",
-        list(MODELS),
+        kinds,
         format_func=MODELS.get,
         key="model",
         bind="query-params",
@@ -120,9 +129,18 @@ def model_sidebar() -> ModelConfig:
             help="Leisen-Reimer converges smoothly and much faster; CRR is the classic tree.",
         )
         steps = sb.slider("Steps", 10, 2000, default.steps, step=1, key="steps", bind="query-params")
-        style = sb.segmented_control(
-            "Exercise", ["European", "American"], default="European", key="style", required=True, bind="query-params"
-        )
+        if european_only:
+            sb.caption("European exercise: SPX options are European-style.")
+            style = "European"
+        else:
+            style = sb.segmented_control(
+                "Exercise",
+                ["European", "American"],
+                default="European",
+                key="style",
+                required=True,
+                bind="query-params",
+            )
         config = ModelConfig(kind=kind, tree_method=method, steps=int(steps), american=style == "American")
     elif kind == "monte_carlo":
         n_paths = sb.select_slider(

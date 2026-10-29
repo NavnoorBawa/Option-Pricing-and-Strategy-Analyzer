@@ -17,11 +17,24 @@ APP_SCRIPT = ROOT / "main.py"
 APP_TIMEOUT = 120
 
 
+#: The valuation time that the tests of the synthetic index pin, so that their numbers do not depend on the day:
+#: Friday 23 October 2026 at the cash close.
+ASOF = "2026-10-23T16:00"
+#: The parameter that a link to the textbook market holds, as the app writes it.
+TEXTBOOK = {"preset": "Textbook"}
+
+
 def make_app(**query: object) -> AppTest:
-    """An app that has not run yet; keyword arguments become URL query parameters, exactly as in a shared link."""
+    """An app that has not run yet; keyword arguments become URL query parameters, exactly as in a shared link.
+
+    The app opens on the textbook market (``preset=Textbook``: S = K = 100, one year, σ 20%, r 5%, q 0), which most
+    tests check numbers against, unless ``preset`` is given: ``preset="index"`` for the synthetic index (pin ``asof``
+    too, :data:`ASOF`), or ``preset=None`` for the URL without the parameter (the app's default market)."""
     from streamlit.testing.v1 import AppTest
 
+    query.setdefault("preset", "Textbook")
     at = AppTest.from_file(str(APP_SCRIPT), default_timeout=APP_TIMEOUT)
     for name, value in query.items():
-        at.query_params[name] = str(value)
+        if value is not None:
+            at.query_params[name] = str(value)
     return at

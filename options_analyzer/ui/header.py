@@ -8,6 +8,10 @@ One row above the price cards, ``st.container(horizontal=True, key="desk_header"
   this exact view (:func:`share_link`) and a Methodology button (or Alt+Shift+M), with which the app opens the
   Methodology in a drawer on the right, over the open tab (:func:`.tab_methodology.drawer`).
 
+Under the synthetic index the ticker is market-level (:func:`index_ticker`: valuation time and index level), a
+SYNTHETIC badge (and an OVERRIDE one while the vol is typed) leads the action group, and the contract is the strip's
+last row (:func:`contract_line`).
+
 How the row wraps is set in ``static/desk.css``. The ticker wraps between its items, never inside one, in lines
 of balanced length. Where the ticker's two lines fit beside the brand, they start one under the other (a hanging
 indent), and the action group stays beside them while there is room; otherwise the group moves, whole, under the
@@ -20,6 +24,7 @@ group stays on one line down to a 360 px screen. :func:`logo` draws the monogram
 from __future__ import annotations
 
 import datetime as dt
+import math
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit, urlunsplit
@@ -30,7 +35,10 @@ from streamlit.delta_generator import DeltaGenerator
 from streamlit.errors import StreamlitAPIException
 
 from ..binomial import METHODS
+from ..market_data.synthetic import SYNTHETIC_LABEL
+from . import market as mk
 from .format import MINUS, expiry, level, pct
+from .format import date as short_date
 from .inputs import Inputs
 from .model_config import ModelConfig
 
@@ -42,9 +50,9 @@ BRAND = "Options Analytics"
 #: What the Share popover says the link holds: the inputs bound to the URL (``bind="query-params"``), which
 #: tests/test_app_header.py checks against the parameters the app writes.
 SHARE_NOTE = (
-    "The link holds the market inputs, the pricing model and its settings, the open tab, and the Strategy tab's "
-    "template, strike width, contracts, shares per contract and commission. Edited legs, uploaded quotes and the "
-    "other settings of a tab stay in this session."
+    "The link holds the market (the preset, and its valuation time or typed inputs), the contract, the pricing model "
+    "and its settings, the open tab, and the Strategy tab's template, strike width, contracts, shares per contract "
+    "and commission. Edited legs, uploaded quotes and the other settings of a tab stay in this session."
 )
 #: The keyboard shortcut of the Methodology button (Streamlit shows Option for Alt on a Mac).
 METHODOLOGY_SHORTCUT = "Alt+Shift+M"
@@ -72,7 +80,8 @@ def _rate(value: float) -> str:
 
 
 def ticker(inputs: Inputs, *, today: dt.date | None = None) -> str:
-    """The contract ticker: spot, strike, expiry date (days to expiry), volatility, rate, dividend yield and forward.
+    """The contract ticker: spot, strike, expiry date (days to expiry), volatility, rate, dividend yield and forward;
+    under the index preset, the valuation time, the index level and the contract (:func:`index_ticker`).
 
     The items are separated by `` · ``, and no item can break: its spaces are no-break spaces (U+00A0, also before
     the separator) and the hyphens of its date non-breaking hyphens (U+2011). A narrow screen thus wraps the ticker
@@ -98,6 +107,8 @@ def ticker(inputs: Inputs, *, today: dt.date | None = None) -> str:
     >>> ticker(market, today=dt.date(2026, 10, 26)).replace("\\xa0", " ").replace("\\u2011", "-")
     'S 5,812.37 · K 5,800.00 · 25-Nov-26 (30d) · σ 20.00% · r 5.00% · q 1.30% · F 5,830.07'
     """
+    if inputs.context is not None:
+        return index_ticker(inputs)
     forward = inputs.spot * np.exp((inputs.rate - inputs.dividend_yield) * inputs.expiry)
     items = (
         f"S {level(inputs.spot)}",
@@ -107,6 +118,58 @@ def ticker(inputs: Inputs, *, today: dt.date | None = None) -> str:
         f"r {_rate(inputs.rate)}",
         f"q {_rate(inputs.dividend_yield)}",
         f"F {level(float(forward))}",
+    )
+    return _SEPARATOR.join(item.replace(" ", "\xa0") for item in items)
+
+
+def index_ticker(inputs: Inputs) -> str:
+    """The index preset's ticker, which is market-level: the valuation time and the index level. The contract
+    (expiry, strike, vol, forward) is per expiry and has its own line above the price cards (:func:`contract_line`).
+
+    Examples
+    --------
+    >>> market = mk.index_market(dt.datetime(2026, 10, 23, 16, 0))
+    >>> inputs = Inputs(market.spot, 5815.0, 28.0, 0.15, 0.04, 0.01, ModelConfig(), mk.INDEX, market)
+    >>> index_ticker(inputs).replace("\\xa0", " ").replace("\\u2011", "-")
+    '23-Oct-26 16:00 ET · SPX 5,800.00'
+    """
+    context = inputs.context
+    assert context is not None  # the index preset
+    asof = context.as_of
+    items = (
+        f"{short_date(asof.date())} {asof:%H:%M} ET".replace("-", "\u2011"),
+        f"{mk.INDEX_ROOT} {level(inputs.spot)}",
+    )
+    return _SEPARATOR.join(item.replace(" ", "\xa0") for item in items)
+
+
+def contract_line(inputs: Inputs) -> str:
+    """The index preset's contract, for the line above the price cards: the expiry with its settlement and time to
+    it, the strike, the vol and where it comes from, the expiry's parity forward and discount factor, and the rate
+    and dividend yield they imply (which the models use). Items are joined like the ticker's and do not break.
+
+    Examples
+    --------
+    >>> market = mk.index_market(dt.datetime(2026, 10, 23, 16, 0))
+    >>> row = market.expiry_row(market.default_expiry())
+    >>> r, q = mk.carry(row["forward"], row["discount_factor"], market.spot, row["maturity"])
+    >>> inputs = Inputs(market.spot, 5815.0, row["maturity"] * 365, 0.1561, r, q, ModelConfig(), mk.INDEX, market,
+    ...                 row["expiry"], row["settlement"], row["maturity"], 0.1561)
+    >>> contract_line(inputs).replace("\\xa0", " ").replace("\\u2011", "-")
+    'SPX 20-Nov-26 AM 5,815 · 28d · σ 15.61% surface · F 5,813.91 · DF 0.99664 · r 4.43% · q 1.27%'
+    """
+    expiry_date = inputs.expiry_date
+    assert expiry_date is not None and inputs.surface_vol is not None  # the index preset
+    strike = f"{inputs.strike:,.0f}" if float(inputs.strike).is_integer() else level(inputs.strike)
+    source = "override" if inputs.vol_overridden else "surface"
+    items = (
+        f"{mk.INDEX_ROOT} {short_date(expiry_date)} {inputs.settlement} {strike}".replace("-", "\u2011"),
+        mk.span(inputs.days),
+        f"σ {pct(inputs.volatility, 2)} {source}",
+        f"F {level(inputs.forward)}",
+        f"DF {math.exp(-inputs.rate * inputs.expiry):.5f}",
+        f"r {_rate(inputs.rate)}",
+        f"q {_rate(inputs.dividend_yield)}",
     )
     return _SEPARATOR.join(item.replace(" ", "\xa0") for item in items)
 
@@ -192,7 +255,8 @@ def share_link(base: str | None, params: Mapping[str, Sequence[str]]) -> str:
     >>> share_link(None, {"tab": ["Risk"]})
     '?tab=Risk'
     """
-    query = urlencode([(key, value) for key, values in params.items() for value in values])
+    # A colon is allowed in a query (RFC 3986), so the valuation time reads 2026-10-23T16:00, not 16%3A00.
+    query = urlencode([(key, value) for key, values in params.items() for value in values], safe=":")
     if base is None:
         return f"?{query}" if query else ""
     parts = urlsplit(base)
@@ -265,6 +329,22 @@ def render(inputs: Inputs, *, on_methodology: Callable[[], None]) -> DeltaGenera
     # 390 px phone the ticker can flow under the brand and both take two lines.
     row.container(key="desk_identity").markdown(f"**{BRAND}** {text}")
     actions = row.container(horizontal=True, key="desk_actions", vertical_alignment="center", width="content")
+    if inputs.context is not None:
+        actions.badge(
+            "SYNTHETIC",
+            color="gray",
+            help=f"{SYNTHETIC_LABEL}: an SPX-like chain priced by the app's generator at the valuation time, with "
+            "bid/ask spreads and rounding, then read like real quotes.",
+        )
+    if inputs.vol_overridden:
+        assert inputs.surface_vol is not None
+        gap = (inputs.volatility - inputs.surface_vol) * 100
+        actions.badge(
+            "OVERRIDE",
+            color="orange",
+            help=f"σ {pct(inputs.volatility, 2)} typed over the surface's {pct(inputs.surface_vol, 2)} "
+            f"({gap:+.2f} vp).".replace("-", MINUS),
+        )
     model = f"Pricing model of the price cards: {inputs.model.label}."
     actions.badge(model_badge(inputs.model), color="gray", help=model)
     share = actions.popover("Share", icon=":material/link:", key="desk_share", help="Link to this view")
@@ -277,10 +357,12 @@ def render(inputs: Inputs, *, on_methodology: Callable[[], None]) -> DeltaGenera
         "(Option+Shift+M on a Mac).",
         shortcut=METHODOLOGY_SHORTCUT,
     )
+    if inputs.context is not None:  # the index preset's ticker is market-level: the contract is the strip's last row
+        row.container(key="contract_line").markdown(contract_line(inputs))
     return share
 
 
-def fill_share(popover: DeltaGenerator) -> None:
+def fill_share(popover: DeltaGenerator, *, pinned: Mapping[str, str] | None = None) -> None:
     """Write the link to the current view into the Share popover of :func:`render`.
 
     Call it after every widget bound to the URL has run: each writes its value into ``st.query_params`` as it runs
@@ -292,6 +374,9 @@ def fill_share(popover: DeltaGenerator) -> None:
     ----------
     popover : DeltaGenerator
         The Share popover that :func:`render` returned in this script run.
+    pinned : mapping of str to str, optional
+        Parameters the link holds even where the URL leaves them out at their default: the valuation time, whose
+        default (the last close) moves with the clock, so that the link reopens the same numbers on another day.
 
     Examples
     --------
@@ -305,7 +390,10 @@ def fill_share(popover: DeltaGenerator) -> None:
     >>> at.run().code[0].value
     '?spot=105'
     """
-    link = share_link(st.context.url, {key: st.query_params.get_all(key) for key in st.query_params})
+    params = {key: st.query_params.get_all(key) for key in st.query_params}
+    for key, value in (pinned or {}).items():
+        params.setdefault(key, [value])
+    link = share_link(st.context.url, params)
     with popover:
         if link.startswith("?"):
             st.caption("Add this to the app's address to open this view:")
