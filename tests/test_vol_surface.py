@@ -1050,8 +1050,10 @@ def test_prices_without_time_value_or_an_implied_vol_are_counted_apart_from_thos
     # A 30-day chain at 25 % plus three prices without an implied vol, each for its own reason: a put below its
     # intrinsic value, a call at its discounted intrinsic value (no time value; it used to be inverted to 0 and
     # dropped as "zero implied vol") and a call so close to its upper bound that its vol exceeds 2,000 % (which used
-    # to be counted as outside the bounds). And a put at the forward quoted at 1e-15, out of the money and so
-    # inverted, to a vol below 1e-12, which is zero to machine precision.
+    # to be counted as outside the bounds). And a put struck one part in 10¹³ below the forward quoted at 1e-15: out
+    # of the money, so inverted, to a vol of 1.1e-13, below 1e-12 and so zero to machine precision. (At the forward
+    # itself the sign of ln(F/K), and so the side the put is on, would depend on the last bit of exp; here ln(F/K) is
+    # 1e-13 and its rounding about 1e-16.)
     spot, rate, t = 100.0, 0.04, 30 / 365
     rows = []
     for strike in np.arange(80.0, 121.0, 5.0):
@@ -1063,7 +1065,7 @@ def test_prices_without_time_value_or_an_implied_vol_are_counted_apart_from_thos
         {"Strike": 117.5, "Days": 30, "Type": "put", "Price": 1.0},
         {"Strike": 82.5, "Days": 30, "Type": "call", "Price": intrinsic},
         {"Strike": 150.0, "Days": 30, "Type": "call", "Price": 99.9999},
-        {"Strike": spot * np.exp(rate * t), "Days": 30, "Type": "put", "Price": 1e-15},
+        {"Strike": spot * np.exp(rate * t) * (1 - 1e-13), "Days": 30, "Type": "put", "Price": 1e-15},
     ]
     clean, messages = vs.parse_quotes(pd.DataFrame(rows), spot, rate)
     assert len(clean) == 9 and np.allclose(clean["iv"], 0.25, atol=0.002)
