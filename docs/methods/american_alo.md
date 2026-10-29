@@ -244,11 +244,11 @@ limits 343 times (deltas down to $-1.00024$, gammas down to $-3725$).
 American bounds, with the messages of the tree solver; since the engine values $\sigma = 0$ exactly, the bracket
 starts there. A quote no more than $10^{-12}\max(S, K)$ above the zero-volatility value (or up to
 $10^{-10}\max(S, K)$ below it) is rejected with the reason `no_time_value`: every volatility up to some level gives
-that value (for a deep in-the-money put, every volatility at which exercising at once stays optimal), so the quote
-does not identify one. Unlike the European solver, which inverts a tiny out-of-the-money quote to full relative
-precision, this margin applies out of the money too, because near zero volatility the engine is accurate only in
-absolute terms (below a total volatility of $10^{-8}$ it is the zero-volatility value, within about
-$4 \times 10^{-9} S$).
+a value that close to it (exactly that value for a deep in-the-money put, at every volatility at which exercising at
+once stays optimal), so the quote does not identify one. Unlike the European solver, which inverts a tiny
+out-of-the-money quote to full relative precision, this margin applies out of the money too, because near zero
+volatility the engine is accurate only in absolute terms (below a total volatility of $10^{-8}$ it is the
+zero-volatility value, within about $4 \times 10^{-9} S$).
 
 ## Speed
 

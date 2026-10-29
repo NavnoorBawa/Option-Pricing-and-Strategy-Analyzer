@@ -48,6 +48,11 @@ def test_round_trip(K, T, sigma, r, q, kind):
         return
     # Measured: at most 1.0e-6, a 5-year call struck at 50 at 5 % volatility with 3.4e-10 of time value.
     assert iv == pytest.approx(sigma, rel=1e-5)
+    # And within what the rounding of the price moves the volatility, 8·ε·max(S, K)/vega: black_scholes.price and the
+    # conversion to the out-of-the-money price each round by a few ε·max(S, K). Measured: at most 1.7·ε·max(S, K)/vega
+    # (with NumPy 1.26 and SciPy 1.11 too). For a one-year option at the money at 30 % the bound is 4.5e-15.
+    vega = bs.greeks(100, K, T, r, sigma, q, kind)["vega"]
+    assert abs(iv - sigma) * vega <= 8 * EPS * max(100, K)
 
 
 @pytest.mark.parametrize(
@@ -830,8 +835,9 @@ def test_accuracy_does_not_depend_on_the_conditioning_once_there_is_time_value()
     error = np.abs(result.vol - sigma) / sigma
     solved = (result.reason == "") & (time_value > margin * (1 - 1e-3))
     # Measured: at most 7.7e-6, just above the margin (6.2e-6 with NumPy 1.26 and SciPy 1.11; seeds 2, 3 and 5 give
-    # 4.7e-6 to 5.4e-6, and exactly rounded prices instead of black_scholes.price 5.3e-6), falling in proportion to
-    # the time value (at most 6.4e-7 beyond ten margins).
+    # 4.7e-6 to 5.4e-6, 4.4e-6 to 6.9e-6 with the older libraries, and exactly rounded prices instead of
+    # black_scholes.price 5.3e-6), falling in proportion to the time value (at most 4.8e-7 beyond ten margins, 6.4e-7
+    # with NumPy 1.26 and SciPy 1.11; up to 1.5e-6 for other seeds, so this second bound holds for this set only).
     assert error[solved].max() < 1e-5
     assert error[solved & (time_value > 10 * margin)].max() < 1e-6
     # Out of the money with less time value than the margin (prices from 2.6e-21 up) the price keeps its relative
@@ -885,7 +891,8 @@ def test_american_quotes_at_and_just_above_the_zero_volatility_value(solver):
         solve(40.0, 60, 100, 1.0, 0.05, 0.0, "put")
     assert str(error.value) == (
         "price 40 is no more than 1e-10 (1e-12·max(S, K)) above the zero-volatility American value 40, which every "
-        "volatility up to some level gives, so it has no time value to identify a volatility from"
+        "volatility up to some level gives to within that margin, so it has no time value to identify a volatility "
+        "from"
     )
     with pytest.raises(ImpliedVolError) as error:
         solve(40 - margin * 1.001, 60, 100, 1.0, 0.05, 0.0, "put")
@@ -901,6 +908,12 @@ def test_american_quotes_at_and_just_above_the_zero_volatility_value(solver):
         with pytest.raises(ImpliedVolError) as error:
             solve(quote, 100, 100, 1.0, 0.05, 0.0, "put")
         assert error.value.reason == "no_time_value", quote
+    # Its value rises from 0 at any positive volatility (about K·σ²/(2r)·e^(-1) for small σ), so the message blames
+    # the engines' accuracy there, not a range of volatilities that all give 0.
+    assert str(error.value) == (
+        "price 9.99e-11 is no more than 1e-10 (1e-12·max(S, K)) above 0, the option's value at zero volatility, and "
+        "the American engines are not that accurate near zero volatility, so no volatility can be identified from it"
+    )
     expected, rel = (4.6e-6, 0.05) if solver == "engine" else (5.8e-4, 0.01)
     assert solve(1e-9, 100, 100, 1.0, 0.05, 0.0, "put") == pytest.approx(expected, rel=rel)
 
@@ -917,8 +930,7 @@ def test_american_engines_near_zero_volatility_are_as_documented():
 
 def test_american_call_without_dividends_agrees_with_the_european_solver_at_its_intrinsic_value():
     # Never exercised early, the call's zero-volatility value is the European lower bound: the engine (which values
-    # it as European) and implied_volatility agree on which quotes have time value, and on their volatility. 1e-4:
-    # at the margin a price rounding of ε·S is 2.2e-4 of the time value (and the engine's Brent works on prices).
+    # it as European) and implied_volatility agree on which quotes have time value, and on their volatility.
     from options_analyzer.implied_vol import implied_volatility_alo
 
     S, K, T, r = 100.0, 60.0, 2 / 365, 0.04
@@ -931,7 +943,13 @@ def test_american_call_without_dividends_agrees_with_the_european_solver_at_its_
             assert error.value.reason == "no_time_value", (solve, quote)
     for quote in (lower + margin * 1.001, lower + 1e-6, lower + 0.005):
         european = implied_volatility(quote, S, K, T, r, 0.0, "call")
-        assert implied_volatility_alo(quote, S, K, T, r, 0.0, "call") == pytest.approx(european, rel=1e-4), quote
+        engine = implied_volatility_alo(quote, S, K, T, r, 0.0, "call")
+        # The engine prices the call with its own formula: at one volatility the two values differ by their
+        # rounding, a fraction of ε·S, which moves the volatility by that over vega; and the engine's Brent stops
+        # within its tolerance, 1e-10. That bound is 5.1e-6, 9.2e-10 and 4.4e-11 relative here; measured: 7.8e-7,
+        # 8.2e-11 and 7.4e-12 (5.9e-7, 4.7e-11 and 7.5e-12 with NumPy 1.26 and SciPy 1.11).
+        vega = bs.greeks(S, K, T, r, european, 0.0, "call")["vega"]
+        assert abs(engine - european) <= EPS * S / vega + 1e-10, quote
 
 
 def test_a_quote_at_the_crr_trees_floor_is_not_given_a_volatility():
@@ -950,3 +968,38 @@ def test_a_quote_at_the_crr_trees_floor_is_not_given_a_volatility():
     )
     above = implied_volatility_american(floor + 1e-6, 100, 100, 1, 0.30, 0, "put", steps=10, method="crr")
     assert above > lowest
+    # A quote at the put's zero-volatility value, 0, has no time value on that tree too (it used to get
+    # "below_tree_floor", as if more steps could find its volatility).
+    with pytest.raises(ImpliedVolError) as error:
+        implied_volatility_american(0.0, 100, 100, 1, 0.30, 0, "put", steps=10, method="crr")
+    assert error.value.reason == "no_time_value"
+
+
+@pytest.mark.parametrize("steps", [10, 100])
+def test_a_deep_in_the_money_quote_at_the_crr_trees_floor_has_no_time_value(steps):
+    # The put struck at 100 with the spot at 60 (one year, rate 5 %) is worth 40, exercised at once, at every
+    # volatility up to 38.5 %, and so at the lowest the CRR tree represents (0.50 % with 100 steps, 1.58 % with 10).
+    # A quote there has no time value, as on the Leisen-Reimer tree and the engine; it used to be rejected as below
+    # the tree's floor ("use more steps or the Leisen-Reimer tree", which cannot help). Above the margin the tree
+    # finds the edge of that range.
+    from options_analyzer import binomial
+    from options_analyzer.implied_vol import implied_volatility_alo
+
+    lowest = lowest_tree_volatility(1.0, 0.05, 0.0, steps, "crr")
+    assert lowest == pytest.approx(0.05 / math.sqrt(steps), rel=1e-5)
+    assert binomial.price(60, 100, 1.0, 0.05, lowest, 0.0, "put", steps, american=True, method="crr") == 40.0
+    margin = 1e-12 * 100
+    for quote in (40.0, 40 + 1e-13 * 100, 40 + margin * 0.999, 40 - margin * 0.999):
+        messages = set()
+        for solve in (
+            lambda quote: implied_volatility_american(quote, 60, 100, 1.0, 0.05, 0.0, "put", steps=steps, method="crr"),
+            lambda quote: implied_volatility_american(quote, 60, 100, 1.0, 0.05, 0.0, "put"),
+            lambda quote: implied_volatility_alo(quote, 60, 100, 1.0, 0.05, 0.0, "put"),
+        ):
+            with pytest.raises(ImpliedVolError) as error:
+                solve(quote)
+            assert error.value.reason == "no_time_value", quote
+            messages.add(str(error.value))
+        assert len(messages) == 1, messages  # the same zero-volatility value, 40, and the same words
+    vol = implied_volatility_american(40 + margin * 1.001, 60, 100, 1.0, 0.05, 0.0, "put", steps=steps, method="crr")
+    assert vol == pytest.approx({10: 0.4252, 100: 0.3956}[steps], abs=1e-4)  # 0.3901 on the Leisen-Reimer tree

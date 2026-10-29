@@ -88,8 +88,8 @@ REJECTION_REASONS = {
     "no_time_value": "the price has no time value to identify a volatility from: it is at most 1e-12·max(S, K) above "
     "the option's value at zero volatility (in the money, the discounted intrinsic value; for an American option, "
     "typically the value of exercising now) and not below it by more than the solver tolerates, where its last digits "
-    "would decide the volatility; or, for a European option out of the money, it is zero (or underflows to zero once "
-    "divided by √(S e^(-qT)·K e^(-rT)))",
+    "(for an American option, the engine's error near zero volatility) would decide the volatility; or, for a "
+    "European option out of the money, it is zero (or underflows to zero once divided by √(S e^(-qT)·K e^(-rT)))",
     "at_or_above_upper_bound": "the price is at or above the no-arbitrage upper bound",
     "above_max_vol": f"the implied volatility exceeds {MAX_VOL:.0%}",
     "below_tree_floor": "the price is not above the value at the lowest volatility the binomial tree can represent",
@@ -343,7 +343,8 @@ class ImpliedVolBatch(NamedTuple):
     """Black-Scholes-Merton vega at the implied volatility, ``∂price/∂σ = S e^(-qT)·φ(d₁)·√T``, in price units per
     unit of volatility (1.00 = 100 vol points; divide by 100 for the vega per vol point); NaN where the quote was
     rejected. A price error ``δ`` moves the volatility by about ``δ/vega``, so a bid-ask spread divided by vega is
-    the spread in volatility: the weight of the quote in a fit to implied volatilities."""
+    the spread in volatility, and its inverse (or inverse square) weights the quote in a fit to implied volatilities:
+    the wider the spread in volatility, the less the quote counts."""
 
 
 # Index 0 is a solved quote; the others are the European rejection codes.
@@ -597,10 +598,16 @@ def implied_volatility_american(
     A quote no more than ``1e-12·max(S, K)`` above the tree's value at :data:`MIN_VOL` (the zero-volatility value,
     for example the value of exercising at once), or up to ``1e-10·max(S, K)`` below it (the tree's own error
     there), has no time value (reason ``"no_time_value"``), as in :func:`implied_volatility`: every volatility up
-    to some level gives that value (deep in the money, every volatility at which exercising at once stays optimal),
-    so the quote cannot single one out. The margin applies out of the money too, where the tree is accurate only in
-    absolute terms (see :func:`implied_volatility_alo`). On a CRR tree that cannot represent volatilities that low,
-    a quote not above the value at its lowest volatility (to the same margin) is rejected with the reason
+    to some level gives a value that close to it (deep in the money exactly that value, at every volatility at
+    which exercising at once stays optimal), so the quote cannot single one out. The margin applies out of the
+    money too, where the tree is accurate only in absolute terms (see :func:`implied_volatility_alo`).
+
+    A CRR tree cannot represent volatilities that low, so there the quote is also compared with the exact
+    zero-volatility value (the engine's, as in :func:`implied_volatility_alo`). As on the Leisen-Reimer tree, the
+    quote has no time value if it is no more than the margin above that value, or if the tree's value at its lowest
+    volatility is that value to the tree's error, ``1e-10·max(S, K)`` (deep in the money, where exercising at once
+    stays optimal up to there). Any other quote not above the value at the tree's lowest volatility (to the same
+    margin) has its volatility somewhere below what the tree represents: it is rejected with the reason
     ``"below_tree_floor"``.
     """
     price, S, K, T, r, q = _check_american_quote(price, S, K, T, r, q, option_type)
@@ -612,16 +619,22 @@ def implied_volatility_american(
     lowest = lowest_tree_volatility(T, r, q, steps, method)
     floor = objective(lowest)
     if floor >= -TIME_VALUE_MARGIN * scale:  # no more than the margin above the value at the lowest volatility
-        if lowest > MIN_VOL:  # a CRR tree's floor: the volatility may be anywhere below what the tree represents
-            where = "below" if floor > 0.0 else f"no more than {TIME_VALUE_MARGIN * scale:.2g} above"
-            raise ImpliedVolError(
-                f"price {price:.6g} is {where} {price + floor:.6g}, the value at {lowest:.4%} volatility, the lowest "
-                f"a {steps}-step CRR tree can represent; use more steps or the Leisen-Reimer tree",
-                "below_tree_floor",
-            )
-        if floor <= 1e-10 * scale:
-            raise _american_no_time_value(price, price + floor, scale)
-        raise _below_zero_volatility(price, price + floor)
+        zero = price + floor  # the zero-volatility value, to the tree's error, on a tree that reaches MIN_VOL
+        if lowest > MIN_VOL:
+            # A CRR tree's floor. The engine's exact zero-volatility value takes about 0.1 ms, only for quotes this low.
+            exact = float(american.price(S, K, T, r, 0.0, q, option_type=option_type))
+            if zero > exact + 1e-10 * scale:  # the floor has time value
+                if price > exact + TIME_VALUE_MARGIN * scale:  # the volatility is somewhere below the floor
+                    where = "below" if floor > 0.0 else f"no more than {TIME_VALUE_MARGIN * scale:.2g} above"
+                    raise ImpliedVolError(
+                        f"price {price:.6g} is {where} {zero:.6g}, the value at {lowest:.4%} volatility, the lowest "
+                        f"a {steps}-step CRR tree can represent; use more steps or the Leisen-Reimer tree",
+                        "below_tree_floor",
+                    )
+                zero = exact
+        if price >= zero - 1e-10 * scale:
+            raise _american_no_time_value(price, zero, S, K, T, r, q, option_type)
+        raise _below_zero_volatility(price, zero)
     hi = _upper_bracket(objective)
     return float(brentq(objective, lowest, hi, xtol=tol, maxiter=200))
 
@@ -672,7 +685,7 @@ def implied_volatility_alo(
     floor = objective(0.0)
     if floor >= -TIME_VALUE_MARGIN * max(S, K):
         if floor <= 1e-10 * max(S, K):
-            raise _american_no_time_value(price, price + floor, max(S, K))  # as in implied_volatility_american
+            raise _american_no_time_value(price, price + floor, S, K, T, r, q, option_type)  # as on the tree
         raise _below_zero_volatility(price, price + floor)
     hi = _upper_bracket(objective)
     return float(brentq(objective, 0.0, hi, xtol=tol, rtol=4 * np.finfo(float).eps, maxiter=200))
@@ -696,11 +709,23 @@ def _check_american_quote(price, S, K, T, r, q, option_type: str) -> tuple[float
     return price, S, K, T, r, q
 
 
-def _american_no_time_value(price: float, floor: float, scale: float) -> ImpliedVolError:
+def _american_no_time_value(
+    price: float, zero: float, S: float, K: float, T: float, r: float, q: float, option_type: str
+) -> ImpliedVolError:
+    """The :class:`ImpliedVolError` of an American quote no more than the margin above ``zero``, the option's value at
+    zero volatility (reason ``"no_time_value"``)."""
+    margin = f"{TIME_VALUE_MARGIN * max(S, K):.2g} (1e-12·max(S, K))"
+    if american_bounds(S, K, T, r, q, option_type)[0] == 0.0:  # worth 0 at zero volatility (out of the money)
+        # The value rises from 0 at any positive volatility, but the engines do not resolve it that close to 0.
+        return ImpliedVolError(
+            f"price {price:.6g} is no more than {margin} above 0, the option's value at zero volatility, and the "
+            "American engines are not that accurate near zero volatility, so no volatility can be identified from it",
+            "no_time_value",
+        )
     return ImpliedVolError(
-        f"price {price:.6g} is no more than {TIME_VALUE_MARGIN * scale:.2g} (1e-12·max(S, K)) above the "
-        f"zero-volatility American value {floor:.6g}, which every volatility up to some level gives, so it has no "
-        "time value to identify a volatility from",
+        f"price {price:.6g} is no more than {margin} above the zero-volatility American value {zero:.6g}, which "
+        "every volatility up to some level gives to within that margin, so it has no time value to identify a "
+        "volatility from",
         "no_time_value",
     )
 
