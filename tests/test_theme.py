@@ -630,6 +630,8 @@ def test_the_card_width_model_matches_plex_sans():
         r"\$10.4237 – \$10.4582, 95%",
         r"−\$0.0001 – \$1,234,567.8901, 95%",
         "Interval unreliable: 299 of 1,000,000 paths finish out of the money",
+        "Interval unreliable: 299 OTM paths",
+        "Interval unreliable: too few paths",
     ):
         assert set(delta.replace("\\", "")) <= set(components._DELTA_CHAR_EM), delta
         shown = delta.replace(r"\$", "$")
@@ -955,7 +957,10 @@ _PRICE_CARD_DELTAS = """() => [...document.querySelectorAll('.st-key-price_cards
 def test_monte_carlo_intervals_are_never_cut_off(chromium, app_url, width):
     # The cards' model made the pill of "$10.4237 – $10.4582, 95%" 13 px narrower than Chromium draws it (0.517 em a
     # character and no padding), so at a row's narrowest that interval would end in an ellipsis. Each card with a
-    # delta, reliable or not, is now modelled at most 2 px wider than its max-content width, never narrower.
+    # delta, reliable or not, is now modelled at most 2 px wider than its max-content width, never narrower. And on a
+    # desktop with the sidebar open the four cards stay on one line whether the interval is shown or withheld: the
+    # reason it was withheld, "Interval unreliable: 85 of 100,000 paths finish out of the money", made its card
+    # 387 px wide where four across leave 249 px a card at 1440 px, so the row went 2 + 2.
     from options_analyzer.ui import components
 
     for query in ("?model=Monte+Carlo", "?model=Monte+Carlo&strike=120&days=30"):
@@ -967,6 +972,12 @@ def test_monte_carlo_intervals_are_never_cut_off(chromium, app_url, width):
                 assert not card["cut"], (query, card)
                 model = components._card_width(card["label"].capitalize(), card["value"], delta=card["delta"])
                 assert card["natural"] <= model <= card["natural"] + 2, (query, card, model)
+            if width == 1440:
+                tops = page.evaluate(
+                    "() => [...document.querySelectorAll('.st-key-price_cards [data-testid=stMetric]')]"
+                    ".map(card => Math.round(card.getBoundingClientRect().top))"
+                )
+                assert len(tops) == 4 and len(set(tops)) == 1, (query, tops)
         finally:
             page.close()
 
