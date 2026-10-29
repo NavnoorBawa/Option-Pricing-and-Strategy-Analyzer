@@ -42,34 +42,51 @@ def _small_amount(value: float) -> str:
     return f"{value:.{max(0, 1 - math.floor(math.log10(value)))}f}"
 
 
-def _no_time_value_text(price: float, lower: float, scale: float, american: bool, model_quote: bool) -> str:
+def _no_time_value_text(
+    price: float, lower: float, scale: float, american: bool, model_quote: bool, option_type: str
+) -> str:
     """What the tab says for a quote the solvers reject with the reason ``no_time_value``.
 
     ``lower`` is the no-arbitrage lower bound, zero exactly when the option is worth nothing at zero volatility (out of
     the money); ``model_quote``: the quote is the model value at the sidebar volatility.
     """
+    margin = f"${_small_amount(TIME_VALUE_MARGIN * scale)} (one part in 10¹² of the larger of spot and strike)"
+    if lower <= 0.0 and american:
+        # The American engines' values near zero volatility are accurate only in absolute terms.
+        return md(
+            f"No implied volatility: the option is worth $0 at zero volatility, and a quote of {money(price, 4)} is "
+            f"no more than {margin} above that, closer than the American pricing engines can tell volatilities apart "
+            "there."
+        )
     if lower <= 0.0:
         return md(
             f"No implied volatility: an out-of-the-money option is worth only its time value, and a quote of "
             f"{money(price, 4)} has none."
         )
-    floor = (
-        "value at zero volatility (deep in the money, the value of exercising now)"
-        if american
-        else "intrinsic value, the no-arbitrage lower bound"
-    )
+    if american:
+        # The American solvers also take a quote up to 1e-10·max(S, K) below the zero-volatility value (their
+        # engines' error there) as on it, and that value can be above the bound shown (a later exercise date).
+        where = (
+            f"no more than {margin} above the option's value at zero volatility (deep in the money, the value of "
+            "exercising now)"
+        )
+    else:
+        # The European solver's margin holds on both sides of the bound. Its zero-volatility value is the discounted
+        # intrinsic value, not the max(S − K, 0) of the Time value card: at a 4 % rate a 2-day call struck at 60 is
+        # worth $40.0131 there, not $40.
+        discounted = "S·e^(−qT) − K·e^(−rT)" if option_type == "call" else "K·e^(−rT) − S·e^(−qT)"
+        where = (
+            f"within {margin} of the no-arbitrage lower bound, the discounted intrinsic value {discounted} = "
+            f"{money(lower, 4)}, which is the option's value at zero volatility"
+        )
     why = (
         "The model value at the sidebar volatility is such a quote: the option is that deep in the money."
         if model_quote
         else "This is typical deep in the money close to expiry."
     )
-    # The European solver's margin holds on both sides of the bound; the American solvers also take a quote up to
-    # 1e-10·max(S, K) below the zero-volatility value (their engines' error there) as on it.
-    margin = f"${_small_amount(TIME_VALUE_MARGIN * scale)} (one part in 10¹² of the larger of spot and strike)"
-    where = f"no more than {margin} above" if american else f"within {margin} of"
     return md(
-        f"No implied volatility: this quote has no time value. It is {where} the option's {floor}, and every "
-        "volatility from zero up to some level prices the option that close to it, so none can be singled out. "
+        f"No implied volatility: this quote has no time value. It is {where}, and every volatility from zero up to "
+        "some level prices the option that close to it, so none can be singled out. "
         f"{why} For a volatility at this strike, invert the out-of-the-money option's quote: it is all time value."
     )
 
@@ -177,7 +194,7 @@ def render(inputs: Inputs) -> None:
     except ImpliedVolError as exc:
         if exc.reason == "no_time_value":
             model_quote = abs(price - model_value) <= 1e-9 * max(S, K)
-            st.warning(_no_time_value_text(price, lower, max(S, K), american, model_quote))
+            st.warning(_no_time_value_text(price, lower, max(S, K), american, model_quote, option_type))
             return
         at_bound = min(abs(price - lower), abs(price - upper)) <= 1e-9 * max(S, K)
         if at_bound and abs(price - model_value) <= 1e-9 * max(S, K):

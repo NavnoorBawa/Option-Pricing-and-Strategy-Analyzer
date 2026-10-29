@@ -598,6 +598,21 @@ def test_iv_tab_says_when_an_american_quote_has_no_time_value(new_app):
     assert iv == pytest.approx(implied_vol.implied_volatility_alo(40.01, 60, 100, 1.0, 0.05, 0.0, "put"), abs=5e-6)
 
 
+def test_iv_tab_says_when_an_american_quote_is_within_the_margin_of_zero(new_app):
+    # The at-the-money put (rate 5 %) is worth 0 at zero volatility and more at any other, but near zero volatility
+    # the engines are accurate only in absolute terms, so a quote of 0 gets no volatility (the tab used to show 0 %).
+    at = _run(new_app, tab="IV")
+    _iv_type(at).set_value("put").run()
+    _quote(at).set_value(0.0).run()
+    _ok(at)
+    assert [w.value for w in at.warning] == [
+        "No implied volatility: the option is worth \\$0 at zero volatility, and a quote of \\$0.0000 is no more than "
+        "\\$0.00000000010 (one part in 10¹² of the larger of spot and strike) above that, closer than the American "
+        "pricing engines can tell volatilities apart there."
+    ]
+    assert "Implied volatility" not in _metrics(at)
+
+
 def test_iv_tab_checks_the_bounds_first_with_the_trees_messages(new_app):
     at = _run(new_app, tab="IV", strike="120")
     _iv_type(at).set_value("put").run()
