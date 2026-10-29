@@ -27,15 +27,32 @@ CONSTRAINT_REACH = 0.10
 #: there too, on WING_POINTS points in each wing. A cap of 1.5 alone is a hundred standard deviations for a six-hour
 #: expiry: holding the density positive that far bent the short smiles 0.3 vol point off at the money. Four
 #: standard deviations lie well beyond a 1-delta strike (about 2.3); on 200 random noisy SSVI surfaces the worst
-#: expiry's RMSE then grows by 6 % under the constraints, against 12 % at five and 14 % at six.
+#: expiry's RMSE then grows by 8.6 % under the constraints (7.4 % at five standard deviations, 9.5 % at six, all with
+#: BLAS threads: the reach is a choice of how far SVI's straight wings are trusted, hardly a cost of the fit).
 WING_CAP = 1.5
 WING_SDS = 4.0
 WING_POINTS = 15
 #: A fit meets the constraints only if it does on a dense grid as well (DENSE_POINTS over the constrained range, and
-#: points a fraction of s apart around the smile's vertex m, where g can turn within a width of s): points where it
-#: fails are added to the constraint grid and the fit solved again (at most CUTTING_ROUNDS times).
+#: points a fraction of s apart around the smile's vertex m, where g can turn within a width of s): the points where
+#: it fails are added to the constraint grid and the fit solved again (at most CUTTING_ROUNDS times), all of them
+#: where there are at most THIN_ABOVE, else CUT_POINTS evenly spaced ones and the worst of each stretch of them
+#: (:func:`_thinned`).
 DENSE_POINTS = 2001
 CUTTING_ROUNDS = 4
+THIN_ABOVE = 200
+CUT_POINTS = 5
+#: The solver's iterations for one slice, over all its starts and cutting-plane rounds (SLSQP_BUDGET), and for one
+#: solve (SLSQP_MAXITER, with SLSQP_FTOL its tolerance on the mean squared error in squared vol points); a start that
+#: has not met the constraints when the budget runs out fails, and a slice whose every start fails keeps its
+#: unconstrained fit with a note (see :func:`fit_svi`). The reviewer's slowest case, 20 expiries of 41 strikes with 8
+#: vol points of noise, took 3.9-14 s with BLAS threads (3.4-3.9 s with one) over four seeds, before the budget, the
+#: thinned cutting planes and the evaluation of the smile once per solver step; it takes 1.8-2.9 s after them (2.7-4.5
+#: s with one thread; 0.5-0.8 s unconstrained), on a shared four-core machine. No slice of the bundled sample quotes,
+#: of the synthetic SPX chains or of the 200 random surfaces of tests/test_svi_constraints.py runs out of it (the
+#: most any used is 419 iterations), so their fits are as they were.
+SLSQP_BUDGET = 600
+SLSQP_MAXITER = 300
+SLSQP_FTOL = 1e-12
 #: The calendar constraint holds where the two slices' quoted ranges overlap, widened by this fraction of their
 #: widths. Zero, as the roadmap's prototype found: over 200 random arbitrage-free SSVI surfaces with 0.2 vol point of
 #: noise, holding it 25 % beyond the quotes (where the surface's calendar check also compares slices for local vol)
@@ -197,9 +214,9 @@ def fit_svi(
     y,
     iv,
     T: float,
+    *,
     weights=None,
     previous: tuple[SVISlice, tuple[float, float]] | None = None,
-    *,
     arbitrage_free: bool = True,
 ) -> SVISlice:
     """Least-squares raw-SVI fit to implied vols ``iv`` at forward log-moneyness ``y`` and maturity ``T``.
@@ -215,7 +232,10 @@ def fit_svi(
     parameter whose gradient is cut to zero; a negative minimum variance and a
     breach of Lee's wing bound ``b (1 + |rho|) <= 2`` are penalised. Several
     quasi-explicit starting points (:func:`_svi_start_points`) are refined and
-    the best fit is kept. Noise-free SVI (hence SSVI) quotes are recovered to
+    the best fit is kept. The penalty leaves a wing slope a few parts in 1e5 above
+    Lee's bound at most (2.000059 measured), so the fit's ``b`` is then cut to it
+    (:func:`_within_lee`): every fit's wing slope is at most 2, with or without the
+    arbitrage constraints. Noise-free SVI (hence SSVI) quotes are recovered to
     solver precision.
 
     With ``arbitrage_free`` (the default) the fit is then checked for static arbitrage, on
@@ -226,23 +246,28 @@ def fit_svi(
     than the quotes' precision, on the overlap of the two quoted ranges only (enforcing it beyond the quotes
     over-constrains the smile). Where either fails, the nearest smile that holds ``g`` at :data:`G_MARGIN` or above
     and ``w`` at or above the previous slice's is found by sequential quadratic programming with analytic gradients,
-    from that optimum and, if it ends 10 % of RMSE worse, from the quasi-explicit starts; so on arbitrage-free quotes
-    the result is the unconstrained fit itself.
+    from that optimum and, if it ends 10 % of RMSE worse, from the quasi-explicit starts in turn until one ends within
+    those 10 %, and if none does, from the previous slice shifted up and from a nearly flat smile above it (which
+    meets the constraints); the best of them is kept. So on arbitrage-free quotes the result is the unconstrained fit
+    itself. Where no start reaches an arbitrage-free smile (within :data:`CUTTING_ROUNDS` rounds each and
+    :data:`SLSQP_BUDGET` iterations in all), the unconstrained fit is returned, arbitrage and all:
+    :func:`static_arbitrage` tells, and :func:`.surface.fit_market_surface` says so in a note.
     """
-    return fit_svi_pair(y, iv, T, weights, previous, arbitrage_free=arbitrage_free)[0]
+    return fit_svi_pair(y, iv, T, weights=weights, previous=previous, arbitrage_free=arbitrage_free)[0]
 
 
 def fit_svi_pair(
     y,
     iv,
     T: float,
+    *,
     weights=None,
     previous: tuple[SVISlice, tuple[float, float]] | None = None,
-    *,
     arbitrage_free: bool = True,
 ) -> tuple[SVISlice, SVISlice]:
     """:func:`fit_svi` and the fit without the arbitrage constraints: ``(fit, unconstrained)``, the same object
-    twice where the unconstrained fit has no arbitrage or ``arbitrage_free`` is False."""
+    twice where the unconstrained fit has no arbitrage, where ``arbitrage_free`` is False, or where no start reached
+    an arbitrage-free smile (then :func:`static_arbitrage` of the fit is not ``(False, False)``)."""
     y = np.asarray(y, dtype=float)
     iv = np.asarray(iv, dtype=float)
     weight = None if weights is None else np.asarray(weights, dtype=float)
@@ -329,7 +354,7 @@ def fit_svi_pair(
         best = step if step.cost <= best.cost else best
         if gain < 1e-3 * QUOTE_PRECISION:
             break
-    unconstrained = SVISlice(*map(float, unpack(best.x)))
+    unconstrained = _within_lee(SVISlice(*map(float, unpack(best.x))))
     if not arbitrage_free:
         return unconstrained, unconstrained
     constraints = _Constraints.build(lo, hi, T, previous, wing_reach(unconstrained))
@@ -345,16 +370,81 @@ def fit_svi_pair(
     def cost(fit: SVISlice) -> float:
         return float(np.sum((weights * (_vols(fit, y, T) - iv)) ** 2))
 
-    nearest = constraints.nearest(y, iv, T, weight, unconstrained)
+    budget = _Budget(SLSQP_BUDGET)
+    nearest = constraints.nearest(y, iv, T, weight, unconstrained, budget)
     # From the unconstrained optimum the search usually ends next to it; only a fit that lost more than 10 % of
     # RMSE (21 % of squared error) is worth the other starts.
     if nearest is not None and cost(nearest) <= 1.21 * cost(unconstrained):
-        return nearest, unconstrained
-    starts = (SVISlice(*map(float, x)) for x in _svi_start_points(y, iv, T, weights=weight))
-    feasible = [fit for fit in (nearest, *(constraints.nearest(y, iv, T, weight, start) for start in starts)) if fit]
+        return _within_lee(nearest), unconstrained
+    feasible = [nearest] if nearest is not None else []
+    for start in _svi_start_points(y, iv, T, weights=weight):
+        fit = constraints.nearest(y, iv, T, weight, SVISlice(*map(float, start)), budget)
+        feasible += [fit] if fit is not None else []
+        if fit is not None and cost(fit) <= 1.21 * cost(unconstrained):  # as good as the first is asked to be
+            break
+    if not any(cost(fit) <= 1.21 * cost(unconstrained) for fit in feasible):
+        # Two starts inside the calendar constraint, tried only where those above found nothing within the 10 %, so
+        # that wherever they do the fit is as before. The previous slice raised to this one's quotes (and a little
+        # more): where these quotes lie below the previous smile across the whole overlap, every other start ended
+        # with the solver's "inequality constraints incompatible" and the slice kept its arbitrage. A nearly flat
+        # smile above the previous one, which meets both constraints: on a 7-day slice with 8 vol points of noise
+        # and no previous slice, every other start ended the same way.
+        extra = [constraints.flat(y, iv, T)]
+        if previous is not None:
+            extra.insert(0, _raised(previous[0], y, iv, T))
+        for start in extra:
+            fit = constraints.nearest(y, iv, T, weight, start, budget)
+            feasible += [fit] if fit is not None else []
     if not feasible:
-        return unconstrained, unconstrained  # no start reached an arbitrage-free smile: the surface's checks report it
-    return min(feasible, key=cost), unconstrained
+        return unconstrained, unconstrained  # no start reached an arbitrage-free smile: the surface notes it
+    return _within_lee(min(feasible, key=cost)), unconstrained
+
+
+def _smile(p, points: np.ndarray, *, derivatives: bool = False) -> tuple[np.ndarray, ...]:
+    """``(w, dw/dy, d2w/dy2)`` of the raw SVI parameters ``p = (a, b, rho, m, s)`` at ``points``, and with
+    ``derivatives`` the three arrays of :meth:`SVISlice.parameter_derivatives` after them: the same arithmetic,
+    element by element, without building an :class:`SVISlice`, for the solver's many calls."""
+    a, b, rho, m, s = p
+    z = points - m
+    s2 = s * s
+    root = np.sqrt(z * z + s2)
+    values: tuple[np.ndarray, ...] = (a + b * (rho * z + root), b * (rho + z / root), b * s * s / root**3)
+    if not derivatives:
+        return values
+    r3, r5 = root**3, root**5
+    dw, dw_y, dw_yy = np.empty((len(z), 5)), np.empty((len(z), 5)), np.empty((len(z), 5))
+    dw[:, 0], dw[:, 1], dw[:, 2], dw[:, 3], dw[:, 4] = 1.0, rho * z + root, b * z, -b * (rho + z / root), b * s / root
+    dw_y[:, 0], dw_y[:, 1], dw_y[:, 2] = 0.0, rho + z / root, b
+    dw_y[:, 3], dw_y[:, 4] = -b * s2 / r3, -b * z * s / r3
+    dw_yy[:, 0], dw_yy[:, 1], dw_yy[:, 2] = 0.0, s2 / r3, 0.0
+    dw_yy[:, 3], dw_yy[:, 4] = 3.0 * b * s2 * z / r5, b * (2.0 * s / r3 - 3.0 * s**3 / r5)
+    return (*values, dw, dw_y, dw_yy)
+
+
+def _raised(previous: SVISlice, y: np.ndarray, iv: np.ndarray, T: float) -> SVISlice:
+    """The previous slice's smile raised by the median gap between it and the quotes' total variance (where they lie
+    above it) plus 1 % of their mean: a start of :func:`fit_svi_pair` that meets the calendar constraint."""
+    gap = float(np.median(iv * iv * T - previous.total_variance(y)[0]))
+    shift = max(gap, 0.0) + 0.01 * float(np.mean(iv * iv * T))
+    return SVISlice(previous.a + shift, previous.b, previous.rho, previous.m, previous.s)
+
+
+def _within_lee(fit: SVISlice) -> SVISlice:
+    """``fit`` with ``b`` cut to Lee's bound ``2 / (1 + |rho|)`` where it exceeds it (by a rounding-level amount after
+    the solvers, whose bound is a penalty or an inequality met to a tolerance), and ``a`` raised as much as keeps the
+    minimum variance from falling below zero; ``fit`` itself where it is within the bound."""
+    bound = 2.0 / (1.0 + abs(fit.rho))
+    if fit.b <= bound:
+        return fit
+    a = max(fit.a, -bound * fit.s * np.sqrt(1.0 - fit.rho * fit.rho)) if fit.min_variance >= 0 else fit.a
+    return SVISlice(float(a), float(bound), fit.rho, fit.m, fit.s)
+
+
+@dataclass(eq=False)
+class _Budget:
+    """The solver iterations left for one slice's arbitrage-free fit (:data:`SLSQP_BUDGET`)."""
+
+    left: int
 
 
 @dataclass(frozen=True, eq=False)  # holds arrays: compared by identity
@@ -396,18 +486,28 @@ class _Constraints:
     def _w_previous(self, y: np.ndarray) -> np.ndarray:
         return self.previous.total_variance(y)[0] if self.previous is not None and len(y) else np.zeros(len(y))
 
+    def flat(self, y: np.ndarray, iv: np.ndarray, T: float) -> SVISlice:
+        """A start that meets the constraints: an almost flat smile at the quotes' mean total variance, or a little
+        above the previous slice's highest on the overlap where that is higher."""
+        level = float(np.mean(iv * iv * T))
+        if self.overlap_span is not None:
+            level = max(level, 1.01 * float(self._w_previous(np.linspace(*self.overlap_span, DENSE_POINTS)).max()))
+        width = max(float(np.ptp(y)), 1e-4)
+        b = 1e-3 * level / width
+        return SVISlice(level - b * width, b, 0.0, float(np.mean(y)), width)
+
     def nearest(
-        self, y: np.ndarray, iv: np.ndarray, T: float, weight: np.ndarray | None, start: SVISlice
+        self, y: np.ndarray, iv: np.ndarray, T: float, weight: np.ndarray | None, start: SVISlice, budget: _Budget
     ) -> SVISlice | None:
         """The SVI smile nearest the quotes (weighted vol least squares) that meets the constraints, by SLSQP from
         ``start``, or None where the solver ends without meeting them.
 
         Inequalities: ``g >= G_MARGIN`` on the grid, ``w >= w_previous`` on the overlap, a non-negative minimum
         variance, and Lee's bound ``b (1 + |rho|) <= 2`` as its two smooth halves ``b (1 +- rho) <= 2``. A solution
-        that meets them on the sparse grids but not on the dense checks (:meth:`_failing`, :meth:`_falling`) has the
-        points where it fails added to the grids and is solved again from there (cutting planes): with all 520
-        points from the start, the solver's quadratic subproblems took 15 of the 16 seconds of the slowest of 200
-        noisy surfaces.
+        that meets them on the sparse grids but not on the dense checks (:meth:`_failing`, :meth:`_falling`) has a
+        few of the points where it fails (:func:`_thinned`) added to the grids and is solved again from there
+        (cutting planes): with all 520 points from the start, the solver's quadratic subproblems took 15 of the 16
+        seconds of the slowest of 200 noisy surfaces. It spends at most what is left of ``budget`` (iterations).
         """
         weights = np.ones_like(y) if weight is None else weight
         lo, hi = y.min(), y.max()
@@ -423,44 +523,61 @@ class _Constraints:
         def raw(x):
             return x * scale + offset
 
-        def cost(x):
-            w = np.maximum(SVISlice(*raw(x)).total_variance(y)[0], 1e-300)
+        n_y = len(y)
+        # SLSQP asks for the cost and the constraints at the same point, and then for both gradients at it: the
+        # smile is evaluated once per point, at the quotes and the constraint points together (the same arithmetic
+        # as SVISlice.total_variance and parameter_derivatives, element by element).
+        last: dict[bool, tuple[bytes, np.ndarray, tuple]] = {}
+
+        def smile(x, points, derivatives: bool):
+            key = x.tobytes()
+            if derivatives in last and last[derivatives][0] == key and last[derivatives][1] is points:
+                return last[derivatives][2]
+            values = _smile(raw(x), points, derivatives=derivatives)
+            last[derivatives] = (key, points, values)
+            return values
+
+        def cost(x, points, n_grid, w_previous):
+            w = np.maximum(smile(x, points, False)[0][:n_y], 1e-300)
             return float(np.mean((weights * (np.sqrt(w / T) - iv)) ** 2)) * 1e4  # in squared vol points
 
-        def cost_gradient(x):
-            fit = SVISlice(*raw(x))
-            w = np.maximum(fit.total_variance(y)[0], 1e-300)
+        def cost_gradient(x, points, n_grid, w_previous):
+            values = smile(x, points, True)
+            w, dw = np.maximum(values[0][:n_y], 1e-300), values[3][:n_y]
             vol = np.sqrt(w / T)
             # d/dp mean((wt (vol - iv))^2) = mean(2 wt^2 (vol - iv) dvol/dw dw/dp), dvol/dw = 1 / (2 sqrt(w T)).
             factor = 2.0 * weights**2 * (vol - iv) / (2.0 * np.sqrt(w * T))
-            return (factor @ fit.parameter_derivatives(y)[0]) / len(y) * 1e4 * scale
+            return (factor @ dw) / n_y * 1e4 * scale
 
-        def inequalities(x, grid, overlap):
+        def inequalities(x, points, n_grid, w_previous):
             p = raw(x)
-            fit = SVISlice(*p)
-            w, w_y, w_yy = fit.total_variance(grid)
+            values = smile(x, points, False)
+            on_grid = slice(n_y, n_y + n_grid)
+            grid = points[on_grid]
+            w, w_y, w_yy = (v[on_grid] for v in values)
             with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
                 g = durrleman_g(grid, np.maximum(w, 1e-300), w_y, w_yy)
             # Bounded, so that the solver stays finite where w is near zero on the way.
-            g = np.clip(np.nan_to_num(g, nan=-1.0), -1e3, 1e3)
-            calendar = (fit.total_variance(overlap)[0] - self._w_previous(overlap)) / variance_scale
+            g = np.clip(np.where(np.isnan(g), -1.0, g), -1e3, 1e3)
+            calendar = (values[0][n_y + n_grid :] - w_previous) / variance_scale
             a, b, rho, _, s = p
             minimum = (a + b * s * np.sqrt(max(1.0 - rho * rho, 0.0))) / variance_scale
             return np.concatenate([g - G_MARGIN, calendar, [minimum, 2.0 - b * (1.0 + rho), 2.0 - b * (1.0 - rho)]])
 
-        def inequality_jacobian(x, grid, overlap):
+        def inequality_jacobian(x, points, n_grid, w_previous):
             p = raw(x)
-            fit = SVISlice(*p)
-            w, w_y, _ = fit.total_variance(grid)
-            w = np.maximum(w, 1e-300)
-            dw, dw_y, dw_yy = fit.parameter_derivatives(grid)
+            values = smile(x, points, True)
+            on_grid = slice(n_y, n_y + n_grid)
+            grid = points[on_grid]
+            w, w_y = np.maximum(values[0][on_grid], 1e-300), values[1][on_grid]
+            dw, dw_y, dw_yy = (v[on_grid] for v in values[3:])
             with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
                 # g = 1 - (y/w) w' + (-1/4 - 1/w + y^2/w^2) w'^2 / 4 + w''/2, differentiated in w, w' and w''.
                 g_w = grid * w_y / w**2 + 0.25 * (1.0 / w**2 - 2.0 * grid**2 / w**3) * w_y**2
                 g_wy = -grid / w + 0.5 * (-0.25 - 1.0 / w + grid**2 / w**2) * w_y
                 rows_g = g_w[:, None] * dw + g_wy[:, None] * dw_y + 0.5 * dw_yy
-            rows_g = np.clip(np.nan_to_num(rows_g, nan=0.0), -1e8, 1e8)
-            rows_calendar = fit.parameter_derivatives(overlap)[0] / variance_scale
+            rows_g = np.clip(np.where(np.isnan(rows_g), 0.0, rows_g), -1e8, 1e8)
+            rows_calendar = values[3][n_y + n_grid :] / variance_scale
             _, b, rho, _, s = p
             q = np.sqrt(max(1.0 - rho * rho, 1e-300))
             rows_bounds = np.array(
@@ -486,23 +603,27 @@ class _Constraints:
         scaled_bounds = list(zip((low - offset) / scale, (high - offset) / scale, strict=True))
         grid, overlap = self.grid, self.overlap
         for _ in range(CUTTING_ROUNDS):
+            if budget.left <= 0:
+                return None
+            # The quotes and the constraint points, and the previous slice's variance there (once per round).
+            args = (np.concatenate([y, grid, overlap]), len(grid), self._w_previous(overlap))
             result = minimize(
                 cost,
                 x,
+                args=args,
                 jac=cost_gradient,
                 method="SLSQP",
                 bounds=scaled_bounds,
-                constraints=[
-                    {"type": "ineq", "fun": inequalities, "jac": inequality_jacobian, "args": (grid, overlap)}
-                ],
-                options={"maxiter": 300, "ftol": 1e-12},
+                constraints=[{"type": "ineq", "fun": inequalities, "jac": inequality_jacobian, "args": args}],
+                options={"maxiter": min(SLSQP_MAXITER, budget.left), "ftol": SLSQP_FTOL},
             )
+            budget.left -= max(int(result.nit), 1)
             x = result.x
             fit = SVISlice(*map(float, raw(x)))
             # A smile whose variance has collapsed far below the quotes' is a failed search, not a fit.
             if float(np.min(fit.total_variance(y)[0])) < 1e-3 * variance_scale:
                 return None
-            butterfly, calendar = self._failing(fit), self._falling(fit)
+            butterfly, calendar = self._failing(fit, thin=True), self._falling(fit, thin=True)
             if not (butterfly.size or calendar.size):
                 return fit
             grid, overlap = np.union1d(grid, butterfly), np.union1d(overlap, calendar)
@@ -515,25 +636,29 @@ class _Constraints:
         vertex = fit.m + fit.s * np.linspace(-8.0, 8.0, 161)
         return np.concatenate([dense, vertex[(vertex >= self.span[0]) & (vertex <= self.span[1])]])
 
-    def _failing(self, fit: SVISlice) -> np.ndarray:
-        """The points of the dense check where ``w <= 0`` or ``g <= 0``."""
-        y = self._dense(fit)
+    def _failing(self, fit: SVISlice, *, thin: bool = False) -> np.ndarray:
+        """The points of the dense check where ``w <= 0`` or ``g <= 0``; with ``thin``, those the cutting planes add
+        (:func:`_thinned`)."""
+        y = np.sort(self._dense(fit))
         w, w_y, w_yy = fit.total_variance(y)
         with np.errstate(divide="ignore", invalid="ignore"):
             g = durrleman_g(y, w, w_y, w_yy)
-        return y[(w <= 0) | ~(g > 0)]
+        bad = (w <= 0) | ~(g > 0)
+        return _thinned(y, bad, np.where(w > 0, np.nan_to_num(g, nan=-np.inf), -np.inf)) if thin else y[bad]
 
-    def _falling(self, fit: SVISlice) -> np.ndarray:
+    def _falling(self, fit: SVISlice, *, thin: bool = False) -> np.ndarray:
         """The points of a dense check of the overlap (:data:`DENSE_POINTS`) where the total variance falls below the
         previous slice's by more than the quotes' precision: each slice's quotes are precise to
         :data:`QUOTE_PRECISION` in vol, ``2 sqrt(w T)`` of it in total variance (as the surface's own calendar check,
-        ``local_vol._time_derivative``; this slice's ``T`` bounds both)."""
+        ``local_vol._time_derivative``; this slice's ``T`` bounds both). With ``thin``, those the cutting planes
+        add (:func:`_thinned`)."""
         if self.overlap_span is None:
             return np.empty(0)
         y = np.linspace(*self.overlap_span, DENSE_POINTS)
         w_previous = self._w_previous(y)
         tolerance = 2.0 * np.sqrt(np.maximum(w_previous, 0.0) * self.T) * QUOTE_PRECISION
-        return y[fit.total_variance(y)[0] - w_previous < -tolerance]
+        margin = fit.total_variance(y)[0] - w_previous + tolerance
+        return _thinned(y, margin < 0, margin) if thin else y[margin < 0]
 
     def met(self, fit: SVISlice) -> bool:
         """No butterfly arbitrage over the span (g > 0) and no fall below the previous slice beyond the precision."""
@@ -543,6 +668,28 @@ class _Constraints:
         """``(butterfly, calendar)``: whether ``fit`` has butterfly arbitrage on the dense check (g <= 0, or w <= 0)
         and whether its total variance falls below the previous slice's by more than the quotes' precision."""
         return bool(self._failing(fit).size), bool(self._falling(fit).size)
+
+
+def _thinned(y: np.ndarray, bad: np.ndarray, score: np.ndarray) -> np.ndarray:
+    """The points of sorted ``y`` that the cutting planes of :meth:`_Constraints.nearest` add: every ``bad`` point
+    where there are at most :data:`THIN_ABOVE` of them, else of each run of consecutive ones :data:`CUT_POINTS`
+    evenly spaced points (its ends among them) and the one with the lowest ``score``.
+
+    On noisy quotes adding every failing point grew the constraint grid to 1,000-2,000 points (the dense check is
+    2,001), and the solver's quadratic subproblems with it, which BLAS threads then slowed further: 20 expiries of 41
+    strikes with 8 vol points of noise took 12-14 s. The quotes the app is meant for fail at a few to 150 points, where
+    all are added as before. Three points per run were too few: on a slice whose previous smile bends sharply, the
+    stretch where the calendar constraint failed narrowed by only a quarter each round and was still there after
+    :data:`CUTTING_ROUNDS` rounds, from every start.
+    """
+    if bad.sum() <= THIN_ABOVE:
+        return y[bad]
+    edges = np.flatnonzero(np.diff(np.concatenate([[0], bad.astype(np.int8), [0]])))
+    picked: list[int] = []
+    for start, end in zip(edges[::2], edges[1::2], strict=True):  # each run is y[start:end]
+        picked += np.linspace(start, end - 1, min(end - start, CUT_POINTS)).round().astype(int).tolist()
+        picked.append(start + int(np.argmin(score[start:end])))
+    return np.unique(y[picked])
 
 
 def static_arbitrage(
