@@ -6,6 +6,9 @@ re-prices it leg by leg, so the numbers are consistent across the app.
 
 from __future__ import annotations
 
+import dataclasses
+import math
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -13,13 +16,20 @@ import streamlit as st
 from .. import risk, scenarios
 from .. import strategies as strat
 from . import cache, charts
-from .components import card_row, current_key
-from .format import md, money, money_short
+from .components import Card, card_row, current_key
+from .format import MINUS, SHORT_SCALES, md, money, money_short, signed
 from .tab_strategy import Position
 
 CONFIDENCE_LEVELS = (0.95, 0.975, 0.99, 0.995, 0.999)
 PATH_CHOICES = (10_000, 25_000, 50_000, 100_000, 250_000, 500_000)
 STRESS_HEADERS = {"IV shock damped": "IV damped", "Rate change (bp)": "Rate Δ (bp)"}
+#: The VaR simulation's default implied-vol dynamics, an equity index's (VIX-like): one-month implied vol with a
+#: volatility of 100% a year, moving against spot with a correlation of −0.7. With implied vol frozen instead, a
+#: 45-day at-the-money short straddle on an index (spot 5,800, vol 16%, r 4.3%, q 1.3%, one 100-share contract)
+#: shows a one-day 99% VaR of $2,833 (ES $3,683) against $3,862 ($4,737) with these dynamics (100,000 paths, seed
+#: 7): 27% less, on the most common vol position.
+INDEX_VOL_OF_VOL = 1.0
+INDEX_SPOT_VOL_CORRELATION = -0.7
 
 
 def shock_label(x: float) -> str:
@@ -252,6 +262,8 @@ def _stress_tests(position: Position) -> None:
     columns = ["Scenario", "P&L", "Spot change", "IV multiplier", "IV shock damped", "Rate change (bp)"]
     if elapsed or custom_on:
         columns += ["Days elapsed", "Legs expired"]
+    # A mark, not a checkbox: a CheckboxColumn drew toggles that looked editable in this read-only table.
+    table["IV shock damped"] = table["IV shock damped"].map({True: "yes", False: "—"})
     st.dataframe(
         # Short headers so that every one fits its narrow column; the help gives the full name.
         table[columns].rename(columns=STRESS_HEADERS),
@@ -263,9 +275,10 @@ def _stress_tests(position: Position) -> None:
             "IV multiplier": st.column_config.NumberColumn(
                 format="%.2fx", width="small", help="Multiplier on implied vol."
             ),
-            "IV damped": st.column_config.CheckboxColumn(
+            "IV damped": st.column_config.TextColumn(
                 width="small",
-                help="IV shock damped: a one-month shock, damped for longer-dated legs (see the toggle above).",
+                help="IV shock damped: yes for a one-month shock, damped for longer-dated legs (see the toggle "
+                "above); — for a shock applied as it is to every leg.",
             ),
             "Rate Δ (bp)": st.column_config.NumberColumn(
                 format="%+.0f", width="small", help="Rate change in basis points (100 bp = 1 percentage point)."
@@ -287,6 +300,55 @@ def _stress_tests(position: Position) -> None:
             "scales each leg's implied vol (less for longer tenors when damped); it does not set it to the index's "
             "level. They are stylised: single stocks can move far more than the index."
         )
+
+
+def _signed_short(value: float) -> str:
+    """:func:`money_short` with an explicit sign, the minus sign U+2212: ``+$1,029`` or ``−$18.40``."""
+    text = money_short(value, signed=True)
+    return MINUS + text[1:] if text.startswith("-") else text
+
+
+def _as_shown(value: float) -> float:
+    """The amount :func:`money_short` shows for ``value``, as a number: 54.29505 reads ``$54.30``, so 54.3.
+
+    Read back from the text, so that it follows the cards' precision by construction (cents below $1,000, whole
+    dollars below a million, then ``$1.23M``)."""
+    if not math.isfinite(value):
+        return value
+    text = money_short(abs(value)).removeprefix("$").replace(",", "")
+    scale = {suffix: size for size, suffix in SHORT_SCALES}.get(text[-1])
+    amount = float(text) if scale is None else float(text[:-1]) * scale
+    return math.copysign(amount, value)
+
+
+def _var_help(result: risk.VaRResult, meaning: str) -> str:
+    """Help of a VaR card: what it means, then the exact amount and its 95% simulation interval."""
+    lo, hi = result.var_ci95
+    return f"{meaning} Exact: {money(result.var)}; 95% simulation interval {money(lo)} to {money(hi)}."
+
+
+def _es_help(result: risk.VaRResult, vol: str) -> str:
+    """Help of an Expected Shortfall card; ``vol`` says what implied vol does in the simulation."""
+    return f"Average loss in the worst tail beyond VaR, {vol}. Exact: {money(result.expected_shortfall)}."
+
+
+def _risk_card(label: str, value: float, help_text: str, frozen: float | None = None) -> Card:
+    """A VaR or ES card: the amount shortened, ``help_text`` as its help, and a delta line with what the implied-vol
+    moves add to ``frozen``, the same measure with implied vol frozen (``+$1,029 vs spot only``). Without
+    ``frozen`` the card's own amount has implied vol frozen, and the line says so.
+
+    The delta is the difference of the two amounts as the cards show them, so that it adds up on screen: on the
+    default page the cards read $54.30 and $54.87 and the line −$0.57, where the exact amounts (54.295 and 54.873)
+    would give −$0.58."""
+    if frozen is None:
+        delta = "implied vol frozen"
+    else:
+        delta = md(f"{_signed_short(_as_shown(value) - _as_shown(frozen))} vs spot only")
+    return (
+        label,
+        money_short(value),
+        {"help": md(help_text), "delta": delta, "delta_color": "off", "delta_arrow": "off"},
+    )
 
 
 def _var(position: Position) -> None:
@@ -361,24 +423,26 @@ def _var(position: Position) -> None:
     c1, c2, c3 = st.columns(3)
     vol_dynamics = c1.toggle(
         "Simulate implied-vol moves",
-        value=False,
+        value=True,
         key="var_volmoves",
         persist_state="session",
-        help="Adds vega risk: log implied vol moves with the chosen vol-of-vol, correlated with spot.",
+        help="Adds vega risk: log implied vol moves with the chosen vol of vol, correlated with spot. On by default "
+        "with index (VIX-like) dynamics: vol of vol 100% a year and spot–vol correlation −0.7. The spot-only VaR "
+        "and ES, with implied vol frozen, are shown beside the result. Off, implied vol stays frozen.",
     )
-    vov, corr = 0.0, -0.7
+    vov, corr = 0.0, INDEX_SPOT_VOL_CORRELATION
     if vol_dynamics:
         vov = (
             c2.number_input(
                 "Vol of vol (% p.a.)",
                 0.0,
                 500.0,
-                100.0,
+                100 * INDEX_VOL_OF_VOL,
                 10.0,
                 key="var_vov",
                 persist_state="session",
-                help="Volatility of one-month implied vol; about 100% matches index (VIX) dynamics. Longer-dated "
-                "legs move less, damped by tenor like the stress tests.",
+                help="Volatility of one-month implied vol. The default, 100%, matches index (VIX-like) dynamics. "
+                "Longer-dated legs move less, damped by tenor like the stress tests.",
             )
             / 100
         )
@@ -386,11 +450,11 @@ def _var(position: Position) -> None:
             "Spot–vol correlation",
             -1.0,
             1.0,
-            -0.7,
+            INDEX_SPOT_VOL_CORRELATION,
             0.05,
             key="var_corr",
             persist_state="session",
-            help="Equity indices: about −0.7 (spot down, implied vol up).",
+            help="The default, −0.7, matches index (VIX-like) dynamics: spot down, implied vol up.",
         )
     seed = int(st.session_state.get("var_seed", 7))
 
@@ -411,46 +475,59 @@ def _var(position: Position) -> None:
     except ValueError as exc:
         st.error(str(exc))
         return
+    # The spot-only run re-prices the same spot paths with implied vol frozen: the simulation draws every spot shock
+    # before any vol shock, and vol shocks only for a positive vol of vol, so with one seed the two P&Ls differ path
+    # by path by the vol moves alone. Without vol moves the correlation does nothing, so it is fixed: a change of the
+    # vol dynamics then finds the spot-only run in the cache, and the toggle switched off finds it too.
+    frozen = dataclasses.replace(config, vol_of_vol=0.0, spot_vol_correlation=INDEX_SPOT_VOL_CORRELATION)
+    with_vol = config.vol_of_vol > 0
     with st.spinner("Simulating…"):
-        result = cache.value_at_risk(position.strategy, position.market, config, position.units)
+        spot_only = cache.value_at_risk(position.strategy, position.market, frozen, position.units)
+        result = spot_only
+        if with_vol:
+            result = cache.value_at_risk(position.strategy, position.market, config, position.units)
 
-    ci = md(f"{money(result.var_ci95[0])} to {money(result.var_ci95[1])}")
-    card_row(
-        "var_cards",
-        ("var_cards_all",),
-        [
-            (
-                f"VaR {confidence:.1%}",
-                money_short(result.var),
-                {
-                    "help": md(
-                        f"Loss not exceeded with {confidence:.1%} probability over {horizon} trading day(s). "
-                        f"Exact: {money(result.var)}; 95% simulation interval {money(result.var_ci95[0])} to "
-                        f"{money(result.var_ci95[1])}."
-                    )
-                },
+    level = f"{confidence:.1%}"
+    meaning = f"Loss not exceeded with {level} probability over {horizon} trading day(s)"
+    moving, still = "with spot and implied vol moving", "with implied vol frozen"
+    if with_vol:
+        # Side by side, so that the vega risk shows: what the implied-vol moves add to VaR and ES.
+        groups = ("var_cards_full", "var_cards_spot")
+        cards = [
+            _risk_card(f"VaR {level}", result.var, _var_help(result, f"{meaning}, {moving}."), spot_only.var),
+            _risk_card(
+                f"Expected Shortfall {level}",
+                result.expected_shortfall,
+                _es_help(result, moving),
+                spot_only.expected_shortfall,
             ),
-            (
-                f"Expected Shortfall {confidence:.1%}",
-                money_short(result.expected_shortfall),
-                {"help": md(f"Average loss in the worst tail beyond VaR. Exact: {money(result.expected_shortfall)}.")},
+            _risk_card(
+                f"Spot-only VaR {level}",
+                spot_only.var,
+                _var_help(spot_only, f"{meaning} on the same spot paths {still}, which leaves out the vega risk."),
             ),
-            (
-                "Delta-normal VaR",
-                money_short(result.delta_normal_var),
-                {
-                    "help": md(
-                        "Linear approximation |Δ|·S·σ·√(h/252)·z. Differences from full revaluation show the "
-                        f"position's non-linearity (gamma, vega). Exact: {money(result.delta_normal_var)}."
-                    )
-                },
-            ),
-        ],
-    )
-    st.caption(
-        f"Simulation uncertainty: the 95% confidence interval of the VaR estimate is {ci} "
-        f"(order statistics of the {n_paths:,} simulated outcomes)."
-    )
+            _risk_card(f"Spot-only ES {level}", spot_only.expected_shortfall, _es_help(spot_only, still)),
+        ]
+    else:
+        groups = ("var_cards_all",)
+        cards = [
+            _risk_card(f"VaR {level}", result.var, _var_help(result, f"{meaning}, {still} (no vega risk).")),
+            _risk_card(f"Expected Shortfall {level}", result.expected_shortfall, _es_help(result, still)),
+        ]
+    card_row("var_cards", groups, cards)
+    interval = f"{money(result.var_ci95[0])} to {money(result.var_ci95[1])}"
+    if with_vol:  # two VaRs on the cards: name the one each interval belongs to
+        lo, hi = spot_only.var_ci95
+        uncertainty = (
+            f"the 95% confidence intervals of the VaR estimates are {interval} with implied-vol moves and "
+            f"{money(lo)} to {money(hi)} spot only (order statistics of the {n_paths:,} simulated outcomes of each run)"
+        )
+    else:
+        uncertainty = (
+            f"the 95% confidence interval of the VaR estimate is {interval} (order statistics of the {n_paths:,} "
+            "simulated outcomes)"
+        )
+    st.caption(md(f"Simulation uncertainty: {uncertainty}."))
     charts.show(
         charts.histogram_chart(
             result.pnl,
@@ -476,14 +553,27 @@ def _var(position: Position) -> None:
             },
             {"Statistic": "Worst simulated P&L", "Value": money(result.worst, signed=True)},
             {"Statistic": "Best simulated P&L", "Value": money(result.best, signed=True)},
+            {"Statistic": f"Delta-normal VaR {level}", "Value": money(result.delta_normal_var)},
         ]
     )
+    vol_moves = (
+        f"implied vol moving (vol of vol {100 * config.vol_of_vol:g}% a year, correlation {signed(corr)} with spot)"
+        if with_vol
+        else "implied vol frozen"
+    )
+    # What delta-normal VaR leaves out, so what its gap to the full-revaluation VaR shows. One-day GARCH returns
+    # with Normal shocks are Normal (the variance starts at its long-run level), so their tails are no fatter.
+    left_out = "gamma, time decay and vega" if with_vol else "gamma and time decay"
+    if distribution == "student_t" or garch_t or (distribution == "garch" and horizon > 1):
+        left_out += ", and the fatter tails of the return model"
     c1, c2 = st.columns([1, 1.4])
     c1.dataframe(stats, hide_index=True)
     c2.caption(
         f"Full revaluation of every leg on {n_paths:,} simulated {risk.DISTRIBUTIONS[distribution]} paths "
-        f"(zero drift, volatility {position.market.volatility:.1%}), with {horizon} trading day(s) of time decay. "
-        "VaR and ES use the Acerbi–Tasche estimators on the sorted P&L."
+        f"(zero drift, volatility {position.market.volatility:.1%}), with {horizon} trading day(s) of time decay and "
+        f"{vol_moves}. VaR and ES use the Acerbi–Tasche estimators on the sorted P&L. Delta-normal VaR is the "
+        f"linear approximation |Δ|·S·σ·√(h/252)·z with Normal returns: its gap to the full-revaluation VaR shows "
+        f"the position's {left_out}."
         + (" Excess kurtosis is unstable for ν ≤ 4." if distribution == "student_t" or garch_t else "")
         + (
             f" {result.settled_legs} option leg(s) expire before the horizon and are settled on the simulated price "
