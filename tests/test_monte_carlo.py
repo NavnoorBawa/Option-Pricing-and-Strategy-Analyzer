@@ -1,10 +1,13 @@
 import numpy as np
 import pytest
+from scipy.special import ndtri
+from scipy.stats import binom
 
 from options_analyzer import black_scholes as bs
 from options_analyzer import monte_carlo as mc
 
 ARGS = (100, 110, 0.75, 0.04, 0.3, 0.01)
+_Z_95 = 1.959963984540054
 
 
 @pytest.mark.parametrize("antithetic", [False, True])
@@ -32,11 +35,140 @@ def test_reproducible_with_seed_and_parity_with_common_draws():
 
 
 def test_confidence_interval_coverage():
+    # Near the money both sides of the strike have over 1,600 of the 5,000 paths, so every interval is shown, and they
+    # cover the value at a rate inside the two-sided 99% binomial band around 95% (181 to 197 of 200): 187 of 200.
     ref = bs.price(*ARGS, "call")
-    hits = sum(
-        lo <= ref <= hi for lo, hi in (mc.price_european(*ARGS, n_paths=5_000, seed=s)["call"].ci95 for s in range(200))
-    )
-    assert 0.90 <= hits / 200 <= 0.99
+    results = [mc.price_european(*ARGS, n_paths=5_000, seed=s)["call"] for s in range(200)]
+    assert all(r.reliable for r in results)
+    hits = sum(lo <= ref <= hi for lo, hi in (r.ci95 for r in results))
+    low, high = binom.interval(0.99, len(results), 0.95)
+    assert low <= hits <= high
+
+
+# --- Reliability of the 95% interval ------------------------------------------------------------------------------
+
+#: The coverage study: a 30-day call at S = 100, r = 5%, sigma = 20%, q = 0, priced as the app prices it (antithetic
+#: pairs and the control variate) from 20,000 paths, with strikes at which about 10, 30, 100, 300 and 1,000 paths
+#: finish on the scarce side of the strike.
+STUDY = (100.0, 30 / 365, 0.05, 0.2, 0.0)
+STUDY_PATHS = 20_000
+STUDY_LEVELS = (10, 30, 100, 300, 1000)
+
+
+def _study_strike(level: int, deep: bool) -> float:
+    """The call strike at which ``level`` of ``STUDY_PATHS`` terminal prices are expected to finish in the money, or,
+    ``deep`` in the money, out of it: the closed-form probability P(S_T > K) = N(d2) is ``level / STUDY_PATHS``."""
+    S, T, r, sigma, q = STUDY
+    d2 = ndtri(level / STUDY_PATHS)
+    return S * np.exp((r - q - 0.5 * sigma**2) * T + (d2 if deep else -d2) * sigma * np.sqrt(T))
+
+
+def _coverage_study(level: int, seeds: range, deep: bool) -> bool:
+    """Price the study's call once per seed and check what the reliability flag promises. Returns whether the
+    coverage of all intervals, shown or not, falls short of the binomial band.
+
+    * The flag counts the scarce side of the strike: the in-the-money paths of an out-of-the-money call, the
+      out-of-the-money paths of a deep in-the-money one (the control variate takes out the payoff's linear part, so
+      what is left is the put's payoff on the same draws).
+    * The intervals flagged reliable cover the closed-form value at a rate inside the two-sided 99% binomial band
+      around 95% and of at least 93%: a rate of 0.95 lies outside that band in one study in 100.
+    * Where the coverage of all intervals, price ± 1.96 SE whether shown or not, falls short of that band, the flag is
+      raised (on every run, at levels so far below the threshold that no run reaches it).
+    """
+    S, T, r, sigma, q = STUDY
+    K = _study_strike(level, deep)
+    value = bs.price(S, K, T, r, sigma, q, "call")
+    results = [mc.price_european(S, K, T, r, sigma, q, ("call",), STUDY_PATHS, seed)["call"] for seed in seeds]
+    reliable = np.array([res.reliable for res in results])
+    covered = np.array([abs(res.price - value) <= _Z_95 * res.std_error for res in results])  # NaN: not covered
+    scarce = np.array([res.n_paths - res.n_itm if deep else res.n_itm for res in results])
+    np.testing.assert_array_equal(reliable, scarce >= mc.RELIABLE_PATHS)
+    # The interval shown is price ± 1.96 SE, and none is shown for an unreliable result.
+    for res, shown in zip(results, covered, strict=True):
+        low, high = res.ci95
+        assert (low <= value <= high) == (shown and res.reliable)
+    if reliable.any():
+        hits, flagged_reliable = int(covered[reliable].sum()), int(reliable.sum())
+        low, high = binom.interval(0.99, flagged_reliable, 0.95)
+        assert low <= hits <= high and hits >= 0.93 * flagged_reliable, (level, hits, flagged_reliable)
+    short = bool(covered.sum() < binom.interval(0.99, len(results), 0.95)[0])
+    if short:
+        assert not reliable.all(), level
+    if level <= 100:  # P(Poisson(100) >= 300) is below 1e-50: every run has fewer than 300 scarce paths.
+        assert not reliable.any(), level
+    if level >= 1000:
+        assert reliable.all(), level
+    return short
+
+
+@pytest.mark.parametrize("level", STUDY_LEVELS)
+def test_intervals_flagged_reliable_cover_the_value_95_percent_of_the_time(level):
+    # Coverage over seeds 0-399 (out-of-the-money call): 0.848 at about 10 in-the-money paths, 0.900 at 30, 0.935 at
+    # 100 (all flagged, the first two below the band of 368 to 390 hits in 400), 0.970 for the 199 intervals shown
+    # at 300 (0.953 for all 400) and 0.940 at 1,000 (all shown). This is a regression check at fixed seeds: of 50
+    # other blocks of 400 seeds, 4 fail, 3 of them on the 0.93 floor at 300 paths, where only about 200 intervals are
+    # shown and the floor is 1.3 standard errors below 95%. The slow study below, with 4,000 seeds, is the statistical
+    # check.
+    short = _coverage_study(level, range(400), deep=False)
+    assert short == (level <= 30)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("deep", [False, True], ids=["out of the money", "deep in the money"])
+@pytest.mark.parametrize("level", STUDY_LEVELS)
+def test_intervals_flagged_reliable_cover_the_value_95_percent_of_the_time_over_4000_seeds(level, deep):
+    # Coverage over seeds 0-3999, out-of-the-money call / deep in-the-money call (2 to 3 s each): 0.872 / 0.875 at
+    # about 10 scarce paths, 0.919 / 0.920 at 30, 0.935 / 0.935 at 100 (all flagged, and all below the band of 3,764
+    # to 3,835 hits in 4,000), 0.951 / 0.950 for the 2,068 intervals shown at 300 (band 0.937 to 0.962; 0.943 for all
+    # 4,000) and 0.946 / 0.946 at 1,000 (all shown). Over 20,000 seeds the out-of-the-money call covered 0.878, 0.922,
+    # 0.940, 0.946 and 0.947 (monte_carlo.RELIABLE_PATHS).
+    short = _coverage_study(level, range(4000), deep=deep)
+    assert short == (level <= 100)
+
+
+def test_reliability_flag_counts_the_scarce_side_of_the_strike():
+    # Exactly at the threshold: strikes between consecutive terminal prices leave 299 and then 300 paths in the money.
+    S, T, r, sigma, q = STUDY
+    draws = np.sort(mc.terminal_prices(S, T, r, sigma, q, STUDY_PATHS, 7))[::-1]
+    for n_itm in (mc.RELIABLE_PATHS - 1, mc.RELIABLE_PATHS):
+        K = 0.5 * (draws[n_itm - 1] + draws[n_itm])
+        res = mc.price_european(S, K, T, r, sigma, q, n_paths=STUDY_PATHS, seed=7)
+        call, put = res["call"], res["put"]
+        assert (call.n_itm, put.n_itm) == (n_itm, STUDY_PATHS - n_itm)
+        assert call.itm_fraction == n_itm / STUDY_PATHS
+        # With the control variate the deep in-the-money put rests on the call's paths too.
+        assert call.reliable == put.reliable == (n_itm >= mc.RELIABLE_PATHS)
+        assert np.isnan(call.ci95).all() != call.reliable and np.isnan(put.ci95).all() != put.reliable
+        # The standard error is still reported, the same for both (their control-variate residuals differ by a
+        # constant).
+        assert call.std_error == pytest.approx(put.std_error, rel=1e-9) and call.std_error > 0
+        # Averaged as it is, the put's payoff rests on its own in-the-money paths, which are almost all of them.
+        plain = mc.price_european(S, K, T, r, sigma, q, n_paths=STUDY_PATHS, seed=7, control_variate=False)
+        assert plain["call"].reliable == (n_itm >= mc.RELIABLE_PATHS) and plain["put"].reliable
+
+
+def test_results_without_an_error_estimate_or_without_sampling():
+    # No path in the money: the standard error is NaN, so nothing is reliable.
+    res = mc.price_european(100, 140, 30 / 365, 0.05, 0.2, 0.0, n_paths=100_000, seed=42)
+    assert (res["call"].n_itm, res["put"].n_itm) == (0, 100_000)
+    assert not res["call"].reliable and not res["put"].reliable
+    assert np.isnan(res["call"].ci95).all() and np.isnan(res["put"].ci95).all()
+    # Nothing to simulate: the value is exact, and so is its (empty) interval.
+    for T, sigma in ((0.0, 0.2), (1.0, 0.0)):
+        res = mc.price_european(100, 90, T, 0.05, sigma, 0.0, n_paths=1_000)
+        call, put = res["call"], res["put"]
+        assert (call.n_itm, put.n_itm) == (1_000, 0) and call.reliable and put.reliable
+        assert call.ci95 == (call.price, call.price) and call.std_error == 0.0
+
+
+def test_heavy_tailed_samples_count_the_scarce_side():
+    # Ten years at 300%: the put is averaged directly and the call follows by parity. Almost no simulated price
+    # finishes above the strike, so neither interval can be trusted (the prices are still right:
+    # test_heavy_tailed_samples_price_the_put_directly_and_the_call_by_parity).
+    res = mc.price_european(100, 100, 10, 0.05, 3.0, 0.0, n_paths=100_000, seed=42)
+    call, put = res["call"], res["put"]
+    assert call.heavy_tailed and call.n_itm < mc.RELIABLE_PATHS
+    assert not call.reliable and not put.reliable
 
 
 def test_degenerate_inputs_return_deterministic_values():
