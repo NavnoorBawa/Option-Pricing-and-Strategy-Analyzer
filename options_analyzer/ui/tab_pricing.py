@@ -291,33 +291,56 @@ def closed_form_decay(S, K, T, r, sigma, q, option_type: str):
     return later - bs.price(S, K, T, r, sigma, q, option_type)
 
 
-def later_tree_steps(steps: int, expiry: float, method: str) -> int:
-    """Steps of the tree that values an option one calendar day later (``steps`` and ``expiry`` are the current
-    tree's).
+def later_trees(steps: int, expiry: float, method: str) -> tuple[tuple[int, float], ...]:
+    """The trees that value an option one calendar day later, as ``(steps, weight)`` pairs whose weights add up to
+    one (``steps`` and ``expiry`` are the current tree's, ``expiry`` more than a day).
 
-    Measured on European options (spot 100, strikes 80 to 120, 20 % volatility, rate 5 %, 2 to 3,650 days, 501
-    steps), on every one-day decay of at least 1 cent per share. Leisen-Reimer keeps its steps: its error is smooth
-    in the expiry, so the two trees' errors cancel, to within 3e-6 of the closed-form decay (median 2e-7). The
-    Cox-Ross-Rubinstein error swings with the strike's place among the final nodes, and with the same steps the two
-    errors did not cancel: up to 5.0 % of the decay (median 0.18 %), and, counting smaller decays too, up to 21 times
-    the tree's own price error. The shorter tree therefore keeps the time step and the parity of the step count (the
-    next count up with that parity), which keeps the final nodes where they were: at most 1.5 % (median 0.05 %), and
-    3.8 times the price error. Its time step is never longer than the current tree's, so it is arbitrage-free
-    whenever the current tree is (p lies in (0, 1) exactly while |r − q| Δt < σ√Δt).
+    Measured on European options against the closed-form decay (spot 100, strikes 80 to 120 in steps of 0.5, rate
+    5 %, no dividends, 2 to 60 days and 13 expiries from 75 to 3,650 days, 501 steps), on every one-day decay of at
+    least 1 cent per share, at 10 %, 20 % and 50 % volatility:
+
+    * Leisen-Reimer keeps its steps: its error is smooth in the expiry, so the two trees' errors cancel, to within
+      1.6e-6, 4.0e-6 and 1.2e-5 of the decay (medians 3e-7 or less).
+    * The Cox-Ross-Rubinstein error swings with the strike's place among the final nodes. With the same steps the
+      two errors did not cancel: up to 4.4 %, 8.5 % and 6.0 % of the decay. The shorter tree therefore keeps the
+      time step, which keeps the final nodes where they were: its value is interpolated linearly in the step count
+      between the two counts with the current tree's parity (the final nodes of an odd and an even tree interleave)
+      that bracket ``steps · (expiry − 1 day) / expiry``, whose time steps bracket the current tree's. Within 0.55 %,
+      1.5 % and 0.66 % of the decay (99 % of cases within 0.08 %, 0.12 % and 0.19 %), where the next count up with
+      the parity alone was off by up to 2.1 %, 3.0 % and 2.9 %, and the nearest count by up to 1.1 %, 2.3 % and
+      2.2 %.
+    * Both scale with the steps. At 20 % volatility: with 101 steps, Cox-Ross-Rubinstein up to 11 % (99 % of cases
+      within 1.2 %) and Leisen-Reimer 9.7e-5; with 2,000 steps (strikes in steps of 2), 0.062 % and 1.7e-7. With a
+      3 % dividend yield and 501 steps, 0.64 % and 4.1e-6.
+
+    The lower count's time step is slightly longer than the current tree's, so its lattice can fail to be
+    arbitrage-free where the current one only just is (p lies in (0, 1) exactly while |r − q| Δt < σ√Δt); the
+    caller then uses the upper count alone (:func:`tree_decay`), whose time step is never longer. The lower count is
+    also left out when it is below one step or carries no weight (a whole number of steps keeps the time step
+    exactly).
     """
     if method != "crr":
-        return steps
-    later = max(1, math.ceil(steps * (expiry - ONE_DAY) / expiry - 1e-9))  # a whole number is not rounded up
-    return later + (later - steps) % 2
+        return ((steps, 1.0),)
+    exact = steps * (expiry - ONE_DAY) / expiry
+    lower = math.floor(exact + 1e-9)  # a whole number is not rounded down
+    lower -= (lower - steps) % 2
+    weight = max(exact - lower, 0.0) / 2.0  # of the upper count, two steps above
+    if lower < 1:
+        return ((lower + 2, 1.0),)
+    if weight < 1e-9:
+        return ((lower, 1.0),)
+    return ((lower, 1.0 - weight), (lower + 2, weight))
 
 
 def greeks_decay(inputs: Inputs, prices: Prices) -> dict[str, float]:
     """One-day decay of the call and the put ($ per share) by the model of the Greeks table: the American engine
     under that model, Black-Scholes-Merton otherwise.
 
-    Under a binomial tree or Monte Carlo the Greeks table is Black-Scholes-Merton's, so its decay is too: the tree's
-    own is in the tree's Greeks (:func:`tree_decay`), and Monte Carlo estimates the Black-Scholes-Merton value,
-    whose decay the closed form gives exactly, where the difference of two simulations would add sampling error.
+    Under a binomial tree or Monte Carlo the Greeks table is Black-Scholes-Merton's, so its decay is too, for
+    European exercise: the tree's own, with the tree's exercise style, is in the tree's Greeks (:func:`tree_decay`),
+    and the Greeks caption says that an American tree's is there (:func:`_decay_note`). Monte Carlo estimates the
+    Black-Scholes-Merton value, whose decay the closed form gives exactly, where the difference of two simulations
+    would add sampling error.
     """
     S, K, T, r, sigma, q = (
         inputs.spot,
@@ -339,10 +362,13 @@ def greeks_decay(inputs: Inputs, prices: Prices) -> dict[str, float]:
     return decay
 
 
-def tree_decay(inputs: Inputs, prices: Prices) -> dict[str, float]:
-    """One-day decay of the call and the put ($ per share) on the sidebar's tree: the value on a tree one calendar
-    day shorter (:func:`later_tree_steps`) minus the value on the tree now, with the tree's exercise style; with a
-    day or less to expiry, the intrinsic value minus the value now."""
+def tree_decay(inputs: Inputs, prices: Prices) -> tuple[dict[str, float], tuple[tuple[int, float], ...]]:
+    """One-day decay of the call and the put ($ per share) on the sidebar's tree, and the shorter trees it used.
+
+    The value on trees one calendar day shorter (:func:`later_trees`, weighted) minus the value on the tree now,
+    with the tree's exercise style; with a day or less to expiry, the intrinsic value minus the value now (and no
+    trees). Where the lower of two Cox-Ross-Rubinstein counts has no arbitrage-free lattice, the upper one alone.
+    """
     model = inputs.model
     S, K, T, r, sigma, q = (
         inputs.spot,
@@ -354,10 +380,22 @@ def tree_decay(inputs: Inputs, prices: Prices) -> dict[str, float]:
     )
     if to_expiry(T):
         later = {kind: max(bs.option_sign(kind) * (S - K), 0.0) for kind in cache.KINDS}
-    else:
-        steps = later_tree_steps(prices.tree["call"].steps, T, model.tree_method)
-        later = cache.tree_prices(S, K, T - ONE_DAY, r, sigma, q, steps, model.american, model.tree_method)
-    return {kind: later[kind] - prices.tree[kind].price for kind in cache.KINDS}
+        return {kind: later[kind] - prices.tree[kind].price for kind in cache.KINDS}, ()
+
+    def value(steps: int) -> dict[str, float]:
+        return cache.tree_prices(S, K, T - ONE_DAY, r, sigma, q, steps, model.american, model.tree_method)
+
+    trees = later_trees(prices.tree["call"].steps, T, model.tree_method)
+    try:
+        values = [(value(steps), weight) for steps, weight in trees]
+    except ValueError:  # the lower count's longer time step has no arbitrage-free lattice
+        trees = ((trees[-1][0], 1.0),)
+        values = [(value(trees[0][0]), 1.0)]
+    decay = {
+        kind: math.fsum(weight * later[kind] for later, weight in values) - prices.tree[kind].price
+        for kind in cache.KINDS
+    }
+    return decay, trees
 
 
 def _decay_row(decay: dict[str, float], expiring: bool) -> dict:
@@ -483,9 +521,9 @@ def _sensitivity(inputs: Inputs) -> None:
         "Value": ("value", 1.0, "Option value ($)"),
         "Delta": ("delta", 1.0, "Delta"),
         "Gamma": ("gamma", 1.0, "Gamma"),
-        "Theta / day": ("theta", 1 / 365, "Theta ($ per day)"),
-        # Repriced one calendar day later (closed_form_decay): against the days to expiry it shows where theta / 365
-        # stops being the cost of a day.
+        # Theta / 365 with the 1-day decay beside it (dashed); the decay alone, repriced one calendar day later
+        # (closed_form_decay), against the days to expiry shows where theta / 365 stops being the cost of a day.
+        "Theta / day": ("theta", 1 / 365, "Theta / 365 and 1-day decay ($)"),
         "1-day decay": ("decay", 1.0, "1-day decay ($)"),
         "Vega / vol pt": ("vega", 0.01, "Vega ($ per vol point)"),
         "Rho / 1%": ("rho", 0.01, "Rho ($ per 1% rate)"),
@@ -523,8 +561,20 @@ def _sensitivity(inputs: Inputs) -> None:
             return closed_form_decay(*args, option_type)
         return bs.greeks(*args, option_type)[name] * scale
 
+    # Against spot or volatility every point has the sidebar's expiry, so within a day of it the decay is the decay
+    # to expiry; against the days left only the first point (1 day) is, and "1-day decay" covers it.
+    decay = decay_label(kind != "days" and to_expiry(T))
+    dashed = None
+    if name == "decay":
+        y_title = f"{decay} ($)"
+    elif name == "theta":
+        # The repriced day beside the rate, dashed: they part within a few days of expiry.
+        y_title = f"Theta / 365 and {decay.lower()} ($)"
+        dashed = ("Theta / 365", decay, closed_form_decay(*args, "call"), closed_form_decay(*args, "put"))
     x_plot = x * 100 if kind == "vol" else x
-    fig = charts.sensitivity_chart(x_plot, curve("call"), curve("put"), x_title, y_title, current, strike_x)
+    fig = charts.sensitivity_chart(
+        x_plot, curve("call"), curve("put"), x_title, y_title, current, strike_x, dashed=dashed
+    )
     charts.show(fig, key="sensitivity_chart", alt=f"Call and put {y_title.lower()} against {x_title.lower()}")
     if note := _european_note(inputs):
         st.caption(note)
@@ -597,6 +647,45 @@ def _chain(inputs: Inputs) -> None:
     )
 
 
+def _tree_repricing(steps: int, expiry: float, method: str, trees: tuple[tuple[int, float], ...]) -> str:
+    """How the tree table's decay reprices, from the shorter trees it used (``trees``, from :func:`tree_decay`).
+
+    It says "this tree's time step" only where the shorter trees keep it: two trees interpolated to it, or one
+    whose time step equals it to 1e-9; otherwise it says how much shorter the one tree's time step is, and why.
+    """
+    if not trees:
+        return "the intrinsic value at expiry minus the tree value"
+    if method != "crr":
+        return (
+            "the value on a tree one day shorter with the same steps minus the value now (Leisen-Reimer's error is "
+            "smooth in the expiry, so the two trees' errors cancel)"
+        )
+    exact = steps * (expiry - ONE_DAY) / expiry  # the steps of a tree one day shorter with this tree's time step
+    kept = "(at the same time step the final nodes stay in place, so the trees' oscillating errors largely cancel)"
+    if len(trees) == 2:
+        (lower, _), (upper, _) = trees
+        return (
+            f"the value one day later, interpolated between trees with {lower:,} and {upper:,} steps to this tree's "
+            f"time step ({exact:,.2f} steps), minus the value now {kept}"
+        )
+    ((later, _),) = trees
+    shorter = 1.0 - exact / later  # how much shorter its time step is than this tree's, as a fraction
+    if abs(shorter) < 1e-9:
+        return (
+            f"the value on a tree one day shorter with {later:,} steps, this tree's time step, minus the value now "
+            + kept
+        )
+    why = (
+        "the next count down has no arbitrage-free lattice here"
+        if len(later_trees(steps, expiry, method)) == 2
+        else "no smaller count keeps it"
+    )
+    return (
+        f"the value on a tree one day shorter with {later:,} steps, a time step {shorter:.2%} shorter than this "
+        f"tree's ({why}), minus the value now"
+    )
+
+
 def _tree_diagnostics(inputs: Inputs, prices: Prices) -> None:
     S, K, T, r, sigma, q = (
         inputs.spot,
@@ -608,23 +697,19 @@ def _tree_diagnostics(inputs: Inputs, prices: Prices) -> None:
     )
     model = inputs.model
     st.markdown("**Tree Greeks** (on the lattice, so they include the early-exercise feature)")
-    decay = tree_decay(inputs, prices)
+    decay, trees = tree_decay(inputs, prices)
     expiring = to_expiry(T)
     label = decay_label(expiring)
-    rows = [
-        {
-            "Option": kind.capitalize(),
-            "Value": res.price,
-            "Delta": res.delta,
-            "Gamma": res.gamma,
-            "Theta / day": res.theta / 365,
-            label: decay[kind],
-            "Vega / vol pt": res.vega / 100,
-            "Rho / 1%": res.rho / 100,
-            "Div. rho / 1%": res.epsilon / 100,
-        }
-        for kind, res in prices.tree.items()
-    ]
+    # The headline rule of the Greeks table, on the tree's own theta: the decay column comes first when it leads.
+    leads = any(decay_leads(res.theta / 365, decay[kind], expiring) for kind, res in prices.tree.items())
+    rows = []
+    for kind, res in prices.tree.items():
+        time = {"Theta / day": res.theta / 365, label: decay[kind]}
+        rows.append(
+            {"Option": kind.capitalize(), "Value": res.price, "Delta": res.delta, "Gamma": res.gamma}
+            | (dict(reversed(time.items())) if leads else time)
+            | {"Vega / vol pt": res.vega / 100, "Rho / 1%": res.rho / 100, "Div. rho / 1%": res.epsilon / 100}
+        )
     steps_used = prices.tree["call"].steps
     st.dataframe(
         pd.DataFrame(rows),
@@ -640,22 +725,22 @@ def _tree_diagnostics(inputs: Inputs, prices: Prices) -> None:
             "Div. rho / 1%": st.column_config.NumberColumn(format="%.4f"),
         },
     )
-    if expiring:
-        repriced = "the intrinsic value at expiry minus the tree value"
-    elif model.tree_method == "crr":
-        later = later_tree_steps(steps_used, T, "crr")
-        repriced = (
-            f"the value on a tree one day shorter with {later:,} steps, the same time step, minus the value now "
-            "(the same final nodes, so the trees' oscillating errors cancel)"
+    first = (
+        f" The {label.lower()} comes first: "
+        + (
+            "the option expires within the day."
+            if expiring
+            else f"it differs from theta / 365 by more than {DECAY_SWITCH:.0%} of the larger, for the call or the put."
         )
-    else:
-        repriced = "the value on a tree one day shorter with the same steps minus the value now"
+        if leads
+        else ""
+    )
     st.caption(
         f"Dollars per share on a {steps_used:,}-step tree. Delta and gamma come from its first two time steps, "
         "theta from the second step (CRR) or from repricing with the expiry moved (Leisen-Reimer). Theta / day is "
-        f"theta / 365; the {label.lower()} is {repriced}. Vega, rho and "
-        "dividend rho (per 1% move in the dividend yield) reprice on a tree with the same steps, with the "
-        "volatility moved ±0.5 vol pt and the rates ±25 bp."
+        f"theta / 365; the {label.lower()} is {_tree_repricing(steps_used, T, model.tree_method, trees)}.{first} "
+        "Vega, rho and dividend rho (per 1% move in the dividend yield) reprice on a tree with the same steps, with "
+        "the volatility moved ±0.5 vol pt and the rates ±25 bp."
     )
 
     st.markdown("**Convergence with the number of steps**")
@@ -884,21 +969,34 @@ def _model_diagnostics(inputs: Inputs, prices: Prices) -> None:
 
 
 def _decay_note(inputs: Inputs) -> str:
-    """The sentence of the Greeks table's caption on its one-day decay row."""
+    """The sentences of the Greeks table's caption on its one-day decay row.
+
+    Under an American binomial tree the table, decay included, is the European option's (Black-Scholes-Merton), so
+    the note says plainly that it is not the decay of the American value in the price cards, which the tree's own
+    Greeks give (:func:`tree_decay`): a 7-day put struck at 110 on 100 is exercised at once on the tree, so its
+    value does not change in a day, while the European put gains 1.5 cents.
+    """
+    model = inputs.model
     expiring = to_expiry(inputs.expiry)
-    value = "the engine's value" if inputs.model.kind == "alo" else "the value"
+    value = "the engine's value" if model.kind == "alo" else "the value"
     later = "the intrinsic value at expiry" if expiring else f"{value} with one calendar day less to expiry"
-    model = {
-        "binomial": " by Black-Scholes-Merton (the tree's own is in its Greeks below)",
+    by = {
+        "binomial": " by Black-Scholes-Merton for European exercise"
+        + ("" if model.american else ", the value the tree converges to (the tree's own is in its Greeks below)"),
         "monte_carlo": " by Black-Scholes-Merton, whose value the simulation estimates",
-    }.get(inputs.model.kind, "")
+    }.get(model.kind, "")
     first = (
         "it is listed first, as the option expires within the day"
         if expiring
         else f"it is listed first when it differs from the theta row (theta / 365) by more than {DECAY_SWITCH:.0%} "
         "of the larger, for the call or the put"
     )
-    return f"{decay_label(expiring)}: {later} minus {value} now{model}, all else equal; {first}."
+    american = (
+        " It is not the decay of the American value in the price cards, which the tree's Greeks give."
+        if model.kind == "binomial" and model.american
+        else ""
+    )
+    return f"{decay_label(expiring)}: {later} minus {value} now{by}, all else equal; {first}.{american}"
 
 
 def render(inputs: Inputs, prices: Prices) -> None:

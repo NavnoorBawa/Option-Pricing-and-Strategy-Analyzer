@@ -599,7 +599,8 @@ def leg_table(strategy: Strategy, market: Market) -> list[dict]:
     """Per-leg premium and Greeks at inception (per unit, display units).
 
     ``Theta / day`` is theta / 365; ``1-day decay`` is the leg's change in value over the next calendar day by
-    repricing (:func:`time_decay`), its intrinsic value at the current spot when it expires within the day.
+    repricing (:func:`time_decay`), with the leg valued at its intrinsic value at the current spot when it expires
+    within the day.
     """
     rows = []
     for leg in strategy.legs:

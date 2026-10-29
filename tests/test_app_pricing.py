@@ -2,6 +2,7 @@
 
 import base64
 import json
+import math
 import re
 
 import numpy as np
@@ -488,24 +489,106 @@ def test_the_decay_follows_the_american_engine(new_app):
     assert _greeks(at).loc["Decay to expiry", "Put"] == pytest.approx(-put, rel=1e-12)
 
 
-@pytest.mark.parametrize(("lattice", "later_steps"), [("Leisen-Reimer", 501), ("Cox-Ross-Rubinstein", 431)])
-def test_the_tree_greeks_add_the_trees_own_decay(new_app, lattice, later_steps):
-    # The Greeks table stays Black-Scholes-Merton's; the tree's table adds the decay on a tree one day shorter
-    # (tab_pricing.later_tree_steps: 501 x 6/7 = 429.4, up to the odd 431 for CRR).
+def _tree_table(at: AppTest):
+    """The tree's Greeks under Model diagnostics, indexed by option."""
+    return next(d.value for d in at.dataframe if "Div. rho / 1%" in d.value.columns).set_index("Option")
+
+
+#: The trees one day shorter than a 7-day 501-step tree: Leisen-Reimer keeps its steps; Cox-Ross-Rubinstein keeps
+#: the time step, 501 x 6/7 = 429 3/7 steps, interpolated between the odd counts 429 and 431 (3/14 of the way).
+LATER_TREES = {"Leisen-Reimer": ((501, 1.0),), "Cox-Ross-Rubinstein": ((429, 11 / 14), (431, 3 / 14))}
+
+
+@pytest.mark.parametrize("lattice", list(LATER_TREES))
+def test_the_tree_greeks_add_the_trees_own_decay(new_app, lattice):
     at = new_app(days=7, model="Binomial tree", tree=lattice, style="American").run()
     _ok(at)
     method = "lr" if lattice == "Leisen-Reimer" else "crr"
-    tree = next(d.value for d in at.dataframe if "Div. rho / 1%" in d.value.columns).set_index("Option")
-    names = list(tree.columns)
-    assert names.index("1-day decay") == names.index("Theta / day") + 1
+    tree = _tree_table(at)
     for kind in ("call", "put"):
-        later = binomial.price(100, 100, 6 * DAY, 0.05, 0.2, 0, kind, later_steps, True, method)
+        later = math.fsum(
+            weight * binomial.price(100, 100, 6 * DAY, 0.05, 0.2, 0, kind, steps, True, method)
+            for steps, weight in LATER_TREES[lattice]
+        )
         now = binomial.price(100, 100, 7 * DAY, 0.05, 0.2, 0, kind, 501, True, method)
         assert tree.loc[kind.capitalize(), "1-day decay"] == pytest.approx(later - now, rel=1e-12)
+        # The Greeks table stays Black-Scholes-Merton's for European exercise, its decay too.
         closed = bs.price(100, 100, 6 * DAY, 0.05, 0.2, 0, kind) - bs.price(100, 100, 7 * DAY, 0.05, 0.2, 0, kind)
         assert _greeks(at).loc["1-day decay", kind.capitalize()] == pytest.approx(closed, rel=1e-12)
-    assert any(f"with {later_steps} steps" in c.value for c in at.caption) is (method == "crr")
-    assert any("by Black-Scholes-Merton (the tree's own is in its Greeks below)" in c.value for c in at.caption)
+    # At the money with a week left the tree's decay and theta / 365 are within 10 %: theta stays first.
+    names = list(tree.columns)
+    assert names.index("1-day decay") == names.index("Theta / day") + 1
+    captions = [c.value for c in at.caption]
+    interpolated = "interpolated between trees with 429 and 431 steps to this tree's time step (429.43 steps)"
+    assert any(interpolated in c for c in captions) is (method == "crr")
+    assert any("one day shorter with the same steps" in c for c in captions) is (method == "lr")
+    assert not any("comes first" in c for c in captions)
+    note = "It is not the decay of the American value in the price cards, which the tree's Greeks give."
+    assert any(note in c for c in captions)
+
+
+def test_an_american_put_exercised_at_once_does_not_decay_on_the_tree(new_app):
+    # The review's case: a 7-day put struck at 110 on 100 is exercised at once on the American tree, worth exactly
+    # 10 today and tomorrow, while the European put of the Greeks table gains 1.5 cents a day. The caption says the
+    # table's decay is not the American value's.
+    at = new_app(days=7, strike=110, model="Binomial tree", style="American").run()
+    _ok(at)
+    assert _dollars(_metrics(at)["Put value"]) == 10.0
+    tree = _tree_table(at)
+    assert tree.loc["Put", "1-day decay"] == 0.0 and tree.loc["Put", "Theta / day"] == 0.0
+    european = bs.price(100, 110, 6 * DAY, 0.05, 0.2, 0, "put") - bs.price(100, 110, 7 * DAY, 0.05, 0.2, 0, "put")
+    assert european == pytest.approx(0.0149, abs=5e-5)
+    assert _greeks(at).loc["1-day decay", "Put"] == pytest.approx(european, rel=1e-12)
+    assert any("It is not the decay of the American value in the price cards" in c.value for c in at.caption)
+
+
+@pytest.mark.parametrize("lattice", list(LATER_TREES))
+@pytest.mark.parametrize(("days", "leads"), [(2, True), (3, False), (45, False)])
+def test_the_tree_table_puts_its_decay_first_beyond_ten_percent(new_app, lattice, days, leads):
+    # The Greeks table's rule on the tree's own figures: at the money (100, 20 %, 5 %) theta / 365 and the 1-day
+    # decay are 14 % and 15 % apart at 2 days (call, put), 8.7 % and 9.7 % at 3 days, under 1 % at 45 days; the
+    # 501-step trees' thetas are within 0.07 % and their decays within 0.1 % of the closed form here, well inside
+    # the 0.3 % left at 3 days.
+    at = new_app(days=days, model="Binomial tree", tree=lattice).run()
+    _ok(at)
+    tree = _tree_table(at)
+    for kind in ("Call", "Put"):
+        theta, decay = tree.loc[kind, "Theta / day"], tree.loc[kind, "1-day decay"]
+        assert bool(abs(decay - theta) > 0.1 * max(abs(decay), abs(theta))) is leads, kind
+    names = list(tree.columns)
+    assert names.index("1-day decay") - names.index("Theta / day") == (-1 if leads else 1)
+    first = "The 1-day decay comes first: it differs from theta / 365 by more than 10% of the larger"
+    assert any(first in c.value for c in at.caption) is leads
+
+
+def test_the_tree_keeps_its_time_step_with_a_whole_number_of_steps(new_app):
+    # 500 steps over 10 days: 450 steps over 9 days have the same time step exactly, so one tree is enough.
+    at = new_app(days=10, steps=500, model="Binomial tree", tree="Cox-Ross-Rubinstein").run()
+    _ok(at)
+    later = binomial.price(100, 100, 9 * DAY, 0.05, 0.2, 0, "put", 450, False, "crr")
+    now = binomial.price(100, 100, 10 * DAY, 0.05, 0.2, 0, "put", 500, False, "crr")
+    assert _tree_table(at).loc["Put", "1-day decay"] == pytest.approx(later - now, rel=1e-12)
+    assert any("one day shorter with 450 steps, this tree's time step," in c.value for c in at.caption)
+
+
+def test_the_crr_decay_uses_the_shorter_time_step_where_the_longer_has_no_lattice(new_app):
+    # 5 % volatility, rate 50 %, 1,828 days, 501 steps: the tree is arbitrage-free only just (|r| dt = 0.0049982
+    # against sigma sqrt(dt) = 0.0049991). Its time step over 1,827 days is 500.73 steps; the 499-step tree's longer
+    # step has no arbitrage-free lattice, so the 501-step tree alone values the option a day later.
+    at = new_app(days=1828, vol=5, rate=50, model="Binomial tree", tree="Cox-Ross-Rubinstein").run()
+    _ok(at)
+    with pytest.raises(ValueError, match="not arbitrage-free"):
+        binomial.price(100, 100, 1827 * DAY, 0.5, 0.05, 0, "call", 499, False, "crr")
+    later = binomial.price(100, 100, 1827 * DAY, 0.5, 0.05, 0, "call", 501, False, "crr")
+    now = binomial.price(100, 100, 1828 * DAY, 0.5, 0.05, 0, "call", 501, False, "crr")
+    assert _tree_table(at).loc["Call", "1-day decay"] == pytest.approx(later - now, rel=1e-12)
+    shorter = 1 - 501 * (1827 / 1828) / 501
+    assert f"{shorter:.2%}" == "0.05%"
+    note = (
+        "one day shorter with 501 steps, a time step 0.05% shorter than this tree's (the next count down has no "
+        "arbitrage-free lattice here)"
+    )
+    assert any(note in c.value for c in at.caption)
 
 
 def test_the_tree_decays_to_its_intrinsic_value_within_a_day(new_app):
@@ -517,6 +600,10 @@ def test_the_tree_decays_to_its_intrinsic_value_within_a_day(new_app):
         assert tree.loc[kind.capitalize(), "Decay to expiry"] == pytest.approx(intrinsic - now, rel=1e-12, abs=1e-15)
     note = "the decay to expiry is the intrinsic value at expiry minus the tree value"
     assert any(note in c.value for c in at.caption)
+    # Within a day of expiry the decay to expiry leads the tree's table too.
+    names = list(tree.columns)
+    assert names.index("Decay to expiry") == names.index("Theta / day") - 1
+    assert any("The decay to expiry comes first: the option expires within the day." in c.value for c in at.caption)
 
 
 def test_monte_carlo_uses_the_closed_form_decay(new_app):
@@ -539,6 +626,42 @@ def test_the_sensitivity_explorer_plots_the_decay_against_the_days_left(app):
     expected = bs.price(100, 100, T - DAY, 0.05, 0.2, 0, "call") - bs.price(100, 100, T, 0.05, 0.2, 0, "call")
     assert call[-1] == pytest.approx(expected, rel=1e-12)
     assert chart["layout"]["yaxis"]["title"]["text"] == "1-day decay ($)"
+
+
+def test_the_theta_view_draws_the_decay_beside_theta(new_app):
+    # Theta / 365 solid and the repriced day dashed, each in its option's colour, against the spot.
+    at = new_app(days=3).run()
+    at.selectbox(key="sens_quantity").set_value("Theta / day").run()
+    _ok(at)
+    chart = _chart(at, "sensitivity_chart")
+    names = [trace["name"] for trace in chart["data"]]
+    assert names == ["Theta / 365 · Call", "Theta / 365 · Put", "1-day decay · Call", "1-day decay · Put"]
+    assert [trace["line"].get("dash") for trace in chart["data"]] == ["solid", "solid", "dash", "dash"]
+    assert chart["data"][0]["line"]["color"] == chart["data"][2]["line"]["color"] != chart["data"][1]["line"]["color"]
+    assert chart["layout"]["yaxis"]["title"]["text"] == "Theta / 365 and 1-day decay ($)"
+    spots = _values(chart["data"][2]["x"])
+    T = 3 * DAY
+    for trace, kind in zip(chart["data"], ("call", "put") * 2, strict=True):
+        y = _values(trace["y"])
+        if trace["line"]["dash"] == "solid":
+            expected = bs.greeks(spots, 100, T, 0.05, 0.2, 0, kind)["theta"] / 365
+        else:
+            expected = bs.price(spots, 100, T - DAY, 0.05, 0.2, 0, kind) - bs.price(spots, 100, T, 0.05, 0.2, 0, kind)
+        np.testing.assert_allclose(y, expected, rtol=1e-12, atol=1e-15)
+
+
+def test_within_a_day_the_explorer_names_the_decay_to_expiry(new_app):
+    # Against spot every point has the sidebar's one day left; against the days left the 1-day decay keeps its name.
+    at = new_app(days=1).run()
+    at.selectbox(key="sens_quantity").set_value("1-day decay").run()
+    _ok(at)
+    assert _chart(at, "sensitivity_chart")["layout"]["yaxis"]["title"]["text"] == "Decay to expiry ($)"
+    at.selectbox(key="sens_quantity").set_value("Theta / day").run()
+    chart = _chart(at, "sensitivity_chart")
+    assert [trace["name"] for trace in chart["data"]][2:] == ["Decay to expiry · Call", "Decay to expiry · Put"]
+    assert chart["layout"]["yaxis"]["title"]["text"] == "Theta / 365 and decay to expiry ($)"
+    at.selectbox(key="sens_axis").set_value("Days to expiry").run()
+    assert _chart(at, "sensitivity_chart")["layout"]["yaxis"]["title"]["text"] == "Theta / 365 and 1-day decay ($)"
 
 
 # --- IV tab ------------------------------------------------------------------------------------------------------

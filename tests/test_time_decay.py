@@ -330,65 +330,100 @@ def test_closed_form_decay_over_a_strip_of_strikes(days):
 
 
 @pytest.mark.parametrize(
-    ("steps", "expiry", "method", "later"),
+    ("steps", "expiry", "method", "trees"),
     [
-        (501, 30 * DAY, "lr", 501),  # Leisen-Reimer keeps its steps
-        (501, 7 * DAY, "crr", 431),  # 501 x 6/7 = 429.4: up to 430, then to the odd 431
-        (500, 7 * DAY, "crr", 430),
-        (500, 10 * DAY, "crr", 450),  # 450 exactly: not rounded up
-        (10, 2 * DAY, "crr", 6),  # 5, then the even 6
-        (11, 2 * DAY, "crr", 7),  # 5.5, up to 6, then the odd 7
-        (10, 365.0001 * DAY, "crr", 10),
-        (10, 1.000001 * DAY, "crr", 2),  # never fewer than one step, with the parity of the current tree
-        (11, 1.000001 * DAY, "crr", 1),
+        (501, 30 * DAY, "lr", ((501, 1.0),)),  # Leisen-Reimer keeps its steps
+        (501, 7 * DAY, "crr", ((429, 1 - 3 / 14), (431, 3 / 14))),  # 501 x 6/7 = 429 3/7 steps: 3/14 of the way
+        (500, 7 * DAY, "crr", ((428, 5 / 7), (430, 2 / 7))),  # 428 4/7, between the even 428 and 430
+        (500, 10 * DAY, "crr", ((450, 1.0),)),  # 450 exactly: this tree's time step, one tree
+        (10, 2 * DAY, "crr", ((4, 0.5), (6, 0.5))),  # 5, half way between the even 4 and 6
+        (11, 2 * DAY, "crr", ((5, 0.75), (7, 0.25))),  # 5.5
+        (501, 365 * DAY, "crr", ((499, 1 - 0.627397 / 2), (501, 0.627397 / 2))),  # the review's 1-year case
+        (10, 1.000001 * DAY, "crr", ((2, 1.0),)),  # no count of at least one step below: the upper one alone
+        (11, 1.000001 * DAY, "crr", ((1, 1.0),)),
     ],
 )
-def test_later_tree_steps(steps, expiry, method, later):
-    assert tab_pricing.later_tree_steps(steps, expiry, method) == later
+def test_later_trees(steps, expiry, method, trees):
+    got = tab_pricing.later_trees(steps, expiry, method)
+    assert [n for n, _ in got] == [n for n, _ in trees]
+    assert [w for _, w in got] == pytest.approx([w for _, w in trees], abs=1e-6)
+    assert math.fsum(w for _, w in got) == pytest.approx(1.0, abs=1e-15)
     if method == "crr":
-        assert later % 2 == steps % 2 and (expiry - DAY) / later <= expiry / steps * (1 + 1e-12)  # not longer
+        assert all(n % 2 == steps % 2 for n, _ in got)  # the final nodes of an odd and an even tree interleave
+        exact = steps * (expiry - DAY) / expiry  # the steps that keep the time step
+        if exact >= 1:  # interpolated (or exactly) to this tree's time step
+            assert math.fsum(w * n for n, w in got) == pytest.approx(exact, rel=1e-12)
 
 
-def _tree_decay(K: float, days: int, kind: str, method: str, american_: bool, steps: int = 501) -> float:
+def _tree_decay(K: float, days: int, kind: str, method: str, american_: bool, vol: float = 0.2) -> float:
+    """The Pricing tab's tree decay (tab_pricing.tree_decay) on a 501-step tree, rate 5 %, no dividends."""
     T = days * DAY
-    used = binomial.price_with_greeks(100, K, T, 0.05, 0.2, 0.0, kind, steps, american_, method).steps
-    later = tab_pricing.later_tree_steps(used, T, method)
-    shorter = binomial.price(100, K, T - DAY, 0.05, 0.2, 0.0, kind, later, american_, method)
-    return shorter - binomial.price(100, K, T, 0.05, 0.2, 0.0, kind, steps, american_, method)
+    used = binomial.price_with_greeks(100, K, T, 0.05, vol, 0.0, kind, 501, american_, method).steps
+    later = math.fsum(
+        weight * binomial.price(100, K, T - DAY, 0.05, vol, 0.0, kind, steps, american_, method)
+        for steps, weight in tab_pricing.later_trees(used, T, method)
+    )
+    return later - binomial.price(100, K, T, 0.05, vol, 0.0, kind, 501, american_, method)
 
 
 @pytest.mark.parametrize("days", [2, 7, 30, 365, 3650])
 @pytest.mark.parametrize("K", [90.0, 100.0, 110.0])
 def test_tree_decays_track_the_closed_form(K, days):
-    # Measured over strikes 80 to 120 and 2 to 3,650 days at 501 steps, on decays of at least 1 cent a share
-    # (later_tree_steps): Leisen-Reimer within 3.0e-6 of the closed form, relative, and Cox-Ross-Rubinstein with the
-    # same time step within 1.5 %; below a cent, within 8.4e-9 and 1.6e-4 absolute on these cases. Bounds: three
-    # times those.
+    # Measured on these 30 decays (20 % volatility): Leisen-Reimer within 4.7e-7 of the closed form, relative, and
+    # Cox-Ross-Rubinstein (interpolated to the same time step) within 7.4e-4 where the decay is at least 1 cent;
+    # below a cent, within 8.4e-9 and 6.1e-6 absolute. Bounds: about three times those.
     for kind in ("call", "put"):
         exact = _bsm(100, K, (days - 1) * DAY, 0.05, 0.2, 0.0, kind) - _bsm(100, K, days * DAY, 0.05, 0.2, 0.0, kind)
         lr = _tree_decay(K, days, kind, "lr", False)
         crr = _tree_decay(K, days, kind, "crr", False)
-        assert lr == pytest.approx(exact, rel=9e-6, abs=3e-8), kind
-        assert crr == pytest.approx(exact, rel=0.045, abs=5e-4 if abs(exact) < 0.01 else 0), kind
+        if abs(exact) >= 0.01:
+            assert lr == pytest.approx(exact, rel=1.5e-6, abs=0), kind
+            assert crr == pytest.approx(exact, rel=2.5e-3, abs=0), kind
+        else:
+            assert lr == pytest.approx(exact, rel=0, abs=2.5e-8), kind
+            assert crr == pytest.approx(exact, rel=0, abs=2e-5), kind
+
+
+@pytest.mark.parametrize(
+    ("method", "K", "days", "kind", "vol", "bound"),
+    [
+        # The worst decay of at least 1 cent in each population of tab_pricing.later_trees (strikes 80 to 120 in
+        # steps of 0.5, every expiry from 2 to 60 days and 13 more to 3,650, 501 steps, rate 5 %): the bound is the
+        # one the docstring and the Methodology state, so the claim fails here first if the rule changes.
+        ("crr", 108.0, 300, "call", 0.1, 0.0055),  # 0.549 %
+        ("crr", 118.5, 365, "call", 0.2, 0.015),  # 1.458 %
+        ("crr", 112.5, 5, "put", 0.5, 0.0066),  # 0.658 %
+        ("lr", 102.5, 4, "put", 0.1, 1.6e-6),  # 1.51e-6
+        ("lr", 103.0, 2, "call", 0.2, 4.0e-6),  # 3.98e-6
+        ("lr", 108.0, 2, "put", 0.5, 1.2e-5),  # 1.17e-5
+        # The review's case: 3.0 % off with the next count up alone (501 steps, a time step 0.33 % shorter),
+        # 0.038 % interpolated; bound three times that.
+        ("crr", 118.5, 300, "call", 0.2, 1.2e-3),
+    ],
+)
+def test_tree_decays_at_the_worst_measured_cases(method, K, days, kind, vol, bound):
+    exact = _bsm(100, K, (days - 1) * DAY, 0.05, vol, 0.0, kind) - _bsm(100, K, days * DAY, 0.05, vol, 0.0, kind)
+    assert abs(exact) >= 0.01
+    assert abs(_tree_decay(K, days, kind, method, False, vol) / exact - 1) <= bound
 
 
 def test_crr_with_the_same_steps_would_not_cancel_its_error():
     # The case that made the rule: a 30-day in-the-money put (110 on 100) decays by +0.3149 cents a share. Two CRR
-    # trees with 501 steps each put it at +0.3553 cents (13 % off); the same time step puts it within 2 %.
+    # trees with 501 steps each put it at +0.3553 cents (13 % off); at the same time step it is 0.05 % off.
     exact = _bsm(100, 110, 29 * DAY, 0.05, 0.2, 0.0, "put") - _bsm(100, 110, 30 * DAY, 0.05, 0.2, 0.0, "put")
     same = binomial.price(100, 110, 29 * DAY, 0.05, 0.2, 0.0, "put", 501, False, "crr") - binomial.price(
         100, 110, 30 * DAY, 0.05, 0.2, 0.0, "put", 501, False, "crr"
     )
     assert abs(same / exact - 1) > 0.10
-    assert _tree_decay(110, 30, "put", "crr", False) == pytest.approx(exact, rel=0.02)
+    assert _tree_decay(110, 30, "put", "crr", False) == pytest.approx(exact, rel=1.5e-3)
 
 
 @pytest.mark.parametrize("days", [2, 7, 30, 365])
 def test_american_tree_decays_track_the_american_engine(days):
     # Early exercise has no closed form: the reference is the American engine at its high scheme (within 4e-10 of
     # QuantLib's QdFp, docs/methods/american_alo.md). The 501-step trees are first-order accurate with early
-    # exercise; their decay errors measured 7.6e-6 (Leisen-Reimer) and 1.25e-4 (Cox-Ross-Rubinstein, same time step)
-    # at most on these at-the-money puts, so the bounds are 2.5e-5 and 4e-4.
+    # exercise; their decay errors measured 7.6e-6 (Leisen-Reimer) and 1.26e-4 (Cox-Ross-Rubinstein, interpolated
+    # to the same time step) at most on these at-the-money puts, so the bounds are 2.5e-5 and 4e-4.
     def engine(T: float) -> float:
         return american.price(100, 100, T, 0.05, 0.2, 0.0, option_type="put", scheme="high")
 

@@ -1028,8 +1028,28 @@ def test_a_one_day_put_shows_its_decay_to_expiry():
     assert theta == pytest.approx(-1066.05, abs=0.005)
     assert "Theta / day: −\\$1,066.05" in card.proto.help
     assert "An option expires within the day" in card.proto.help
-    table = _legs_table(at).value
-    assert table["1-day decay"].tolist() == [pytest.approx(-premium, rel=1e-12)]
+    # The legs table names its column as the card is named.
+    table = _legs_table(at)
+    assert "1-day decay" not in table.value.columns
+    assert table.value["Decay to expiry"].tolist() == [pytest.approx(-premium, rel=1e-12)]
+    assert (
+        "A leg that expires within the day is worth its intrinsic value"
+        in (json.loads(table.proto.columns)["Decay to expiry"]["help"])
+    )
+
+
+def test_the_legs_table_keys_its_decimals_by_the_decay_column():
+    market = strat.Market(100, 0.05, 0.2, 1 / 365)
+    strategy = strat.Strategy("x", (strat.Leg("call", 1, 100), strat.Leg("put", -1, 95, expiry=30 / 365)))
+    table, decimals = tab_strategy.legs_table(strategy, market, 100)
+    # The front leg expires within the day, so the column is the decay to expiry, though the back leg's figure is
+    # its decay over one day: the card says the same (tab_strategy.decay_card).
+    assert "Decay to expiry" in table.columns and "1-day decay" not in table.columns
+    assert decimals["Decay to expiry"] == 2 and "1-day decay" not in decimals
+    expected = [100 * strat.time_decay(strat.Strategy("leg", (leg,)), market) for leg in strategy.legs]
+    assert table["Decay to expiry"].tolist() == pytest.approx(expected, abs=0.005)
+    table, decimals = tab_strategy.legs_table(strategy, strat.Market(100, 0.05, 0.2, 2 / 365), 100)
+    assert "1-day decay" in table.columns and decimals["1-day decay"] == 2
 
 
 @pytest.mark.parametrize(("days", "label"), [(45, "Theta / day"), (3, "Theta / day"), (2, "1-day decay")])
@@ -1070,7 +1090,51 @@ def test_the_risk_tab_gives_the_decay_beside_theta():
     assert "Decay to expiry by repricing at today's spot: +\\$4,359.89" in caption
     assert "theta / 365, the instantaneous rate: +\\$2,179.76 per day" in caption
     at.segmented_control(key="risk_greek").set_value("Theta").run()
-    assert any("Theta is theta / 365, the instantaneous rate" in c.value for c in at.caption)
+    _ok(at)
+    note = "the dashed lines reprice the position one calendar day later"
+    assert any("Theta is theta / 365, the instantaneous rate" in c.value and note in c.value for c in at.caption)
+    assert any("in either direction" in c.value for c in at.caption)
+    # One day to expiry: one date, today, with its decay to expiry beside theta; at today's spot the decay is the
+    # whole value of the straddle again.
+    data = _chart(at, "greek_profiles")["data"]
+    assert [trace["name"] for trace in data] == ["Today: theta / 365", "Today: decay to expiry"]
+    assert [trace["line"]["dash"] for trace in data] == ["solid", "dash"]
+    assert data[0]["line"]["color"] == data[1]["line"]["color"]
+    spots, decay = _array(data[1]["x"]), _array(data[1]["y"])
+    middle = len(spots) // 2  # the axis is symmetric in the log price about the spot
+    assert spots[middle] == pytest.approx(5800, rel=1e-12)
+    assert decay[middle] == pytest.approx(value, rel=1e-9)
+
+
+def test_the_theta_profile_reprices_each_date_one_day_later():
+    # The default bull call spread (long the 100 call, short the 110, a year to expiry, 100 shares): beside theta /
+    # 365 at each date, the change in value over the next day, to expiry from the day before it.
+    at = _app("Risk")
+    at.segmented_control(key="risk_greek").set_value("Theta").run()
+    _ok(at)
+    data = _chart(at, "greek_profiles")["data"]
+    names = [trace["name"] for trace in data]
+    assert names == [
+        "Today: theta / 365",
+        "Today: 1-day decay",
+        "In 182 days: theta / 365",
+        "In 182 days: 1-day decay",
+        "In 364 days: theta / 365",
+        "In 364 days: decay to expiry",
+    ]
+    assert _chart(at, "greek_profiles")["layout"]["yaxis"]["title"]["text"] == "Theta / 365 and 1-day decay ($)"
+    spots = _array(data[0]["x"])
+
+    def spread(spot, days_left):
+        return sum(
+            sign * (max(spot - k, 0.0) if days_left == 0 else bs.price(spot, k, days_left / 365, 0.05, 0.2, 0, "call"))
+            for sign, k in ((1, 100), (-1, 110))
+        )
+
+    for trace, day in ((data[1], 0), (data[3], 182), (data[5], 364)):
+        for i in (40, 120, 200):
+            expected = 100 * (spread(spots[i], 365 - day - 1) - spread(spots[i], 365 - day))
+            assert _array(trace["y"])[i] == pytest.approx(expected, rel=1e-9, abs=1e-9), (trace["name"], i)
 
 
 def test_a_position_of_shares_alone_has_no_decay_to_expiry():

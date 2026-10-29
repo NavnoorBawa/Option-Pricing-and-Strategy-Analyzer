@@ -747,7 +747,9 @@ def legs_table(strategy: strat.Strategy, market: strat.Market, units: float) -> 
 
     The entry price is left out when every leg is entered at its model value. Whole-position columns show fewer
     decimals as they grow (:func:`~.format.shown_decimals`); a dollar column in whole dollars is rounded here, as
-    the browser would truncate it. No value shows as a negative zero (``-$0.00`` reads as a credit).
+    the browser would truncate it. No value shows as a negative zero (``-$0.00`` reads as a credit). The decay
+    column is named as the decay card is (:func:`~.format.decay_label`): ``Decay to expiry`` when an option leg
+    expires within the day.
     """
     table = pd.DataFrame(strat.leg_table(strategy, market)).drop(columns="Leg")
     for col in ("Cost", "Delta", "Gamma", "Theta / day", "1-day decay", "Vega / vol pt"):
@@ -763,6 +765,9 @@ def legs_table(strategy: strat.Strategy, market: strat.Market, units: float) -> 
             table[col] = table[col].round()
     for col, d in decimals.items():
         table[col] = table[col].mask(table[col].abs() < 0.5 * 10**-d, 0.0)
+    if (label := decay_label(expires_within_a_day(strategy, market))) != "1-day decay":
+        table = table.rename(columns={"1-day decay": label})
+        decimals[label] = decimals.pop("1-day decay")
     return table, decimals
 
 
@@ -1027,6 +1032,7 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
 
     st.markdown("**Legs at inception**")
     table, decimals = legs_table(strategy, market, units)
+    decay = decay_label(expires_within_a_day(strategy, market))
     st.dataframe(
         table,
         hide_index=True,
@@ -1046,8 +1052,8 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
                 format=f"%.{decimals['Gamma']}f", help="Whole position, per $1 move."
             ),
             "Theta/day": _dollar_column(decimals["Theta/day"], "Whole position: theta / 365, per calendar day."),
-            "1-day decay": _dollar_column(
-                decimals["1-day decay"],
+            decay: _dollar_column(
+                decimals[decay],
                 "Whole position: the change in the leg's value over the next calendar day by repricing, spot and "
                 "implied volatility unchanged. A leg that expires within the day is worth its intrinsic value.",
             ),

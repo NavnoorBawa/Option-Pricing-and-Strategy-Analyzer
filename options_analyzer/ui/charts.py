@@ -234,6 +234,14 @@ def scenario_styles(n: int, palette: dict[str, str] | None = None) -> list[tuple
     return styles
 
 
+def pair_styles(n: int, palette: dict[str, str] | None = None) -> list[tuple[str, str]]:
+    """``(colour, dash)`` for ``n`` pairs of series, such as theta / 365 and the 1-day decay at each date: pair ``i``
+    in the ``i``-th categorical colour of the palette's mode, its first series solid and its second dashed (as the
+    smile chart pairs implied and local volatility)."""
+    series = desk_theme.categorical(palette or desk_theme.palette())
+    return [(series[i % len(series)], dash) for i in range(n) for dash in ("solid", "dash")]
+
+
 def sensitivity_chart(
     x,
     call_y,
@@ -243,13 +251,27 @@ def sensitivity_chart(
     current_x: float,
     strike_x: float | None = None,
     palette: dict[str, str] | None = None,
+    dashed: tuple[str, str, Sequence[float], Sequence[float]] | None = None,
 ):
     """Call and put values or Greeks against one input. The call is the first trace and the put the second, so
-    they take the theme's first two categorical colours (the call and put colours of the mode)."""
+    they take the theme's first two categorical colours (the call and put colours of the mode).
+
+    ``dashed = (solid name, dashed name, call_y, put_y)`` adds a second quantity in the same units as dashed lines
+    after the two, each in its option's colour (the categorical colour of the palette's mode, as the smile chart's
+    implied and local volatility share one), and names every line by its quantity and option: ``Theta / 365 ·
+    Call``."""
     colors = palette or desk_theme.palette()
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=x, y=call_y, name="Call", line=dict(width=LINE_WIDTH)))
-    fig.add_trace(go.Scatter(x=x, y=put_y, name="Put", line=dict(width=LINE_WIDTH)))
+    if dashed is None:
+        fig.add_trace(go.Scatter(x=x, y=call_y, name="Call", line=dict(width=LINE_WIDTH)))
+        fig.add_trace(go.Scatter(x=x, y=put_y, name="Put", line=dict(width=LINE_WIDTH)))
+    else:
+        solid, second, call_dashed, put_dashed = dashed
+        call_color, put_color = desk_theme.categorical(colors)[:2]
+        for style, name, call, put in (("solid", solid, call_y, put_y), ("dash", second, call_dashed, put_dashed)):
+            for option, y, color in (("Call", call, call_color), ("Put", put, put_color)):
+                line = dict(color=color, width=LINE_WIDTH, dash=style)
+                fig.add_trace(go.Scatter(x=x, y=y, name=f"{name} · {option}", line=line))
     # Labels sit inside the top of the plot, each on the far side of its line from the other line, so they
     # cannot overlap each other or the tick labels; a strike equal to the current value gets one shared label.
     if strike_x is None:

@@ -172,9 +172,28 @@ def _time_decay(position: Position, front_days: float) -> None:
 GREEK_VIEWS = {
     "Delta": ("delta", 1.0, "Delta (shares)"),
     "Gamma": ("gamma", 1.0, "Gamma (delta per $1)"),
-    "Theta": ("theta", 1.0 / 365.0, "Theta ($ per day)"),
+    "Theta": ("theta", 1.0 / 365.0, "Theta / 365 and 1-day decay ($)"),
     "Vega": ("vega", 0.01, "Vega ($ per vol point)"),
 }
+
+
+def _with_decay(
+    position: Position, spots: np.ndarray, dates: list[int], front_days: float, theta: dict[str, np.ndarray]
+) -> tuple[dict[str, np.ndarray], list[tuple[str, str]]]:
+    """The theta profiles (``theta``, theta / 365 by date) with the repriced day beside each, and their styles.
+
+    Each date's theta / 365 is solid and its decay dashed in the same colour: the position's value one calendar
+    day after the date minus its value on the date, at every spot of the axis, implied volatility unchanged (the
+    revaluation of :func:`~options_analyzer.strategies.time_decay`; a leg that expires within the day is worth its
+    intrinsic value). It is the decay to expiry on a date within a day of the front expiry of an option leg.
+    """
+    options = any(leg.is_option for leg in position.strategy.legs)
+    series = {}
+    for d, (when, rate) in zip(dates, theta.items(), strict=True):
+        later, now = (strat.position_value(position.strategy, position.market, spots, t / 365.0) for t in (d + 1, d))
+        series[f"{when}: theta / 365"] = rate
+        series[f"{when}: {decay_label(options and front_days - d <= 1.0).lower()}"] = (later - now) * position.units
+    return series, charts.pair_styles(len(dates))
 
 
 def _greek_profiles(position: Position, front_days: float) -> None:
@@ -189,8 +208,11 @@ def _greek_profiles(position: Position, front_days: float) -> None:
     for d in dates:
         values = strat.position_greeks(position.strategy, market, spots, d / 365.0)[name]
         series["Today" if d == 0 else f"In {d} days"] = np.broadcast_to(values * scale * position.units, spots.shape)
+    styles = None
+    if name == "theta":
+        series, styles = _with_decay(position, spots, dates, front_days, series)
     charts.show(
-        charts.lines_chart(spots, series, "Underlying price", title, vline=(market.spot, "spot")),
+        charts.lines_chart(spots, series, "Underlying price", title, vline=(market.spot, "spot"), styles=styles),
         key="greek_profiles",
         alt=f"The position's {greek.lower()} against the underlying price, today and at later dates",
     )
@@ -198,8 +220,9 @@ def _greek_profiles(position: Position, front_days: float) -> None:
         "Position Greeks of the whole position across ±3 standard deviations of the price at the front expiry, "
         "today and at later dates with implied volatility unchanged (analytical Black-Scholes-Merton Greeks)."
         + (
-            " Theta is theta / 365, the instantaneous rate: close to expiry a day costs more, as the decay by "
-            "repricing under the time-decay chart shows."
+            " Theta is theta / 365, the instantaneous rate; the dashed lines reprice the position one calendar day "
+            "later (to its intrinsic value for an option that expires within the day). Within a few days of "
+            "expiry the two can part a long way, in either direction."
             if name == "theta"
             else ""
         )

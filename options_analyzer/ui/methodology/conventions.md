@@ -11,7 +11,8 @@
   *decay to expiry*. The two agree while options have weeks to run and part near expiry: a 1-day at-the-money
   put worth \$21.56 (spot 5,800, volatility 18 %, rate 4.3 %, dividend yield 1.3 %) has a theta of −\$10.66 per
   day and loses all \$21.56. The decay is the headline (the Strategy card, the first of the two rows in the Greeks
-  table) when an option expires within the day or when a decay $D$ and theta differ by more than 10 % of the
-  larger, ${|D - \theta/365| > 0.1\,\max(|D|, |\theta/365|)}$; the card's help gives both figures.
+  table, the first of the two columns in a tree's Greeks) when an option expires within the day or when a decay
+  $D$ and theta differ by more than 10 % of the larger, ${|D - \theta/365| > 0.1\,\max(|D|, |\theta/365|)}$; the
+  card's help gives both figures.
 * Strategy quantities are signed (+ long, − short); one unit is an option on one share. The contract
   multiplier converts to dollar P&L.
