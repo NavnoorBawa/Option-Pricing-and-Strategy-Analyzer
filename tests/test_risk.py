@@ -230,10 +230,19 @@ def test_frozen_implied_vol_understates_the_var_of_a_short_straddle_by_27_percen
     # Far outside the simulation noise: even the two 95 % intervals are apart (the runs share their spot paths, so
     # the noise of the gap itself is smaller still).
     assert frozen.var_ci95[1] < moving.var_ci95[0]
-    # The Methodology quotes this case: its numbers must be these.
+    # The Methodology quotes this case: its numbers must be these, and the spread of the understatement over seeds 0
+    # to 9 (24.2 % at seed 9 to 27.0 % at seed 4, measured; ten pairs of runs, about 1.5 s).
     text = " ".join((Path(risk.__file__).parent / "ui" / "methodology" / "risk.md").read_text(encoding="utf-8").split())
+    assert "100,000 paths, seed 7, the app's default" in text
     assert rf"VaR is \${moving.var:,.0f} with implied-vol moves and \${frozen.var:,.0f} without them" in text
     assert f"understates it by {100 * (1 - frozen.var / moving.var):.0f} %" in text
+    gaps = [
+        1
+        - risk.value_at_risk(STRADDLE, SPX, risk.VaRConfig(0.99, 1, 100_000, seed=seed), 100).var
+        / risk.value_at_risk(STRADDLE, SPX, risk.VaRConfig(0.99, 1, 100_000, seed=seed, **INDEX_VOL), 100).var
+        for seed in range(10)
+    ]
+    assert f"({100 * min(gaps):.0f} % to {100 * max(gaps):.0f} % over seeds 0 to 9)" in text
 
 
 @pytest.mark.parametrize(
@@ -250,8 +259,9 @@ def test_frozen_implied_vol_understates_the_var_of_a_short_straddle_by_27_percen
 )
 def test_index_vol_dynamics_add_to_the_var_and_es_of_a_short_straddle(days, vol, cfg):
     # Short vega and short gamma: implied-vol moves widen the loss tail, so the VaR and ES with them exceed the
-    # spot-only ones on the same spot paths. The smallest gap here is the 7-day straddle's VaR, +1.2 % (a week from
-    # expiry, vega is small next to gamma); the 45-day one gains 36 % at this seed, and 46 % without the correlation.
+    # spot-only ones on the same spot paths. The smallest gaps here are the 7-day straddle's, +1.2 % on VaR and +0.9 %
+    # on ES (a week from expiry, vega is small next to gamma), then the Student-t ES's, +2.2 %; the 45-day VaR gains
+    # 36 % at this seed, and 46 % without the correlation (measured).
     market = S.Market(5800, 0.043, vol, days / 365, 0.013)
     base = {"confidence": 0.99, "horizon_days": 1, "n_paths": 50_000, "spot_vol_correlation": -0.7, "seed": 3} | cfg
     moving = risk.value_at_risk(STRADDLE, market, risk.VaRConfig(**(base | {"vol_of_vol": 1.0})), 100)

@@ -5,6 +5,7 @@ import dataclasses
 import json
 import re
 import urllib.parse
+from decimal import Decimal
 
 import numpy as np
 import pytest
@@ -18,7 +19,7 @@ from options_analyzer import risk, scenarios
 from options_analyzer import strategies as strat
 from options_analyzer.ui import cache, charts, tab_risk, tab_strategy
 from options_analyzer.ui.app import TABS
-from options_analyzer.ui.format import md, money
+from options_analyzer.ui.format import MINUS, md, money
 
 NO_EDITS = {"edited_rows": {}, "added_rows": [], "deleted_rows": []}
 #: The Risk tab's default implied-vol dynamics in the VaR simulation, an index's (VIX-like).
@@ -859,6 +860,29 @@ def test_every_card_amount_fits_at_laptop_width(sign, signed):
                 assert _card_width(text) <= CARD_WIDTH, (value, decimals, text)
 
 
+@pytest.mark.parametrize(
+    ("value", "shown"),
+    [
+        (54.29505, 54.30),
+        (-54.87316, -54.87),
+        (0.004, 0.0),
+        (999.996, 1000.0),
+        (3861.945, 3862.0),
+        (-2_345_678.9, -2_350_000.0),
+        (337_720_000.0, 337_700_000.0),
+        (2_157_150_000.0, 2_160_000_000.0),
+        (1.03e15, 1.0e15),
+        (float("inf"), float("inf")),
+    ],
+)
+def test_var_delta_amounts_are_read_back_from_the_cards(value, shown):
+    # The VaR delta line subtracts the amounts as the cards show them, read back from money_short's text in every
+    # tier (cents, whole dollars, M, B, T, scientific). Equal to a few ulps (rel 1e-15: "2.16" x 1e9 is not exact in
+    # binary), and the amount read back shows as the same text.
+    assert tab_risk._as_shown(value) == pytest.approx(shown, rel=1e-15)
+    assert tab_strategy.money_short(tab_risk._as_shown(value)) == tab_strategy.money_short(value)
+
+
 def test_worded_card_values_fit_at_laptop_width():
     for text in ("No loss", "No profit", "Unlimited", "Too large", "–", ">99.9%", "<0.1%", "100.0%"):
         assert _card_width(text) <= CARD_WIDTH, text
@@ -1171,12 +1195,22 @@ def test_stress_table_and_var_cards():
     at = _app("Risk")
     labels = [m.label for m in at.metric]
     assert "VaR 95% CI (simulation)" not in labels
-    assert any("95% confidence interval of the VaR estimate" in c.value for c in at.caption)
+    assert any("95% confidence intervals of the VaR estimates" in c.value for c in at.caption)
     full = next(c.value for c in at.caption if c.value.startswith("Full revaluation"))
     assert "ν ≤ 4" not in full  # Normal returns have no degrees of freedom
+    assert "fatter tails" not in full
     at.selectbox(key="var_dist").set_value("student_t").run()
     full = next(c.value for c in at.caption if c.value.startswith("Full revaluation"))
     assert "ν ≤ 4" in full
+    # Delta-normal VaR assumes Normal returns, so its gap to the VaR also shows the fat tails of Student-t returns,
+    # and of GARCH ones beyond a day (one-day GARCH returns with Normal shocks are Normal).
+    assert "vega, and the fatter tails of the return model." in full
+    at.selectbox(key="var_dist").set_value("garch").run()
+    full = next(c.value for c in at.caption if c.value.startswith("Full revaluation"))
+    assert "fatter tails" not in full
+    at.number_input(key="var_horizon").set_value(2).run()
+    full = next(c.value for c in at.caption if c.value.startswith("Full revaluation"))
+    assert "fatter tails of the return model" in full
 
 
 def _stress_frame(at: AppTest):
@@ -1223,6 +1257,20 @@ def _var_configs(monkeypatch) -> list[risk.VaRConfig]:
     return configs
 
 
+def _var_runs(monkeypatch) -> list[tuple[risk.VaRConfig, risk.VaRResult]]:
+    """Like :func:`_var_configs`, with the result of each simulation."""
+    runs = []
+    real = risk.value_at_risk
+
+    def spy(strategy, market, config, multiplier=1.0):
+        runs.append((config, real(strategy, market, config, multiplier)))
+        return runs[-1][1]
+
+    monkeypatch.setattr(risk, "value_at_risk", spy)
+    cache.value_at_risk.clear()
+    return runs
+
+
 def _var_cards(at: AppTest) -> list[tuple[str, str, str]]:
     """Label, value and delta line of every VaR and ES card."""
     return [(m.label, m.value, m.delta) for m in at.metric if re.search(r"VaR|ES |Shortfall", m.label)]
@@ -1242,6 +1290,79 @@ def test_var_simulates_index_implied_vol_dynamics_by_default(monkeypatch):
     assert configs == [dataclasses.replace(moving, vol_of_vol=0.0), moving]
     full = next(c.value for c in at.caption if c.value.startswith("Full revaluation"))
     assert "implied vol moving (vol of vol 100% a year, correlation −0.70 with spot)" in full
+
+
+@pytest.mark.parametrize(
+    ("model", "steps"),
+    [
+        pytest.param(
+            {"distribution": "student_t", "dof": 4.0},
+            [[("selectbox", "var_dist", "student_t")], [("slider", "var_dof", 4)]],
+            id="student_t",
+        ),
+        pytest.param(
+            {"distribution": "garch", "garch_alpha": 0.05, "garch_beta": 0.93, "garch_t": True, "dof": 8.0},
+            [
+                [("selectbox", "var_dist", "garch")],
+                [
+                    ("number_input", "garch_alpha", 0.05),
+                    ("number_input", "garch_beta", 0.93),
+                    ("toggle", "garch_t", True),
+                ],
+                [("slider", "var_dof_garch", 8)],
+            ],
+            id="garch_t",
+        ),
+    ],
+)
+def test_the_spot_only_run_keeps_every_setting_but_the_implied_vol_moves(monkeypatch, model, steps):
+    # The gap between the two VaRs is the vega risk only if the spot-only run differs from the other in the implied-vol
+    # moves alone. A spot-only run at the default seed or return model would mix a seed or model difference into
+    # it, which the tests at the defaults cannot see; here every setting is off its default. Each step's widgets
+    # appear once the step before has run (the GARCH inputs once GARCH is chosen); the last step changes the return
+    # model, so both runs are simulated again and are the last two.
+    configs = _var_configs(monkeypatch)
+    at = _app("Risk")
+    at.selectbox(key="var_conf").set_value(0.975)
+    at.number_input(key="var_horizon").set_value(5)
+    at.select_slider(key="var_paths").set_value(10_000)
+    at.number_input(key="var_vov").set_value(150.0)
+    at.slider(key="var_corr").set_value(-0.5)
+    at.number_input(key="var_seed").set_value(11)
+    for step in steps:
+        for kind, key, value in step:
+            getattr(at, kind)(key=key).set_value(value)
+        at.run()
+        _ok(at)
+    config = risk.VaRConfig(0.975, 5, 10_000, seed=11, vol_of_vol=1.5, spot_vol_correlation=-0.5, **model)
+    assert configs[-2:] == [dataclasses.replace(config, vol_of_vol=0.0, spot_vol_correlation=-0.7), config]
+    assert [label for label, *_ in _var_cards(at)] == [
+        "VaR 97.5%",
+        "Expected Shortfall 97.5%",
+        "Spot-only VaR 97.5%",
+        "Spot-only ES 97.5%",
+    ]
+
+
+def _shown(text: str) -> Decimal:
+    """A card's amount as it reads, in exact decimal: ``$1,029`` is 1029 and ``$54.30`` is 54.30."""
+    return Decimal(text.removeprefix("$").replace(",", ""))
+
+
+def test_the_var_delta_line_adds_up_with_the_amounts_shown(monkeypatch):
+    # Review: the delta line was the difference of the exact amounts, so on the default page it read −$0.58 under
+    # cards of $54.30 and $54.87 (exact 54.295 and 54.873). It is the difference of the amounts as shown now,
+    # computed here in exact decimal from the cards' text.
+    runs = _var_runs(monkeypatch)
+    at = _app("Risk")
+    (_, spot_only), (_, moving) = runs
+    cards = _var_cards(at)
+    assert [value for _, value, _ in cards] == ["$54.30", "$61.77", "$54.87", "$62.91"]
+    assert money(moving.var - spot_only.var) == "-$0.58"  # the exact amounts would not add up on screen
+    for (_, value, delta), (_, frozen, _) in zip(cards[:2], cards[2:], strict=True):
+        gap = _shown(value) - _shown(frozen)
+        assert delta == md(f"{'+' if gap > 0 else MINUS}${abs(gap):,} vs spot only")
+    assert [delta for *_, delta in cards[:2]] == [md("−$0.57 vs spot only"), md("−$1.14 vs spot only")]
 
 
 def test_var_cards_show_the_spot_only_var_beside_the_var_with_implied_vol_moves():
@@ -1271,6 +1392,18 @@ def test_var_cards_show_the_spot_only_var_beside_the_var_with_implied_vol_moves(
     # The delta-normal VaR, a card before, is in the table of statistics.
     stats = next(df.value for df in at.dataframe if "Statistic" in df.value.columns).set_index("Statistic")
     assert stats.loc["Delta-normal VaR 99.0%", "Value"] == money(moving.delta_normal_var)
+    # With two VaRs on the cards, the simulation interval says which is which; delta-normal VaR leaves out vega too.
+    (lo, hi), (lo_spot, hi_spot) = moving.var_ci95, spot_only.var_ci95
+    uncertainty = next(c.value for c in at.caption if c.value.startswith("Simulation uncertainty"))
+    assert uncertainty == md(
+        f"Simulation uncertainty: the 95% confidence intervals of the VaR estimates are {money(lo)} to {money(hi)} "
+        f"with implied-vol moves and {money(lo_spot)} to {money(hi_spot)} spot only (order statistics of the "
+        "100,000 simulated outcomes of each run)."
+    )
+    full = next(c.value for c in at.caption if c.value.startswith("Full revaluation"))
+    assert full.endswith(
+        "with Normal returns: its gap to the full-revaluation VaR shows the position's gamma, time decay and vega."
+    )
 
 
 def test_implied_vol_moves_switched_off_show_the_spot_only_run_from_the_cache(monkeypatch):
@@ -1287,7 +1420,12 @@ def test_implied_vol_moves_switched_off_show_the_spot_only_run_from_the_cache(mo
         ("Expected Shortfall 99.0%", "$3,683", "implied vol frozen"),
     ]
     assert "implied vol frozen (no vega risk)" in _metric(at, "VaR 99.0%").proto.help
-    assert "time decay and implied vol frozen" in next(c.value for c in at.caption if c.value.startswith("Full"))
+    full = next(c.value for c in at.caption if c.value.startswith("Full"))
+    assert "time decay and implied vol frozen" in full
+    assert full.endswith("shows the position's gamma and time decay.")  # no vega in the full revaluation
+    uncertainty = next(c.value for c in at.caption if c.value.startswith("Simulation uncertainty"))
+    assert uncertainty.startswith("Simulation uncertainty: the 95% confidence interval of the VaR estimate is ")
+    assert "spot only" not in uncertainty and uncertainty.endswith("of the 100,000 simulated outcomes).")
     at.toggle(key="var_volmoves").set_value(True).run()
     _ok(at)
     assert len(configs) == 2  # both runs came from the cache

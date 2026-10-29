@@ -7,6 +7,7 @@ re-prices it leg by leg, so the numbers are consistent across the app.
 from __future__ import annotations
 
 import dataclasses
+import math
 
 import numpy as np
 import pandas as pd
@@ -16,7 +17,7 @@ from .. import risk, scenarios
 from .. import strategies as strat
 from . import cache, charts
 from .components import Card, card_row, current_key
-from .format import MINUS, md, money, money_short, signed
+from .format import MINUS, SHORT_SCALES, md, money, money_short, signed
 from .tab_strategy import Position
 
 CONFIDENCE_LEVELS = (0.95, 0.975, 0.99, 0.995, 0.999)
@@ -306,6 +307,19 @@ def _signed_short(value: float) -> str:
     return MINUS + text[1:] if text.startswith("-") else text
 
 
+def _as_shown(value: float) -> float:
+    """The amount :func:`money_short` shows for ``value``, as a number: 54.29505 reads ``$54.30``, so 54.3.
+
+    Read back from the text, so that it follows the cards' precision by construction (cents below $1,000, whole
+    dollars below a million, then ``$1.23M``)."""
+    if not math.isfinite(value):
+        return value
+    text = money_short(abs(value)).removeprefix("$").replace(",", "")
+    scale = {suffix: size for size, suffix in SHORT_SCALES}.get(text[-1])
+    amount = float(text) if scale is None else float(text[:-1]) * scale
+    return math.copysign(amount, value)
+
+
 def _var_help(result: risk.VaRResult, meaning: str) -> str:
     """Help of a VaR card: what it means, then the exact amount and its 95% simulation interval."""
     lo, hi = result.var_ci95
@@ -320,8 +334,15 @@ def _es_help(result: risk.VaRResult, vol: str) -> str:
 def _risk_card(label: str, value: float, help_text: str, frozen: float | None = None) -> Card:
     """A VaR or ES card: the amount shortened, ``help_text`` as its help, and a delta line with what the implied-vol
     moves add to ``frozen``, the same measure with implied vol frozen (``+$1,029 vs spot only``). Without
-    ``frozen`` the card's own amount has implied vol frozen, and the line says so."""
-    delta = "implied vol frozen" if frozen is None else md(f"{_signed_short(value - frozen)} vs spot only")
+    ``frozen`` the card's own amount has implied vol frozen, and the line says so.
+
+    The delta is the difference of the two amounts as the cards show them, so that it adds up on screen: on the
+    default page the cards read $54.30 and $54.87 and the line −$0.57, where the exact amounts (54.295 and 54.873)
+    would give −$0.58."""
+    if frozen is None:
+        delta = "implied vol frozen"
+    else:
+        delta = md(f"{_signed_short(_as_shown(value) - _as_shown(frozen))} vs spot only")
     return (
         label,
         money_short(value),
@@ -465,7 +486,6 @@ def _var(position: Position) -> None:
         if with_vol:
             result = cache.value_at_risk(position.strategy, position.market, config, position.units)
 
-    ci = md(f"{money(result.var_ci95[0])} to {money(result.var_ci95[1])}")
     level = f"{confidence:.1%}"
     meaning = f"Loss not exceeded with {level} probability over {horizon} trading day(s)"
     moving, still = "with spot and implied vol moving", "with implied vol frozen"
@@ -494,10 +514,19 @@ def _var(position: Position) -> None:
             _risk_card(f"Expected Shortfall {level}", result.expected_shortfall, _es_help(result, still)),
         ]
     card_row("var_cards", groups, cards)
-    st.caption(
-        f"Simulation uncertainty: the 95% confidence interval of the VaR estimate is {ci} "
-        f"(order statistics of the {n_paths:,} simulated outcomes)."
-    )
+    interval = f"{money(result.var_ci95[0])} to {money(result.var_ci95[1])}"
+    if with_vol:  # two VaRs on the cards: name the one each interval belongs to
+        lo, hi = spot_only.var_ci95
+        uncertainty = (
+            f"the 95% confidence intervals of the VaR estimates are {interval} with implied-vol moves and "
+            f"{money(lo)} to {money(hi)} spot only (order statistics of the {n_paths:,} simulated outcomes of each run)"
+        )
+    else:
+        uncertainty = (
+            f"the 95% confidence interval of the VaR estimate is {interval} (order statistics of the {n_paths:,} "
+            "simulated outcomes)"
+        )
+    st.caption(md(f"Simulation uncertainty: {uncertainty}."))
     charts.show(
         charts.histogram_chart(
             result.pnl,
@@ -531,14 +560,19 @@ def _var(position: Position) -> None:
         if with_vol
         else "implied vol frozen"
     )
+    # What delta-normal VaR leaves out, so what its gap to the full-revaluation VaR shows. One-day GARCH returns
+    # with Normal shocks are Normal (the variance starts at its long-run level), so their tails are no fatter.
+    left_out = "gamma, time decay and vega" if with_vol else "gamma and time decay"
+    if distribution == "student_t" or garch_t or (distribution == "garch" and horizon > 1):
+        left_out += ", and the fatter tails of the return model"
     c1, c2 = st.columns([1, 1.4])
     c1.dataframe(stats, hide_index=True)
     c2.caption(
         f"Full revaluation of every leg on {n_paths:,} simulated {risk.DISTRIBUTIONS[distribution]} paths "
         f"(zero drift, volatility {position.market.volatility:.1%}), with {horizon} trading day(s) of time decay and "
         f"{vol_moves}. VaR and ES use the Acerbi–Tasche estimators on the sorted P&L. Delta-normal VaR is the "
-        "linear approximation |Δ|·S·σ·√(h/252)·z, spot only: its gap to full revaluation shows the position's "
-        "gamma and vega."
+        f"linear approximation |Δ|·S·σ·√(h/252)·z with Normal returns: its gap to the full-revaluation VaR shows "
+        f"the position's {left_out}."
         + (" Excess kurtosis is unstable for ν ≤ 4." if distribution == "student_t" or garch_t else "")
         + (
             f" {result.settled_legs} option leg(s) expire before the horizon and are settled on the simulated price "
