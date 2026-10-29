@@ -23,8 +23,8 @@ import streamlit as st
 #: of its 14 px base) and deltas in Regular at 12.25 px. Digits (tabular), "$", "+" and "−" are 0.6 em wide in Plex
 #: Sans Medium; the other characters of amounts and percentages are listed, with the "M", "B", "T" and "e" of the
 #: shortened amounts ("$46.62M", "$1.2e+15"). The words a card can show instead ("Unlimited", "No profit") are
-#: modelled at 0.6 em a character, wider than they are. Deltas average at most 0.517 em per character.
-_VALUE_PX, _DELTA_PX, _DELTA_EM = 22.75, 12.25, 0.517
+#: modelled at 0.6 em a character, wider than they are.
+_VALUE_PX, _DELTA_PX = 22.75, 12.25
 _DIGIT_EM = 0.6
 _CHAR_EM = {",": 0.29, ".": 0.29, " ": 0.236, "-": 0.401, "%": 0.947, "M": 0.814, "B": 0.659, "T": 0.577, "e": 0.556}
 #: Labels, as static/desk.css sets them: Regular capitals at 0.72rem (10.08 px), each character followed by 0.06 em
@@ -39,7 +39,20 @@ _LABEL_CHAR_EM = {
     " ": 0.236, ".": 0.272, ",": 0.272, ":": 0.292, "(": 0.335, ")": 0.335, "/": 0.383, "-": 0.399, "&": 0.694,
     "%": 0.927,
 }  # fmt: skip
-#: Room to spare on every value (about 2 px on a desktop), for browsers that round the glyph widths differently.
+#: Deltas, Regular at 12.25 px in a pill with 0.375rem (5.25 px) of padding on each side: the advance widths of the
+#: labels' characters, the lowercase letters and the "$" and "–" of an interval; any other character counts as the
+#: widest, "%". (Every character at 0.517 em and no padding, which covered the pills of deltas of words, made the pill
+#: of a Monte Carlo interval, "$10.4237 – $10.4582, 95%", 13 px narrower than the 165.3 px it measures in Chromium.)
+_DELTA_PADDING_PX = 10.5
+_DELTA_CHAR_EM = {
+    **_LABEL_CHAR_EM,
+    "a": 0.534, "b": 0.58, "c": 0.503, "d": 0.58, "e": 0.549, "f": 0.324, "g": 0.528, "h": 0.568, "i": 0.25,
+    "j": 0.25, "k": 0.527, "l": 0.272, "m": 0.873, "n": 0.568, "o": 0.56, "p": 0.58, "q": 0.58, "r": 0.367,
+    "s": 0.487, "t": 0.351, "u": 0.568, "v": 0.492, "w": 0.768, "x": 0.507, "y": 0.499, "z": 0.464,
+    "$": 0.598, "–": 0.588,
+}  # fmt: skip
+#: Room to spare on every value and delta (about 2 px and 1 px on a desktop), for browsers that round the glyph widths
+#: differently.
 _VALUE_SPARE_EM = 0.1
 #: Card padding and border, the label's help icon and its margin, and the gap between cards (gap="small").
 _CARD_CHROME_PX, _HELP_ICON_PX, _CARD_GAP_PX = 28.0, 19.25, 14.0
@@ -64,8 +77,13 @@ def _label_px(text: str) -> float:
 
 
 def _delta_px(text: str) -> float:
-    """Width in px of a card delta (the small line under the value) on one line."""
-    return _DELTA_PX * _DELTA_EM * len(text)
+    """Width in px of a card delta (the small line under the value) on one line, with its pill's padding and a little
+    room to spare. A dollar sign escaped for Markdown (``\\$``) shows without its backslash. No delta, no pill: 0."""
+    if not text:
+        return 0.0
+    widest = max(_DELTA_CHAR_EM.values())
+    em = sum(_DELTA_CHAR_EM.get(c, widest) for c in text.replace("\\$", "$")) + _VALUE_SPARE_EM
+    return _DELTA_PX * em + _DELTA_PADDING_PX
 
 
 def _card_width(

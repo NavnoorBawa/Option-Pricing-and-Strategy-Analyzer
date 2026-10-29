@@ -617,9 +617,24 @@ def test_the_card_width_model_matches_plex_sans():
     assert max(components._LABEL_CHAR_EM.values()) == components._LABEL_CHAR_EM["%"] == 0.927
     for label in CARD_LABELS:
         assert set(label.upper()) <= set(components._LABEL_CHAR_EM), label
-    # Deltas: at most _DELTA_EM per character on average.
-    for delta in ("+0.00 vol pts vs sidebar", "debit (paid)", "credit (received)"):
-        assert sum(regular[c] for c in delta) <= components._DELTA_EM * len(delta), delta
+    # Deltas: the same Regular widths with the lowercase letters, exactly; any other character as the widest. Every
+    # delta the app writes is modelled from its own characters, in its pill, never narrower than it is. (At 0.517 em
+    # a character a Monte Carlo interval was modelled 2.8 px narrower than its text, before its pill's 10.5 px.)
+    for char, model in components._DELTA_CHAR_EM.items():
+        assert regular[char] == model, char
+    assert max(components._DELTA_CHAR_EM.values()) == 0.927
+    for delta in (
+        "+0.00 vol pts vs sidebar",
+        "debit (paid)",
+        "credit (received)",
+        r"\$10.4237 – \$10.4582, 95%",
+        r"−\$0.0001 – \$1,234,567.8901, 95%",
+        "Interval unreliable: 299 of 1,000,000 paths finish out of the money",
+    ):
+        assert set(delta.replace("\\", "")) <= set(components._DELTA_CHAR_EM), delta
+        shown = delta.replace(r"\$", "$")
+        text_px = components._DELTA_PX * sum(regular[c] for c in shown)
+        assert text_px + components._DELTA_PADDING_PX <= components._delta_px(delta) <= text_px + 12, delta
 
 
 def _covered(code_point: int) -> bool:
@@ -916,6 +931,44 @@ def test_card_rows_line_up(chromium, app_url, width, query, three_up):
         assert boxes("strategy_cards") == boxes("greek_cards")
     finally:
         page.close()
+
+
+#: The price cards with a delta line: label, value and delta as written, the width of the card at max-content and
+#: whether the delta is cut off with an ellipsis where it is.
+_PRICE_CARD_DELTAS = """() => [...document.querySelectorAll('.st-key-price_cards [data-testid=stMetric]')]
+  .filter(card => card.querySelector('[data-testid=stMetricDelta]')).map(card => {
+    const delta = card.querySelector('[data-testid=stMetricDelta]');
+    const cut = [delta, ...delta.querySelectorAll('*')]
+      .some(t => t.scrollWidth > t.clientWidth && getComputedStyle(t).overflow !== 'visible');
+    const width = card.style.width;
+    card.style.width = 'max-content';
+    const natural = card.getBoundingClientRect().width;
+    card.style.width = width;
+    return {label: card.querySelector('[data-testid=stMetricLabel]').innerText,
+            value: card.querySelector('[data-testid=stMetricValue]').innerText, delta: delta.innerText, natural, cut};
+  })"""
+
+
+@pytest.mark.e2e
+@pytest.mark.slow
+@pytest.mark.parametrize("width", [1440, 1024, 390])
+def test_monte_carlo_intervals_are_never_cut_off(chromium, app_url, width):
+    # The cards' model made the pill of "$10.4237 – $10.4582, 95%" 13 px narrower than Chromium draws it (0.517 em a
+    # character and no padding), so at a row's narrowest that interval would end in an ellipsis. Each card with a
+    # delta, reliable or not, is now modelled at most 2 px wider than its max-content width, never narrower.
+    from options_analyzer.ui import components
+
+    for query in ("?model=Monte+Carlo", "?model=Monte+Carlo&strike=120&days=30"):
+        page = _open(chromium, f"{app_url}/{query}", "light", width)
+        try:
+            cards = page.evaluate(_PRICE_CARD_DELTAS)
+            assert [card["label"].lower() for card in cards] == ["call value", "put value"], query
+            for card in cards:
+                assert not card["cut"], (query, card)
+                model = components._card_width(card["label"].capitalize(), card["value"], delta=card["delta"])
+                assert card["natural"] <= model <= card["natural"] + 2, (query, card, model)
+        finally:
+            page.close()
 
 
 #: A chart that each tab draws (the key given to charts.show), and the number of charts it draws, at the default URL.
