@@ -62,10 +62,13 @@ class StressScenario:
     """An instantaneous shock, optionally spread over ``days`` of elapsed time.
 
     A sourced scenario (the historical analogues and the Fed scenario, built with :meth:`sourced`) also keeps the
-    volatility index it was calibrated on and that index's levels at the start and end of the window. Its
-    ``vol_multiplier`` is the ratio ``vol_end / vol_start``, so the shock cannot drift from the levels that its
-    description quotes: a multiplier more than 1e-12 (relative) away from the ratio raises ``ValueError``, as do
-    missing, non-positive or non-finite levels and a sourced shock that is not a one-month shock.
+    volatility index it was calibrated on and the two levels of that index the shock is calibrated between: its
+    closes at the start and end of the window for a historical analogue; the Fed's jump-off and peak, each the
+    highest close of its quarter, for the Fed scenario. Its ``vol_multiplier`` is the ratio ``vol_end / vol_start``,
+    which multiplies each leg's current implied vol (it does not set implied vol to ``vol_end``), so the shock cannot
+    drift from the levels that its description quotes: a multiplier more than 1e-12 (relative) away from the ratio
+    raises ``ValueError``, as do missing, non-positive or non-finite levels and a sourced shock that is not a
+    one-month shock.
     """
 
     name: str
@@ -77,8 +80,8 @@ class StressScenario:
     #: True when ``vol_multiplier`` is a one-month (VIX-like) shock, which is
     #: damped for longer tenors; False applies it literally to every leg.
     one_month_vol_shock: bool = False
-    #: A sourced scenario's one-month volatility index ("VIX", or "VXO" before 1990) and its levels in vol points at
-    #: the start and end of the window; empty for a hypothetical shock.
+    #: A sourced scenario's one-month volatility index ("VIX", or "VXO" before 1990) and the two levels in vol points
+    #: that the shock is calibrated between (see the class docstring); empty for a hypothetical shock.
     vol_index: str = ""
     vol_start: float | None = None
     vol_end: float | None = None
@@ -110,16 +113,20 @@ class StressScenario:
     def sourced(
         cls,
         name: str,
+        *,
         spot_change: float,
         rate_change: float,
         days: int,
         description: str,
-        *,
         vol_index: str,
         vol_start: float,
         vol_end: float,
     ) -> StressScenario:
-        """A one-month vol shock calibrated on a volatility index: the multiplier is ``vol_end / vol_start``."""
+        """A one-month vol shock calibrated on a volatility index: the multiplier is ``vol_end / vol_start``.
+
+        Every argument but the name is keyword-only: the constructor takes the vol multiplier third, so a positional
+        call by analogy would put the vol shock in ``rate_change``.
+        """
         try:
             multiplier = vol_end / vol_start
         except (TypeError, ZeroDivisionError):
@@ -147,7 +154,7 @@ HISTORICAL_SCENARIOS: tuple[StressScenario, ...] = (
         "Fed funds target unchanged at 7.3125% until 4 Nov.",
     ),
     StressScenario.sourced(
-        "Dot-com bust (2000-02)",
+        "Dot-com bust (2000–02)",
         spot_change=-0.491,
         rate_change=-0.0425,
         days=929,
@@ -158,7 +165,7 @@ HISTORICAL_SCENARIOS: tuple[StressScenario, ...] = (
         "Fed funds target 6.00% → 1.75%.",
     ),
     StressScenario.sourced(
-        "Global Financial Crisis (2007-09)",
+        "Global Financial Crisis (2007–09)",
         spot_change=-0.568,
         rate_change=-0.04625,
         days=517,

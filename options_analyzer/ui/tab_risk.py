@@ -282,9 +282,10 @@ def _stress_tests(position: Position) -> None:
         for sc in chosen:
             st.markdown(f"- **{sc.name}** — {sc.description}")
         st.caption(
-            "Historical analogues apply the episode's S&P 500 move, its VIX ratio (as a shock to one-month "
-            "implied vol) and its policy-rate change to your position instantly, unless durations are "
-            "included. They are stylised: single stocks can move far more than the index."
+            "Historical analogues apply the episode's S&P 500 move, its VIX ratio (the VXO for 1987) and its "
+            "change in the Fed funds target to your position instantly, unless durations are included. The ratio "
+            "scales each leg's implied vol (less for longer tenors when damped); it does not set it to the index's "
+            "level. They are stylised: single stocks can move far more than the index."
         )
 
 
