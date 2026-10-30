@@ -55,6 +55,8 @@ References
   Statistics* 13(3), 253-263. doi:10.1080/07350015.1995.10524599
 * Newey, W. K. and West, K. D. (1987). A simple, positive semi-definite, heteroskedasticity and autocorrelation
   consistent covariance matrix. *Econometrica* 55(3), 703-708. doi:10.2307/1913610
+* Newey, W. K. and West, K. D. (1994). Automatic lag selection in covariance matrix estimation. *Review of Economic
+  Studies* 61(4), 631-653. doi:10.2307/2297912
 * Hull, J. and White, A. (1998). Incorporating volatility updating into the historical simulation method for
   value-at-risk. *Journal of Risk* 1(1), 5-19. doi:10.21314/JOR.1998.001
 """
@@ -205,10 +207,13 @@ def kupiec_pof(exceptions: int, observations: int, p: float = 0.01) -> KupiecRes
     >>> round(res.lr, 4), round(res.p_value, 4), round(res.exact_p_value, 4), round(res.binomial_tail, 4)
     (12.9555, 0.0003, 0.0003, 0.0003)
 
-    No exception at all is a rejection too, at 5 % (a 99 % VaR that is never breached in a year is too high):
+    No exception at all scores 5.0252, which the chi-square approximation rejects at 5 % but the exact p-value does
+    not: a correct 99 % model has no exception in 8.1 % of years (and MAR32 puts that year in the green zone). This
+    is the discreteness that makes the test's actual size 9.5 % at 250 days (:func:`power_kupiec`).
 
-    >>> round(kupiec_pof(0, 250, 0.01).lr, 4)
-    5.0252
+    >>> res = kupiec_pof(0, 250, 0.01)
+    >>> round(res.lr, 4), round(res.p_value, 4), round(res.exact_p_value, 4)
+    (5.0252, 0.025, 0.0948)
     """
     n = _check_count("observations", observations, 1)
     x = _check_count("exceptions", exceptions)
@@ -530,6 +535,11 @@ def _simulate_z2(
     on its scale, so standard draws suffice. Only tail days contribute, so each history draws its number of tail days
     from the binomial and then that many tail values by inverting the distribution below the VaR: exact in
     distribution, with about ``days alpha`` draws per history instead of ``days``.
+
+    Both draws invert a cdf at uniforms, so a seed gives the same histories on every NumPy the project supports.
+    ``Generator.binomial`` does not: where the expected count is above 30 it changed between NumPy 1.26 and 2.x, and
+    from seed 2014 the 5 % critical value at 2,520 days and alpha = 2.5 % was -0.21149 on one and -0.21133 on the
+    other (by inversion, -0.21036 on both). Up to 30 NumPy inverts the cdf too and draws the same counts from a seed.
     """
     q, e = _standard_tail(alpha, dof)
     if truth is None:
@@ -538,7 +548,11 @@ def _simulate_z2(
         scale, true_dof = truth
         factor = scale * (1.0 if true_dof is None else math.sqrt((true_dof - 2.0) / true_dof))
         tail = float(stats.norm.cdf(-q / factor) if true_dof is None else stats.t.cdf(-q / factor, true_dof))
-    counts = rng.binomial(days, tail, size=n_sims)
+    # The binomial quantile of each uniform: the first count whose cdf reaches it (the running maximum guards the
+    # search against a cdf that rounding leaves a last bit lower near 1; under 0.01 s for 100,000 histories of 2,520
+    # days).
+    cdf = np.maximum.accumulate(stats.binom.cdf(np.arange(days + 1), days, tail))
+    counts = np.minimum(np.searchsorted(cdf, rng.random(n_sims)), days)
     values = factor * _tail_draws(rng, int(counts.sum()), tail, true_dof)
     sums = np.bincount(np.repeat(np.arange(n_sims), counts), weights=values, minlength=n_sims)
     return sums / (days * alpha * e) + 1.0
@@ -579,8 +593,9 @@ def acerbi_szekely_z2(
 
     Examples
     --------
-    The paper's 5 % critical value for a year at alpha = 2.5 % is about -0.70 (for a Normal model; it barely moves
-    with the distribution):
+    The paper's 5 % critical value for a year at alpha = 2.5 % is about -0.70 for a Normal model. It moves little for
+    moderate tails (-0.74 for a Student-t with 5 degrees of freedom) but reaches -0.82 with 3 (its Table 4), so
+    ``null`` should be the model's own distribution:
 
     >>> rng = np.random.default_rng(0)
     >>> q, es = 1.959964, 2.337803  # VaR and ES of N(0, 1) at alpha = 2.5 %
@@ -723,8 +738,9 @@ def diebold_mariano(loss_a: ArrayLike, loss_b: ArrayLike, *, lags: int | None = 
 
     The loss differential ``d_t = loss_a_t - loss_b_t`` is averaged and divided by its standard error from the
     Newey-West long-run variance (:func:`newey_west_variance`), which allows for autocorrelated losses (VaR losses
-    cluster with volatility). The default number of lags is Newey and West's (1994) rule ``floor(4 (T / 100)^(2/9))``,
-    7 for 2,000 days. The statistic is asymptotically standard Normal under equal expected loss.
+    cluster with volatility). The default number of lags is ``floor(4 (T / 100)^(2/9))``, 7 for 2,000 days: the
+    first-step lag count of Newey and West's (1994) automatic selection for the Bartlett kernel (the smaller of the two
+    they try), used here as a fixed rule. The statistic is asymptotically standard Normal under equal expected loss.
 
     Examples
     --------

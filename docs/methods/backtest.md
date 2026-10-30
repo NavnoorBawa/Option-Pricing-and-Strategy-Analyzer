@@ -53,10 +53,12 @@ in the paper):
 
 $$L = \frac{\max(-X - \mathrm{VaR}, 0)}{\alpha\, \mathrm{ES}} + \frac{\mathrm{VaR}}{\mathrm{ES}} + \ln \mathrm{ES} - 1,$$
 
-strictly consistent for VaR and ES jointly (smallest in expectation at the true pair) and homogeneous of degree
-zero. **Diebold and Mariano (1995)** compare two models' mean losses: $\bar d / \sqrt{\hat\sigma^2 / T}$ with
-$\hat\sigma^2$ the Newey and West (1987) long-run variance of the loss differential (Bartlett weights,
-$\lfloor 4 (T/100)^{2/9} \rfloor$ lags by default), asymptotically standard Normal.
+strictly consistent for VaR and ES jointly (smallest in expectation at the true pair). Its differences between
+models are homogeneous of degree zero, so they do not depend on the currency unit; its level does (multiplying every
+amount by $c$ adds $\ln c$, through the $\ln \mathrm{ES}$ term). **Diebold and Mariano (1995)** compare two models'
+mean losses: $\bar d / \sqrt{\hat\sigma^2 / T}$ with $\hat\sigma^2$ the Newey and West (1987) long-run variance of
+the loss differential (Bartlett weights, $\lfloor 4 (T/100)^{2/9} \rfloor$ lags by default: the first-step lag count
+of Newey and West's (1994) automatic selection for that kernel, used as a fixed rule), asymptotically standard Normal.
 
 **P&L attribution (MAR32.34 to MAR32.42).** The Spearman correlation of hypothetical and risk-theoretical P&L and
 the Kolmogorov-Smirnov distance between their empirical distributions: green with a correlation above 0.80 and a
@@ -89,8 +91,11 @@ of vol the returns are a plain GARCH(1,1)-t.
   standard distribution, once per sample size. Only tail days contribute: each simulated history draws its number
   of tail days from the binomial and then that many tail values by inverting the distribution below the VaR. This
   is exact in distribution and needs about $T \alpha$ draws per history instead of $T$ (100,000 histories, seed
-  2014, in 0.06 s for the Normal; the 5 % quantile moves by about 0.003 with the seed). For any other model, pass
-  P&L simulated under it; the rolling backtest draws every day's P&L from that day's scenarios (2,000 histories).
+  2014, in about 0.03 s for the Normal at 250 days; the 5 % quantile moves by about 0.003 with the seed). Both draws
+  invert a cdf at uniforms, so a seed gives the same numbers on NumPy 1.26 and 2.x: `Generator.binomial` changed
+  between them for expected counts above 30, which moved the 2,520-day critical value by 0.0002. For any other
+  model, pass P&L simulated under it; the rolling backtest draws every day's P&L from that day's scenarios (2,000
+  histories).
 * The Newey-West variance is a direct sum of the autocovariances; Hull and White's EWMA is a first-order filter
   (`scipy.signal.lfilter`) started at the window's mean square.
 
@@ -132,7 +137,7 @@ most 0.5 point (Christoffersen) and 0.2 point ($Z_2$). `tests/test_backtest.py` 
 | Christoffersen independence, 25 % chance of an exception after one | 34.1 % | 52.9 % | 78.6 % | 96.7 % |
 | $Z_2$, correct model | 5.0 % | 5.2 % | 5.2 % | 5.0 % |
 | $Z_2$, volatility 20 % above the model's | 77.3 % | 95.1 % | 99.8 % | 100.0 % |
-| $Z_2$, Student-t(5) tails at the model's variance | 15.8 % | 21.3 % | 28.9 % | 48.3 % |
+| $Z_2$, Student-t(5) tails at the model's variance | 15.8 % | 21.3 % | 28.9 % | 48.6 % |
 
 A year of exceptions cannot tell a 99 % VaR from one that is breached twice as often: Kupiec's test rejects the
 second only 24 % of the time while rejecting a correct model 9.5 % of the time. Christoffersen's test is badly
@@ -165,6 +170,7 @@ ranges are from scratch runs of about 20 s each.
   day rather than averaging out (with 10,000 paths the 99 % VaR of a share is its 1.06 % quantile).
 * **The traffic light beyond 250 days at 99 % is an extension.** BCBS (1996) gives the cumulative-probability rule
   for other sample sizes at 99 %; applying it at 97.5 % is this library's choice, and no multiplier is defined there.
+  At 97.5 % MAR32.19 sets only a desk's limit of 30 exceptions in the most recent 12 months.
 * **$Z_2$'s Normal and Student-t nulls assume a zero-mean scale family.** For an option position's P&L, pass the
   model's simulated P&L (the rolling backtest does).
 * **Diebold-Mariano is asymptotic.** With AR(1) loss differentials (coefficient 0.3, 1,000 days) it rejects 5.2 %
@@ -192,5 +198,7 @@ ranges are from scratch runs of about 20 s each.
   Statistics* 13(3), 253-263. [doi:10.1080/07350015.1995.10524599](https://doi.org/10.1080/07350015.1995.10524599)
 * Newey, W. K. and West, K. D. (1987). A simple, positive semi-definite, heteroskedasticity and autocorrelation
   consistent covariance matrix. *Econometrica* 55(3), 703-708. [doi:10.2307/1913610](https://doi.org/10.2307/1913610)
+* Newey, W. K. and West, K. D. (1994). Automatic lag selection in covariance matrix estimation. *Review of Economic
+  Studies* 61(4), 631-653. [doi:10.2307/2297912](https://doi.org/10.2307/2297912)
 * Hull, J. and White, A. (1998). Incorporating volatility updating into the historical simulation method for
   value-at-risk. *Journal of Risk* 1(1), 5-19. [doi:10.21314/JOR.1998.001](https://doi.org/10.21314/JOR.1998.001)

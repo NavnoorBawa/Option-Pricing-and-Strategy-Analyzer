@@ -86,6 +86,19 @@ def test_ten_exceptions_reject_asymptotically_and_exactly():
     assert res.exact_p_value == pytest.approx(stats.binom.sf(9, 250, 0.01), rel=1e-12)
 
 
+def test_no_exception_in_a_year_is_rejected_only_by_the_chi_square_approximation():
+    # LR 5.0252 for no exception: chi-square p 0.0250, a rejection at 5 %. The exact p-value is the probability of an
+    # LR at least that large, no exception (0.99^250 = 0.0811) or seven and more (LR 5.497 at seven, 3.555 at six):
+    # 0.0948, no rejection. MAR32 puts no exception in the green zone.
+    res = bt.kupiec_pof(0, 250, 0.01)
+    assert [round(kupiec_reference(k, 250, 0.01), 3) for k in (0, 6, 7)] == [5.025, 3.555, 5.497]
+    assert res.p_value == pytest.approx(stats.chi2.sf(kupiec_reference(0, 250, 0.01), 1), rel=1e-10)
+    assert round(res.p_value, 4) == 0.025
+    exact = stats.binom.pmf(0, 250, 0.01) + stats.binom.sf(6, 250, 0.01)
+    assert res.exact_p_value == pytest.approx(exact, rel=1e-12) and round(exact, 4) == 0.0948
+    assert bt.traffic_light(0).zone == "green"
+
+
 @pytest.mark.parametrize("p", [0.01, 0.025])
 def test_kupiec_rejects_a_true_var_at_its_nominal_rate(p):
     # Acceptance 6: 200 replications of 2,500 iid N(0, 1) days scored against the true VaR. The rejection rate at 5 %
@@ -262,11 +275,13 @@ def test_christoffersen_power_simulation_matches_exact_enumeration():
 def test_christoffersen_in_a_year_is_weak():
     # 250 days at 99 %: independent exceptions are rejected 1.3 % of the time by LR_ind at a nominal 5 % (too few
     # exceptions for the asymptotics), and exceptions that follow one another a quarter of the time only 34 % of the
-    # time. Measured with 10,000 paths (standard error at most 0.005).
+    # time. Measured with the default 10,000 paths: 0.0134 and 0.3412 (standard errors 0.0011 and 0.0047); a separate
+    # vectorised simulation of 40,000 paths gave 0.0147 and 0.3359 (0.0006 and 0.0024). Each tolerance is about 3.5
+    # standard errors of the library's rate.
     size = bt.power_christoffersen(250, 0.01, 0.01)
     clustered = bt.power_christoffersen(250, 0.01, 0.25)
-    assert size.independence == pytest.approx(0.013, abs=0.01)
-    assert clustered.independence == pytest.approx(0.34, abs=0.02)
+    assert size.independence == pytest.approx(0.013, abs=0.004)
+    assert clustered.independence == pytest.approx(0.34, abs=0.016)
     assert clustered.independence > size.independence and clustered.conditional_coverage > size.conditional_coverage
 
 
@@ -323,6 +338,29 @@ def test_z2_null_simulation_agrees_with_brute_force():
     given_null = bt.acerbi_szekely_z2(x[0], q, es, alpha, null=x[:5_000])
     assert given_null.critical_value == pytest.approx(np.quantile(brute[:5_000], 0.05), rel=1e-12)
     assert given_null.statistic == pytest.approx(brute[0], rel=1e-12)
+
+
+@pytest.mark.parametrize("days", [250, 2_520])
+def test_z2_null_simulation_has_the_closed_form_mean_and_variance(days):
+    # Under a standard Normal model, X I has mean -phi(q) and second moment alpha + q phi(q) (by parts), so Z2 has mean
+    # 0 and variance (alpha + q phi - phi^2) / (T alpha^2 ES^2): 0.1594 at 250 days, 0.01582 at 2,520. The library's
+    # null draws only the tail days (a binomial count, then that many values below the VaR); over 100,000 histories
+    # its mean and variance must match within 4 standard errors. Measured at seed 2014: mean +0.8 and +0.5 standard
+    # errors, variance -1.3 and -1.4 (the two sizes share their uniforms); over seeds 0 to 11 the variance's z-scores
+    # average -0.15 and -0.28, so no bias. 2,520 days is past the expected count of 30 where NumPy's own binomial
+    # stops inverting its cdf.
+    alpha, q = 0.025, stats.norm.isf(0.025)
+    phi = stats.norm.pdf(q)
+    variance = (alpha + q * phi - phi**2) / (days * alpha**2 * (phi / alpha) ** 2)
+    z = bt._simulate_z2(np.random.default_rng(2014), 100_000, days, alpha, None)
+    assert abs(z.mean()) < 4 * math.sqrt(variance / z.size)
+    variance_error = math.sqrt((np.mean((z - z.mean()) ** 4) - z.var() ** 2) / z.size)
+    assert abs(z.var() - variance) < 4 * variance_error
+    if days == 2_520:
+        # The default seed's critical value, the same on NumPy 1.26.4 and 2.5.3 (the oldest-dependencies CI job runs
+        # this): the counts invert the binomial cdf at uniforms. Generator.binomial gave -0.21149 on one and -0.21133
+        # on the other.
+        assert np.quantile(z, 0.05) == pytest.approx(-0.2103575, abs=1e-7)
 
 
 @given(scale=st.floats(1e-3, 1e3), seed=st.integers(0, 1_000))
@@ -637,16 +675,53 @@ def test_a_correct_model_passes():
         assert row.z2_critical == pytest.approx(normal.critical_value, abs=0.05)
 
 
+def hull_white_reference(returns, decay=0.94):
+    """Hull and White's (1998) scaling by an explicit loop: the EWMA variance before each day, from the window's
+    mean square, and each return times today's volatility over its day's."""
+    variance = [np.mean(returns**2)]
+    for r in returns:
+        variance.append(decay * variance[-1] + (1 - decay) * r * r)
+    return returns * np.sqrt(variance[-1] / np.array(variance[:-1]))
+
+
 def test_hull_white_scaling_matches_an_explicit_loop():
     rng = np.random.default_rng(18)
     returns = np.concatenate([0.01 * rng.standard_normal(250), 0.03 * rng.standard_normal(250)])
-    variance = [np.mean(returns**2)]
-    for r in returns:
-        variance.append(0.94 * variance[-1] + 0.06 * r * r)
-    expected = returns * np.sqrt(variance[-1] / np.array(variance[:-1]))
-    np.testing.assert_allclose(bt._ewma_scaled(returns, 0.94), expected, rtol=1e-12)
+    np.testing.assert_allclose(bt._ewma_scaled(returns, 0.94), hull_white_reference(returns), rtol=1e-12)
     # After the volatility triples, the old quiet days are scaled up to about today's volatility.
     assert np.std(bt._ewma_scaled(returns, 0.94)[:250]) == pytest.approx(0.03, rel=0.3)
+
+
+@pytest.mark.parametrize("implied_vol", [True, False], ids=["implied-vol moves", "implied vol frozen"])
+@pytest.mark.parametrize("scaling", ["ewma", "none"])
+def test_historical_model_reprices_the_straddle_on_each_past_day(scaling, implied_vol):
+    # The model of acceptance 7, scenario by scenario, with Black-Scholes in the test: the 45-day straddle a trading
+    # day later, at today's spot times exp(the past day's return, Hull-White scaled or not), its implied vol moved by
+    # the past day's index change damped for its tenor, (tau / 1M)^-0.25 = 0.912 (or not moved), minus today's value.
+    # A window whose volatility doubles halfway, so that the scaling matters; tolerances as for the hypothetical P&L.
+    rng = np.random.default_rng(19)
+    returns = np.concatenate([0.008 * rng.standard_normal(150), 0.016 * rng.standard_normal(100)])
+    iv_changes = 0.06 * rng.standard_normal(250)
+    spot, iv = 5_800.0, 0.18
+    strategy, market = short_straddle(spot, iv)
+    scenarios = bt.historical_model(scaling=scaling, implied_vol=implied_vol)(strategy, market, returns, iv_changes)
+    tau = 45 / 365 - 1 / 252
+    moves = hull_white_reference(returns) if scaling == "ewma" else returns
+    vol = iv * (1 + (np.exp(iv_changes) - 1) * (tau / (30 / 365)) ** -0.25) if implied_vol else iv
+
+    def straddle(spot_after, years, vol):
+        call = bs.price(spot_after, spot, years, 0.043, vol, 0.013, "call")
+        return call + bs.price(spot_after, spot, years, 0.043, vol, 0.013, "put")
+
+    expected = -(straddle(spot * np.exp(moves), tau, vol) - straddle(spot, 45 / 365, iv))
+    np.testing.assert_allclose(scenarios, expected, rtol=1e-10, atol=1e-8)
+    # Both options matter on this window, so each case tests something: the straddle is short 16.2 of vega per vol
+    # point, and moving its implied vol changes a scenario by up to 49 index points (median 11); the scaling changes
+    # one by up to 45.
+    vol_flipped = bt.historical_model(scaling=scaling, implied_vol=not implied_vol)
+    scaling_flipped = bt.historical_model(scaling="none" if scaling == "ewma" else "ewma", implied_vol=implied_vol)
+    for other in (vol_flipped, scaling_flipped):
+        assert np.max(np.abs(other(strategy, market, returns, iv_changes) - scenarios)) > 10
 
 
 def test_rolling_backtest_refuses_inconsistent_input():
@@ -782,6 +857,9 @@ POWER_ROWS = {
 
 @pytest.mark.slow  # about 12 s: the Student-t rows invert the t distribution millions of times at 2,520 days
 def test_the_method_note_power_table_is_what_the_functions_give():
+    # Cell for cell, the simulated rows too: they come from fixed seeds and draws that invert cdfs at uniforms, so
+    # NumPy 1.26.4 and 2.5.3 give the same table (with Generator.binomial the 2,520-day Z2 cells differed by up to
+    # 0.1 point between them, and the oldest-dependencies CI job failed).
     text = METHOD_NOTE.read_text(encoding="utf-8")
     for name, power in POWER_ROWS.items():
         cells = " | ".join(f"{100 * power(n):.1f} %" for n in (250, 500, 1_000, 2_520))

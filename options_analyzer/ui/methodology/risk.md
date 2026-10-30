@@ -56,13 +56,15 @@ is judged by its exceptions, the days whose loss exceeds the VaR. Kupiec's (1995
 with the exact binomial p-value beside the chi-square one; Christoffersen's (1998) Markov test asks whether they come
 in clusters; and the Basel traffic light of MAR32 counts them: in 250 days at 99 %, 0 to 4 exceptions are green
 (capital multiplier 1.50), 5 to 9 amber (1.70 to 1.92) and 10 or more red (2.00). Other sample sizes follow the
-Basel Committee's 1996 rule, amber from a cumulative binomial probability of 95 % and red from 99.99 %. Expected
-shortfall is tested by Acerbi and Szekely's (2014) $Z_2$, with its critical value simulated under the model, and
-two models are ranked by the FZ0 loss of Patton, Ziegel and Chen (2019) with Diebold and Mariano's (1995) test and a
-Newey–West variance. MAR32's P&L attribution test (the Spearman correlation and the Kolmogorov–Smirnov distance
-between the desk's and the risk model's P&L) is there too. A rolling backtest builds the position at every close,
-lets each model forecast its next-day P&L, and scores the forecasts against the P&L of that position held to the
-next close, re-priced at the next close's spot and implied vol.
+Basel Committee's 1996 rule, amber from a cumulative binomial probability of 95 % and red from 99.99 %. Basel's
+traffic light is defined at 99 % only (at 97.5 % MAR32 sets just a desk's limit of 30 exceptions in 12 months); the
+zones the library also gives at 97.5 % apply the same rule as its own extension. Expected shortfall is tested by
+Acerbi and Szekely's (2014) $Z_2$, with its critical value simulated under the model, and two models are ranked by
+the FZ0 loss of Patton, Ziegel and Chen (2019) with Diebold and Mariano's (1995) test and a Newey–West variance.
+MAR32's P&L attribution test (the Spearman correlation and the Kolmogorov–Smirnov distance between the desk's and
+the risk model's P&L) is there too. A rolling backtest builds the position at every close, lets each model forecast
+its next-day P&L, and scores the forecasts against the P&L of that position held to the next close, re-priced at the
+next close's spot and implied vol.
 
 A year of data tells little. At 250 days and 99 %, Kupiec's test at a nominal 5 % rejects a correct model 9.5 % of
 the time (the binomial is discrete) and a model whose true exception rate is 2 %, twice the forecast, only 24 % of
@@ -73,7 +75,8 @@ with 5 degrees of freedom, at the model's variance, in only 16 %.
 
 The tests check themselves on a synthetic history, labelled "Synthetic — not market data": ten years of GARCH(1,1)
 returns with Student-t shocks, their volatility set by a log-normal implied-vol index with the Risk tab's index
-dynamics, on which the 45-day at-the-money short straddle above is struck again at every close. At 99 % over 2,020 days (20.2
-exceptions expected, red from 39), the Normal model with implied vol frozen has 50 exceptions (red), the Risk tab's
-default with implied-vol moves 31 (amber), both with 5,000 paths a day, and historical simulation on the last 500
-days with Hull and White's (1998) volatility scaling 17 (green); over ten seeds, 42 to 76, 21 to 39 and 15 to 25.
+dynamics, on which the 45-day at-the-money short straddle above is struck again at every close. At 99 % over 2,020
+days (20.2 exceptions expected, red from 39), the Normal model with implied vol frozen has 50 exceptions (red), the
+Risk tab's default with implied-vol moves 31 (amber), both with 5,000 paths a day, and historical simulation on the
+last 500 days with Hull and White's (1998) volatility scaling 17 (green); over ten seeds, 42 to 76, 21 to 39 and 15
+to 25.
