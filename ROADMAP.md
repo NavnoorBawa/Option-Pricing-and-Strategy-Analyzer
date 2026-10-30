@@ -41,6 +41,25 @@ The project is done when all of these hold, each shown by a test or a measuremen
 - Market clock, synthetic option chain, chain adapters, enforced data policy (DT-1, DT-4, DT-5, DT-6).
 - Volatility-surface code split into a package with golden-output tests (SF-2).
 
+## Done since 3.0
+
+The wrong numbers of [docs/improvement-guide.md](docs/improvement-guide.md) section 2, items 1 to 5, each reviewed by
+an independent adversarial check before it merged:
+
+- Theta per day beside the one-day decay by full revaluation, which leads when the two differ by more than 10 %
+  (item 1). On a tree the decay is the difference of two trees: Leisen–Reimer keeps its steps (within 4.0e-6 of the
+  closed form at 501 steps and 20 % vol); Cox–Ross–Rubinstein interpolates between the two trees whose time steps
+  bracket this one's (within 1.5 %, where the same steps were off by up to 8.5 %).
+- VaR with implied-vol moves on by default, beside the spot-only VaR (item 2): frozen implied vol understated a
+  45-day short straddle's 99 % VaR by 27 % ($2,833 against $3,862; 24 % to 27 % over seeds 0 to 9).
+- Implied vol rejects quotes whose time value is lost in rounding as `no_time_value`, in the European, tree and ALO
+  solvers, and the batch result carries the vega (item 3): on 20,000 random quotes the worst error on the rest is
+  7.7e-6.
+- Stress scenarios pinned to their sourced closes by a test; the Fed 2026 vol shock is 72.0 / 26.4 = 2.73, not 4.0
+  (item 4).
+- Monte Carlo intervals withheld below 300 paths on the scarce side of the strike or 5,000 independent samples, with
+  the coverage study as binomial tests (item 5; the reliability part of PR-6).
+
 ## Remaining
 
 ### Volatility surface
@@ -61,7 +80,9 @@ The project is done when all of these hold, each shown by a test or a measuremen
 - [ ] PR-4 (rest) Batch American implied volatility and a de-Americanisation API in the library.
 - [ ] PR-5 Discrete cash dividends with a finite-difference engine on the spot model (removes the escrowed-dividend
   approximation and its strict xfail).
-- [ ] PR-6 Monte Carlo honesty (reliability flag, coverage study) and randomised quasi-Monte Carlo.
+- [ ] PR-6 Monte Carlo honesty: the reliability flag and coverage study are done; randomised quasi-Monte Carlo, the
+  small-σ ultima limit, NaN input validation and a flag for heavy-tailed samples (coverage 0.94 at σ√T of 2.5 to 3)
+  remain.
 - [ ] PR-7 Pricing and IV tabs in the desk layout of the UI specification.
 - [ ] RK-12 American revaluation in Strategy and Risk through an ALO price grid.
 - [ ] PR-8 Heston with the Albrecher characteristic function and calibration (could).

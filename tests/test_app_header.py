@@ -290,8 +290,10 @@ def test_the_price_cards_have_no_caption_at_the_closed_form(app):
         # The interval's formula never splits over two lines (no-break spaces): on a phone "SE" stood alone.
         (
             {"model": "Monte Carlo"},
-            r"Standard error: call \$0\.\d{4}, put \$0\.\d{4}; 95%\xa0CI\xa0=\xa0price\xa0±\xa01\.96\xa0SE$",
+            r"Standard error: call \$0\.\d{4}, put \$0\.\d{4}; 95%\xa0interval\xa0=\xa0price\xa0±\xa01\.96\xa0SE$",
         ),
+        # Where both cards withhold the interval (about 85 of 100,000 paths in the money), so does the caption.
+        ({"model": "Monte Carlo", "strike": 120, "days": 30}, r"Standard error: call \$0\.\d{4}, put \$0\.\d{4}$"),
     ],
 )
 def test_the_price_cards_caption_gives_the_call_and_the_put(new_app, query, caption):

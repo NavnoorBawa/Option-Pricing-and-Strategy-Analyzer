@@ -40,6 +40,7 @@ from scipy.special import ndtr, ndtri
 from . import black_scholes as bs
 
 __all__ = [
+    "ONE_DAY",
     "TEMPLATES",
     "Leg",
     "Market",
@@ -60,10 +61,13 @@ __all__ = [
     "position_value",
     "strike_for_delta",
     "strike_text",
+    "time_decay",
     "unbounded_loss_from_dividends",
 ]
 
 LEG_KINDS = ("call", "put", "stock")
+#: One calendar day in years: every time to expiry here is calendar days / 365 (ACT/365).
+ONE_DAY = 1.0 / 365.0
 
 
 def _require_finite(owner: str, *, optional: tuple[str, ...] = (), **values: Any) -> None:
@@ -526,8 +530,78 @@ def position_risk(
     )
 
 
+def _leg_decay(leg: Leg, market: Market, years: float) -> float:
+    """Change in the value of one unit of ``leg`` when ``years`` pass, spot and implied volatility unchanged."""
+    later, now = (float(_leg_value(leg, market, market.spot, t, 1.0, 0.0, 0.0, 0.0)) for t in (years, 0.0))
+    return later - now
+
+
+def time_decay(strategy: Strategy, market: Market, *, days: float = 1.0, multiplier: float = 1.0) -> float:
+    """Change in the position's value when ``days`` calendar days pass, by full revaluation.
+
+    Every leg is valued as :func:`position_value` values it, now and ``days`` later with the spot and every leg's
+    implied volatility unchanged, and the result is the later value minus the value now: what holding the position
+    over that time makes or loses if nothing else moves. A leg whose expiry falls inside the period is worth its
+    intrinsic value at the current spot (``max(S - K, 0)`` for a call, ``max(K - S, 0)`` for a put), which is what
+    it settles at if the spot does not move; shares gain the dividends they accrue (see the module notes). Each
+    leg's two values are differenced on their own, so a small decay is not lost in the rounding of a large total
+    value (a box, or a hedged book).
+
+    Theta (:func:`position_greeks`, :attr:`PositionRisk.theta`) is the instantaneous rate of this change, and
+    theta / 365 is close to the one-day decay only while every option has well over a day left: for a 1-day
+    at-the-money option the decay is the whole premium, about twice theta / 365 (see the example).
+
+    Parameters
+    ----------
+    strategy, market : Strategy, Market
+        The position and the market it is valued in.
+    days : float, default 1.0
+        Calendar days that pass (fractions allowed); finite and non-negative.
+    multiplier : float, default 1.0
+        Scale of the result, e.g. contracts x shares per contract; finite.
+
+    Returns
+    -------
+    float
+        Value after ``days`` minus value now, per unit of :class:`Leg` quantity times ``multiplier``: negative when
+        the position loses value as time passes (a long option), positive when it gains (a short one).
+
+    Raises
+    ------
+    ValueError
+        Naming the argument, if ``days`` or ``multiplier`` is not a single finite number, or ``days`` is negative.
+
+    Examples
+    --------
+    A 1-day at-the-money put on an index (spot and strike 5,800, rate 4.3 %, dividend yield 1.3 %, volatility
+    18 %) is worth 21.56 and loses all of it by expiry tomorrow, while theta / 365 reads -10.66:
+
+    >>> market = Market(5800, 0.043, 0.18, 1 / 365, 0.013)
+    >>> put = Strategy("put", (Leg("put", 1, 5800),))
+    >>> round(float(position_value(put, market)), 2), round(time_decay(put, market), 2)
+    (21.56, -21.56)
+    >>> round(position_risk(put, market).theta, 2)
+    -10.66
+
+    A short 7-day iron condor on 100 shares gains $151.97 in a day by repricing, against $137.50 from theta / 365:
+
+    >>> condor = build_template("Iron Condor", 5800, 50, 7 / 365)
+    >>> round(time_decay(condor, Market(5800, 0.043, 0.16, 7 / 365, 0.013), multiplier=100), 2)
+    151.97
+    """
+    days, m = _number("days", days), _number("multiplier", multiplier)
+    if days < 0:
+        raise ValueError(f"days must be a non-negative number of calendar days, got {days:g}")
+    return m * math.fsum(leg.quantity * _leg_decay(leg, market, days * ONE_DAY) for leg in strategy.legs)
+
+
 def leg_table(strategy: Strategy, market: Market) -> list[dict]:
-    """Per-leg premium and Greeks at inception (per unit, display units)."""
+    """Per-leg premium and Greeks at inception (per unit, display units).
+
+    ``Theta / day`` is theta / 365; ``1-day decay`` is the leg's change in value over the next calendar day by
+    repricing (:func:`time_decay`), with the leg valued at its intrinsic value at the current spot when it expires
+    within the day.
+    """
     rows = []
     for leg in strategy.legs:
         if leg.kind == "stock":
@@ -554,6 +628,7 @@ def leg_table(strategy: Strategy, market: Market) -> list[dict]:
                 "Delta": leg.quantity * g["delta"],
                 "Gamma": leg.quantity * g["gamma"],
                 "Theta / day": leg.quantity * g["theta"] / 365.0,
+                "1-day decay": leg.quantity * _leg_decay(leg, market, ONE_DAY),
                 "Vega / vol pt": leg.quantity * g["vega"] / 100.0,
             }
         )

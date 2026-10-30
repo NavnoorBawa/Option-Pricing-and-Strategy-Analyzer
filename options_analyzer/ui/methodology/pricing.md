@@ -78,3 +78,56 @@ the control variate on (the residuals are then constant). Calls and puts share
 draws and a fixed seed makes results reproducible. The sample-path chart draws the first 60 of these
 scenarios, each filled in from today to its sampled $S_T$ with a Brownian bridge (exact for GBM given the
 end point).
+
+The 95% interval, price ± 1.96 standard errors, is shown under each price card and in the diagnostics table.
+It assumes the estimate is close to normal, which fails when few simulated prices finish on the side of the
+strike that its error rests on: the in-the-money side when the payoff is averaged as it is, and whichever
+side is scarcer with the control variate, which takes out the payoff's linear part (a deep in-the-money call
+is then as uncertain as the out-of-the-money put on the same draws), and in a heavy-tailed sample (very
+large ${\sigma\sqrt{T}}$, priced from the put and parity as the diagnostics describe). Over 20,000 seeds per level (a 30-day call on ${S = 100}$ at ${\sigma = 20\%}$ and ${r = 5\%}$, 20,000
+antithetic paths with the control variate, a strike for each level) the interval covered the
+Black–Scholes–Merton value in 87.8% of runs with about 10 such paths, 92.2% with 30, 94.0% with 100, 94.6%
+with 300 and 94.7% with 1,000, against 94.8% at the money; a put, a call without either variance reduction
+and 10,000 or 100,000 paths behave alike. It also fails with few independent samples (antithetic pairs, or
+paths), however many paths finish on each side: with antithetic pairs and the control variate, 500 pairs
+covered the value in 92.8 to 93.7% of 8,000 runs, 2,000 pairs in 94.2 to 94.9% and 5,000 pairs in 94.6 to
+94.9% (at-the-money options of 30 days to 2 years at 20 to 60% volatility, and an out-of-the-money 9-month
+call). Below 300 such paths or 5,000 independent samples, or when the standard error cannot be estimated,
+the result is flagged unreliable, and the cards and the diagnostics table say how many paths finished in (or
+out of) the money instead of showing the interval. The sidebar's fewest paths, 10,000, are 5,000 antithetic
+pairs, so in the app only the count of paths applies. The flag counts each run's own paths, so near the
+threshold it also sorts the runs of one level: at about 300 expected paths, over 100,000 seeds, the half
+with at least 300 covered 95.7% and the rest 93.5%. The intervals shown just above the threshold thus cover
+more than 95%: the runs kept drew at least the expected number of paths into the scarce side, so their
+standard errors come out larger. From 350 expected paths almost every run is kept. The test-suite checks
+this with binomial tests at about 10, 30, 100, 300 and 1,000 paths on the scarce side, 4,000 seeds each:
+the intervals flagged reliable cover the value at a rate of at least 93% and not below the 99% binomial band
+around 95%, and inside that band where every run is flagged reliable (at 1,000 paths); where the coverage of
+all runs falls short of the band (at 10 and 30 paths), the flag is raised. What the flag does not catch is a
+smaller shortfall at very large ${\sigma\sqrt{T}}$, with thousands of paths on each side of the strike: at
+the money over 4 years with 100,000 antithetic paths, the interval covered the value in 94.9%, 94.5% and
+94.2% of 12,000 runs at ${\sigma\sqrt{T}}$ of 2, 2.5 and 3 with the control variate, and in 95.2%, 94.9% and
+94.6% without it (the put averaged directly and the call by parity).
+
+### One-day decay
+The Greeks table, the option chain and the sensitivity explorer (dashed, in its theta view) show the *1-day decay*
+beside theta per day (see Conventions): the value with one calendar day less to expiry minus the value now, all else
+equal, or the intrinsic value minus the value now when the option expires within the day. It uses the model of the
+table it is in: the closed form for Black–Scholes–Merton, and the engine for the American engine. Under a binomial
+tree the Greeks table stays Black–Scholes–Merton's for European exercise, decay included, so with American exercise
+it is not the decay of the tree's American value in the price cards; the tree's Greeks give that one, and put it
+first by the same 10 % rule against the tree's own theta. Under Monte Carlo the decay is the closed-form one: the
+simulation estimates that same value, and the difference of two simulations would only add sampling error.
+
+On a tree the decay is the difference of two trees, so how the shorter tree is built decides its accuracy. Measured
+against the closed-form decay of European options (spot 100, strikes 80 to 120 in steps of 0.5, rate 5 %, no
+dividends, every expiry from 2 to 60 days and 13 more out to 3,650 days, 501 steps, decays of at least one cent) at
+10 %, 20 % and 50 % volatility: a Leisen–Reimer tree one day shorter keeps its steps, and as its error is smooth in
+$T$ the two errors cancel, to within ${1.6 \times 10^{-6}}$, ${4.0 \times 10^{-6}}$ and ${1.2 \times 10^{-5}}$ of
+the decay. The Cox–Ross–Rubinstein error swings with the strike's place among the final nodes, so the same steps
+were off by up to 4.4 %, 8.5 % and 6.0 %. Its shorter tree keeps the time step instead, which keeps the final nodes
+in place: the value is interpolated, linearly in the step count, between the two trees with the step count's parity
+whose time steps bracket the current one. That is within 0.55 %, 1.5 % and 0.66 % of the decay (99 % of cases within
+0.08 %, 0.12 % and 0.19 %); the nearest of those two trees alone was off by up to 1.1 %, 2.3 % and 2.2 %. Both
+trees' errors grow as the steps fall: at 20 % volatility and 101 steps, up to 11 % for Cox–Ross–Rubinstein (99 % of
+cases within 1.2 %) and ${9.7 \times 10^{-5}}$ for Leisen–Reimer; at 2,000 steps, 0.06 % and ${1.7 \times 10^{-7}}$.

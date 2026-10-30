@@ -122,8 +122,11 @@ def mc_terminal(S, T, r, sigma, q, n_paths, seed, antithetic) -> np.ndarray:
     return monte_carlo.terminal_prices(S, T, r, sigma, q, min(n_paths, 200_000), seed, antithetic)
 
 
-@st.cache_data(show_spinner=False, max_entries=12)
+@st.cache_data(show_spinner=False, max_entries=24)
 def value_at_risk(strategy: Strategy, market: Market, config: risk.VaRConfig, multiplier: float) -> risk.VaRResult:
+    """``risk.value_at_risk``. The Risk tab makes two runs per view, with implied vol moving and with it frozen (one
+    seed), so the cache holds 24 entries: the last 12 views, as many as when a view made one run. Each entry keeps its
+    P&L sample, 0.8 MB at the default 100,000 paths and 4 MB at the most, 500,000."""
     return risk.value_at_risk(strategy, market, config, multiplier)
 
 
@@ -136,16 +139,16 @@ def ssvi_surface(params: vol_surface.SSVIParams, rate, dividend_yield, m_range, 
 
 @st.cache_data(show_spinner=False, max_entries=8)
 def market_surface(
-    raw, spot, rate, dividend_yield, forward="parity", calibration="arbitrage_free"
+    raw, spot, rate, dividend_yield, forward="parity", calibration="arbitrage_free", exercise="european"
 ) -> tuple[vol_surface.VolSurface | None, list[str], str | None]:
     """Clean an uploaded quotes table (inverting any prices at each expiry's ``forward``: ``"parity"`` or
-    ``"rates"``, see ``vol_surface.parse_quotes``) and fit it (``calibration``: ``"arbitrage_free"`` or
-    ``"unconstrained"``, see ``vol_surface.fit_market_surface``).
+    ``"rates"``, which American ``exercise`` always uses; see ``vol_surface.parse_quotes``) and fit it
+    (``calibration``: ``"arbitrage_free"`` or ``"unconstrained"``, see ``vol_surface.fit_market_surface``).
 
     Returns ``(surface, messages, error)`` so the parse messages survive a fit that fails.
     """
     quotes, messages, forwards = vol_surface.parse_quotes(
-        raw, spot, rate, dividend_yield, forward=forward, return_forwards=True
+        raw, spot, rate, dividend_yield, forward=forward, exercise=exercise, return_forwards=True
     )
     try:
         surface = vol_surface.fit_market_surface(

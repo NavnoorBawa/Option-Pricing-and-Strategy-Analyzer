@@ -484,7 +484,7 @@ def _links() -> list[tuple[str, str]]:
 
 def test_every_reference_has_authors_a_year_and_a_link():
     entries = _entries()
-    assert len(entries) == 19
+    assert len(entries) == 20
     for entry in entries:
         assert re.match(r"^[A-Z][^()]+ \((19|20)\d\d\)\. ", entry), entry
         assert _LINK.search(entry), f"no link: {entry}"
@@ -495,7 +495,7 @@ def test_doi_and_arxiv_links_say_where_they_go():
     # abstract; any other link names its host.
     links = _links()
     dois = [(text, url) for text, url in links if text.startswith("doi:")]
-    assert len(dois) == 13
+    assert len(dois) == 14
     for text, url in dois:
         doi = text.removeprefix("doi:")
         assert _DOI.fullmatch(doi) and url == f"https://doi.org/{doi}", text
@@ -514,7 +514,8 @@ def test_doi_and_arxiv_links_say_where_they_go():
 CITED = {
     "Black–Scholes": "Black, F.", "Merton": "Merton, R. C.", "Cox–Ross–Rubinstein": "Cox, J. C.",
     "Leisen–Reimer": "Leisen, D. P. J.", "Peizer–Pratt": "Peizer, D. B.", "McDonald–Schroder": "McDonald, R. L.",
-    "Brent": "Brent, R. P.", "Acerbi–Tasche": "Acerbi, C.", "GARCH": "Bollerslev, T.", "Dupire": "Dupire, B.",
+    "Brent": "Brent, R. P.", "Let's Be Rational": "Jäckel, P.", "Acerbi–Tasche": "Acerbi, C.",
+    "GARCH": "Bollerslev, T.", "Dupire": "Dupire, B.",
     "Gatheral & Jacquier": "Gatheral, J. and Jacquier, A.", "Gatheral's": "Gatheral, J. (2006)",
     "Lee's": "Lee, R. W.", "Zeliade": "De Marco, S. and Martini, C.", "Fritsch–Butland": "Fritsch, F. N.",
     "2026 severely adverse": "Federal Reserve System (2026)",

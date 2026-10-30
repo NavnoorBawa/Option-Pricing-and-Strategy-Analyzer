@@ -1,7 +1,9 @@
 """Golden outputs of the volatility-surface code (roadmap item SF-2).
 
-``tests/fixtures/surface_golden.jsonl`` was recorded from the flat module ``options_analyzer/vol_surface.py`` just
-before it became the ``options_analyzer.vol_surface`` package. For every case below it holds what
+``tests/fixtures/surface_golden.jsonl`` was first recorded from the flat module ``options_analyzer/vol_surface.py``
+just before it became the ``options_analyzer.vol_surface`` package, and recorded again when parity forwards (SF-3),
+the spread-weighted arbitrage-free SVI calibration (SF-4) and Lee-bounded wings (SF-8) changed these outputs on
+purpose. For every case below it holds what
 :func:`~options_analyzer.vol_surface.parse_quotes`, :func:`~options_analyzer.vol_surface.fit_market_surface` (or
 :func:`~options_analyzer.vol_surface.ssvi_surface`), :func:`~options_analyzer.vol_surface.surface_summary` and
 :meth:`~options_analyzer.vol_surface.VolSurface.implied_vol_at` returned or raised:
@@ -51,6 +53,7 @@ import hashlib
 import io
 import json
 import math
+import os
 import platform
 import sys
 import warnings
@@ -75,11 +78,31 @@ GOLDEN = FIXTURES / "surface_golden.jsonl"
 HEADER = (
     "# Provenance: synthetic",
     "# Description: outputs of options_analyzer.vol_surface for the cases in tests/test_surface_golden.py, recorded",
-    "# from the flat module before the SF-2 package split. The first JSON line holds the recording platform and the",
-    "# module's names; each further line holds one case. Record again with",
+    "# after SF-3, SF-4 and SF-8 (parity forwards, the arbitrage-free SVI fit). The first JSON line holds the",
+    "# recording platform and the module's names; each further line holds one case. Record again with",
     "# PYTHONPATH=. python tests/test_surface_golden.py --record",
 )
-RTOL, ATOL = 1e-6, 1e-9
+#: Off the recording platform numbers must agree to RTOL (ATOL near zero). Since SF-4 the default calibration ends in
+#: a constrained search (SLSQP) that stops at a tolerance, not at a bit pattern: with OpenBLAS on one thread instead
+#: of several, or with NumPy's AVX-512 paths and OpenBLAS's own kernel switched off (NPY_DISABLE_CPU_FEATURES,
+#: OPENBLAS_CORETYPE=Haswell), the largest relative difference outside the cases below was 1.0e-5 (a fit RMSE of the
+#: bundled chain fixtures) and 5.1e-6 elsewhere; it was 4.2e-8 before SF-4.
+RTOL, ATOL = 2e-5, 1e-9
+#: The median |error| / half-spread of a near-exact fit is about 0.01 to 0.03 half-spread, solver noise: it moved by
+#: up to 1.4e-5 half-spread (5e-4 relative) under those settings, so it is compared to this many half-spreads instead.
+ERROR_RATIO = "Median |error| / half-spread"
+ERROR_RATIO_ATOL = 5e-5
+#: Quotes that hold static arbitrage themselves (or a smile at zero variance): their arbitrage-free fit is the end of
+#: a constrained search whose path depends on the last bits of the BLAS kernels, so off the recording platform it may
+#: end at another arbitrage-free smile, or, on fit_zero_total_variance, at none (and the surface says so). Under the
+#: settings above local vols moved by up to 56 % and implied vols by up to 54 % on these four. Off the recording
+#: platform they are checked for what holds on every path (test_path_sensitive_cases_keep_their_invariants).
+PATH_SENSITIVE = (
+    "fit_vertical_spread_arbitrage",
+    "fit_zero_total_variance",
+    "fit_rounded_midpoint_vols",
+    "fit_rounded_midpoint_vols_with_a_spike",
+)
 DIGITS = 10  # significant digits of the array values kept for the comparison off the recording platform
 SAMPLE = 256  # values kept of each quote table (the grids are kept whole)
 
@@ -523,7 +546,8 @@ CASES = _cases()
 
 
 def _environment() -> dict[str, Any]:
-    """What decides the last bits of the outputs: Python, the numerical libraries, the CPU and its SIMD features."""
+    """What decides the last bits of the outputs: Python, the numerical libraries, the CPU and its SIMD features, and
+    whether OpenBLAS runs threaded and on which kernel (one thread gave other last bits than two or four)."""
     try:
         from numpy._core._multiarray_umath import __cpu_features__ as features
     except ImportError:  # NumPy 1.x
@@ -536,6 +560,9 @@ def _environment() -> dict[str, Any]:
         "system": platform.system(),
         "machine": platform.machine(),
         "simd": sorted(name for name, enabled in features.items() if enabled),
+        "blas_threaded": int(os.environ.get("OPENBLAS_NUM_THREADS") or os.environ.get("OMP_NUM_THREADS") or 0) != 1
+        and (os.cpu_count() or 1) > 1,
+        "blas_kernel": os.environ.get("OPENBLAS_CORETYPE", "auto"),
     }
 
 
@@ -581,7 +608,8 @@ def _differences(actual: Any, expected: Any, path: str = "", *, exact: bool) -> 
             for found in _differences(*pair, f"{path}[{i}]", exact=exact)
         ]
     if isinstance(expected, float) and isinstance(actual, float) and not exact:
-        close = math.isclose(actual, expected, rel_tol=RTOL, abs_tol=ATOL)
+        atol = ERROR_RATIO_ATOL if ERROR_RATIO in path else ATOL
+        close = math.isclose(actual, expected, rel_tol=RTOL, abs_tol=atol)
         return [] if close else [f"{path}: {actual!r} != {expected!r}"]
     same = type(actual) is type(expected) and (
         repr(actual) == repr(expected) if isinstance(actual, float) else actual == expected
@@ -606,9 +634,27 @@ def test_every_name_of_the_flat_module_is_still_importable():
 
 @pytest.mark.parametrize("name", list(CASES))
 def test_outputs_agree_with_the_recording(name):
-    """On any platform: every text, count and shape identical, every number within RTOL (ATOL near zero)."""
-    _, golden = _golden()
+    """On any platform: every text, count and shape identical, every number within RTOL (ATOL near zero); the
+    path-sensitive cases (PATH_SENSITIVE) on the recording platform only."""
+    recorded, golden = _golden()
+    if name in PATH_SENSITIVE and any(recorded["environment"].get(k) != v for k, v in _environment().items()):
+        pytest.skip("its arbitrage-free search may end elsewhere off the recording platform; see PATH_SENSITIVE")
     assert _differences(_outputs(name), golden[name], exact=False) == []
+
+
+@pytest.mark.parametrize("name", PATH_SENSITIVE)
+def test_path_sensitive_cases_keep_their_invariants(name):
+    """What holds on every path of the arbitrage-free search, on any platform: the same quotes, maturities and grid
+    (not the points where the fit has a vol, which follow the fit); and every maturity either free of static
+    arbitrage or named in the note that it kept its unconstrained fit."""
+    _, golden = _golden()
+    actual, expected = _outputs(name), golden[name]
+    for key in ("maturities", "moneyness"):
+        assert _differences(actual["fit"][key], expected["fit"][key], exact=False) == [], key
+    assert actual.get("messages") == expected.get("messages")
+    notes = " ".join(actual["fit"]["notes"])
+    free = actual["fit"]["calendar_violations"] == 0 and actual["fit"]["butterfly_violations"] == 0
+    assert free or "No SVI smile free of static arbitrage was found" in notes or "arbitrage" in notes
 
 
 @pytest.mark.parametrize("name", list(CASES))

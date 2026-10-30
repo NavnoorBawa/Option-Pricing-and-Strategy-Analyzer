@@ -293,7 +293,7 @@ ROWS = {
     "strategy_cards": [["Net premium", "Max profit"], ["Max loss", "Probability of profit"]],
     "greek_cards": [["Delta (shares)", "Gamma"], ["Theta / day", "Vega / vol pt"]],
     "expectation_cards": [["Expected P&L at expiry", "P&L standard deviation", "Drift used"]],
-    "var_cards": [["VaR 99.0%", "Expected Shortfall 99.0%", "Delta-normal VaR"]],
+    "var_cards": [["VaR 99.0%", "Expected Shortfall 99.0%"], ["Spot-only VaR 99.0%", "Spot-only ES 99.0%"]],
     "surface_cards": [["Grid", "Calendar arbitrage"], ["Butterfly arbitrage", "Local vol defined"]],
     "iv_cards": [["Implied volatility", "Model check"], ["Vega at IV", "Time value"]],
 }
@@ -309,11 +309,16 @@ def states():
 def test_every_metric_of_every_tab_is_in_a_card_row(states):
     # The Strategy, Risk and Surface tabs drew their metrics in st.columns, which stack one card per row on a phone.
     found = {}
-    for at in states.values():
+    for state, at in states.items():
         for row, groups in _card_rows(at).items():
-            found[row] = [[m.label for m in group] for group in groups]
             assert all(m.proto.show_border for group in groups for m in group), row
             assert any(f".st-key-{row} {{ container:" in s for s in _styles(at)), f"{row} has no stylesheet"
+            labels = [[m.label for m in group] for group in groups]
+            if state == "limits" and row == "greek_cards":
+                # One day to expiry: the decay to expiry takes theta's place (tab_strategy.decay_card).
+                assert labels == [["Delta (shares)", "Gamma"], ["Decay to expiry", "Vega / vol pt"]]
+                continue
+            found[row] = labels
     assert found == ROWS
 
 
@@ -330,23 +335,23 @@ def test_the_four_card_rows_stay_two_by_two_on_a_phone(states):
             style = next(s for s in _styles(at) if f".st-key-{row} {{ container:" in s)
             assert _layout(style, PHONE_ROW)[0] == 2, (state, row)
             checked.add(row)
-    assert checked == {"price_cards", "strategy_cards", "greek_cards", "surface_cards", "iv_cards"}
+    assert checked == {"price_cards", "strategy_cards", "greek_cards", "var_cards", "surface_cards", "iv_cards"}
 
 
 @pytest.mark.parametrize(
     ("phone", "expected"),
-    # Cards per line of the three-card rows at the default URL on common phone widths (360 px Android, 375 and 390
+    # Cards per line of the three-card row at the default URL on common phone widths (360 px Android, 375 and 390
     # px iPhone, 412, 430 and 440 px large phones). The expected-P&L cards go 3 across from a 409 px row (phones of
     # 437 px and up), where each card has room for its value at full size and "EXPECTED P&L" over "AT EXPIRY" in
-    # the labels' small capitals; the VaR cards need a 460 px row ("EXPECTED" over "SHORTFALL 99.0%"), so they go
-    # 2 + 1 on every phone.
+    # the labels' small capitals. (The VaR cards were a row of three, 2 + 1 on every phone; they are two pairs now,
+    # the spot-only VaR and ES beside the VaR and ES with implied-vol moves.)
     [
-        (360, {"expectation_cards": 2, "var_cards": 2}),
-        (375, {"expectation_cards": 2, "var_cards": 2}),
-        (390, {"expectation_cards": 2, "var_cards": 2}),
-        (412, {"expectation_cards": 2, "var_cards": 2}),
-        (430, {"expectation_cards": 2, "var_cards": 2}),
-        (440, {"expectation_cards": 3, "var_cards": 2}),
+        (360, {"expectation_cards": 2}),
+        (375, {"expectation_cards": 2}),
+        (390, {"expectation_cards": 2}),
+        (412, {"expectation_cards": 2}),
+        (430, {"expectation_cards": 2}),
+        (440, {"expectation_cards": 3}),
     ],
 )
 def test_the_three_card_rows_on_a_phone(states, phone, expected):
@@ -392,11 +397,11 @@ def _advances(weight: str) -> dict[str, float]:
 def test_the_card_width_model_covers_every_card_row_in_plex_sans(states):
     # Every card of a row is based on the row's widest card in the model. It must not be narrower than the widest
     # card's real text (Plex Sans advance widths): the value in Medium at 22.75 px, the label in Regular capitals at
-    # 10.08 px with its letter-spacing (plus its help icon) and the delta in Regular at 12.25 px, on one line or on
-    # two (a line of three cards on a phone), and the value at 16 px with the label one word per line (a pair on a
-    # phone). And no value is modelled narrower than it is, as the compact rows size their values from the model:
-    # "$46.62M" was modelled 0.11 em too narrow ("M" is 0.814 em wide), so on a 390 px phone it ran 2.6 px into its
-    # card's padding.
+    # 10.08 px with its letter-spacing (plus its help icon) and the delta in Regular at 12.25 px (plus its pill's
+    # padding), on one line or on two (a line of three cards on a phone), and the value at 16 px with the label one
+    # word per line (a pair on a phone). And no value is modelled narrower than it is, as the compact rows size their
+    # values from the model: "$46.62M" was modelled 0.11 em too narrow ("M" is 0.814 em wide), so on a 390 px phone
+    # it ran 2.6 px into its card's padding.
     medium, regular = _advances("Medium"), _advances("Regular")
     tracking = components._LABEL_TRACKING_EM * components._LABEL_PX
 
@@ -426,7 +431,9 @@ def test_the_card_width_model_covers_every_card_row_in_plex_sans(states):
 
         label_px = wrapped(metric.label, label) + components._HELP_ICON_PX
         value_width = text(metric.value, medium, value_px)
-        return max(value_width, label_px, wrapped(metric.proto.delta, delta)) + components._CARD_CHROME_PX
+        # A delta sits in a pill, with its padding on either side.
+        pill = wrapped(metric.proto.delta, delta) + components._DELTA_PADDING_PX if metric.proto.delta else 0.0
+        return max(value_width, label_px, pill) + components._CARD_CHROME_PX
 
     for at in states.values():
         for row, groups in _card_rows(at).items():

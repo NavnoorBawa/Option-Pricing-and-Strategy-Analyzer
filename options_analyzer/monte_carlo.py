@@ -33,6 +33,18 @@ mostly while that gap is still below 5 standard errors. From 2 on the call
 then follows from parity as well. Every estimate is also kept within the
 no-arbitrage bounds of a European option.
 
+Reliable intervals
+------------------
+The 95% interval ``price ± 1.96 SE`` assumes the sample mean is close to
+normal. When few simulated prices finish on the side of the strike that the
+estimate's error rests on, it is not: with about 10 such paths the interval
+covers the value in 88% of runs, with 30 in 92%. Nor is it with few
+independent samples, whatever the strike: with 500 antithetic pairs and the
+control variate it covers the value in 93 to 94% of runs. A result is
+therefore flagged unreliable, and its interval withheld, below
+``RELIABLE_PATHS`` such paths or ``RELIABLE_SAMPLES`` independent samples (see
+:class:`MonteCarloResult`).
+
 Calls and puts are priced from the *same* draws (common random numbers) and
 a seeded :class:`numpy.random.Generator` makes results reproducible, so the
 displayed price does not jitter between Streamlit reruns.
@@ -40,15 +52,44 @@ displayed price does not jitter between Streamlit reruns.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
 from . import black_scholes as bs
 
-__all__ = ["MonteCarloResult", "price_european", "scenario_paths", "simulate_paths", "terminal_prices"]
+__all__ = [
+    "RELIABLE_PATHS",
+    "RELIABLE_SAMPLES",
+    "MonteCarloResult",
+    "price_european",
+    "scenario_paths",
+    "simulate_paths",
+    "terminal_prices",
+]
 
 _Z_95 = 1.959963984540054
+#: Fewest simulated prices, on the side of the strike that a result's error rests on, for which its 95% interval
+#: is trusted (``MonteCarloResult.reliable``). Coverage of the interval against the expected number of such paths
+#: (30-day call, S = 100, sigma = 20%, r = 5%, 20,000 antithetic paths with the control variate, 20,000 seeds per
+#: level, so +-0.0016): 0.820 at 5, 0.878 at 10, 0.911 at 20, 0.922 at 30, 0.933 at 50, 0.940 at 100, 0.945 at 200,
+#: 0.946 at 300, 0.947 at 1,000 and 0.948 at 2,000 and at the money. The shortfall from 95% falls roughly as one
+#: over the number of paths (7 points at 10, 3 at 30, 1 at 100); from 300 it is under half a point, close to what
+#: remains at the money. A put, a call without either variance reduction and 10,000 or 100,000 paths give the same
+#: picture (0.944 to 0.949 at 300). The flag counts each run's own paths, so near the threshold it also sorts the runs
+#: of a level: at 300 expected paths (100,000 seeds) the 50,738 runs with at least 300 covered 0.957, the others 0.935.
+#: The intervals shown just above the threshold thus cover more than 95%: the runs kept drew at least the expected
+#: number of paths into the scarce side, so their standard errors come out larger, not smaller. From 350 expected
+#: paths almost every run is kept (99.7%) and the coverage is the level's (0.947).
+RELIABLE_PATHS = 300
+#: Fewest independent samples (antithetic pairs, or paths without antithetic sampling) for which a result's 95%
+#: interval is trusted, however many paths finish on each side of the strike: with fewer, the standard error is itself
+#: too uncertain. Coverage with antithetic pairs and the control variate, over 8,000 seeds per point (+-0.0024), for
+#: at-the-money options of 30 days to 2 years at 20 to 60% and an out-of-the-money 9-month call at 30%: 0.928 to 0.937
+#: with 500 pairs, 0.936 to 0.945 with 1,000, 0.942 to 0.949 with 2,000, 0.946 to 0.949 with 5,000 and 0.946 to 0.948
+#: with 10,000. Either variance reduction alone does better (0.942 to 0.948 with 1,000 paths), and so does neither.
+#: The sidebar's fewest paths, 10,000, are 5,000 antithetic pairs.
+RELIABLE_SAMPLES = 5_000
 #: Largest gap, in standard errors, between the sample mean of the discounted terminal price and its known mean
 #: ``S e^{-qT}`` before the sample is treated as heavy-tailed (see the module docstring). Samples that price
 #: correctly stay within about 3; the failing ones miss by 6 to 1e15.
@@ -80,9 +121,30 @@ class MonteCarloResult:
     #: is then the plain average of its payoff and the call follows from put-call parity, with the put's standard
     #: error.
     heavy_tailed: bool = False
+    #: Number of simulated terminal prices that finished in the money (``itm_fraction * n_paths``). Keyword-only and
+    #: required, as is ``reliable``: a result built by hand states both rather than defaulting to "none".
+    n_itm: int = field(kw_only=True)
+    #: Whether the 95% interval can be trusted. False when the standard error is NaN; when the result rests on fewer
+    #: than ``RELIABLE_SAMPLES`` independent samples; and when fewer than ``RELIABLE_PATHS`` simulated prices finish on
+    #: the side of the strike that the estimate's error rests on: in the money when the payoff is averaged as it is;
+    #: whichever side is scarcer with the control variate, which absorbs the payoff's linear part (a deep in-the-money
+    #: call is then as unreliable as the out-of-the-money put on the same draws: their estimates differ by a
+    #: constant), and in a heavy-tailed sample. Below either threshold the interval covers the value in less than 95%
+    #: of runs: 88% with about 10 such paths, 92% with 30 and 94% with 100; 93 to 94% with 500 antithetic pairs and
+    #: the control variate (see ``RELIABLE_PATHS`` and ``RELIABLE_SAMPLES``). True when nothing is simulated (no time
+    #: or no volatility: the value is exact).
+    reliable: bool = field(kw_only=True)
+
+    @property
+    def n_samples(self) -> int:
+        """Independent samples behind :attr:`std_error`: antithetic pairs, or paths without antithetic sampling."""
+        return self.n_paths // 2 if self.antithetic else self.n_paths
 
     @property
     def ci95(self) -> tuple[float, float]:
+        """``price ± 1.96 std_error``, or ``(nan, nan)`` when the result is not :attr:`reliable`."""
+        if not self.reliable:
+            return float("nan"), float("nan")
         half = _Z_95 * self.std_error
         return self.price - half, self.price + half
 
@@ -151,17 +213,20 @@ def price_european(
 
     if T <= 0 or sigma == 0:
         forward = S * np.exp((r - q) * max(T, 0.0))
-        return {
-            kind: MonteCarloResult(
+        results = {}
+        for kind in option_types:
+            itm = bool(bs.option_sign(kind) * (forward - K) > 0)
+            results[kind] = MonteCarloResult(
                 bs.price(S, K, T, r, sigma, q, kind),
                 0.0,
                 n_paths,
                 antithetic,
                 control_variate,
-                float(bs.option_sign(kind) * (forward - K) > 0),
+                float(itm),
+                n_itm=n_paths if itm else 0,
+                reliable=True,  # nothing is simulated: the value is exact
             )
-            for kind in option_types
-        }
+        return results
 
     s_t = terminal_prices(S, T, r, sigma, q, n_paths, seed, antithetic)
     discount = np.exp(-r * T)
@@ -211,8 +276,25 @@ def price_european(
         # estimate can otherwise come out negative).
         lower = max(phi * (control_mean - strike_value), 0.0)
         price = min(max(price, lower), control_mean if phi > 0 else strike_value)
-        itm = float(np.count_nonzero(phi * (s_t - K) > 0.0)) / n_paths
-        results[kind] = MonteCarloResult(price, std_error, n_paths, antithetic, use_control, itm, heavy_tailed)
+        n_itm = int(np.count_nonzero(phi * (s_t - K) > 0.0))
+        # The paths the error rests on (see MonteCarloResult.reliable): a payoff averaged as it is rests on its own
+        # in-the-money paths, but once the control variate takes out its linear part, on whichever side of the strike
+        # is scarcer. So does a heavy-tailed sample, priced from the put: with no simulated price above a strike of
+        # S (10 years at 300%, control variate on) the put's interval covered the value in 35% of 200 runs, though
+        # every path finished in the money for the put.
+        n_side = min(n_itm, n_paths - n_itm) if use_control or heavy_tailed else n_itm
+        enough = n_side >= RELIABLE_PATHS and x.size >= RELIABLE_SAMPLES  # x: one entry per independent sample
+        results[kind] = MonteCarloResult(
+            price,
+            std_error,
+            n_paths,
+            antithetic,
+            use_control,
+            n_itm / n_paths,
+            heavy_tailed,
+            n_itm=n_itm,
+            reliable=bool(np.isfinite(std_error)) and enough,
+        )
     return results
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -11,16 +12,18 @@ from scipy.special import ndtr
 
 from .. import black_scholes as bs
 from ..american import AmericanPrice
+from ..monte_carlo import RELIABLE_PATHS, RELIABLE_SAMPLES, MonteCarloResult
+from ..strategies import ONE_DAY
 from . import cache, charts
 from .components import card_row
-from .format import md, money, pct
+from .format import DECAY_SWITCH, MINUS, decay_label, decay_leads, md, money, pct
 from .inputs import Inputs
 
 #: Monte Carlo scenarios drawn on the sample-paths chart.
 SAMPLE_PATHS = 60
 #: The confidence interval of a simulated price, in no-break spaces: it never splits over two lines (on a phone "SE"
 #: stood alone on the second line of the caption under the price cards).
-_CI_FORMULA = "95% CI = price ± 1.96 SE".replace(" ", "\xa0")
+_CI_FORMULA = "95% interval = price ± 1.96 SE".replace(" ", "\xa0")
 #: What a heavy-tailed Monte Carlo sample does instead of the usual estimator (see ``monte_carlo``).
 HEAVY_TAIL_NOTE = (
     "Heavy-tailed sample (large σ√T): the put is averaged directly and the call follows from put-call parity"
@@ -99,15 +102,7 @@ def compute_prices(inputs: Inputs) -> Prices:
         )
     if model.kind == "monte_carlo":
         mc = cache.mc_results(S, K, T, r, sigma, q, model.n_paths, model.seed, model.antithetic, model.control_variate)
-        notes = {
-            kind: (f"{HEAVY_TAIL_NOTE}. " if res.heavy_tailed else "")
-            + (
-                f"95% CI {money(res.ci95[0], 3)} – {money(res.ci95[1], 3)} · SE {money(res.std_error, 4)}"
-                if np.isfinite(res.std_error)
-                else "Every simulated price finished on one side of the strike: the error cannot be estimated"
-            )
-            for kind, res in mc.items()
-        }
+        notes = {kind: (f"{HEAVY_TAIL_NOTE}. " if res.heavy_tailed else "") + _mc_note(res) for kind, res in mc.items()}
         return Prices(mc["call"].price, mc["put"].price, notes["call"], notes["put"], mc=mc)
     if model.kind == "alo":
         details, greeks = cache.alo_results(S, K, T, r, sigma, q, model.scheme)
@@ -121,6 +116,66 @@ def compute_prices(inputs: Inputs) -> Prices:
             alo_greeks=greeks,
         )
     return Prices(bs_call, bs_put, "Closed-form European value", "Closed-form European value")
+
+
+def mc_interval(res: MonteCarloResult, dollars: bool = True, short: bool = False) -> str:
+    """The 95% interval of a simulated price, ``$10.4237 – $10.4582, 95%`` (``10.4237 – 10.4582`` without
+    ``dollars``, for a table of plain amounts), or, when the result is not reliable, why it is not shown:
+    ``Interval unreliable: 12 of 100,000 paths finish in the money`` in the diagnostics table and the card's tooltip,
+    and ``short`` on the card itself, ``Interval unreliable: 12 ITM paths`` (the long form made the card 387 px wide,
+    so at 1440 px with the sidebar open the four price cards went 2 + 2 instead of 4 across, which leaves 249 px a
+    card; the short form is at most 232 px)."""
+    if res.reliable:
+        low, high = (money(bound, 4).replace("-", MINUS) for bound in res.ci95)
+        return f"{low} – {high}, 95%" if dollars else f"{low} – {high}".replace("$", "")
+    card, sentence, _ = _withheld(res)
+    return card if short else sentence
+
+
+def _withheld(res: MonteCarloResult) -> tuple[str, str, str]:
+    """Why an unreliable result's interval is not shown (``MonteCarloResult.reliable``): the card's line, the full
+    sentence and the reason, with the coverage measured below the threshold (``monte_carlo.RELIABLE_PATHS`` and
+    ``RELIABLE_SAMPLES``)."""
+    if res.n_samples < RELIABLE_SAMPLES:  # never in the app: its fewest paths, 10,000, are 5,000 antithetic pairs
+        needed = RELIABLE_SAMPLES * (2 if res.antithetic else 1)
+        return (
+            "Interval unreliable: too few paths",
+            f"Interval unreliable: {res.n_paths:,} paths, fewer than {needed:,}",
+            f"with fewer than {RELIABLE_SAMPLES:,} independent samples ({needed:,} paths"
+            + (" in antithetic pairs" if res.antithetic else "")
+            + ") the standard error is itself too uncertain, and the interval covers the value in less than 95% of "
+            "runs (93 to 94% with 500 antithetic pairs and the control variate)",
+        )
+    count, side = _scarce_side(res)
+    return (
+        f"Interval unreliable: {count:,} {'ITM' if side == 'in' else 'OTM'} paths",
+        f"Interval unreliable: {count:,} of {res.n_paths:,} paths finish {side} the money",
+        f"with fewer than {RELIABLE_PATHS} paths finishing {side} the money it covers the value in less than 95% of "
+        "runs (88% with 10 such paths, 92% with 30, 94% with 100)",
+    )
+
+
+def _scarce_side(res: MonteCarloResult) -> tuple[int, str]:
+    """The simulated prices on the scarcer side of the strike, and which side: ``(12, "in")`` or ``(12, "out of")``.
+
+    It is the side an unreliable result's flag counts (``MonteCarloResult.reliable``) whenever there are at least
+    ``RELIABLE_SAMPLES`` independent samples, so at least 5,000 paths: a payoff averaged as it is fails on its
+    in-the-money paths only when fewer than 300 of them, so fewer than half, finish in the money."""
+    out = res.n_paths - res.n_itm
+    return (res.n_itm, "in") if res.n_itm <= out else (out, "out of")
+
+
+def _mc_note(res: MonteCarloResult) -> str:
+    """The tooltip of a Monte Carlo price card: its standard error, and why its interval is not shown if it is not."""
+    if not np.isfinite(res.std_error):
+        return "Every simulated price finished on one side of the strike: the error cannot be estimated"
+    if res.reliable:
+        return f"Standard error {money(res.std_error, 4)}; {_CI_FORMULA}"
+    _, sentence, reason = _withheld(res)
+    return (
+        f"{sentence}. Standard error {money(res.std_error, 4)}. The 95% interval, price ± 1.96 SE, is not shown: "
+        f"{reason}."
+    )
 
 
 def _alo_note(kind: str, res: AmericanPrice) -> str:
@@ -211,7 +266,10 @@ def _model_card(inputs: Inputs, prices: Prices) -> tuple[str, str, str, str]:
         return (
             "Std. error",
             money(max(finite), 4) if finite else "–",
-            f"Standard error: call {money(se['call'], 4)}, put {money(se['put'], 4)}; {_CI_FORMULA}"
+            f"Standard error: call {money(se['call'], 4)}, put {money(se['put'], 4)}"
+            # The interval's formula only where a card shows an interval: where both withhold it, it invited the user
+            # to work out by hand what the app had just declined to show.
+            + (f"; {_CI_FORMULA}" if any(res.reliable for res in prices.mc.values()) else "")
             + (f". {HEAVY_TAIL_NOTE}." if heavy else ""),
             "Standard error of the simulated prices, after any variance reduction in use (the header's badge names "
             "it: AV for antithetic variates, CV for a control variate). The larger of the call's and the put's is "
@@ -251,12 +309,16 @@ def render_price_cards(inputs: Inputs, prices: Prices) -> None:
         forward_help = f"F = S·e^((r−q)T). Discount factor e^(−rT) = {np.exp(-r * T):.6f}."
     # The per-option notes are in the tooltips so the cards stay short on narrow screens.
     cards = [
-        ("Call value", money(prices.call, decimals), md(prices.call_note)),
-        ("Put value", money(prices.put, decimals), md(prices.put_note)),
-        ("Forward price", money(forward, decimals), forward_help),
-        (label, value, md(help_text)),
+        ("Call value", money(prices.call, decimals), {"help": md(prices.call_note)}),
+        ("Put value", money(prices.put, decimals), {"help": md(prices.put_note)}),
+        ("Forward price", money(forward, decimals), {"help": forward_help}),
+        (label, value, {"help": md(help_text)}),
     ]
-    card_row(*PRICE_CARDS, [(name, text, {"help": help_text}) for name, text, help_text in cards])
+    if prices.mc:
+        # A simulated price carries its 95% interval, or why it is not shown, on the card's small grey line.
+        for (_, _, options), kind in zip(cards, ("call", "put"), strict=False):
+            options.update(delta=md(mc_interval(prices.mc[kind], short=True)), delta_color="off", delta_arrow="off")
+    card_row(*PRICE_CARDS, cards)
     # The header's badge names the model, so the caption only adds what the cards do not show.
     if caption:
         st.caption(md(caption))
@@ -279,7 +341,154 @@ def _european_note(inputs: Inputs) -> str:
     )
 
 
-def _greeks_table(inputs: Inputs, higher_order: bool) -> pd.DataFrame:
+# --- One-day decay --------------------------------------------------------------------------------------------
+# Theta / 365 is the instantaneous rate of decay. Inside a few days of expiry it is far from what a day costs: a
+# 1-day at-the-money SPX put (5,800, 18 % volatility, rate 4.3 %, dividend yield 1.3 %) worth $21.56 shows theta
+# -$10.66 a day, and loses all $21.56 by expiry. The decay below reprices the option instead.
+
+
+def to_expiry(expiry: float) -> bool:
+    """Whether an option with ``expiry`` years left expires within the next calendar day, so that its one-day decay
+    is its decay to expiry."""
+    return expiry <= ONE_DAY
+
+
+def closed_form_decay(S, K, T, r, sigma, q, option_type: str):
+    """Black-Scholes-Merton one-day decay ($ per share): the value with one calendar day less to expiry, all else
+    equal, minus the value now. With a day or less to expiry, the value at expiry (the intrinsic value
+    ``max(±(S − K), 0)``) minus the value now. Broadcasts like :func:`black_scholes.price`."""
+    later = bs.price(S, K, np.maximum(np.asarray(T, dtype=float) - ONE_DAY, 0.0), r, sigma, q, option_type)
+    return later - bs.price(S, K, T, r, sigma, q, option_type)
+
+
+def later_trees(steps: int, expiry: float, method: str) -> tuple[tuple[int, float], ...]:
+    """The trees that value an option one calendar day later, as ``(steps, weight)`` pairs whose weights add up to
+    one (``steps`` and ``expiry`` are the current tree's, ``expiry`` more than a day).
+
+    Measured on European options against the closed-form decay (spot 100, strikes 80 to 120 in steps of 0.5, rate
+    5 %, no dividends, 2 to 60 days and 13 expiries from 75 to 3,650 days, 501 steps), on every one-day decay of at
+    least 1 cent per share, at 10 %, 20 % and 50 % volatility:
+
+    * Leisen-Reimer keeps its steps: its error is smooth in the expiry, so the two trees' errors cancel, to within
+      1.6e-6, 4.0e-6 and 1.2e-5 of the decay (medians 3e-7 or less).
+    * The Cox-Ross-Rubinstein error swings with the strike's place among the final nodes. With the same steps the
+      two errors did not cancel: up to 4.4 %, 8.5 % and 6.0 % of the decay. The shorter tree therefore keeps the
+      time step, which keeps the final nodes where they were: its value is interpolated linearly in the step count
+      between the two counts with the current tree's parity (the final nodes of an odd and an even tree interleave)
+      that bracket ``steps · (expiry − 1 day) / expiry``, whose time steps bracket the current tree's. Within 0.55 %,
+      1.5 % and 0.66 % of the decay (99 % of cases within 0.08 %, 0.12 % and 0.19 %), where the next count up with
+      the parity alone was off by up to 2.1 %, 3.0 % and 2.9 %, and the nearest count by up to 1.1 %, 2.3 % and
+      2.2 %.
+    * Both scale with the steps. At 20 % volatility: with 101 steps, Cox-Ross-Rubinstein up to 11 % (99 % of cases
+      within 1.2 %) and Leisen-Reimer 9.7e-5; with 2,000 steps (strikes in steps of 2), 0.062 % and 1.7e-7. With a
+      3 % dividend yield and 501 steps, 0.64 % and 4.1e-6.
+
+    The lower count's time step is slightly longer than the current tree's, so its lattice can fail to be
+    arbitrage-free where the current one only just is (p lies in (0, 1) exactly while |r − q| Δt < σ√Δt); the
+    caller then uses the upper count alone (:func:`tree_decay`), whose time step is never longer. The lower count is
+    also left out when it is below one step or carries no weight (a whole number of steps keeps the time step
+    exactly).
+    """
+    if method != "crr":
+        return ((steps, 1.0),)
+    exact = steps * (expiry - ONE_DAY) / expiry
+    lower = math.floor(exact + 1e-9)  # a whole number is not rounded down
+    lower -= (lower - steps) % 2
+    weight = max(exact - lower, 0.0) / 2.0  # of the upper count, two steps above
+    if lower < 1:
+        return ((lower + 2, 1.0),)
+    if weight < 1e-9:
+        return ((lower, 1.0),)
+    return ((lower, 1.0 - weight), (lower + 2, weight))
+
+
+def greeks_decay(inputs: Inputs, prices: Prices) -> dict[str, float]:
+    """One-day decay of the call and the put ($ per share) by the model of the Greeks table: the American engine
+    under that model, Black-Scholes-Merton otherwise.
+
+    Under a binomial tree or Monte Carlo the Greeks table is Black-Scholes-Merton's, so its decay is too, for
+    European exercise: the tree's own, with the tree's exercise style, is in the tree's Greeks (:func:`tree_decay`),
+    and the Greeks caption says that an American tree's is there (:func:`_decay_note`). Monte Carlo estimates the
+    Black-Scholes-Merton value, whose decay the closed form gives exactly, where the difference of two simulations
+    would add sampling error.
+    """
+    S, K, T, r, sigma, q = (
+        inputs.spot,
+        inputs.strike,
+        inputs.expiry,
+        inputs.rate,
+        inputs.volatility,
+        inputs.dividend_yield,
+    )
+    if inputs.model.kind != "alo":
+        return {kind: float(closed_form_decay(S, K, T, r, sigma, q, kind)) for kind in cache.KINDS}
+    decay = {}
+    for kind, res in prices.alo.items():
+        if to_expiry(T):
+            later = max(bs.option_sign(kind) * (S - K), 0.0)
+        else:
+            later = cache.alo_value(S, K, T - ONE_DAY, r, sigma, q, kind, inputs.model.scheme)
+        decay[kind] = later - res.value
+    return decay
+
+
+def tree_decay(inputs: Inputs, prices: Prices) -> tuple[dict[str, float], tuple[tuple[int, float], ...]]:
+    """One-day decay of the call and the put ($ per share) on the sidebar's tree, and the shorter trees it used.
+
+    The value on trees one calendar day shorter (:func:`later_trees`, weighted) minus the value on the tree now,
+    with the tree's exercise style; with a day or less to expiry, the intrinsic value minus the value now (and no
+    trees). Where the lower of two Cox-Ross-Rubinstein counts has no arbitrage-free lattice, the upper one alone.
+    """
+    model = inputs.model
+    S, K, T, r, sigma, q = (
+        inputs.spot,
+        inputs.strike,
+        inputs.expiry,
+        inputs.rate,
+        inputs.volatility,
+        inputs.dividend_yield,
+    )
+    if to_expiry(T):
+        later = {kind: max(bs.option_sign(kind) * (S - K), 0.0) for kind in cache.KINDS}
+        return {kind: later[kind] - prices.tree[kind].price for kind in cache.KINDS}, ()
+
+    def value(steps: int) -> dict[str, float]:
+        return cache.tree_prices(S, K, T - ONE_DAY, r, sigma, q, steps, model.american, model.tree_method)
+
+    trees = later_trees(prices.tree["call"].steps, T, model.tree_method)
+    try:
+        values = [(value(steps), weight) for steps, weight in trees]
+    except ValueError:  # the lower count's longer time step has no arbitrage-free lattice
+        trees = ((trees[-1][0], 1.0),)
+        values = [(value(trees[0][0]), 1.0)]
+    decay = {
+        kind: math.fsum(weight * later[kind] for later, weight in values) - prices.tree[kind].price
+        for kind in cache.KINDS
+    }
+    return decay, trees
+
+
+def _decay_row(decay: dict[str, float], expiring: bool) -> dict:
+    """The one-day decay as a row of the Greeks table."""
+    return {
+        "Greek": decay_label(expiring),
+        "Call": decay["call"],
+        "Put": decay["put"],
+        "Unit": "until expiry, by repricing" if expiring else "over the next calendar day, by repricing",
+        "Definition": "V(expiry) − V" if expiring else "V(T − 1 day) − V(T)",
+        "Order": 1,
+    }
+
+
+def _with_decay(rows: list[dict], theta: dict[str, float], decay: dict[str, float], expiring: bool) -> list[dict]:
+    """``rows`` with the one-day decay next to the theta row: before it when it leads (:func:`decay_leads`) for the
+    call or the put, after it otherwise. ``theta`` is theta / 365 of each option."""
+    leads = any(decay_leads(theta[kind], decay[kind], expiring) for kind in cache.KINDS)
+    at = next(i for i, row in enumerate(rows) if row["Greek"].startswith("Theta")) + (0 if leads else 1)
+    return [*rows[:at], _decay_row(decay, expiring), *rows[at:]]
+
+
+def _greeks_table(inputs: Inputs, higher_order: bool, decay: dict[str, float]) -> pd.DataFrame:
     args = (inputs.spot, inputs.strike, inputs.expiry, inputs.rate, inputs.volatility, inputs.dividend_yield)
     call = bs.greeks(*args, "call")
     put = bs.greeks(*args, "put")
@@ -297,10 +506,11 @@ def _greeks_table(inputs: Inputs, higher_order: bool) -> pd.DataFrame:
                 "Order": info.order,
             }
         )
-    return pd.DataFrame(rows)
+    theta = {"call": call["theta"] / 365.0, "put": put["theta"] / 365.0}
+    return pd.DataFrame(_with_decay(rows, theta, decay, to_expiry(inputs.expiry)))
 
 
-def _alo_greeks_table(prices: Prices) -> pd.DataFrame:
+def _alo_greeks_table(inputs: Inputs, prices: Prices, decay: dict[str, float]) -> pd.DataFrame:
     """The American engine's Greeks (``american.greeks``) in the layout and units of
     :func:`_greeks_table`."""
     rows = []
@@ -316,7 +526,8 @@ def _alo_greeks_table(prices: Prices) -> pd.DataFrame:
                 "Order": info.order,
             }
         )
-    return pd.DataFrame(rows)
+    theta = {kind: prices.alo_greeks[kind]["theta"] / 365.0 for kind in cache.KINDS}
+    return pd.DataFrame(_with_decay(rows, theta, decay, to_expiry(inputs.expiry)))
 
 
 #: How the Greeks table under the American engine is computed (american.GREEK_BUMPS).
@@ -344,7 +555,7 @@ def _alo_greeks_note(inputs: Inputs, prices: Prices) -> str:
     """The caption of the Greeks table under the American engine: how they are computed, and for which option
     each exception holds (``AmericanGreeks.basis`` and ``one_sided``, and the fallback to the tree)."""
     greeks, details = prices.alo_greeks, prices.alo
-    notes = [ALO_GREEKS_NOTE]
+    notes = [ALO_GREEKS_NOTE, _decay_note(inputs)]
     closed = [kind for kind in cache.KINDS if greeks[kind].basis == "closed form"]
     if len(closed) == 2:
         notes.append(
@@ -380,7 +591,10 @@ def _sensitivity(inputs: Inputs) -> None:
         "Value": ("value", 1.0, "Option value ($)"),
         "Delta": ("delta", 1.0, "Delta"),
         "Gamma": ("gamma", 1.0, "Gamma"),
-        "Theta / day": ("theta", 1 / 365, "Theta ($ per day)"),
+        # Theta / 365 with the 1-day decay beside it (dashed); the decay alone, repriced one calendar day later
+        # (closed_form_decay), against the days to expiry shows where theta / 365 stops being the cost of a day.
+        "Theta / day": ("theta", 1 / 365, "Theta / 365 and 1-day decay ($)"),
+        "1-day decay": ("decay", 1.0, "1-day decay ($)"),
         "Vega / vol pt": ("vega", 0.01, "Vega ($ per vol point)"),
         "Rho / 1%": ("rho", 0.01, "Rho ($ per 1% rate)"),
     }
@@ -413,10 +627,24 @@ def _sensitivity(inputs: Inputs) -> None:
     def curve(option_type):
         if name == "value":
             return bs.price(*args, option_type)
+        if name == "decay":
+            return closed_form_decay(*args, option_type)
         return bs.greeks(*args, option_type)[name] * scale
 
+    # Against spot or volatility every point has the sidebar's expiry, so within a day of it the decay is the decay
+    # to expiry; against the days left only the first point (1 day) is, and "1-day decay" covers it.
+    decay = decay_label(kind != "days" and to_expiry(T))
+    dashed = None
+    if name == "decay":
+        y_title = f"{decay} ($)"
+    elif name == "theta":
+        # The repriced day beside the rate, dashed: they part within a few days of expiry.
+        y_title = f"Theta / 365 and {decay.lower()} ($)"
+        dashed = ("Theta / 365", decay, closed_form_decay(*args, "call"), closed_form_decay(*args, "put"))
     x_plot = x * 100 if kind == "vol" else x
-    fig = charts.sensitivity_chart(x_plot, curve("call"), curve("put"), x_title, y_title, current, strike_x)
+    fig = charts.sensitivity_chart(
+        x_plot, curve("call"), curve("put"), x_title, y_title, current, strike_x, dashed=dashed
+    )
     charts.show(fig, key="sensitivity_chart", alt=f"Call and put {y_title.lower()} against {x_title.lower()}")
     if note := _european_note(inputs):
         st.caption(note)
@@ -448,15 +676,18 @@ def _chain(inputs: Inputs) -> None:
     strikes = np.unique(np.round(inputs.strike * np.linspace(0.8, 1.2, 9), 2))
     call = bs.greeks(S, strikes, T, r, sigma, q, "call")
     put = bs.greeks(S, strikes, T, r, sigma, q, "put")
+    decay = decay_label(to_expiry(T))
     chain = pd.DataFrame(
         {
             "Call value": bs.price(S, strikes, T, r, sigma, q, "call"),
             "Call delta": call["delta"],
             "Call theta / day": call["theta"] / 365,
+            f"Call {decay.lower()}": closed_form_decay(S, strikes, T, r, sigma, q, "call"),
             "Strike": strikes,
             "Put value": bs.price(S, strikes, T, r, sigma, q, "put"),
             "Put delta": put["delta"],
             "Put theta / day": put["theta"] / 365,
+            f"Put {decay.lower()}": closed_form_decay(S, strikes, T, r, sigma, q, "put"),
             "Gamma": call["gamma"],
             "Vega / vol pt": call["vega"] / 100,
         }
@@ -472,13 +703,56 @@ def _chain(inputs: Inputs) -> None:
             "Put delta": st.column_config.NumberColumn(format="%.3f"),
             "Call theta / day": st.column_config.NumberColumn(format="%.4f"),
             "Put theta / day": st.column_config.NumberColumn(format="%.4f"),
+            f"Call {decay.lower()}": st.column_config.NumberColumn(format="%.4f"),
+            f"Put {decay.lower()}": st.column_config.NumberColumn(format="%.4f"),
             "Gamma": st.column_config.NumberColumn(format="%.5f"),
             "Vega / vol pt": st.column_config.NumberColumn(format="%.4f"),
         },
     )
     st.caption(
-        "Strikes from 80% to 120% of the sidebar strike, flat volatility (no smile), same expiry. "
+        "Strikes from 80% to 120% of the sidebar strike, flat volatility (no smile), same expiry. Theta / day is "
+        f"theta / 365; the {decay.lower()} reprices each option "
+        + ("at expiry (its intrinsic value). " if to_expiry(T) else "with one calendar day less to expiry. ")
         + _european_note(inputs)
+    )
+
+
+def _tree_repricing(steps: int, expiry: float, method: str, trees: tuple[tuple[int, float], ...]) -> str:
+    """How the tree table's decay reprices, from the shorter trees it used (``trees``, from :func:`tree_decay`).
+
+    It says "this tree's time step" only where the shorter trees keep it: two trees interpolated to it, or one
+    whose time step equals it to 1e-9; otherwise it says how much shorter the one tree's time step is, and why.
+    """
+    if not trees:
+        return "the intrinsic value at expiry minus the tree value"
+    if method != "crr":
+        return (
+            "the value on a tree one day shorter with the same steps minus the value now (Leisen-Reimer's error is "
+            "smooth in the expiry, so the two trees' errors cancel)"
+        )
+    exact = steps * (expiry - ONE_DAY) / expiry  # the steps of a tree one day shorter with this tree's time step
+    kept = "(at the same time step the final nodes stay in place, so the trees' oscillating errors largely cancel)"
+    if len(trees) == 2:
+        (lower, _), (upper, _) = trees
+        return (
+            f"the value one day later, interpolated between trees with {lower:,} and {upper:,} steps to this tree's "
+            f"time step ({exact:,.2f} steps), minus the value now {kept}"
+        )
+    ((later, _),) = trees
+    shorter = 1.0 - exact / later  # how much shorter its time step is than this tree's, as a fraction
+    if abs(shorter) < 1e-9:
+        return (
+            f"the value on a tree one day shorter with {later:,} steps, this tree's time step, minus the value now "
+            + kept
+        )
+    why = (
+        "the next count down has no arbitrage-free lattice here"
+        if len(later_trees(steps, expiry, method)) == 2
+        else "no smaller count keeps it"
+    )
+    return (
+        f"the value on a tree one day shorter with {later:,} steps, a time step {shorter:.2%} shorter than this "
+        f"tree's ({why}), minus the value now"
     )
 
 
@@ -493,19 +767,19 @@ def _tree_diagnostics(inputs: Inputs, prices: Prices) -> None:
     )
     model = inputs.model
     st.markdown("**Tree Greeks** (on the lattice, so they include the early-exercise feature)")
-    rows = [
-        {
-            "Option": kind.capitalize(),
-            "Value": res.price,
-            "Delta": res.delta,
-            "Gamma": res.gamma,
-            "Theta / day": res.theta / 365,
-            "Vega / vol pt": res.vega / 100,
-            "Rho / 1%": res.rho / 100,
-            "Div. rho / 1%": res.epsilon / 100,
-        }
-        for kind, res in prices.tree.items()
-    ]
+    decay, trees = tree_decay(inputs, prices)
+    expiring = to_expiry(T)
+    label = decay_label(expiring)
+    # The headline rule of the Greeks table, on the tree's own theta: the decay column comes first when it leads.
+    leads = any(decay_leads(res.theta / 365, decay[kind], expiring) for kind, res in prices.tree.items())
+    rows = []
+    for kind, res in prices.tree.items():
+        time = {"Theta / day": res.theta / 365, label: decay[kind]}
+        rows.append(
+            {"Option": kind.capitalize(), "Value": res.price, "Delta": res.delta, "Gamma": res.gamma}
+            | (dict(reversed(time.items())) if leads else time)
+            | {"Vega / vol pt": res.vega / 100, "Rho / 1%": res.rho / 100, "Div. rho / 1%": res.epsilon / 100}
+        )
     steps_used = prices.tree["call"].steps
     st.dataframe(
         pd.DataFrame(rows),
@@ -515,16 +789,28 @@ def _tree_diagnostics(inputs: Inputs, prices: Prices) -> None:
             "Delta": st.column_config.NumberColumn(format="%.4f"),
             "Gamma": st.column_config.NumberColumn(format="%.5f"),
             "Theta / day": st.column_config.NumberColumn(format="%.4f"),
+            label: st.column_config.NumberColumn(format="%.4f"),
             "Vega / vol pt": st.column_config.NumberColumn(format="%.4f"),
             "Rho / 1%": st.column_config.NumberColumn(format="%.4f"),
             "Div. rho / 1%": st.column_config.NumberColumn(format="%.4f"),
         },
     )
+    first = (
+        f" The {label.lower()} comes first: "
+        + (
+            "the option expires within the day."
+            if expiring
+            else f"it differs from theta / 365 by more than {DECAY_SWITCH:.0%} of the larger, for the call or the put."
+        )
+        if leads
+        else ""
+    )
     st.caption(
         f"Dollars per share on a {steps_used:,}-step tree. Delta and gamma come from its first two time steps, "
-        "theta from the second step (CRR) or from repricing with the expiry moved (Leisen-Reimer). Vega, rho and "
-        "dividend rho (per 1% move in the dividend yield) reprice on a tree with the same steps, with the "
-        "volatility moved ±0.5 vol pt and the rates ±25 bp."
+        "theta from the second step (CRR) or from repricing with the expiry moved (Leisen-Reimer). Theta / day is "
+        f"theta / 365; the {label.lower()} is {_tree_repricing(steps_used, T, model.tree_method, trees)}.{first} "
+        "Vega, rho and dividend rho (per 1% move in the dividend yield) reprice on a tree with the same steps, with "
+        "the volatility moved ±0.5 vol pt and the rates ±25 bp."
     )
 
     st.markdown("**Convergence with the number of steps**")
@@ -618,8 +904,7 @@ def _monte_carlo_diagnostics(inputs: Inputs, prices: Prices) -> None:
             "Option": kind.capitalize(),
             "Monte Carlo": res.price,
             "Std. error": res.std_error,
-            "95% CI low": res.ci95[0],
-            "95% CI high": res.ci95[1],
+            "95% interval": mc_interval(res, dollars=False),
             "BSM": bs.price(S, K, T, r, sigma, q, kind),
             "Error / SE": (res.price - bs.price(S, K, T, r, sigma, q, kind)) / res.std_error
             if res.std_error > 0
@@ -632,18 +917,18 @@ def _monte_carlo_diagnostics(inputs: Inputs, prices: Prices) -> None:
         pd.DataFrame(rows),
         hide_index=True,
         placeholder="",  # undefined values are left blank, as the caption says (Streamlit would write "None")
-        column_config={
-            c: st.column_config.NumberColumn(format="%.4f")
-            for c in ("Monte Carlo", "Std. error", "95% CI low", "95% CI high", "BSM")
-        }
+        column_config={c: st.column_config.NumberColumn(format="%.4f") for c in ("Monte Carlo", "Std. error", "BSM")}
         | {
             "Error / SE": st.column_config.NumberColumn(format="%.2f"),
             "In the money": st.column_config.NumberColumn(format="percent"),
         },
     )
     st.caption(
-        "Terminal prices are sampled exactly from the log-normal distribution (no time-stepping bias). "
-        "|Error / SE| below about 2 is consistent with an unbiased estimator. The standard error is left blank "
+        "Dollars per share. Terminal prices are sampled exactly from the log-normal distribution (no time-stepping "
+        "bias). |Error / SE| below about 2 is consistent with an unbiased estimator. The 95% interval is the price "
+        f"± 1.96 SE; it is not shown when fewer than {RELIABLE_PATHS} paths finish on the side of the strike that "
+        "the error rests on (the Methodology says which), where it covers the value in less than 95% of runs (88% "
+        "with 10 such paths, 92% with 30, 94% with 100). The standard error is left blank "
         "when the sample cannot estimate it: every price finished out of the money, or every one in the money "
         "with the control variate on. At very large σ√T (hundreds of percent of volatility over years) the mean of "
         "the price at expiry rests on scenarios too rare to draw: when the simulated discounted prices miss their "
@@ -752,21 +1037,54 @@ def _model_diagnostics(inputs: Inputs, prices: Prices) -> None:
         )
 
 
+def _decay_note(inputs: Inputs) -> str:
+    """The sentences of the Greeks table's caption on its one-day decay row.
+
+    Under an American binomial tree the table, decay included, is the European option's (Black-Scholes-Merton), so
+    the note says plainly that it is not the decay of the American value in the price cards, which the tree's own
+    Greeks give (:func:`tree_decay`): a 7-day put struck at 110 on 100 is exercised at once on the tree, so its
+    value does not change in a day, while the European put gains 1.5 cents.
+    """
+    model = inputs.model
+    expiring = to_expiry(inputs.expiry)
+    value = "the engine's value" if model.kind == "alo" else "the value"
+    later = "the intrinsic value at expiry" if expiring else f"{value} with one calendar day less to expiry"
+    by = {
+        "binomial": " by Black-Scholes-Merton for European exercise"
+        + ("" if model.american else ", the value the tree converges to (the tree's own is in its Greeks below)"),
+        "monte_carlo": " by Black-Scholes-Merton, whose value the simulation estimates",
+    }.get(model.kind, "")
+    first = (
+        "it is listed first, as the option expires within the day"
+        if expiring
+        else f"it is listed first when it differs from the theta row (theta / 365) by more than {DECAY_SWITCH:.0%} "
+        "of the larger, for the call or the put"
+    )
+    american = (
+        " It is not the decay of the American value in the price cards, which the tree's Greeks give."
+        if model.kind == "binomial" and model.american
+        else ""
+    )
+    return f"{decay_label(expiring)}: {later} minus {value} now{by}, all else equal; {first}.{american}"
+
+
 def render(inputs: Inputs, prices: Prices) -> None:
     st.subheader("Greeks")
+    decay = greeks_decay(inputs, prices)
     if inputs.model.kind == "alo":
-        table = _alo_greeks_table(prices)
+        table = _alo_greeks_table(inputs, prices, decay)
         note = _alo_greeks_note(inputs, prices)
     else:
         higher = st.toggle(
             "Show second- and third-order Greeks", value=False, key="higher_greeks", persist_state="session"
         )
-        table = _greeks_table(inputs, higher)
+        table = _greeks_table(inputs, higher, decay)
         note = (
             "Analytical Black-Scholes-Merton Greeks for European exercise, in the units shown "
             "(theta and the other time Greeks per calendar day of elapsed time). "
+            + _decay_note(inputs)
             + (
-                "Tree Greeks for the American option, including vega and rho, are under *Model diagnostics* below."
+                " Tree Greeks for the American option, including vega and rho, are under *Model diagnostics* below."
                 if inputs.model.american and inputs.model.kind == "binomial"
                 else ""
             )

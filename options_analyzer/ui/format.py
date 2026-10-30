@@ -6,6 +6,8 @@ The functions from :func:`signed` on are the desk number-format standard:
   digit in IBM Plex, so signed columns line up) and no sign at zero: never ``−0.00``.
 * Greeks keep at least three significant digits (:func:`greek`), so small second-order Greeks never read
   ``0.000000``; dollar Greeks have one explicit definition each (:func:`dollar_delta` and the functions after it).
+  Time decay heads a card or table as theta / 365 or as the one-day decay by repricing, by one rule
+  (:func:`decay_leads`), under one of two names (:func:`decay_label`).
 * Dates read ``20-Oct-27 (365d)`` (:func:`expiry`), money in accounting style ``($1,234.56)`` where a column of
   amounts needs it (:func:`accounting`), and position sizes are whole numbers (:func:`quantity`).
 
@@ -221,6 +223,37 @@ def dollar_theta(theta: float, units: float) -> float:
 def dollar_rho(rho: float, units: float) -> float:
     """Rho in dollars per 1% move in the rate (raw rho is per 1.00, i.e. 100%): ρ · 0.01 · units."""
     return rho * 0.01 * units
+
+
+#: Theta / 365 stays the headline while it is within this fraction of the one-day decay by repricing, measured
+#: against the larger of the two in size. At the money (100, 20 % volatility, 5 % rate) the two differ by 8.7 % (call)
+#: and 9.7 % (put) at 3 days to expiry and by 14.1 % and 15.2 % at 2 days; on the panel's 7-day SPX-like iron condor
+#: by 9.5 % ($137.50 against $151.97), so that one keeps theta.
+DECAY_SWITCH = 0.10
+
+
+def decay_label(to_expiry: bool) -> str:
+    """The name of the one-day decay by repricing: ``Decay to expiry`` when the (front) expiry falls within the day,
+    so that the figure is the whole remaining time value, and ``1-day decay`` otherwise."""
+    return "Decay to expiry" if to_expiry else "1-day decay"
+
+
+def decay_leads(theta_per_day: float, decay: float, to_expiry: bool = False) -> bool:
+    """Whether the one-day decay by repricing is the headline rather than theta / 365.
+
+    Theta / 365 is the instantaneous rate; the decay is the change in value over the next calendar day, spot and
+    implied volatility unchanged. The decay leads when the (front) expiry falls within the day, where a rate per day
+    means nothing, and when the two differ by more than :data:`DECAY_SWITCH` of the larger in size:
+    ``|decay − θ/365| > 0.10 · max(|decay|, |θ/365|)``. Two zeros agree.
+
+    Examples
+    --------
+    >>> decay_leads(-10.66, -21.56), decay_leads(137.50, 151.97), decay_leads(-0.01757, -0.01758)
+    (True, False, False)
+    >>> decay_leads(-0.01757, -0.01758, to_expiry=True)
+    True
+    """
+    return bool(to_expiry or abs(decay - theta_per_day) > DECAY_SWITCH * max(abs(decay), abs(theta_per_day)))
 
 
 def level(value: float) -> str:

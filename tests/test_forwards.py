@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from options_analyzer import american
 from options_analyzer import black_scholes as bs
 from options_analyzer import vol_surface as vs
 from options_analyzer.implied_vol import implied_volatility_batch
@@ -113,12 +114,22 @@ def test_acceptance_1_forwards_and_an_arbitrage_free_surface_from_a_sidebar_with
     rounded to $0.05 and quoted $0.05 either side, read with the sidebar's q = 0.
 
     Every forward is within 2 bp (measured 0.89) and every discount factor within three of its own standard errors
-    (measured errors up to 4.0e-4, standard errors 2.3e-4 to 4.6e-4). The plan asked for 2e-5, which these quotes
-    cannot give: rounding each price to $0.05 on a $100 underlying leaves the slope of C - P that uncertain, and it
-    costs the vols at most sigma * 4e-4, 0.01 vol point. No calendar or butterfly point and no static-arbitrage note
-    (with the sidebar forward: 7 calendar and 12 butterfly points). The fit RMSE is below 0.4 vol point from the
-    second expiry on (measured 0.11 at most) and 0.68 at 30 days, where wing quotes worth a few ticks are rounded by
-    up to a third of their value: weighting quotes by their spread is roadmap item SF-4.
+    (measured errors up to 4.0e-4, at most 1.3 standard errors of 2.3e-4 to 4.6e-4). The plan asked for 2e-5, which
+    these quotes cannot give: rounding each price to $0.05 on a $100 underlying leaves the slope of C - P that
+    uncertain, and it costs the vols at most sigma * 4e-4, 0.01 vol point. No calendar or butterfly point and no
+    static-arbitrage note.
+
+    The plan's fit criterion, an RMSE below 0.4 vol point, is restated as what a fit to bid/ask quotes can be held
+    to: at every expiry at least 99 % of the fitted vols lie inside their quote's bid/ask in vol, and the median
+    ``|fit - quote| / half-spread`` is at most 0.25. Measured: 100 % at every expiry, medians 0.13 to 0.22 (the
+    largest error is 0.63 of its half-spread). With the sidebar forward instead, 4 to 83 % lie inside, with medians up
+    to 8.9 (and, fitted unconstrained, 9 calendar and 15 butterfly points), so the criterion tells the two apart.
+
+    The unweighted RMSE stays reported and bounded: 0.733 vol point at 30 days (bound 0.8, 9 % headroom), where wing
+    quotes worth a few ticks are rounded by up to a third of their value, and 0.118 at most from the second expiry on
+    (bound 0.15). Since roadmap item SF-4 the fit minimises the spread-weighted error, so the unweighted RMSE at 30
+    days is above the 0.684 of an unweighted fit, which follows the wide wing quotes at the expense of the tight ones
+    near the money: weighted, the errors are 0.192 against that fit's 0.225.
     """
     _, _, table, surface = _parsed(_ssvi_chain())
     T = table["maturity"].to_numpy()
@@ -127,9 +138,14 @@ def test_acceptance_1_forwards_and_an_arbitrage_free_surface_from_a_sidebar_with
     assert (table["source"] == "parity").all() and (error <= 3 * table["discount_se"]).all()
     assert surface.calendar_violations == 0 and surface.butterfly_violations == 0
     assert not [note for note in surface.notes if "arbitrage" in note]
-    assert surface.fit_rmse[1:].max() < 0.004 and surface.fit_rmse[0] < 0.0075
-    by_rates = _parsed(_ssvi_chain(), forward="rates")[3]
-    assert by_rates.calendar_violations + by_rates.butterfly_violations > 0  # what the sidebar forward gave
+    summary = vs.surface_summary(surface)
+    assert (summary["Inside bid/ask (%)"] >= 99.0).all() and (summary["Median |error| / half-spread"] <= 0.25).all()
+    assert surface.fit_rmse[0] < 0.008 and surface.fit_rmse[1:].max() < 0.0015
+    # What the sidebar forward gives: fits outside the spreads at every expiry, and arbitrage in the quotes' vols.
+    clean, _, forwards, by_rates = _parsed(_ssvi_chain(), forward="rates")
+    assert (vs.surface_summary(by_rates)["Inside bid/ask (%)"] < 99.0).all()
+    free = vs.fit_market_surface(clean, S, RATE, 0.0, forwards=forwards, calibration="unconstrained")
+    assert free.calendar_violations + free.butterfly_violations > 0
 
 
 def test_acceptance_2_call_and_put_vols_agree_within_their_spreads():
@@ -177,17 +193,21 @@ def test_acceptance_5_with_the_true_rate_and_yield_parity_changes_nothing():
     parity = _parsed(frame, dividend_yield=YIELD)
     rates = _parsed(frame, dividend_yield=YIELD, forward="rates")
     assert "forward" in parity[0] and "forward" not in rates[0]
+    # Measured: 5e-16 in the vols, 7e-16 in implied vol and 2.2e-12 in local vol on the grid (dw/dT from secants
+    # between maturities amplifies the rounding of w by about 1 / (T2 - T1)).
     assert parity[0]["iv"].to_numpy() == pytest.approx(rates[0]["iv"].to_numpy(), abs=1e-10)
     assert np.allclose(parity[3].implied_vol, rates[3].implied_vol, rtol=0, atol=1e-10, equal_nan=True)
-    assert np.allclose(parity[3].local_vol, rates[3].local_vol, rtol=0, atol=1e-8, equal_nan=True)
+    assert np.allclose(parity[3].local_vol, rates[3].local_vol, rtol=0, atol=1e-10, equal_nan=True)
 
 
 def test_the_synthetic_spx_chain_read_with_the_treasury_rate():
     """The panel's run (docs/reviews/panel-v3.0.md, quant developer, finding 2): the synthetic SPX chain with the
-    generator's Treasury rate and yield. With the sidebar forward: 135 quotes dropped as outside the no-arbitrage
-    bounds, 26 calendar violations and fits up to 1.33 vol points from the quotes. With parity forwards: none
-    dropped, no violation, largest fit RMSE 0.068 vol point, ATM vols within 0.006 vol point and forwards within
-    0.3 bp."""
+    generator's Treasury rate and yield. Before parity forwards (roadmap item SF-3), the sidebar forward dropped 135
+    quotes as outside the no-arbitrage bounds, gave 26 calendar violations and fits up to 1.33 vol points from the
+    quotes; with "Sidebar r, q" on this version, which drops in-the-money quotes without time value, it drops none
+    but its forwards are up to 85 bp off and its fits up to 2.38 vol points from the quotes. With parity forwards:
+    none dropped, no violation, largest fit RMSE 0.073 vol point (bound 0.1), ATM vols within 0.0064 vol point (bound
+    0.02) and forwards within 0.22 bp (bound 0.5)."""
     chain = sample_chain(5000.0, 0.04, 0.012, as_of=AS_OF)
     quotes = to_quotes(chain.quotes, as_of=AS_OF)
     clean, messages, table = vs.parse_quotes(quotes, 5000.0, 0.04, 0.012, return_forwards=True)
@@ -219,3 +239,78 @@ def test_in_the_money_quotes_without_time_value_are_dropped():
 def test_the_forward_method_is_checked():
     with pytest.raises(ValueError, match="forward must be one of 'parity', 'rates'"):
         vs.parse_quotes(_ssvi_chain(days=(30,)), S, RATE, 0.0, forward="sidebar")
+
+
+def test_the_parse_message_names_where_a_fitted_forwards_discount_factor_comes_from():
+    """An expiry whose slope is too uncertain discounts at the given rate plus the spread pooled from the other
+    expiries' fits; the message says so, and names both reasons a slope is not used."""
+    table = pd.DataFrame({"source": ["parity", "parity_forward", "rates"]})
+    text = vs.quotes._forward_message(table, "parity")
+    assert "at 1 of them the discount factor is the sidebar rate plus the spread over it that the other" in text
+    assert "the slope of C − P in the strike was too uncertain (the strikes span too little) or implied a rate" in text
+    assert "outside −10% to 50%" in text  # RATE_LIMITS, with the minus sign U+2212
+    assert "the other 1 use the sidebar rate and dividend yield" in text
+
+
+def test_a_zero_maturity_is_refused():
+    prices = _price_table(np.arange(80.0, 121.0, 5.0), 0.0, 0.05, 0.02)
+    with pytest.raises(ValueError, match="every maturity must be positive"):
+        fw.implied_forwards(prices, S, 0.05, 0.02)
+
+
+def test_the_standard_errors_match_the_scatter_of_the_estimates():
+    """The standard errors of the forward (delta method on a / DF) and of the discount factor (the slope) against a
+    Monte Carlo of the parity fit: 400 draws of a 0.5-year chain, 41 strikes from 80 to 120, each price moved by a
+    uniform error within its 0.02 half-spread (fixed seed). The reported standard error, averaged over the draws,
+    is within 15 % of the standard deviation of the estimates: the Monte Carlo's own sampling error is 3.5 % (one
+    over the square root of 2 x 400), and each draw's standard error is itself estimated from the scatter of the 37
+    to 39 pairs left after outlier trimming. Measured: forward 0.00270 against 0.00277 (-2.4 %), discount factor
+    2.40e-4 against 2.26e-4 (+6.4 %)."""
+    rng = np.random.default_rng(11)
+    exact = _price_table(np.linspace(80.0, 120.0, 41), 0.5, 0.05, 0.02, error=0.02)
+    rows = []
+    for _ in range(400):
+        noisy = exact.assign(price=exact["price"] + rng.uniform(-0.02, 0.02, len(exact)))
+        rows.append(fw.implied_forwards(noisy, S, 0.05, 0.02).iloc[0])
+    draws = pd.DataFrame(rows)
+    assert (draws["source"] == "parity").all()
+    for estimate, error in (("forward", "forward_se"), ("discount_factor", "discount_se")):
+        assert draws[error].mean() == pytest.approx(draws[estimate].std(ddof=1), rel=0.15), error
+
+
+def _american_chain() -> pd.DataFrame:
+    """A listed single-stock chain priced as American (``options_analyzer.american``): S = 100, r = 5 %, no
+    dividend, a flat 30 % vol, five expiries from 30 days to two years, strikes 60-140, mids rounded to $0.05 and
+    quoted $0.05 either side (quotes worth less than $0.10 left out)."""
+    rows = []
+    for days in (30, 91, 182, 365, 730):
+        T = days / 365
+        for strike in np.arange(60.0, 140.01, 2.5):
+            for kind in ("call", "put"):
+                mid = round(float(american.price(S, strike, T, 0.05, 0.30, 0.0, option_type=kind)) / 0.05) * 0.05
+                if mid >= 0.10:
+                    bid, ask = round(mid - 0.05, 2), round(mid + 0.05, 2)
+                    rows.append({"Strike": strike, "Days": days, "Type": kind, "Bid": bid, "Ask": ask})
+    return pd.DataFrame(rows)
+
+
+def test_american_quotes_take_their_forwards_from_the_rates_given_and_say_why():
+    """Put-call parity does not hold for American options: read as European, the early-exercise premium of the puts
+    implies a dividend yield of 0.9-1.6 % that the stock does not pay, forwards 9 to 179 bp low, and a carry-gap
+    warning at every expiry. Read as American, every forward comes from the rate and dividend yield given (source
+    "rates"), there is no warning, and the message says why and that the prices are still inverted as European."""
+    frame = _american_chain()
+    _, _, european = vs.parse_quotes(frame, S, 0.05, 0.0, return_forwards=True)
+    assert vs.carry_gaps(european).all()  # what reading the American quotes as European gave
+    clean, messages, table = vs.parse_quotes(frame, S, 0.05, 0.0, exercise="american", return_forwards=True)
+    assert (table["source"] == "rates").all() and not vs.carry_gaps(table).any() and "forward" not in clean
+    # To 1e-9: the table's maturities are rounded to 1e-10 years after its forwards are computed (measured 1.1e-12).
+    assert table["forward"].to_numpy() == pytest.approx(S * np.exp(0.05 * table["maturity"].to_numpy()), rel=1e-9)
+    text = next(m for m in messages if m.startswith("Forwards and discount factors"))
+    assert "because the quotes are read as American" in text and "holds only for European options" in text
+    assert "still inverted as European options" in text and "overstates their implied vols" in text
+    # The same with "Sidebar r, q", whose forwards are those anyway; the message still says why parity is not used.
+    messages = vs.parse_quotes(frame, S, 0.05, 0.0, forward="rates", exercise="american")[1]
+    assert any(m.startswith("Forwards and discount factors") and "read as American" in m for m in messages)
+    with pytest.raises(ValueError, match="exercise must be one of 'european', 'american'"):
+        vs.parse_quotes(frame, S, 0.05, 0.0, exercise="bermudan")

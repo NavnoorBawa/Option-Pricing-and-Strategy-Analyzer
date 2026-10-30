@@ -834,8 +834,9 @@ def test_fit_recovers_the_generator_atm_vols_from_the_whole_chain():
     somewhere. The cause was not the unweighted SVI fit, as first thought, but the in-the-money quotes in the wings,
     kept where their out-of-the-money side has a zero bid: their time value lies within their spread, and they were
     inverted into vols several points off. Parsing now drops them, and each expiry's forward and discount factor come
-    from put-call parity. Measured over the same 16 runs: the worst error is 0.090 vol point (30 October, 10:00, noise
-    seed 2, the expiry six hours away), every other run below 0.017, with the largest fit RMSE 0.17 vol point.
+    from put-call parity, and the fit weights each quote by its spread (SF-4). Measured over the same 16 runs: the
+    worst error is 0.018 vol point (30 October, 10:00, noise seed 2, the expiry six hours away), the largest fit RMSE
+    0.21 vol point.
     """
     misses = []
     for as_of in FIT_TIMES:
@@ -854,8 +855,8 @@ def test_fit_recovers_forwards_and_atm_vols_with_the_sidebar_rate(rate_curve, di
     """Acceptance (3), the part that needs SF-3: parsed with the sidebar's Treasury rate and no dividend yield, the
     surface fitted to the liquid core recovers each expiry's forward within 2e-4 and its ATM vol within 0.1 vol
     point, because both come from put-call parity, not from the sidebar. Measured over noise seeds 0-3: forwards
-    within 0.26 bp (0.21 bp with the rate curve and cash dividends), ATM vols within 0.0095 vol point. Before SF-3
-    the sidebar forward was 45 bp a year off (the box rate) and the dividends were missing."""
+    within 0.24 bp and ATM vols within 0.011 vol point (0.21 bp and 0.0067 vol point with the rate curve and cash
+    dividends). Before SF-3 the sidebar forward was 45 bp a year off (the box rate) and the dividends were missing."""
     chain = sample_chain(SPOT, rate_curve, dividends, as_of=AS_OF)
     parsed, _ = vs.parse_quotes(to_quotes(chain.quotes, as_of=AS_OF), SPOT, UST, 0.0)
     surface = vs.fit_market_surface(_liquid_core(parsed, SPOT, UST, 0.0), SPOT, UST, 0.0)

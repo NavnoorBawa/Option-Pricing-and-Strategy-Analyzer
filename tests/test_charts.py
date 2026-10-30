@@ -27,6 +27,9 @@ def _builders(palette):
     m = np.linspace(0.8, 1.2, 9)
     return {
         "sensitivity": charts.sensitivity_chart(X, X, X[::-1], "Spot", "Value", 100.0, 105.0, palette=palette),
+        "sensitivity_dashed": charts.sensitivity_chart(
+            X, X, X[::-1], "Spot", "Theta", 100.0, palette=palette, dashed=("Theta / 365", "1-day decay", X, X)
+        ),
         "price_heatmap": charts.price_heatmap(X[:5], [0.1, 0.2, 0.3], np.ones((3, 5)), "Call", palette=palette),
         "convergence": charts.convergence_chart({"CRR": (steps, steps * 0.0 + 10)}, 10.0, "BSM", "Call", palette),
         "boundary": charts.exercise_boundary_chart({"Put boundary": (X, X)}, 100.0, palette=palette),
@@ -214,6 +217,17 @@ def test_identity_colours():
     sensitivity = charts.sensitivity_chart(X, X, X, "Spot", "Value", 100.0)
     assert [t.name for t in sensitivity.data] == ["Call", "Put"]
     assert all(t.line.color is None for t in sensitivity.data)
+    # With a second quantity dashed beside the first (theta / 365 and the 1-day decay), each option keeps one
+    # colour across both: the palette's mode's first two categorical colours, as the smile chart pairs its lines.
+    both = charts.sensitivity_chart(X, X, X, "Spot", "Theta", 100.0, palette=LIGHT, dashed=("Rate", "Decay", X, X))
+    assert [t.name for t in both.data] == ["Rate · Call", "Rate · Put", "Decay · Call", "Decay · Put"]
+    call, put = theme.CATEGORICAL["light"][:2]
+    assert [(t.line.color, t.line.dash) for t in both.data] == [
+        (call, "solid"),
+        (put, "solid"),
+        (call, "dash"),
+        (put, "dash"),
+    ]
     # A put boundary drawn alone keeps the put colour, so these are explicit.
     put = charts.exercise_boundary_chart({"Put boundary": (X, X)}, 100.0, palette=LIGHT)
     assert put.data[0].line.color == LIGHT["put"]
@@ -222,6 +236,16 @@ def test_identity_colours():
     # Implied and local vol of one maturity share a colour, the categorical colour of the palette's mode.
     smile = charts.smile_chart(X, [("30d", X, X), ("60d", X, X)], "K/S", palette=LIGHT)
     assert [t.line.color for t in smile.data] == [theme.CATEGORICAL["light"][i] for i in (0, 0, 1, 1)]
+
+
+def test_pair_styles():
+    # Theta / 365 and the 1-day decay at three dates: one colour per date, solid then dashed.
+    styles = charts.pair_styles(3, DARK)
+    series = theme.CATEGORICAL["dark"]
+    assert styles == [(series[i], dash) for i in range(3) for dash in ("solid", "dash")]
+    assert charts.pair_styles(len(series) + 1, LIGHT)[-2:] == [
+        (theme.CATEGORICAL["light"][0], d) for d in ("solid", "dash")
+    ]
 
 
 def test_reference_lines_are_thin_and_muted():

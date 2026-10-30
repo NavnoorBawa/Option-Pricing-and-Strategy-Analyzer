@@ -1,11 +1,14 @@
 """Strategy and Risk tabs: app behaviour (streamlit.testing) and their display helpers."""
 
 import base64
+import dataclasses
 import json
 import re
 import urllib.parse
+from decimal import Decimal
 
 import numpy as np
+import pyarrow as pa
 import pytest
 from _apptest import TEXTBOOK, make_app
 from scipy.stats import lognorm, norm
@@ -13,12 +16,15 @@ from streamlit.proto.WidgetStates_pb2 import WidgetState
 from streamlit.testing.v1 import AppTest
 
 from options_analyzer import black_scholes as bs
-from options_analyzer import risk
+from options_analyzer import risk, scenarios
 from options_analyzer import strategies as strat
-from options_analyzer.ui import charts, tab_risk, tab_strategy
+from options_analyzer.ui import cache, charts, tab_risk, tab_strategy
 from options_analyzer.ui.app import TABS
+from options_analyzer.ui.format import MINUS, md, money
 
 NO_EDITS = {"edited_rows": {}, "added_rows": [], "deleted_rows": []}
+#: The Risk tab's default implied-vol dynamics in the VaR simulation, an index's (VIX-like).
+INDEX_VOL = {"vol_of_vol": 1.0, "spot_vol_correlation": -0.7}
 
 
 def _ok(at: AppTest) -> None:
@@ -281,10 +287,15 @@ def test_a_link_to_the_risk_tab_analyses_the_linked_template():
     condor = [("put", 1, 80), ("put", -1, 90), ("call", -1, 110), ("call", 1, 120)]
     _assert_heatmap_of(at, 200, condor)
     strategy = strat.Strategy("Iron Condor", strat.build_template("Iron Condor", 100, 10, 1.0).legs, fees=4 * 0.0065)
-    config = risk.VaRConfig(confidence=0.99, horizon_days=1, n_paths=100_000, seed=7)
-    var = risk.value_at_risk(strategy, strat.Market(100, 0.05, 0.2, 1.0), config, 200)
-    assert _metric(at, "VaR 99.0%").value == tab_strategy.money_short(var.var)
-    assert _metric(at, "Expected Shortfall 99.0%").value == tab_strategy.money_short(var.expected_shortfall)
+    # The VaR with the default index implied-vol dynamics, and beside it the spot-only VaR (implied vol frozen).
+    frozen = risk.VaRConfig(confidence=0.99, horizon_days=1, n_paths=100_000, seed=7)
+    for config, var_label, es_label in (
+        (dataclasses.replace(frozen, **INDEX_VOL), "VaR 99.0%", "Expected Shortfall 99.0%"),
+        (frozen, "Spot-only VaR 99.0%", "Spot-only ES 99.0%"),
+    ):
+        var = risk.value_at_risk(strategy, strat.Market(100, 0.05, 0.2, 1.0), config, 200)
+        assert _metric(at, var_label).value == tab_strategy.money_short(var.var)
+        assert _metric(at, es_label).value == tab_strategy.money_short(var.expected_shortfall)
 
 
 CONDOR = "**Iron Condor** — Long 1 × 80 Put, Short 1 × 90 Put, Short 1 × 110 Call, Long 1 × 120 Call"
@@ -850,6 +861,29 @@ def test_every_card_amount_fits_at_laptop_width(sign, signed):
                 assert _card_width(text) <= CARD_WIDTH, (value, decimals, text)
 
 
+@pytest.mark.parametrize(
+    ("value", "shown"),
+    [
+        (54.29505, 54.30),
+        (-54.87316, -54.87),
+        (0.004, 0.0),
+        (999.996, 1000.0),
+        (3861.945, 3862.0),
+        (-2_345_678.9, -2_350_000.0),
+        (337_720_000.0, 337_700_000.0),
+        (2_157_150_000.0, 2_160_000_000.0),
+        (1.03e15, 1.0e15),
+        (float("inf"), float("inf")),
+    ],
+)
+def test_var_delta_amounts_are_read_back_from_the_cards(value, shown):
+    # The VaR delta line subtracts the amounts as the cards show them, read back from money_short's text in every
+    # tier (cents, whole dollars, M, B, T, scientific). Equal to a few ulps (rel 1e-15: "2.16" x 1e9 is not exact in
+    # binary), and the amount read back shows as the same text.
+    assert tab_risk._as_shown(value) == pytest.approx(shown, rel=1e-15)
+    assert tab_strategy.money_short(tab_risk._as_shown(value)) == tab_strategy.money_short(value)
+
+
 def test_worded_card_values_fit_at_laptop_width():
     for text in ("No loss", "No profit", "Unlimited", "Too large", "–", ">99.9%", "<0.1%", "100.0%"):
         assert _card_width(text) <= CARD_WIDTH, text
@@ -882,7 +916,7 @@ def test_index_sized_short_premium_cards_fit_at_laptop_width():
     _ok(at)
     theta = _metric(at, "Theta / day")
     assert theta.value == "+$2,737"
-    assert "Exact: +\\$2,737.18" in theta.proto.help
+    assert "Theta / day: +\\$2,737.18" in theta.proto.help
     for label in ("Net premium", "Max profit", "Max loss", "Delta (shares)", "Gamma", "Theta / day", "Vega / vol pt"):
         assert _card_width(_metric(at, label).value) <= CARD_WIDTH, (label, _metric(at, label).value)
 
@@ -905,16 +939,19 @@ def test_cards_stay_readable_at_the_input_limits(category, name):
         strategy_category=category,
         **{f"strategy_{category}": name},
     )
-    shortened = ["Net premium", "Max profit", "Max loss", "Delta (shares)", "Theta / day", "Vega / vol pt"]
-    for label in [*shortened, "Gamma", "Probability of profit"]:
+    shortened = ["Net premium", "Max profit", "Max loss", "Delta (shares)", "Vega / vol pt"]
+    for label in [*shortened, "Decay to expiry", "Gamma", "Probability of profit"]:
         value = _metric(at, label).value
         assert len(value) <= 9 and _card_width(value) <= CARD_WIDTH, (label, value)
     for label in shortened:
         value = _metric(at, label).value
         assert value in ("Unlimited", "No loss", "No profit") or "Exact:" in _metric(at, label).proto.help, label
     if name == "Short Straddle":
-        assert _metric(at, "Theta / day").value == "+$1.0e+15"
-        assert "Exact: +\\$1,03" in _metric(at, "Theta / day").proto.help
+        # The decay to expiry is the whole value of the straddle, about twice theta / 365.
+        decay = _metric(at, "Decay to expiry")
+        assert decay.value == "+$2.1e+15"
+        assert "Decay to expiry: +\\$2,082,072,717,212,0" in decay.proto.help
+        assert "Theta / day: +\\$1,034,965,609,384,7" in decay.proto.help
 
 
 def test_shortened_amounts_at_the_input_limits_keep_the_exact_value_in_the_help():
@@ -961,6 +998,7 @@ def test_legs_table_has_no_negative_zeros():
         "Delta": 2,
         "Gamma": 4,
         "Theta/day": 2,
+        "1-day decay": 2,
         "Vega/pt": 2,
     }
     for col, decimals in shown_decimals.items():
@@ -992,6 +1030,155 @@ def test_number_has_no_negative_zero():
     assert tab_strategy.number(-1e-12, 2) == "0.00"
     assert tab_strategy.number(-0.004, 2) == "0.00"
     assert tab_strategy.number(-0.006, 2) == "-0.01"
+
+
+# --- One-day decay beside theta / 365 (docs/reviews/panel-v3.0.md, market maker, finding 3) --------------------
+
+#: The panel's SPX-like market (rates and volatility in percent, as the sidebar takes them).
+SPX = {"spot": 5800, "strike": 5800, "rate": 4.3, "div": 1.3}
+DECAY_LABELS = ("Theta / day", "1-day decay", "Decay to expiry")
+
+
+def _decay_card(at: AppTest):
+    """The time-decay card, whichever of its labels it has."""
+    (card,) = [m for m in at.metric if m.label in DECAY_LABELS]
+    return card
+
+
+def _single(name: str, **query) -> AppTest:
+    return _app(strategy_category="Single option", **{"strategy_Single option": name}, **query)
+
+
+def test_a_one_day_put_shows_its_decay_to_expiry():
+    # The panel: a 1-day at-the-money put worth $21.56 a share shows theta -$10.66 a day and loses all of it.
+    at = _single("Long Put", vol=18, days=1, **SPX)
+    card = _decay_card(at)
+    market = strat.Market(5800, 0.043, 0.18, 1 / 365, 0.013)
+    premium = 100 * bs.price(5800, 5800, 1 / 365, 0.043, 0.18, 0.013, "put")
+    assert (card.label, card.value) == ("Decay to expiry", "-$2,156")
+    assert premium == pytest.approx(2156.11, abs=0.005)
+    assert f"Decay to expiry: −\\${premium:,.2f}" in card.proto.help  # minus the whole premium
+    theta = strat.position_risk(strat.Strategy("p", (strat.Leg("put", 1, 5800),)), market, multiplier=100).theta
+    assert theta == pytest.approx(-1066.05, abs=0.005)
+    assert "Theta / day: −\\$1,066.05" in card.proto.help
+    assert "An option expires within the day" in card.proto.help
+    # The legs table names its column as the card is named.
+    table = _legs_table(at)
+    assert "1-day decay" not in table.value.columns
+    assert table.value["Decay to expiry"].tolist() == [pytest.approx(-premium, rel=1e-12)]
+    assert (
+        "A leg that expires within the day is worth its intrinsic value"
+        in (json.loads(table.proto.columns)["Decay to expiry"]["help"])
+    )
+
+
+def test_the_legs_table_keys_its_decimals_by_the_decay_column():
+    market = strat.Market(100, 0.05, 0.2, 1 / 365)
+    strategy = strat.Strategy("x", (strat.Leg("call", 1, 100), strat.Leg("put", -1, 95, expiry=30 / 365)))
+    table, decimals = tab_strategy.legs_table(strategy, market, 100)
+    # The front leg expires within the day, so the column is the decay to expiry, though the back leg's figure is
+    # its decay over one day: the card says the same (tab_strategy.decay_card).
+    assert "Decay to expiry" in table.columns and "1-day decay" not in table.columns
+    assert decimals["Decay to expiry"] == 2 and "1-day decay" not in decimals
+    expected = [100 * strat.time_decay(strat.Strategy("leg", (leg,)), market) for leg in strategy.legs]
+    assert table["Decay to expiry"].tolist() == pytest.approx(expected, abs=0.005)
+    table, decimals = tab_strategy.legs_table(strategy, strat.Market(100, 0.05, 0.2, 2 / 365), 100)
+    assert "1-day decay" in table.columns and decimals["1-day decay"] == 2
+
+
+@pytest.mark.parametrize(("days", "label"), [(45, "Theta / day"), (3, "Theta / day"), (2, "1-day decay")])
+def test_the_card_shows_the_decay_beyond_ten_percent(days, label):
+    # Spot = strike = 100, 20 % volatility, 5 % rate: the put's theta / 365 and 1-day decay differ by 0.7 % at
+    # 45 days, 9.7 % at 3 days and 15.2 % at 2 days. The card's help gives both figures either way.
+    at = _single("Long Put", days=days)
+    card = _decay_card(at)
+    T = days / 365
+    decay = 100 * (bs.price(100, 100, T - 1 / 365, 0.05, 0.2, 0, "put") - bs.price(100, 100, T, 0.05, 0.2, 0, "put"))
+    theta = 100 * bs.greeks(100, 100, T, 0.05, 0.2, 0, "put")["theta"] / 365
+    assert card.label == label
+    assert card.value == tab_strategy.money_short(theta if label == "Theta / day" else decay, signed=True)
+    assert f"1-day decay: −\\${-decay:,.2f}" in card.proto.help
+    assert f"Theta / day: −\\${-theta:,.2f}" in card.proto.help
+
+
+def test_the_panels_seven_day_condor_keeps_theta_with_the_decay_in_its_help():
+    # The panel's 7-day condor: theta / 365 +$137.50 against +$151.97 by repricing, 9.5 % of the larger apart, so
+    # theta stays the headline under the 10 % rule; the legs table's decays add up to the card's.
+    at = _app(strategy_category="Range-bound", **{"strategy_Range-bound": "Iron Condor"}, vol=16, days=7, **SPX)
+    card = _decay_card(at)
+    assert (card.label, card.value) == ("Theta / day", "+$137.50")
+    assert "1-day decay: +\\$151.97" in card.proto.help
+    assert "They differ by 10% of the larger or less" in card.proto.help
+    table = _legs_table(at).value
+    assert table["1-day decay"].sum() == pytest.approx(151.97, abs=0.005)
+    names = list(table.columns)
+    assert names.index("1-day decay") == names.index("Theta/day") + 1
+
+
+def test_the_risk_tab_gives_the_decay_beside_theta():
+    # A 1-day short straddle: repricing gains its whole value, $4,359.89, where theta / 365 says $2,179.76 a day.
+    at = _app("Risk", strategy_category="Volatility", strategy_Volatility="Short Straddle", vol=18, days=1, **SPX)
+    caption = next(c.value for c in at.caption if c.value.startswith("Mark-to-market P&L as time passes"))
+    value = 100 * sum(bs.price(5800, 5800, 1 / 365, 0.043, 0.18, 0.013, kind) for kind in ("call", "put"))
+    assert value == pytest.approx(4359.89, abs=0.005)
+    assert "Decay to expiry by repricing at today's spot: +\\$4,359.89" in caption
+    assert "theta / 365, the instantaneous rate: +\\$2,179.76 per day" in caption
+    at.segmented_control(key="risk_greek").set_value("Theta").run()
+    _ok(at)
+    note = "the dashed lines reprice the position one calendar day later"
+    assert any("Theta is theta / 365, the instantaneous rate" in c.value and note in c.value for c in at.caption)
+    assert any("in either direction" in c.value for c in at.caption)
+    # One day to expiry: one date, today, with its decay to expiry beside theta; at today's spot the decay is the
+    # whole value of the straddle again.
+    data = _chart(at, "greek_profiles")["data"]
+    assert [trace["name"] for trace in data] == ["Today: theta / 365", "Today: decay to expiry"]
+    assert [trace["line"]["dash"] for trace in data] == ["solid", "dash"]
+    assert data[0]["line"]["color"] == data[1]["line"]["color"]
+    spots, decay = _array(data[1]["x"]), _array(data[1]["y"])
+    middle = len(spots) // 2  # the axis is symmetric in the log price about the spot
+    assert spots[middle] == pytest.approx(5800, rel=1e-12)
+    assert decay[middle] == pytest.approx(value, rel=1e-9)
+
+
+def test_the_theta_profile_reprices_each_date_one_day_later():
+    # The default bull call spread (long the 100 call, short the 110, a year to expiry, 100 shares): beside theta /
+    # 365 at each date, the change in value over the next day, to expiry from the day before it.
+    at = _app("Risk")
+    at.segmented_control(key="risk_greek").set_value("Theta").run()
+    _ok(at)
+    data = _chart(at, "greek_profiles")["data"]
+    names = [trace["name"] for trace in data]
+    assert names == [
+        "Today: theta / 365",
+        "Today: 1-day decay",
+        "In 182 days: theta / 365",
+        "In 182 days: 1-day decay",
+        "In 364 days: theta / 365",
+        "In 364 days: decay to expiry",
+    ]
+    assert _chart(at, "greek_profiles")["layout"]["yaxis"]["title"]["text"] == "Theta / 365 and 1-day decay ($)"
+    spots = _array(data[0]["x"])
+
+    def spread(spot, days_left):
+        return sum(
+            sign * (max(spot - k, 0.0) if days_left == 0 else bs.price(spot, k, days_left / 365, 0.05, 0.2, 0, "call"))
+            for sign, k in ((1, 100), (-1, 110))
+        )
+
+    for trace, day in ((data[1], 0), (data[3], 182), (data[5], 364)):
+        for i in (40, 120, 200):
+            expected = 100 * (spread(spots[i], 365 - day - 1) - spread(spots[i], 365 - day))
+            assert _array(trace["y"])[i] == pytest.approx(expected, rel=1e-9, abs=1e-9), (trace["name"], i)
+
+
+def test_a_position_of_shares_alone_has_no_decay_to_expiry():
+    # No option expires, whatever the sidebar's days: the card keeps its usual names.
+    market = strat.Market(100, 0.05, 0.2, 1 / 365, 0.02)
+    shares = strat.Strategy("s", (strat.Leg("stock", 100),))
+    assert not tab_strategy.expires_within_a_day(shares, market)
+    assert tab_strategy.expires_within_a_day(strat.Strategy("c", (strat.Leg("call", 1, 100),)), market)
+    label, value, _ = tab_strategy.decay_card(0.5, 0.5, tab_strategy.expires_within_a_day(shares, market))
+    assert (label, value) == ("Theta / day", "+$0.50")
 
 
 # --- Descriptions and valuation notes --------------------------------------------------------------------------
@@ -1061,7 +1248,7 @@ def test_risk_heatmap_labels_show_the_exact_spot_shocks():
     at = _app("Risk")
     at.slider(key="grid_span").set_value(25).run()
     spec = _chart(at, "risk_heatmap")["data"][0]
-    assert spec["y"][:4] == ["-25%", "-20.8%", "-16.7%", "-12.5%"]
+    assert spec["y"][:4] == ["−25%", "−20.8%", "−16.7%", "−12.5%"]
     assert spec["y"][6] == "0%"
     assert spec["x"][2] == "IV 0%"
 
@@ -1072,8 +1259,8 @@ def test_spot_iv_heatmap_cells_stay_wide_enough_for_a_phone():
     # rows (highest at the top), and the colour bar is left out: the cell values already say it.
     heat = _chart(_app("Risk"), "risk_heatmap")["data"][0]
     assert heat["showscale"] is False
-    assert heat["x"] == ["IV -50%", "IV -25%", "IV 0%", "IV +25%", "IV +50%", "IV +100%"]
-    assert heat["y"][0] == "-30%" and heat["y"][6] == "0%" and heat["y"][-1] == "+30%"
+    assert heat["x"] == ["IV −50%", "IV −25%", "IV 0%", "IV +25%", "IV +50%", "IV +100%"]
+    assert heat["y"][0] == "−30%" and heat["y"][6] == "0%" and heat["y"][-1] == "+30%"
     z = _array(heat["z"])
     assert z.shape == (13, 6)
 
@@ -1114,8 +1301,8 @@ def test_spot_date_grid_labels_stay_distinct_at_the_sidebar_limits(query):
 def test_time_decay_moves_scale_with_volatility():
     names = [trace["name"] for trace in _chart(_app("Risk", vol=40), "time_decay")["data"]]
     assert names == [
-        "Spot -1σ (-33.0%)",
-        "Spot -0.5σ (-18.1%)",
+        "Spot −1σ (−33.0%)",
+        "Spot −0.5σ (−18.1%)",
         "Spot unchanged",
         "Spot +0.5σ (+22.1%)",
         "Spot +1σ (+49.2%)",
@@ -1156,18 +1343,266 @@ def test_stress_table_headers_are_short_with_the_full_name_in_the_help():
     config = json.loads(frame.proto.columns)
     assert "IV shock damped" in config["IV damped"]["help"]
     assert "basis points" in config["Rate Δ (bp)"]["help"]
+    # The rate change is signed with the minus sign U+2212 and has no sign at zero (a format string gave "+0").
+    shown = pa.ipc.open_stream(frame.proto.arrow_data.styler.display_values).read_all().to_pandas()["Rate Δ (bp)"]
+    rates = frame.value["Rate Δ (bp)"]
+    assert shown.tolist() == [("" if r == 0 else "+" if r > 0 else "\u2212") + f"{abs(r):,.0f}" for r in rates]
+    assert (rates < 0).any() and (rates == 0).any()
 
 
 def test_stress_table_and_var_cards():
     at = _app("Risk")
+    # The Fed scenario's vol shock is the Fed's own jump-off-to-peak VIX ratio, and its source line says so
+    # (validator finding 3: the table showed 4.00x).
+    table = next(df for df in at.dataframe if "Scenario" in df.value.columns).value.set_index("Scenario")
+    assert table.loc["Fed severely adverse (2026)", "IV multiplier"] == pytest.approx(72.0 / 26.4, rel=1e-15)
+    assert any("rises 26.4 → 72.0 to its Q2 2026 peak" in m.value for m in at.markdown)
+    # The caption names the 1987 index and the rate the analogues shift, and says the ratio is not a level.
+    sources = next(c.value for c in at.caption if c.value.startswith("Historical analogues"))
+    for text in ("(the VXO for 1987)", "change in the Fed funds target", "does not set it to the index's level"):
+        assert text in sources
     labels = [m.label for m in at.metric]
     assert "VaR 95% CI (simulation)" not in labels
-    assert any("95% confidence interval of the VaR estimate" in c.value for c in at.caption)
+    assert any("95% confidence intervals of the VaR estimates" in c.value for c in at.caption)
     full = next(c.value for c in at.caption if c.value.startswith("Full revaluation"))
     assert "ν ≤ 4" not in full  # Normal returns have no degrees of freedom
+    assert "fatter tails" not in full
     at.selectbox(key="var_dist").set_value("student_t").run()
     full = next(c.value for c in at.caption if c.value.startswith("Full revaluation"))
     assert "ν ≤ 4" in full
+    # Delta-normal VaR assumes Normal returns, so its gap to the VaR also shows the fat tails of Student-t returns,
+    # and of GARCH ones beyond a day (one-day GARCH returns with Normal shocks are Normal).
+    assert "vega, and the fatter tails of the return model." in full
+    at.selectbox(key="var_dist").set_value("garch").run()
+    full = next(c.value for c in at.caption if c.value.startswith("Full revaluation"))
+    assert "fatter tails" not in full
+    at.number_input(key="var_horizon").set_value(2).run()
+    full = next(c.value for c in at.caption if c.value.startswith("Full revaluation"))
+    assert "fatter tails of the return model" in full
+
+
+def _stress_frame(at: AppTest):
+    return next(df for df in at.dataframe if "Scenario" in df.value.columns)
+
+
+def test_the_stress_table_marks_damped_iv_shocks_in_text():
+    # Review panel (designer, finding 8): "IV damped" was a CheckboxColumn, which drew live-looking toggles in a
+    # read-only table. It is text now: "yes" where a one-month (historical or Fed) shock is damped for longer-dated
+    # legs, "—" where a hypothetical shock applies as it is.
+    at = _app("Risk")
+    frame = _stress_frame(at)
+    assert json.loads(frame.proto.columns)["IV damped"]["type_config"] == {"type": "text"}
+    every = (*scenarios.HISTORICAL_SCENARIOS, *scenarios.HYPOTHETICAL_SCENARIOS)
+    marks = dict(zip(frame.value["Scenario"], frame.value["IV damped"], strict=True))
+    assert marks == {sc.name: "yes" if sc.one_month_vol_shock else "—" for sc in every}
+    assert set(marks.values()) == {"yes", "—"}
+    at.toggle(key="stress_damp").set_value(False).run()
+    _ok(at)
+    assert set(_stress_frame(at).value["IV damped"]) == {"—"}
+
+
+#: The review panel's VaR case (market maker, finding 2): a 45-day at-the-money short straddle on an index, one
+#: contract of 100 shares.
+SPX_STRADDLE = {
+    "spot": 5800,
+    "strike": 5800,
+    "days": 45,
+    "vol": 16,
+    "rate": 4.3,
+    "div": 1.3,
+    "strategy": "Short Straddle",
+}
+
+
+def _var_configs(monkeypatch) -> list[risk.VaRConfig]:
+    """The configuration of every VaR simulation from now on, in order (the cache is cleared, so none hides there)."""
+    configs = []
+    real = risk.value_at_risk
+    monkeypatch.setattr(
+        risk, "value_at_risk", lambda s, m, config, n=1.0: configs.append(config) or real(s, m, config, n)
+    )
+    cache.value_at_risk.clear()
+    return configs
+
+
+def _var_runs(monkeypatch) -> list[tuple[risk.VaRConfig, risk.VaRResult]]:
+    """Like :func:`_var_configs`, with the result of each simulation."""
+    runs = []
+    real = risk.value_at_risk
+
+    def spy(strategy, market, config, multiplier=1.0):
+        runs.append((config, real(strategy, market, config, multiplier)))
+        return runs[-1][1]
+
+    monkeypatch.setattr(risk, "value_at_risk", spy)
+    cache.value_at_risk.clear()
+    return runs
+
+
+def _var_cards(at: AppTest) -> list[tuple[str, str, str]]:
+    """Label, value and delta line of every VaR and ES card."""
+    return [(m.label, m.value, m.delta) for m in at.metric if re.search(r"VaR|ES |Shortfall", m.label)]
+
+
+def test_var_simulates_index_implied_vol_dynamics_by_default(monkeypatch):
+    # Review panel (market maker, finding 2): implied vol was frozen unless a toggle was switched on, so the VaR of a
+    # short straddle left out its vega risk. Implied-vol moves are on by default now, with index (VIX-like)
+    # dynamics, and the spot-only run beside them is the same simulation with implied vol frozen: same seed, paths,
+    # confidence, horizon and return model.
+    configs = _var_configs(monkeypatch)
+    at = _app("Risk")
+    toggle = at.toggle(key="var_volmoves")
+    assert toggle.value is True and "index (VIX-like) dynamics" in toggle.help
+    assert at.number_input(key="var_vov").value == 100.0 and at.slider(key="var_corr").value == -0.7
+    moving = risk.VaRConfig(confidence=0.99, horizon_days=1, n_paths=100_000, seed=7, **INDEX_VOL)
+    assert configs == [dataclasses.replace(moving, vol_of_vol=0.0), moving]
+    full = next(c.value for c in at.caption if c.value.startswith("Full revaluation"))
+    assert "implied vol moving (vol of vol 100% a year, correlation −0.70 with spot)" in full
+
+
+@pytest.mark.parametrize(
+    ("model", "steps"),
+    [
+        pytest.param(
+            {"distribution": "student_t", "dof": 4.0},
+            [[("selectbox", "var_dist", "student_t")], [("slider", "var_dof", 4)]],
+            id="student_t",
+        ),
+        pytest.param(
+            {"distribution": "garch", "garch_alpha": 0.05, "garch_beta": 0.93, "garch_t": True, "dof": 8.0},
+            [
+                [("selectbox", "var_dist", "garch")],
+                [
+                    ("number_input", "garch_alpha", 0.05),
+                    ("number_input", "garch_beta", 0.93),
+                    ("toggle", "garch_t", True),
+                ],
+                [("slider", "var_dof_garch", 8)],
+            ],
+            id="garch_t",
+        ),
+    ],
+)
+def test_the_spot_only_run_keeps_every_setting_but_the_implied_vol_moves(monkeypatch, model, steps):
+    # The gap between the two VaRs is the vega risk only if the spot-only run differs from the other in the implied-vol
+    # moves alone. A spot-only run at the default seed or return model would mix a seed or model difference into
+    # it, which the tests at the defaults cannot see; here every setting is off its default. Each step's widgets
+    # appear once the step before has run (the GARCH inputs once GARCH is chosen); the last step changes the return
+    # model, so both runs are simulated again and are the last two.
+    configs = _var_configs(monkeypatch)
+    at = _app("Risk")
+    at.selectbox(key="var_conf").set_value(0.975)
+    at.number_input(key="var_horizon").set_value(5)
+    at.select_slider(key="var_paths").set_value(10_000)
+    at.number_input(key="var_vov").set_value(150.0)
+    at.slider(key="var_corr").set_value(-0.5)
+    at.number_input(key="var_seed").set_value(11)
+    for step in steps:
+        for kind, key, value in step:
+            getattr(at, kind)(key=key).set_value(value)
+        at.run()
+        _ok(at)
+    config = risk.VaRConfig(0.975, 5, 10_000, seed=11, vol_of_vol=1.5, spot_vol_correlation=-0.5, **model)
+    assert configs[-2:] == [dataclasses.replace(config, vol_of_vol=0.0, spot_vol_correlation=-0.7), config]
+    assert [label for label, *_ in _var_cards(at)] == [
+        "VaR 97.5%",
+        "Expected Shortfall 97.5%",
+        "Spot-only VaR 97.5%",
+        "Spot-only ES 97.5%",
+    ]
+
+
+def _shown(text: str) -> Decimal:
+    """A card's amount as it reads, in exact decimal: ``$1,029`` is 1029 and ``$54.30`` is 54.30."""
+    return Decimal(text.removeprefix("$").replace(",", ""))
+
+
+def test_the_var_delta_line_adds_up_with_the_amounts_shown(monkeypatch):
+    # Review: the delta line was the difference of the exact amounts, so on the default page it read −$0.58 under
+    # cards of $54.30 and $54.87 (exact 54.295 and 54.873). It is the difference of the amounts as shown now,
+    # computed here in exact decimal from the cards' text.
+    runs = _var_runs(monkeypatch)
+    at = _app("Risk")
+    (_, spot_only), (_, moving) = runs
+    cards = _var_cards(at)
+    assert [value for _, value, _ in cards] == ["$54.30", "$61.77", "$54.87", "$62.91"]
+    assert money(moving.var - spot_only.var) == "-$0.58"  # the exact amounts would not add up on screen
+    for (_, value, delta), (_, frozen, _) in zip(cards[:2], cards[2:], strict=True):
+        gap = _shown(value) - _shown(frozen)
+        assert delta == md(f"{'+' if gap > 0 else MINUS}${abs(gap):,} vs spot only")
+    assert [delta for *_, delta in cards[:2]] == [md("−$0.57 vs spot only"), md("−$1.14 vs spot only")]
+
+
+def test_var_cards_show_the_spot_only_var_beside_the_var_with_implied_vol_moves():
+    # The panel's numbers: with implied vol frozen (the old default) VaR $2,833 and ES $3,683; with index dynamics
+    # $3,862 and $4,737, 27 % more. Both pairs are shown, and the headline cards say what the vol moves add.
+    at = _app("Risk", **SPX_STRADDLE)
+    assert _var_cards(at) == [
+        ("VaR 99.0%", "$3,862", md("+$1,029 vs spot only")),
+        ("Expected Shortfall 99.0%", "$4,737", md("+$1,054 vs spot only")),
+        ("Spot-only VaR 99.0%", "$2,833", "implied vol frozen"),
+        ("Spot-only ES 99.0%", "$3,683", "implied vol frozen"),
+    ]
+    # The library's numbers for the link's market, as the sidebar builds it, at the tab's defaults.
+    market = strat.Market(5800, 4.3 / 100, 16 / 100, 45 / 365, 1.3 / 100)
+    straddle = strat.build_template("Short Straddle", 5800, 10)
+    frozen = risk.VaRConfig(0.99, 1, 100_000, seed=7)
+    spot_only = risk.value_at_risk(straddle, market, frozen, 100)
+    moving = risk.value_at_risk(straddle, market, dataclasses.replace(frozen, **INDEX_VOL), 100)
+    shown = [moving.var, moving.expected_shortfall, spot_only.var, spot_only.expected_shortfall]
+    assert [card[1] for card in _var_cards(at)] == [tab_strategy.money_short(x) for x in shown]
+    # A short straddle is short vega: the vol moves add to both measures.
+    assert moving.var >= spot_only.var and moving.expected_shortfall >= spot_only.expected_shortfall
+    helps = {m.label: m.proto.help for m in at.metric}
+    assert md(f"Exact: {money(moving.var)}") in helps["VaR 99.0%"]
+    assert md(f"Exact: {money(spot_only.var)}") in helps["Spot-only VaR 99.0%"]
+    assert "implied vol frozen" in helps["Spot-only VaR 99.0%"]
+    # The delta-normal VaR, a card before, is in the table of statistics.
+    stats = next(df.value for df in at.dataframe if "Statistic" in df.value.columns).set_index("Statistic")
+    assert stats.loc["Delta-normal VaR 99.0%", "Value"] == money(moving.delta_normal_var)
+    # With two VaRs on the cards, the simulation interval says which is which; delta-normal VaR leaves out vega too.
+    (lo, hi), (lo_spot, hi_spot) = moving.var_ci95, spot_only.var_ci95
+    uncertainty = next(c.value for c in at.caption if c.value.startswith("Simulation uncertainty"))
+    assert uncertainty == md(
+        f"Simulation uncertainty: the 95% confidence intervals of the VaR estimates are {money(lo)} to {money(hi)} "
+        f"with implied-vol moves and {money(lo_spot)} to {money(hi_spot)} spot only (order statistics of the "
+        "100,000 simulated outcomes of each run)."
+    )
+    full = next(c.value for c in at.caption if c.value.startswith("Full revaluation"))
+    assert full.endswith(
+        "with Normal returns: its gap to the full-revaluation VaR shows the position's gamma, time decay and vega."
+    )
+
+
+def test_implied_vol_moves_switched_off_show_the_spot_only_run_from_the_cache(monkeypatch):
+    # Off, the tab shows one pair of cards, with implied vol frozen; that run is the spot-only one already simulated.
+    # The spot-only run does not depend on the vol dynamics, so changing them re-runs only the other one: one
+    # simulation per change, as before the spot-only run was added.
+    configs = _var_configs(monkeypatch)
+    at = _app("Risk", **SPX_STRADDLE)
+    assert [c.vol_of_vol for c in configs] == [0.0, 1.0]
+    at.toggle(key="var_volmoves").set_value(False).run()
+    _ok(at)
+    assert _var_cards(at) == [
+        ("VaR 99.0%", "$2,833", "implied vol frozen"),
+        ("Expected Shortfall 99.0%", "$3,683", "implied vol frozen"),
+    ]
+    assert "implied vol frozen (no vega risk)" in _metric(at, "VaR 99.0%").proto.help
+    full = next(c.value for c in at.caption if c.value.startswith("Full"))
+    assert "time decay and implied vol frozen" in full
+    assert full.endswith("shows the position's gamma and time decay.")  # no vega in the full revaluation
+    uncertainty = next(c.value for c in at.caption if c.value.startswith("Simulation uncertainty"))
+    assert uncertainty.startswith("Simulation uncertainty: the 95% confidence interval of the VaR estimate is ")
+    assert "spot only" not in uncertainty and uncertainty.endswith("of the 100,000 simulated outcomes).")
+    at.toggle(key="var_volmoves").set_value(True).run()
+    _ok(at)
+    assert len(configs) == 2  # both runs came from the cache
+    at.number_input(key="var_vov").set_value(150.0).run()
+    at.slider(key="var_corr").set_value(-0.5).run()
+    _ok(at)
+    assert [(c.vol_of_vol, c.spot_vol_correlation) for c in configs[2:]] == [(1.5, -0.7), (1.5, -0.5)]
+    assert [label for label, *_ in _var_cards(at)][2:] == ["Spot-only VaR 99.0%", "Spot-only ES 99.0%"]
+    assert _var_cards(at)[2][1] == "$2,833"  # the spot-only VaR does not depend on the vol dynamics
 
 
 # --- Chart and label helpers ---------------------------------------------------------------------------------
@@ -1255,7 +1690,9 @@ def test_risk_heatmaps_give_the_colour_scale_width_to_their_cells():
     assert _chart(at, "risk_heatmap")["data"][0]["showscale"] is False
 
 
-@pytest.mark.parametrize(("x", "label"), [(-0.125, "-12.5%"), (0.0, "0%"), (0.3, "+30%"), (-1 / 12, "-8.3%")])
+@pytest.mark.parametrize(
+    ("x", "label"), [(-0.125, "−12.5%"), (0.0, "0%"), (0.3, "+30%"), (-1 / 12, "−8.3%"), (12.5, "+1,250%")]
+)
 def test_shock_label(x, label):
     assert tab_risk.shock_label(x) == label
 

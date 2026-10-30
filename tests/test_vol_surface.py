@@ -1070,6 +1070,47 @@ def test_bid_ask_quotes_keep_the_out_of_the_money_side_and_drop_impossible_price
     assert len(by_rates) == 26
 
 
+def test_prices_without_time_value_or_an_implied_vol_are_counted_apart_from_those_outside_the_bounds():
+    # A 30-day chain at 25 % plus three prices without an implied vol, each for its own reason: a put below its
+    # intrinsic value (in the money with a negative time value at the expiry's forward, so dropped before inversion
+    # since SF-3; it used to be counted as outside the bounds), a call at its discounted intrinsic value (no time
+    # value; it used to be inverted to 0 and dropped as "zero implied vol") and a call so close to its upper bound
+    # that its vol exceeds 2,000 % (which used to be counted as outside the bounds). And a put struck one part in
+    # 10¹³ below the forward quoted at 1e-15: out of the money, so inverted, to a vol of 1.1e-13, below 1e-12 and so
+    # zero to machine precision. (At the forward
+    # itself the sign of ln(F/K), and so the side the put is on, would depend on the last bit of exp; here ln(F/K) is
+    # 1e-13 and its rounding about 1e-16.)
+    spot, rate, t = 100.0, 0.04, 30 / 365
+    rows = []
+    for strike in np.arange(80.0, 121.0, 5.0):
+        kind = "call" if strike >= spot * np.exp(rate * t) else "put"  # out of the money
+        price = round(bs.price(spot, strike, t, rate, 0.25, 0.0, kind), 4)
+        rows.append({"Strike": strike, "Days": 30, "Type": kind, "Price": price})
+    intrinsic = spot - 82.5 * np.exp(-rate * t)
+    rows += [
+        {"Strike": 117.5, "Days": 30, "Type": "put", "Price": 1.0},
+        {"Strike": 82.5, "Days": 30, "Type": "call", "Price": intrinsic},
+        {"Strike": 150.0, "Days": 30, "Type": "call", "Price": 99.9999},
+        {"Strike": spot * np.exp(rate * t) * (1 - 1e-13), "Days": 30, "Type": "put", "Price": 1e-15},
+    ]
+    clean, messages = vs.parse_quotes(pd.DataFrame(rows), spot, rate)
+    assert len(clean) == 9 and np.allclose(clean["iv"], 0.25, atol=0.002)
+    assert [str(m) for m in messages[1:]] == [
+        "Forwards and discount factors of the 1 expiry from the sidebar rate and dividend yield: put-call parity "
+        "needs a call and a put quoted at 6+ common strikes of an expiry.",
+        "Dropped 1 in-the-money quote(s) whose time value at the expiry's forward is within their bid/ask spread "
+        "(their out-of-the-money side has no usable quote): they carry no information about the vol.",
+        f"Dropped 1 price quote(s) with no time value (e.g. price {intrinsic:.6g} is within 1e-10 (1e-12·max(S, K)) "
+        "of the no-arbitrage lower bound "
+        f"{intrinsic:.6g} (discounted intrinsic value), so it has no time value to identify a volatility from: its "
+        "last digits would decide it).",
+        "Dropped 1 other price quote(s) without an implied vol (e.g. implied volatility exceeds 2000%; check the quote "
+        "and inputs).",
+        "Dropped 1 price quote(s) whose implied vol is zero to machine precision.",
+        "Inverted 9 option price(s) into implied vols with Black-Scholes-Merton (European exercise).",
+    ]
+
+
 def _stacked_calls_and_puts(itm_vol) -> pd.DataFrame:
     """Calls and puts at every strike with a Type column: exact SSVI vols out of the money, ``itm_vol(iv)`` in it."""
     params, r = vs.SSVIParams(), 0.05

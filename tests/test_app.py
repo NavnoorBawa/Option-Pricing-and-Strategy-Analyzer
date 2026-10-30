@@ -292,7 +292,7 @@ def _counted(calls: dict[str, int], name: str, function):
 def test_a_sidebar_change_recomputes_only_the_open_tab(new_app, monkeypatch):
     # Count the work of each tab in the run that follows a sidebar change: the charts it builds (every chart goes
     # through charts.show), the strategy analysis and the Monte Carlo VaR (its cache is cleared first, so that a
-    # call cannot hide in it).
+    # call cannot hide in it). The Risk tab simulates twice, with implied vol moving and with it frozen.
     from options_analyzer import risk
     from options_analyzer import strategies as strat
     from options_analyzer.ui import cache, charts
@@ -311,7 +311,7 @@ def test_a_sidebar_change_recomputes_only_the_open_tab(new_app, monkeypatch):
         at.sidebar.number_input(key="spot").set_value(105.0).run()
         _ok(at)
         assert set(shown) == TAB_CHARTS[tab], tab
-        assert calls == {"analyze": int(tab == "Strategy"), "value_at_risk": int(tab == "Risk")}, tab
+        assert calls == {"analyze": int(tab == "Strategy"), "value_at_risk": 2 * (tab == "Risk")}, tab
 
 
 def test_value_at_risk_is_not_simulated_while_the_pricing_tab_is_open(app, monkeypatch):
@@ -328,8 +328,8 @@ def test_value_at_risk_is_not_simulated_while_the_pricing_tab_is_open(app, monke
     app.selectbox(key="strategy_category").set_value("Range-bound").run()  # the Strategy controls are on every run
     _ok(app)
     assert calls == []
-    _open(app, "Risk")  # the counter does see the simulation once the Risk tab opens
-    assert len(calls) == 1
+    _open(app, "Risk")  # the counter does see the simulations once the Risk tab opens
+    assert len(calls) == 2  # with implied vol moving, and with it frozen (the spot-only VaR)
     assert any(chart.proto.id.endswith("-var_hist") for chart in app.get("plotly_chart"))
 
 

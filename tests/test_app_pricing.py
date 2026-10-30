@@ -2,6 +2,7 @@
 
 import base64
 import json
+import math
 import re
 
 import numpy as np
@@ -9,7 +10,7 @@ import pytest
 from scipy.special import ndtr
 from streamlit.testing.v1 import AppTest
 
-from options_analyzer import binomial, monte_carlo
+from options_analyzer import american, binomial, monte_carlo
 from options_analyzer import black_scholes as bs
 from options_analyzer.ui import charts, components, tab_pricing
 
@@ -228,12 +229,24 @@ def test_card_width_estimate_covers_the_rendered_card(label, value, measured):
 
 
 @pytest.mark.parametrize(
-    ("delta", "measured"),
-    # max-content widths in Chromium of the implied-volatility card (value 20.000%) with its delta line, in px
-    [("+0.00 vol pts vs sidebar", 169.3), ("-12.34 vol pts vs sidebar", 174.2), ("+123.45 vol pts vs sidebar", 184.0)],
+    ("label", "value", "delta", "measured"),
+    # max-content widths in Chromium of cards with a delta line (in a pill), rounded up, in px: the implied-volatility
+    # card, and the Monte Carlo price cards with their interval (the model made that pill 13 px too narrow at first)
+    # or the reason it is not shown. (The long reason, "Interval unreliable: 85 of 100,000 paths finish out of the
+    # money", made its card 387.3 px wide, and at 1440 px the row of four, 249 px a card, went 2 + 2.)
+    [
+        ("Implied volatility", "20.000%", "+0.00 vol pts vs sidebar", 169.3),
+        ("Implied volatility", "20.000%", "-12.34 vol pts vs sidebar", 174.2),
+        ("Implied volatility", "20.000%", "+123.45 vol pts vs sidebar", 184.0),
+        ("Call value", "$10.4409", r"\$10.4237 – \$10.4582, 95%", 193.3),
+        ("Put value", "$5.5639", r"\$5.5466 – \$5.5811, 95%", 178.6),
+        ("Call value", "$0.0018", "Interval unreliable: 85 ITM paths", 219.5),
+        ("Put value", "$19.5097", "Interval unreliable: 85 OTM paths", 223.1),
+    ],
 )
-def test_card_width_estimate_covers_the_delta_line(delta, measured):
-    assert measured <= components._card_width("Implied volatility", "20.000%", delta=delta) <= measured + 20
+def test_card_width_estimate_covers_the_delta_line(label, value, delta, measured):
+    # Never narrower than the card (its delta would be cut with an ellipsis), and within 2 px of it.
+    assert measured <= components._card_width(label, value, delta=delta) <= measured + 2
 
 
 # --- Pricing tab -------------------------------------------------------------------------------------------------
@@ -403,6 +416,87 @@ def test_monte_carlo_diagnostics_leave_undefined_cells_blank(new_app):
     assert table.value["Std. error"].isna().all() and table.value["Error / SE"].isna().all()
     assert table.proto.HasField("placeholder") and table.proto.placeholder == ""
     assert any("The standard error is left blank" in c.value for c in at.caption)
+    # The interval column says why there is no interval: no path finished in the money.
+    assert list(table.value["95% interval"]) == [
+        "Interval unreliable: 0 of 10,000 paths finish in the money",
+        "Interval unreliable: 0 of 10,000 paths finish out of the money",
+    ]
+
+
+def _shown(text: str) -> str:
+    """A card's delta line as the browser shows it (Markdown escapes removed)."""
+    return text.replace("\\$", "$")
+
+
+def test_monte_carlo_price_cards_show_the_95_percent_interval(new_app):
+    # The cards showed the standard error only ("STD. ERROR $0.0088" and "95% CI = price ± 1.96 SE"), so the user had
+    # to work the interval out; the diagnostics table far below had it.
+    at = new_app(model="Monte Carlo").run()
+    _ok(at)
+    res = monte_carlo.price_european(100, 100, 1, 0.05, 0.2, 0, n_paths=100_000, seed=42)
+    cards = {m.label: m for m in at.metric}
+    table = next(d for d in at.dataframe if "Error / SE" in d.value.columns).value.set_index("Option")
+    for kind, r in res.items():
+        assert r.reliable
+        low, high = r.price - 1.959963984540054 * r.std_error, r.price + 1.959963984540054 * r.std_error
+        card = cards[f"{kind.capitalize()} value"]
+        assert _shown(card.delta) == f"${low:.4f} – ${high:.4f}, 95%"
+        # Grey and without an arrow: a caption, not a change.
+        assert card.proto.color == card.proto.MetricColor.GRAY
+        assert card.proto.direction == card.proto.MetricDirection.NONE
+        assert table.loc[kind.capitalize(), "95% interval"] == f"{low:.4f} – {high:.4f}"
+        assert f"Standard error ${r.std_error:.4f}" in _shown(card.proto.help)
+    assert _shown(cards["Call value"].delta) == "$10.4237 – $10.4582, 95%"  # the panel's example
+    assert not cards["Forward price"].delta and not cards["Std. error"].delta
+
+
+def test_monte_carlo_price_cards_flag_an_unreliable_interval(new_app):
+    # With about 100 of 100,000 paths in the money (a 30-day call struck at 120), price ± 1.96 SE covers the value in
+    # about 94% of runs, and in 88% with 10 such paths: the cards said "95% CI" whenever the standard error was finite.
+    # The put on the same draws, deep in the money, is just as uncertain: with the control variate the two estimates
+    # differ by a constant.
+    at = new_app(model="Monte Carlo", strike=120, days=30).run()
+    _ok(at)
+    res = monte_carlo.price_european(100, 120, 30 / 365, 0.05, 0.2, 0, n_paths=100_000, seed=42)
+    n_itm = res["call"].n_itm
+    assert 0 < n_itm < monte_carlo.RELIABLE_PATHS and not res["call"].reliable and not res["put"].reliable
+    cards = {m.label: m for m in at.metric}
+    table = next(d for d in at.dataframe if "Error / SE" in d.value.columns).value.set_index("Option")
+    # The card says it in short, so that the four cards stay on one line at 1440 px; its tooltip and the diagnostics
+    # table say it in full.
+    expected = {"Call": ("ITM", "in"), "Put": ("OTM", "out of")}
+    for option, (scarce, side) in expected.items():
+        card, sentence = cards[f"{option} value"], f"{n_itm} of 100,000 paths finish {side} the money"
+        assert _shown(card.delta) == f"Interval unreliable: {n_itm} {scarce} paths"
+        assert table.loc[option, "95% interval"] == f"Interval unreliable: {sentence}"
+        assert _shown(card.proto.help) == (
+            f"Interval unreliable: {sentence}. Standard error ${res['call'].std_error:.4f}. The 95% interval, price ± "
+            f"1.96 SE, is not shown: with fewer than 300 paths finishing {side} the money it covers the value in less "
+            "than 95% of runs (88% with 10 such paths, 92% with 30, 94% with 100)."
+        )
+    # The prices and the standard error are still shown, but not the interval's formula, which invited the user to
+    # work out by hand the interval the cards withhold.
+    assert _dollars(cards["Call value"].value) == pytest.approx(res["call"].price, abs=5e-5)
+    assert _dollars(cards["Std. error"].value) == pytest.approx(res["call"].std_error, abs=5e-5)
+    assert not any("1.96" in c.value for c in at.caption if c.value.startswith("Standard error"))
+    assert any(f"fewer than {monte_carlo.RELIABLE_PATHS} paths" in c.value for c in at.caption)
+
+
+def test_monte_carlo_interval_withheld_for_too_few_independent_samples():
+    # The sidebar draws 10,000 paths or more (5,000 antithetic pairs, the fewest for which an interval is shown), but
+    # the text says why for any result: here 500 pairs, with thousands of paths on each side of the strike.
+    res = monte_carlo.price_european(100, 100, 1, 0.05, 0.2, 0, n_paths=1_000, seed=1)["call"]
+    assert not res.reliable and min(res.n_itm, res.n_paths - res.n_itm) >= monte_carlo.RELIABLE_PATHS
+    assert tab_pricing.mc_interval(res, short=True) == "Interval unreliable: too few paths"
+    assert tab_pricing.mc_interval(res, dollars=False) == "Interval unreliable: 1,000 paths, fewer than 10,000"
+    assert tab_pricing._mc_note(res).endswith(
+        "is not shown: with fewer than 5,000 independent samples (10,000 paths in antithetic pairs) the standard error "
+        "is itself too uncertain, and the interval covers the value in less than 95% of runs (93 to 94% with 500 "
+        "antithetic pairs and the control variate)."
+    )
+    plain = monte_carlo.price_european(100, 100, 1, 0.05, 0.2, 0, n_paths=1_000, seed=1, antithetic=False)["call"]
+    assert tab_pricing.mc_interval(plain) == "Interval unreliable: 1,000 paths, fewer than 5,000"
+    assert "(5,000 paths) the standard error" in tab_pricing._mc_note(plain)
 
 
 def test_greek_names_get_a_column_wide_enough_for_the_longest(app):
@@ -410,6 +504,257 @@ def test_greek_names_get_a_column_wide_enough_for_the_longest(app):
     # so the name was cut at 1,280 px and on phones ("Epsilon (di", and "Vomma (vo" with the higher-order Greeks).
     table = next(d for d in app.dataframe if "Greek" in d.value.columns)
     assert json.loads(table.proto.columns)["Greek"]["width"] == "medium"
+
+
+# --- One-day decay beside theta / 365 -----------------------------------------------------------------------------
+
+#: The panel's 1-day SPX-like contract (docs/reviews/panel-v3.0.md, market maker, finding 3).
+SPX_1D = {"spot": 5800, "strike": 5800, "rate": 4.3, "div": 1.3, "vol": 18, "days": 1}
+DAY = 1 / 365
+
+
+def _greeks(at: AppTest):
+    """The Greeks table, indexed by the Greek's name."""
+    return next(d.value for d in at.dataframe if "Greek" in d.value.columns).set_index("Greek")
+
+
+def _first(names: list[str], a: str, b: str) -> str:
+    """Which of the adjacent rows ``a`` and ``b`` comes first."""
+    assert abs(names.index(a) - names.index(b)) == 1, names
+    return a if names.index(a) < names.index(b) else b
+
+
+def test_a_one_day_at_the_money_put_decays_by_its_whole_premium(new_app):
+    # The panel: worth 21.56, theta -10.66 a day, and the whole premium lost by expiry tomorrow.
+    at = new_app(**SPX_1D).run()
+    _ok(at)
+    table = _greeks(at)
+    assert _first(list(table.index), "Decay to expiry", "Theta Θ") == "Decay to expiry"  # the headline
+    put = bs.price(5800, 5800, DAY, 0.043, 0.18, 0.013, "put")
+    assert _dollars(_metrics(at)["Put value"]) == pytest.approx(21.56, abs=0.005)
+    assert table.loc["Decay to expiry", "Put"] == pytest.approx(-put, rel=1e-12)  # intrinsic value 0 at the money
+    assert table.loc["Theta Θ", "Put"] == pytest.approx(-10.66, abs=0.005)
+    assert table.loc["Decay to expiry", "Unit"] == "until expiry, by repricing"
+    # The chain says the same at its at-the-money row.
+    chain = next(d.value for d in at.dataframe if "Strike" in d.value.columns).set_index("Strike")
+    assert chain.loc[5800.0, "Put decay to expiry"] == pytest.approx(-put, rel=1e-12)
+    assert "Call 1-day decay" not in chain.columns
+
+
+def test_a_one_day_out_of_the_money_put_decays_by_less_than_theta_says(new_app):
+    # The panel: the 5,750 put shows theta -6.97 a day, against a true decay of -5.19 (its whole value).
+    at = new_app(**(SPX_1D | {"strike": 5750})).run()
+    table = _greeks(at)
+    assert table.loc["Decay to expiry", "Put"] == pytest.approx(-5.19, abs=0.005)
+    assert table.loc["Theta Θ", "Put"] == pytest.approx(-6.97, abs=0.005)
+    # The in-the-money call ends at its intrinsic value, 50.
+    call = bs.price(5800, 5750, DAY, 0.043, 0.18, 0.013, "call")
+    assert table.loc["Decay to expiry", "Call"] == pytest.approx(50 - call, rel=1e-12)
+
+
+@pytest.mark.parametrize(("days", "first"), [(45, "Theta Θ"), (3, "Theta Θ"), (2, "1-day decay")])
+def test_the_decay_leads_the_table_only_beyond_ten_percent(new_app, days, first):
+    # At the money (spot = strike = 100, 20 % volatility, 5 % rate) theta / 365 and the 1-day decay differ by about
+    # under 1 % at 45 days, 8.7 % (call) and 9.7 % (put) at 3 days, 14 % and 15 % at 2 days.
+    at = new_app(days=days).run()
+    _ok(at)
+    table = _greeks(at)
+    assert _first(list(table.index), "Theta Θ", "1-day decay") == first
+    T = days * DAY
+    for kind in ("call", "put"):
+        decay = bs.price(100, 100, T - DAY, 0.05, 0.2, 0, kind) - bs.price(100, 100, T, 0.05, 0.2, 0, kind)
+        assert table.loc["1-day decay", kind.capitalize()] == pytest.approx(decay, rel=1e-12)
+    assert any("it is listed first when it differs from the theta row" in c.value for c in at.caption)
+
+
+def test_the_decay_follows_the_american_engine(new_app):
+    at = new_app(days=7, model="American (ALO)", div=3).run()
+    _ok(at)
+    table = _greeks(at)
+    for kind in ("call", "put"):
+        later = american.price(100, 100, 6 * DAY, 0.05, 0.2, 0.03, option_type=kind)
+        now = american.price(100, 100, 7 * DAY, 0.05, 0.2, 0.03, option_type=kind)
+        assert table.loc["1-day decay", kind.capitalize()] == pytest.approx(later - now, rel=1e-12)
+        assert _dollars(_metrics(at)[f"{kind.capitalize()} value"]) == pytest.approx(now, abs=5e-5)
+    # Within a day of expiry: the intrinsic value (zero at the money) minus the engine's value.
+    at = new_app(days=1, model="American (ALO)").run()
+    put = american.price(100, 100, DAY, 0.05, 0.2, 0.0, option_type="put")
+    assert _greeks(at).loc["Decay to expiry", "Put"] == pytest.approx(-put, rel=1e-12)
+
+
+def _tree_table(at: AppTest):
+    """The tree's Greeks under Model diagnostics, indexed by option."""
+    return next(d.value for d in at.dataframe if "Div. rho / 1%" in d.value.columns).set_index("Option")
+
+
+#: The trees one day shorter than a 7-day 501-step tree: Leisen-Reimer keeps its steps; Cox-Ross-Rubinstein keeps
+#: the time step, 501 x 6/7 = 429 3/7 steps, interpolated between the odd counts 429 and 431 (3/14 of the way).
+LATER_TREES = {"Leisen-Reimer": ((501, 1.0),), "Cox-Ross-Rubinstein": ((429, 11 / 14), (431, 3 / 14))}
+
+
+@pytest.mark.parametrize("lattice", list(LATER_TREES))
+def test_the_tree_greeks_add_the_trees_own_decay(new_app, lattice):
+    at = new_app(days=7, model="Binomial tree", tree=lattice, style="American").run()
+    _ok(at)
+    method = "lr" if lattice == "Leisen-Reimer" else "crr"
+    tree = _tree_table(at)
+    for kind in ("call", "put"):
+        later = math.fsum(
+            weight * binomial.price(100, 100, 6 * DAY, 0.05, 0.2, 0, kind, steps, True, method)
+            for steps, weight in LATER_TREES[lattice]
+        )
+        now = binomial.price(100, 100, 7 * DAY, 0.05, 0.2, 0, kind, 501, True, method)
+        assert tree.loc[kind.capitalize(), "1-day decay"] == pytest.approx(later - now, rel=1e-12)
+        # The Greeks table stays Black-Scholes-Merton's for European exercise, its decay too.
+        closed = bs.price(100, 100, 6 * DAY, 0.05, 0.2, 0, kind) - bs.price(100, 100, 7 * DAY, 0.05, 0.2, 0, kind)
+        assert _greeks(at).loc["1-day decay", kind.capitalize()] == pytest.approx(closed, rel=1e-12)
+    # At the money with a week left the tree's decay and theta / 365 are within 10 %: theta stays first.
+    names = list(tree.columns)
+    assert names.index("1-day decay") == names.index("Theta / day") + 1
+    captions = [c.value for c in at.caption]
+    interpolated = "interpolated between trees with 429 and 431 steps to this tree's time step (429.43 steps)"
+    assert any(interpolated in c for c in captions) is (method == "crr")
+    assert any("one day shorter with the same steps" in c for c in captions) is (method == "lr")
+    assert not any("comes first" in c for c in captions)
+    note = "It is not the decay of the American value in the price cards, which the tree's Greeks give."
+    assert any(note in c for c in captions)
+
+
+def test_an_american_put_exercised_at_once_does_not_decay_on_the_tree(new_app):
+    # The review's case: a 7-day put struck at 110 on 100 is exercised at once on the American tree, worth exactly
+    # 10 today and tomorrow, while the European put of the Greeks table gains 1.5 cents a day. The caption says the
+    # table's decay is not the American value's.
+    at = new_app(days=7, strike=110, model="Binomial tree", style="American").run()
+    _ok(at)
+    assert _dollars(_metrics(at)["Put value"]) == 10.0
+    tree = _tree_table(at)
+    assert tree.loc["Put", "1-day decay"] == 0.0 and tree.loc["Put", "Theta / day"] == 0.0
+    european = bs.price(100, 110, 6 * DAY, 0.05, 0.2, 0, "put") - bs.price(100, 110, 7 * DAY, 0.05, 0.2, 0, "put")
+    assert european == pytest.approx(0.0149, abs=5e-5)
+    assert _greeks(at).loc["1-day decay", "Put"] == pytest.approx(european, rel=1e-12)
+    assert any("It is not the decay of the American value in the price cards" in c.value for c in at.caption)
+
+
+@pytest.mark.parametrize("lattice", list(LATER_TREES))
+@pytest.mark.parametrize(("days", "leads"), [(2, True), (3, False), (45, False)])
+def test_the_tree_table_puts_its_decay_first_beyond_ten_percent(new_app, lattice, days, leads):
+    # The Greeks table's rule on the tree's own figures: at the money (100, 20 %, 5 %) theta / 365 and the 1-day
+    # decay are 14 % and 15 % apart at 2 days (call, put), 8.7 % and 9.7 % at 3 days, under 1 % at 45 days; the
+    # 501-step trees' thetas are within 0.07 % and their decays within 0.1 % of the closed form here, well inside
+    # the 0.3 % left at 3 days.
+    at = new_app(days=days, model="Binomial tree", tree=lattice).run()
+    _ok(at)
+    tree = _tree_table(at)
+    for kind in ("Call", "Put"):
+        theta, decay = tree.loc[kind, "Theta / day"], tree.loc[kind, "1-day decay"]
+        assert bool(abs(decay - theta) > 0.1 * max(abs(decay), abs(theta))) is leads, kind
+    names = list(tree.columns)
+    assert names.index("1-day decay") - names.index("Theta / day") == (-1 if leads else 1)
+    first = "The 1-day decay comes first: it differs from theta / 365 by more than 10% of the larger"
+    assert any(first in c.value for c in at.caption) is leads
+
+
+def test_the_tree_keeps_its_time_step_with_a_whole_number_of_steps(new_app):
+    # 500 steps over 10 days: 450 steps over 9 days have the same time step exactly, so one tree is enough.
+    at = new_app(days=10, steps=500, model="Binomial tree", tree="Cox-Ross-Rubinstein").run()
+    _ok(at)
+    later = binomial.price(100, 100, 9 * DAY, 0.05, 0.2, 0, "put", 450, False, "crr")
+    now = binomial.price(100, 100, 10 * DAY, 0.05, 0.2, 0, "put", 500, False, "crr")
+    assert _tree_table(at).loc["Put", "1-day decay"] == pytest.approx(later - now, rel=1e-12)
+    assert any("one day shorter with 450 steps, this tree's time step," in c.value for c in at.caption)
+
+
+def test_the_crr_decay_uses_the_shorter_time_step_where_the_longer_has_no_lattice(new_app):
+    # 5 % volatility, rate 50 %, 1,828 days, 501 steps: the tree is arbitrage-free only just (|r| dt = 0.0049982
+    # against sigma sqrt(dt) = 0.0049991). Its time step over 1,827 days is 500.73 steps; the 499-step tree's longer
+    # step has no arbitrage-free lattice, so the 501-step tree alone values the option a day later.
+    at = new_app(days=1828, vol=5, rate=50, model="Binomial tree", tree="Cox-Ross-Rubinstein").run()
+    _ok(at)
+    with pytest.raises(ValueError, match="not arbitrage-free"):
+        binomial.price(100, 100, 1827 * DAY, 0.5, 0.05, 0, "call", 499, False, "crr")
+    later = binomial.price(100, 100, 1827 * DAY, 0.5, 0.05, 0, "call", 501, False, "crr")
+    now = binomial.price(100, 100, 1828 * DAY, 0.5, 0.05, 0, "call", 501, False, "crr")
+    assert _tree_table(at).loc["Call", "1-day decay"] == pytest.approx(later - now, rel=1e-12)
+    shorter = 1 - 501 * (1827 / 1828) / 501
+    assert f"{shorter:.2%}" == "0.05%"
+    note = (
+        "one day shorter with 501 steps, a time step 0.05% shorter than this tree's (the next count down has no "
+        "arbitrage-free lattice here)"
+    )
+    assert any(note in c.value for c in at.caption)
+
+
+def test_the_tree_decays_to_its_intrinsic_value_within_a_day(new_app):
+    at = new_app(days=1, strike=95, model="Binomial tree", style="American").run()
+    _ok(at)
+    tree = next(d.value for d in at.dataframe if "Div. rho / 1%" in d.value.columns).set_index("Option")
+    for kind, intrinsic in (("call", 5.0), ("put", 0.0)):
+        now = binomial.price(100, 95, DAY, 0.05, 0.2, 0, kind, 501, True, "lr")
+        assert tree.loc[kind.capitalize(), "Decay to expiry"] == pytest.approx(intrinsic - now, rel=1e-12, abs=1e-15)
+    note = "the decay to expiry is the intrinsic value at expiry minus the tree value"
+    assert any(note in c.value for c in at.caption)
+    # Within a day of expiry the decay to expiry leads the tree's table too.
+    names = list(tree.columns)
+    assert names.index("Decay to expiry") == names.index("Theta / day") - 1
+    assert any("The decay to expiry comes first: the option expires within the day." in c.value for c in at.caption)
+
+
+def test_monte_carlo_uses_the_closed_form_decay(new_app):
+    at = new_app(days=1, model="Monte Carlo").run()
+    _ok(at)
+    call = bs.price(100, 100, DAY, 0.05, 0.2, 0, "call")
+    assert _greeks(at).loc["Decay to expiry", "Call"] == pytest.approx(-call, rel=1e-12)
+    assert any("by Black-Scholes-Merton, whose value the simulation estimates" in c.value for c in at.caption)
+
+
+def test_the_sensitivity_explorer_plots_the_decay_against_the_days_left(app):
+    app.selectbox(key="sens_quantity").set_value("1-day decay").run()
+    app.selectbox(key="sens_axis").set_value("Days to expiry").run()
+    _ok(app)
+    chart = _chart(app, "sensitivity_chart")
+    days = _values(chart["data"][0]["x"])
+    call = _values(chart["data"][0]["y"])
+    assert days[0] == 1 and call[0] == pytest.approx(-bs.price(100, 100, DAY, 0.05, 0.2, 0, "call"), rel=1e-12)
+    T = days[-1] * DAY
+    expected = bs.price(100, 100, T - DAY, 0.05, 0.2, 0, "call") - bs.price(100, 100, T, 0.05, 0.2, 0, "call")
+    assert call[-1] == pytest.approx(expected, rel=1e-12)
+    assert chart["layout"]["yaxis"]["title"]["text"] == "1-day decay ($)"
+
+
+def test_the_theta_view_draws_the_decay_beside_theta(new_app):
+    # Theta / 365 solid and the repriced day dashed, each in its option's colour, against the spot.
+    at = new_app(days=3).run()
+    at.selectbox(key="sens_quantity").set_value("Theta / day").run()
+    _ok(at)
+    chart = _chart(at, "sensitivity_chart")
+    names = [trace["name"] for trace in chart["data"]]
+    assert names == ["Theta / 365 · Call", "Theta / 365 · Put", "1-day decay · Call", "1-day decay · Put"]
+    assert [trace["line"].get("dash") for trace in chart["data"]] == ["solid", "solid", "dash", "dash"]
+    assert chart["data"][0]["line"]["color"] == chart["data"][2]["line"]["color"] != chart["data"][1]["line"]["color"]
+    assert chart["layout"]["yaxis"]["title"]["text"] == "Theta / 365 and 1-day decay ($)"
+    spots = _values(chart["data"][2]["x"])
+    T = 3 * DAY
+    for trace, kind in zip(chart["data"], ("call", "put") * 2, strict=True):
+        y = _values(trace["y"])
+        if trace["line"]["dash"] == "solid":
+            expected = bs.greeks(spots, 100, T, 0.05, 0.2, 0, kind)["theta"] / 365
+        else:
+            expected = bs.price(spots, 100, T - DAY, 0.05, 0.2, 0, kind) - bs.price(spots, 100, T, 0.05, 0.2, 0, kind)
+        np.testing.assert_allclose(y, expected, rtol=1e-12, atol=1e-15)
+
+
+def test_within_a_day_the_explorer_names_the_decay_to_expiry(new_app):
+    # Against spot every point has the sidebar's one day left; against the days left the 1-day decay keeps its name.
+    at = new_app(days=1).run()
+    at.selectbox(key="sens_quantity").set_value("1-day decay").run()
+    _ok(at)
+    assert _chart(at, "sensitivity_chart")["layout"]["yaxis"]["title"]["text"] == "Decay to expiry ($)"
+    at.selectbox(key="sens_quantity").set_value("Theta / day").run()
+    chart = _chart(at, "sensitivity_chart")
+    assert [trace["name"] for trace in chart["data"]][2:] == ["Decay to expiry · Call", "Decay to expiry · Put"]
+    assert chart["layout"]["yaxis"]["title"]["text"] == "Theta / 365 and decay to expiry ($)"
+    at.selectbox(key="sens_axis").set_value("Days to expiry").run()
+    assert _chart(at, "sensitivity_chart")["layout"]["yaxis"]["title"]["text"] == "Theta / 365 and 1-day decay ($)"
 
 
 # --- IV tab ------------------------------------------------------------------------------------------------------
@@ -482,6 +827,53 @@ def test_iv_time_value_is_quote_minus_intrinsic_value(iv_app):
     next(s for s in iv_app.segmented_control if s.key == "iv_type").set_value("put").run()
     put = bs.price(100, 120, 1, 0.05, 0.2, 0, "put")
     assert _dollars(_metrics(iv_app)["Time value"]) == pytest.approx(put - 20.0, abs=1e-4)
+
+
+def test_iv_tab_says_when_a_quote_has_no_time_value(new_app):
+    # The review's 2-day call struck at 60 with the spot at 100 and a rate of 4 %: at the sidebar's 20 % the model
+    # value is the discounted intrinsic value 100 − 60·e^(−0.04·2/365) = 40.0131 to the last digit. The tab used to
+    # show 0 % for it (and 94.5 % for 1e-13 more); now it says the quote has no time value and shows no volatility.
+    # The value it names is the discounted intrinsic value, not the max(S − K, 0) = $40 of the Time value card.
+    from options_analyzer.implied_vol import implied_volatility, no_arbitrage_bounds
+    from options_analyzer.ui.format import pct
+
+    at = new_app(tab="IV", strike="60", days="2", rate="4").run()
+    _ok(at)
+    lower, _ = no_arbitrage_bounds(100, 60, 2 / 365, 0.04, 0.0, "call")
+    # Black-Scholes-Merton gives one ulp (7.1e-15) above the bound here: far within the margin 1e-12·100.
+    assert _quote(at).value - lower == pytest.approx(0.0, abs=1e-13) and lower == pytest.approx(40.0131, abs=5e-5)
+    [warning] = [w.value for w in at.warning]
+    assert warning == (
+        "No implied volatility: this quote has no time value. It is within \\$0.00000000010 (one part in 10¹² of the "
+        "larger of spot and strike) of the no-arbitrage lower bound, the discounted intrinsic value "
+        "S·e^(−qT) − K·e^(−rT) = \\$40.0131, which is the option's value at zero volatility, and every volatility from "
+        "zero up to some level prices the option that close to it, so none can be singled out. The model value at the "
+        "sidebar volatility is such a quote: the option is that deep in the money. For a volatility at this strike, "
+        "invert the out-of-the-money option's quote: it is all time value."
+    )
+    assert "Implied volatility" not in _metrics(at) and not at.get("plotly_chart")
+    # Half a cent of time value is a volatility (230 %).
+    _quote(at).set_value(lower + 0.005).run()
+    assert not at.exception and not at.error
+    assert _metrics(at)["Implied volatility"] == pct(implied_volatility(lower + 0.005, 100, 60, 2 / 365, 0.04), 3)
+    assert _metrics(at)["Implied volatility"] == "230.024%"
+    # Out of the money, a quote of zero has no time value either.
+    next(s for s in at.segmented_control if s.key == "iv_type").set_value("put").run()
+    _quote(at).set_value(0.0).run()
+    _ok(at)
+    assert [w.value for w in at.warning] == [
+        "No implied volatility: an out-of-the-money option is worth only its time value, and a quote of \\$0.0000 "
+        "has none."
+    ]
+    # A month out the model value of the put struck at 120 has time value ($0.0013), and a typed quote at its
+    # discounted intrinsic value has none.
+    at = new_app(tab="IV", strike="120", days="30", rate="0").run()
+    next(s for s in at.segmented_control if s.key == "iv_type").set_value("put").run()
+    _quote(at).set_value(20.0).run()
+    _ok(at)
+    [warning] = [w.value for w in at.warning]
+    assert "the discounted intrinsic value K·e^(−rT) − S·e^(−qT) = \\$20.0000," in warning
+    assert "This is typical deep in the money close to expiry." in warning
 
 
 def test_iv_cards_wrap_in_pairs_like_the_price_cards(iv_app):

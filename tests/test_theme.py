@@ -617,9 +617,26 @@ def test_the_card_width_model_matches_plex_sans():
     assert max(components._LABEL_CHAR_EM.values()) == components._LABEL_CHAR_EM["%"] == 0.927
     for label in CARD_LABELS:
         assert set(label.upper()) <= set(components._LABEL_CHAR_EM), label
-    # Deltas: at most _DELTA_EM per character on average.
-    for delta in ("+0.00 vol pts vs sidebar", "debit (paid)", "credit (received)"):
-        assert sum(regular[c] for c in delta) <= components._DELTA_EM * len(delta), delta
+    # Deltas: the same Regular widths with the lowercase letters, exactly; any other character as the widest. Every
+    # delta the app writes is modelled from its own characters, in its pill, never narrower than it is. (At 0.517 em
+    # a character a Monte Carlo interval was modelled 2.8 px narrower than its text, before its pill's 10.5 px.)
+    for char, model in components._DELTA_CHAR_EM.items():
+        assert regular[char] == model, char
+    assert max(components._DELTA_CHAR_EM.values()) == 0.927
+    for delta in (
+        "+0.00 vol pts vs sidebar",
+        "debit (paid)",
+        "credit (received)",
+        r"\$10.4237 – \$10.4582, 95%",
+        r"−\$0.0001 – \$1,234,567.8901, 95%",
+        "Interval unreliable: 299 of 1,000,000 paths finish out of the money",
+        "Interval unreliable: 299 OTM paths",
+        "Interval unreliable: too few paths",
+    ):
+        assert set(delta.replace("\\", "")) <= set(components._DELTA_CHAR_EM), delta
+        shown = delta.replace(r"\$", "$")
+        text_px = components._DELTA_PX * sum(regular[c] for c in shown)
+        assert text_px + components._DELTA_PADDING_PX <= components._delta_px(delta) <= text_px + 12, delta
 
 
 def _covered(code_point: int) -> bool:
@@ -864,8 +881,8 @@ def _lines(cards: list[dict]) -> list[list[dict]]:
 @pytest.mark.slow
 @pytest.mark.parametrize(
     ("width", "query", "three_up"),
-    # Phones (Android and iPhone widths) and a laptop with the sidebar open (the strategy and Greek rows 2 + 2, the
-    # three-card rows 3 across), and on a phone a 100,000-lot position, whose amounts are in millions ("$46.62M").
+    # Phones (Android and iPhone widths) and a laptop with the sidebar open (the strategy, Greek and VaR rows 2 + 2,
+    # the three-card row 3 across), and on a phone a 100,000-lot position, whose amounts are in millions ("$46.62M").
     [
         pytest.param(360, "", False, id="360"),
         pytest.param(390, "", False, id="390"),
@@ -876,8 +893,9 @@ def _lines(cards: list[dict]) -> list[list[dict]]:
 def test_card_rows_line_up(chromium, app_url, width, query, three_up):
     # The cards of each line of a row have one width, one height and one value baseline; a card is as wide on a
     # line of its own (2 + 1) as above it; and no value or label runs out of its card's content box. Every value is
-    # at the theme's full size, and on a line of three cards no label takes more than two lines. The rows of three
-    # go 2 + 1 on phones, and the Strategy summary and Greek rows wrap together with their cards lined up.
+    # at the theme's full size, and on a line of three cards no label takes more than two lines. The row of three
+    # goes 2 + 1 on phones, the rows of two pairs (the VaR row among them: implied vol moving, and frozen) 2 + 2,
+    # and the Strategy summary and Greek rows wrap together with their cards lined up.
     # (The subgrid and stretch rules of ui/components.py depend on Streamlit's DOM: the bordered stMetric box, the
     # padded box inside it and the element container around it.)
     page = _open(chromium, app_url + query, "light", width)
@@ -905,9 +923,8 @@ def test_card_rows_line_up(chromium, app_url, width, query, three_up):
                 # set it at the card's right edge then: 46 to 54 px after "Call ITM probability" at 360-375 px).
                 if card["iconGap"] is not None:
                     assert 0 <= card["iconGap"] <= 8 and card["iconOnLastLine"], (key, card)
-        for key in ("expectation_cards", "var_cards"):
-            assert [len(line) for line in _lines(rows[key])] == ([3] if three_up else [2, 1]), key
-        for key in ("strategy_cards", "greek_cards"):
+        assert [len(line) for line in _lines(rows["expectation_cards"])] == ([3] if three_up else [2, 1])
+        for key in ("strategy_cards", "greek_cards", "var_cards"):
             assert [len(line) for line in _lines(rows[key])] == [2, 2], key
 
         def boxes(key: str) -> list[list[tuple[int, int]]]:
@@ -916,6 +933,53 @@ def test_card_rows_line_up(chromium, app_url, width, query, three_up):
         assert boxes("strategy_cards") == boxes("greek_cards")
     finally:
         page.close()
+
+
+#: The price cards with a delta line: label, value and delta as written, the width of the card at max-content and
+#: whether the delta is cut off with an ellipsis where it is.
+_PRICE_CARD_DELTAS = """() => [...document.querySelectorAll('.st-key-price_cards [data-testid=stMetric]')]
+  .filter(card => card.querySelector('[data-testid=stMetricDelta]')).map(card => {
+    const delta = card.querySelector('[data-testid=stMetricDelta]');
+    const cut = [delta, ...delta.querySelectorAll('*')]
+      .some(t => t.scrollWidth > t.clientWidth && getComputedStyle(t).overflow !== 'visible');
+    const width = card.style.width;
+    card.style.width = 'max-content';
+    const natural = card.getBoundingClientRect().width;
+    card.style.width = width;
+    return {label: card.querySelector('[data-testid=stMetricLabel]').innerText,
+            value: card.querySelector('[data-testid=stMetricValue]').innerText, delta: delta.innerText, natural, cut};
+  })"""
+
+
+@pytest.mark.e2e
+@pytest.mark.slow
+@pytest.mark.parametrize("width", [1440, 1024, 390])
+def test_monte_carlo_intervals_are_never_cut_off(chromium, app_url, width):
+    # The cards' model made the pill of "$10.4237 – $10.4582, 95%" 13 px narrower than Chromium draws it (0.517 em a
+    # character and no padding), so at a row's narrowest that interval would end in an ellipsis. Each card with a
+    # delta, reliable or not, is now modelled at most 2 px wider than its max-content width, never narrower. And on a
+    # desktop with the sidebar open the four cards stay on one line whether the interval is shown or withheld: the
+    # reason it was withheld, "Interval unreliable: 85 of 100,000 paths finish out of the money", made its card
+    # 387 px wide where four across leave 249 px a card at 1440 px, so the row went 2 + 2.
+    from options_analyzer.ui import components
+
+    for query in ("?model=Monte+Carlo", "?model=Monte+Carlo&strike=120&days=30"):
+        page = _open(chromium, f"{app_url}/{query}", "light", width)
+        try:
+            cards = page.evaluate(_PRICE_CARD_DELTAS)
+            assert [card["label"].lower() for card in cards] == ["call value", "put value"], query
+            for card in cards:
+                assert not card["cut"], (query, card)
+                model = components._card_width(card["label"].capitalize(), card["value"], delta=card["delta"])
+                assert card["natural"] <= model <= card["natural"] + 2, (query, card, model)
+            if width == 1440:
+                tops = page.evaluate(
+                    "() => [...document.querySelectorAll('.st-key-price_cards [data-testid=stMetric]')]"
+                    ".map(card => Math.round(card.getBoundingClientRect().top))"
+                )
+                assert len(tops) == 4 and len(set(tops)) == 1, (query, tops)
+        finally:
+            page.close()
 
 
 #: A chart that each tab draws (the key given to charts.show), and the number of charts it draws, at the default URL.

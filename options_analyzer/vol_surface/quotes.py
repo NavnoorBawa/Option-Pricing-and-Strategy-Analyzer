@@ -22,7 +22,7 @@ from dateutil import parser as dateutil_parser
 from scipy.special import ndtr
 
 from ..implied_vol import ImpliedVolError, implied_volatility
-from .forwards import MIN_PARITY_PAIRS, implied_forwards
+from .forwards import MIN_PARITY_PAIRS, RATE_LIMITS, implied_forwards
 
 
 class QuoteParseError(ValueError):
@@ -416,33 +416,52 @@ def _out_of_the_money(
 
 #: How the forward of each expiry is obtained when option prices are inverted (see :func:`parse_quotes`).
 FORWARD_METHODS = ("parity", "rates")
+#: The exercise styles of the options quoted (see :func:`parse_quotes`).
+EXERCISE_STYLES = ("european", "american")
 
 
 def _with_forwards(
-    data: pd.DataFrame, spot: float, rate: float, dividend_yield: float, method: str, messages: list[str]
+    data: pd.DataFrame,
+    spot: float,
+    rate: float,
+    dividend_yield: float,
+    method: str,
+    messages: list[str],
+    exercise: str = "european",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Each row's expiry label (``_expiry``, as :func:`_expiries` groups maturities) and the table of forwards (one
     row per expiry, keyed by ``expiry``; see :func:`.forwards.implied_forwards`).
 
-    With ``method="parity"`` the rows also get their expiry's ``forward`` and ``discount_factor``, from put-call
-    parity where it can be read and from the rate and dividend yield elsewhere. With ``method="rates"`` they get
-    no such columns, so every later stage uses the rate and dividend yield as before parity forwards existed (the
-    table then holds the forwards those give, for display).
+    With ``method="parity"`` and European ``exercise`` the rows also get their expiry's ``forward`` and
+    ``discount_factor``, from put-call parity where it can be read and from the rate and dividend yield elsewhere.
+    With ``method="rates"``, or American exercise (for which parity does not hold), they get no such columns, so
+    every later stage uses the rate and dividend yield as before parity forwards existed (the table then holds the
+    forwards those give, for display, all with the source ``"rates"``).
     """
     labels = _expiries(data["maturity"])
     data = data.assign(_expiry=labels)
-    table = implied_forwards(data, spot, rate, dividend_yield, expiry=labels, parity=method == "parity")
-    messages.append(_forward_message(table, method))
-    if method != "parity" or (table["source"] == "rates").all():
+    parity = method == "parity" and exercise == "european"
+    table = implied_forwards(data, spot, rate, dividend_yield, expiry=labels, parity=parity)
+    messages.append(_forward_message(table, method, exercise))
+    if not parity or (table["source"] == "rates").all():
         return data, table
     columns = table.set_index("expiry")[["forward", "discount_factor"]]
     return data.join(columns, on="_expiry"), table
 
 
-def _forward_message(table: pd.DataFrame, method: str) -> str:
+def _forward_message(table: pd.DataFrame, method: str, exercise: str = "european") -> str:
     """What the forwards of the expiries came from."""
     n = len(table)
     expiries = f"{n} expir{'y' if n == 1 else 'ies'}"
+    if exercise == "american":
+        return (
+            f"Forwards and discount factors of the {expiries} from the sidebar rate and dividend yield, because the "
+            "quotes are read as American (the sidebar's pricing model): put-call parity, C − P = DF·(F − K), holds "
+            "only for European options, and the early-exercise premium of American ones would show up as a wrong "
+            "forward and dividend yield. The prices are still inverted as European options (Black-76 at the sidebar "
+            "forward, which is Black-Scholes-Merton), which overstates their implied vols by what the right to "
+            "exercise early is worth, until de-Americanisation (roadmap items PR-4 and SF-5) is in."
+        )
     if method != "parity":
         return f"Forwards and discount factors of the {expiries} from the sidebar rate and dividend yield."
     counts = table["source"].value_counts()
@@ -456,8 +475,10 @@ def _forward_message(table: pd.DataFrame, method: str) -> str:
     slope = int(counts.get("parity_forward", 0))
     if slope:
         text += (
-            f"; at {slope} of them the discount factor comes from the sidebar rate, because their strikes span too "
-            "little to measure it"
+            f"; at {slope} of them the discount factor is the sidebar rate plus the spread over it that the other "
+            "expiries' parity fits measured (the sidebar rate alone where none did), because their own fit could "
+            "not measure it: the slope of C − P in the strike was too uncertain (the strikes span too little) or "
+            f"implied a rate outside {_percent(RATE_LIMITS[0])} to {_percent(RATE_LIMITS[1])}"
         )
     rates = n - parity
     if rates:
@@ -466,6 +487,11 @@ def _forward_message(table: pd.DataFrame, method: str) -> str:
             "quoted for both a call and a put)"
         )
     return text + "."
+
+
+def _percent(value: float) -> str:
+    """A whole percentage with the minus sign U+2212: ``−10%``."""
+    return f"{value:.0%}".replace("-", "\u2212")
 
 
 def _prices_to_vols(
@@ -490,7 +516,7 @@ def _prices_to_vols(
         carry_yield = carry_rate - np.log(data["forward"].to_numpy(float) / spot) / T
     else:
         carry_rate, carry_yield = np.full(len(data), rate), np.full(len(data), dividend_yield)
-    vols, reasons = [], []
+    vols, rejected = [], []
     columns = (data[c].to_numpy() for c in ("price", "strike", "maturity", "type"))
     rows = zip(*columns, carry_rate, carry_yield, strict=True)
     for price, strike, maturity, kind, r_T, q_T in rows:
@@ -498,21 +524,36 @@ def _prices_to_vols(
             vols.append(implied_volatility(price, spot, strike, maturity, r_T, q_T, kind))
         except ImpliedVolError as exc:
             vols.append(np.nan)
-            reasons.append(str(exc))
+            rejected.append(exc)
     data = data.assign(iv=vols)
-    if reasons:
+    outside = [str(exc) for exc in rejected if exc.reason in ("below_lower_bound", "at_or_above_upper_bound")]
+    if outside:
         where = (
             " and each expiry's forward and discount factor"
             if "forward" in data
             else f", rate {rate:.2%} and dividend yield {dividend_yield:.2%}"
         )
         messages.append(
-            f"Dropped {len(reasons)} price quote(s) outside the no-arbitrage bounds at spot {spot:,.2f}{where} "
-            f"(e.g. {reasons[0]})."
+            f"Dropped {len(outside)} price quote(s) outside the no-arbitrage bounds at spot {spot:,.2f}{where} "
+            f"(e.g. {outside[0]})."
         )
-    no_time_value = int((data["iv"] == 0).sum())
-    if no_time_value:
-        messages.append(f"Dropped {no_time_value} price quote(s) with no time value (zero implied vol).")
+    # In the money within 1e-12·max(S, K) of the intrinsic value the last digits of a price decide its implied vol
+    # (a 2-day call struck at 60, spot 100, rate 4 %: 0 % at its intrinsic value, 94.5 % at 1e-13 above it), so such
+    # a quote would only add noise to the fit. The prices here are positive, so an out-of-the-money one is rejected
+    # only if its time value underflows once divided by √(FK).
+    flat = [str(exc) for exc in rejected if exc.reason == "no_time_value"]
+    if flat:
+        messages.append(f"Dropped {len(flat)} price quote(s) with no time value (e.g. {flat[0]}).")
+    other = [
+        str(exc)
+        for exc in rejected
+        if exc.reason not in ("below_lower_bound", "at_or_above_upper_bound", "no_time_value")
+    ]
+    if other:  # an implied vol above the solver's cap, typically
+        messages.append(f"Dropped {len(other)} other price quote(s) without an implied vol (e.g. {other[0]}).")
+    zero_vol = int((data["iv"] == 0).sum())
+    if zero_vol:  # out of the money with so little time value that the implied vol is below 1e-12
+        messages.append(f"Dropped {zero_vol} price quote(s) whose implied vol is zero to machine precision.")
     data = data[data["iv"] > 0]
     model = "Black-76 at each expiry's forward and discount factor" if "forward" in data else "Black-Scholes-Merton"
     messages.append(f"Inverted {len(data)} option price(s) into implied vols with {model} (European exercise).")
@@ -663,6 +704,7 @@ def parse_quotes(
     dividend_yield: float = 0.0,
     *,
     forward: str = "parity",
+    exercise: str = "european",
     return_forwards: bool = False,
 ) -> tuple[pd.DataFrame, list[str]] | tuple[pd.DataFrame, list[str], pd.DataFrame | None]:
     """Validate and clean a quotes table.
@@ -676,7 +718,12 @@ def parse_quotes(
     ``forward="parity"`` (the default) read from put-call parity on the expiry's calls
     and puts (:func:`.forwards.implied_forwards`), and from ``spot``, ``rate`` and
     ``dividend_yield`` where that cannot be read or with ``forward="rates"`` (which is
-    Black-Scholes-Merton at ``rate`` and ``dividend_yield``). Where an expiry and strike
+    Black-Scholes-Merton at ``rate`` and ``dividend_yield``). With ``exercise="american"``
+    parity is not used (it holds only for European options; the early-exercise premium
+    would read as a lower forward), so every forward and discount factor comes from ``rate``
+    and ``dividend_yield``, and a message says that the prices are still inverted as European
+    options, which overstates their vols by the early-exercise premium (de-Americanisation is
+    roadmap items PR-4 and SF-5). Where an expiry and strike
     are quoted for both a call and a put, the out-of-the-money one (against that
     forward) is kept, for implied vols too when a ``Type`` column and the spot are
     given. Units in brackets are read (``IV (%)``, ``Maturity (days)``,
@@ -702,15 +749,18 @@ def parse_quotes(
     ``dividend_yield``. With ``return_forwards=True`` a third item is returned: for option
     prices the table of :func:`.forwards.implied_forwards` for the expiries that remain (at
     their final maturities), else None. Raises :class:`QuoteParseError` if the data is
-    unusable, and ``ValueError`` for a ``forward`` other than ``"parity"`` or ``"rates"``.
+    unusable, and ``ValueError`` for a ``forward`` other than ``"parity"`` or ``"rates"`` or an
+    ``exercise`` other than ``"european"`` or ``"american"``.
     """
     if forward not in FORWARD_METHODS:
         raise ValueError(f"forward must be one of {', '.join(map(repr, FORWARD_METHODS))}, got {forward!r}")
+    if exercise not in EXERCISE_STYLES:
+        raise ValueError(f"exercise must be one of {', '.join(map(repr, EXERCISE_STYLES))}, got {exercise!r}")
     messages: list[str] = []
     found = _map_columns(frame, messages)
     columns = _normalise_units(frame.reset_index(drop=True), found, spot, messages)
     rows = _valid_rows(columns, messages)
-    data, forwards = _invert(rows, columns.iv_percent, spot, rate, dividend_yield, messages, forward)
+    data, forwards = _invert(rows, columns.iv_percent, spot, rate, dividend_yield, messages, forward, exercise)
     clean = _filter(data, columns.guess, messages)
     if "_expiry" in clean:
         if forwards is not None:
@@ -866,6 +916,7 @@ def _invert(
     dividend_yield: float,
     messages: list[str],
     forward: str = "parity",
+    exercise: str = "european",
 ) -> tuple[pd.DataFrame, pd.DataFrame | None]:
     """Stage 4 of :func:`parse_quotes`: implied vols as decimals, inverted from option prices at each expiry's
     forward (:func:`_with_forwards`, :func:`_prices_to_vols`) or read from the quoted vols in their unit
@@ -873,7 +924,7 @@ def _invert(
     if "iv" in data:
         return _quoted_vols(data, iv_percent, spot, rate, dividend_yield, messages), None
     assert spot is not None  # prices without a spot were refused in stage 2
-    data, forwards = _with_forwards(data, spot, rate, dividend_yield, forward, messages)
+    data, forwards = _with_forwards(data, spot, rate, dividend_yield, forward, messages, exercise)
     data = _prices_to_vols(data, spot, rate, dividend_yield, messages)
     if data.empty:
         raise QuoteParseError("no option price could be inverted into an implied vol; check the spot, rate and units")

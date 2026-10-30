@@ -231,7 +231,10 @@ def _differences(kind: str, **inputs) -> dict[str, float]:
 def test_the_greeks_are_finite_differences_of_the_engine_in_the_tabs_units(new_app):
     at = _run(new_app, div="2")
     table = _table(at, "Greek").set_index("Greek")
-    assert list(table.index) == [f"{bs.GREEKS[n].label} {bs.GREEKS[n].symbol}" for n in GREEKS]
+    names = [f"{bs.GREEKS[n].label} {bs.GREEKS[n].symbol}" for n in GREEKS]
+    # The engine's 1-day decay follows theta: with a year to expiry the two agree to well within 10 % of the larger.
+    assert list(table.index) == [*names[:3], "1-day decay", *names[3:]]
+    table = table.drop(index="1-day decay")
     assert list(table["Unit"]) == [bs.GREEKS[n].unit for n in GREEKS]  # the units of the European table
     for kind in ("call", "put"):
         expected = _differences(kind, q=0.02)
@@ -294,7 +297,7 @@ def test_at_zero_rate_and_yield_rho_and_dividend_rho_are_black_scholes_mertons(k
 
 def test_at_zero_rate_and_yield_the_table_is_black_scholes_mertons_and_says_one_sided(new_app):
     at = _run(new_app, rate="0")
-    table = _table(at, "Greek").set_index("Greek")
+    table = _table(at, "Greek").set_index("Greek").drop(index="1-day decay")
     for kind in ("call", "put"):
         exact = bs.greeks(100, 100, 1.0, 0.0, 0.2, 0.0, kind)
         for name, shown in zip(GREEKS, table[kind.capitalize()], strict=True):
@@ -366,7 +369,9 @@ def test_an_option_exercised_at_once_has_the_greeks_of_its_exercise_value(new_ap
     assert call.basis == "exercise value" and call["delta"] == 1.0 and call["gamma"] == 0.0
     at = _run(new_app, spot="60")
     table = _table(at, "Greek").set_index("Greek")
-    assert list(table["Put"]) == [-1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # Exercised at once today and a day later, it is worth K - S at both: its 1-day decay (after theta) is zero too.
+    assert list(table["Put"]) == [-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    assert list(table.index)[3] == "1-day decay"
     [note] = [c.value for c in at.caption if c.value.startswith("American Greeks of the sidebar engine")]
     assert (
         "The put is exercised at once at this spot (at or below its critical spot), so its Greeks are those of its "
@@ -576,6 +581,43 @@ def test_iv_tab_inverts_the_tree_fallback_at_the_engines_corner(new_app):
     assert _values(model["x"]).size == 41
 
 
+def test_iv_tab_says_when_an_american_quote_has_no_time_value(new_app):
+    # The put struck at 100 with the spot at 60 is exercised at once at every volatility up to 38.5 %, so at the
+    # sidebar's 20 % the engine's value is the exercise value, 40: no time value to identify a volatility from. The
+    # tab used to show 0 % with a warning.
+    at = _run(new_app, tab="IV", spot="60")
+    _iv_type(at).set_value("put").run()
+    _ok(at)
+    assert _quote(at).value == 40.0
+    [warning] = [w.value for w in at.warning]
+    assert warning.startswith(
+        "No implied volatility: this quote has no time value. It is no more than \\$0.00000000010 (one part in 10¹² "
+        "of the larger of spot and strike) above the option's value at zero volatility (deep in the money, the value "
+        "of exercising now)"
+    )
+    assert "Implied volatility" not in _metrics(at)
+    # A cent of time value is a volatility again.
+    _quote(at).set_value(40.01).run()
+    _ok(at)
+    iv = float(_metrics(at)["Implied volatility"].value.rstrip("%")) / 100
+    assert iv == pytest.approx(implied_vol.implied_volatility_alo(40.01, 60, 100, 1.0, 0.05, 0.0, "put"), abs=5e-6)
+
+
+def test_iv_tab_says_when_an_american_quote_is_within_the_margin_of_zero(new_app):
+    # The at-the-money put (rate 5 %) is worth 0 at zero volatility and more at any other, but near zero volatility
+    # the engines are accurate only in absolute terms, so a quote of 0 gets no volatility (the tab used to show 0 %).
+    at = _run(new_app, tab="IV")
+    _iv_type(at).set_value("put").run()
+    _quote(at).set_value(0.0).run()
+    _ok(at)
+    assert [w.value for w in at.warning] == [
+        "No implied volatility: the option is worth \\$0 at zero volatility, and a quote of \\$0.0000 is no more than "
+        "\\$0.00000000010 (one part in 10¹² of the larger of spot and strike) above that, closer than the American "
+        "pricing engines can tell volatilities apart there."
+    ]
+    assert "Implied volatility" not in _metrics(at)
+
+
 def test_iv_tab_checks_the_bounds_first_with_the_trees_messages(new_app):
     at = _run(new_app, tab="IV", strike="120")
     _iv_type(at).set_value("put").run()
@@ -606,8 +648,13 @@ def test_alo_implied_volatility_round_trips_and_shares_the_tree_solvers_messages
         with pytest.raises(implied_vol.ImpliedVolError) as tree:
             implied_vol.implied_volatility_american(quote, 80, 100, 1.0, 0.05, 0.0, "put")
         assert (str(alo.value), alo.value.reason) == (str(tree.value), tree.value.reason)
-    # The value of exercising now is the zero-volatility value: zero, as the tree solver reports it.
-    assert implied_vol.implied_volatility_alo(40.0, 60, 100, 1.0, 0.05, 0.0, "put") == 0.0
+    # The value of exercising now is the zero-volatility value, which every volatility up to 38.5 % gives: no time
+    # value, as the tree solver reports it (both used to return zero).
+    with pytest.raises(implied_vol.ImpliedVolError) as alo:
+        implied_vol.implied_volatility_alo(40.0, 60, 100, 1.0, 0.05, 0.0, "put")
+    with pytest.raises(implied_vol.ImpliedVolError) as tree:
+        implied_vol.implied_volatility_american(40.0, 60, 100, 1.0, 0.05, 0.0, "put")
+    assert (str(alo.value), alo.value.reason) == (str(tree.value), "no_time_value")
     # A put with q > r > 0 is worth most at zero volatility when exercised at a date before expiry (here 25 at
     # 13.9 years), above its bounds (23.25): a quote between the two has no volatility.
     assert american.price(100, 100, 20.0, 0.05, 0.0, 0.10, option_type="put") == pytest.approx(25.0, abs=1e-9)

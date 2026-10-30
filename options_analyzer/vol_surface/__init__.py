@@ -80,6 +80,7 @@ from .quotes import (
     _UNIT_SUFFIXES,
     _UNITS,
     _WEAK_IV,
+    EXERCISE_STYLES,
     FLY_CHECK_VOL,
     FORWARD_METHODS,
     MATURITY_TOLERANCE,
@@ -134,6 +135,7 @@ from .surface import (
 from .svi import _LOG_S_RANGE, _RHO_FACE, _RHO_MAX, QUOTE_PRECISION, SVISlice, _svi_start_points, fit_svi
 
 __all__ = [
+    "EXERCISE_STYLES",
     "FORWARD_METHODS",
     "FORWARD_SOURCES",
     "QuoteParseError",

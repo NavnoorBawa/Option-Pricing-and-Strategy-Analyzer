@@ -7,10 +7,17 @@ For European options on one underlying and one expiry, put-call parity holds at 
 with ``F`` the forward of the expiry and ``DF`` the discount factor the options are priced with (the box rate, which
 for index options sits tens of basis points above Treasury rates). So the call-minus-put prices of an expiry lie on
 a straight line in the strike whose slope is ``-DF`` and whose root is ``F``. Reading both from the quotes, instead
-of building the forward from a sidebar rate and dividend yield, removes the largest error in a fitted surface: on
-the project's own arbitrage-free synthetic SPX chain the sidebar forward put 135 out-of-the-money quotes outside the
-no-arbitrage bounds, flagged 26 calendar violations and left SVI fits 1.33 vol points from the quotes (see
-``tests/test_forwards.py``).
+of building the forward from a sidebar rate and dividend yield, removes the largest error in a fitted surface. On
+the project's own arbitrage-free synthetic SPX chain (``market_data.sample_chain`` at a spot of 5,000, 26 October
+2026 at 10:00; box rate 45 bp above the Treasury rate, dividend yield 1.2 %) read with the Treasury rate and no
+dividend yield, the sidebar forward is up to 142 bp from the generator's and the at-the-money vols up to 0.17 vol
+point off; fitted unconstrained, the surface has 69 calendar and 40 butterfly grid points of arbitrage and fits up
+to 1.60 vol points (RMSE) from the quotes, and the arbitrage-free fit holds the arbitrage out at a largest RMSE of
+1.98. With the generator's 1.2 % yield the sidebar forward is still up to 85 bp off and the RMSE up to 2.38. Parity
+forwards are within 0.22 bp of the generator's either way, the at-the-money vols within 0.0064 vol point, with no
+arbitrage point and RMSEs of 0.073 vol point at most, arbitrage-free or not (``tests/test_forwards.py``). Before
+roadmap item SF-3, which also drops in-the-money quotes without time value, the sidebar forward put 135 quotes (49
+with no dividend yield) outside the no-arbitrage bounds as well.
 
 :func:`implied_forwards` estimates them expiry by expiry:
 
@@ -21,8 +28,9 @@ no-arbitrage bounds, flagged 26 calendar violations and left SVI fits 1.33 vol p
    smallest, moved by ``(C - P) / DF``), or the :data:`MIN_NEAR_PAIRS` nearest ``F0`` where fewer lie that close.
    ``sigma sqrt(T)`` is read from the straddle at that strike, ``C + P = 2 DF F (2 N(sigma sqrt(T) / 2) - 1)``, so
    the window needs no model. Deep in-the-money options quote wide and their weights are small, but a window that
-   stays at 8 % for a two-year expiry (a third of a standard deviation) left the slope 0.6-0.7 % uncertain there;
-   1.5 standard deviations measure it to 1.5e-4;
+   stays at 8 % for a two-year expiry (a third of a standard deviation) left the slope's standard error at 4.3e-4
+   and 4.7e-4 at 0.9 and 1.1 years on the synthetic SPX chain, and above :data:`MAX_DISCOUNT_SE` (too uncertain to
+   use) over the last three expiries (1.4 to 1.9 years); 1.5 standard deviations measure it to 1e-4 or better there;
 3. fit ``C - P = a - DF K`` by weighted least squares, each pair weighted by ``1 / (e_C + e_P)^2`` where ``e`` is
    how far each price may be off (half its bid/ask spread, see ``parse_quotes``), then remove pairs whose
    standardised residual is more than :data:`TRIM_MADS` median absolute deviations from the median, refitting until
@@ -30,16 +38,19 @@ no-arbitrage bounds, flagged 26 calendar violations and left SVI fits 1.33 vol p
 4. ``F = a / DF``. Where fewer than :data:`MIN_PARITY_PAIRS` pairs remain the expiry keeps the forward and discount
    factor of the rate and dividend yield it was given. Where the slope is too uncertain (standard error above
    :data:`MAX_DISCOUNT_SE`, typical of short expiries whose few strikes span a narrow range, where it hardly matters)
-   or implausible (an implied rate outside :data:`RATE_LIMITS`), the discount factor comes from the given rate and
-   the forward is the weighted mean of ``K + (C - P) / DF`` over the same pairs. Near the money that mean barely
-   depends on ``DF``: a discount factor off by ``d`` (relative) moves each term by ``d (F - K)``.
+   or implausible (an implied rate outside :data:`RATE_LIMITS`), the discount factor comes from the given rate plus
+   the spread over it that the other expiries' slopes measured (:func:`_rate_spread`; the given rate alone where none
+   did), and the forward is the weighted mean of ``K + (C - P) / DF`` over the same pairs. Near the money that mean
+   barely depends on ``DF``: a discount factor off by ``d`` (relative) moves each term by ``d (F - K)``.
 
 Black-76 with ``F`` and ``DF`` is Black-Scholes-Merton with the rate ``r_T = -ln(DF) / T`` and the dividend yield
 ``q_T = r_T - ln(F / S) / T`` (``S e^{-q_T T} = DF F`` and ``K e^{-r_T T} = DF K``), so the quotes are inverted with
 the existing solver at those per-expiry carries.
 
-Parity is an equality only for European exercise. American chains (listed single-stock and ETF options) need their
-quotes de-Americanised first (roadmap item SF-5); this module does not do that.
+Parity is an equality only for European exercise. For American chains (listed single-stock and ETF options) the
+early-exercise premium makes ``C - P`` differ from ``DF (F - K)``, so ``parse_quotes(..., exercise="american")``
+does not call this module's parity fit: their forwards come from the rate and dividend yield given, until their
+quotes can be de-Americanised (roadmap items PR-4 and SF-5).
 """
 
 from __future__ import annotations
@@ -88,8 +99,10 @@ MIN_CARRY_GAP_BP = 5.0
 #: How each expiry's forward and discount factor were obtained.
 FORWARD_SOURCES = {
     "parity": "put-call parity: forward and discount factor fitted to the call/put pairs",
-    "parity_forward": "put-call parity for the forward; discount factor from the rate input (slope too uncertain)",
-    "rates": "the rate and dividend yield inputs (too few call/put pairs)",
+    "parity_forward": "put-call parity for the forward; discount factor from the rate input plus the spread over it "
+    "that the other expiries' parity fits measured (the rate input alone where none did), because this expiry's own "
+    "slope was too uncertain (standard error above MAX_DISCOUNT_SE) or implied a rate outside RATE_LIMITS",
+    "rates": "the rate and dividend yield inputs (too few call/put pairs, parity not asked for, or American exercise)",
 }
 #: The columns of :func:`implied_forwards`' table.
 FORWARD_COLUMNS = (
@@ -285,9 +298,9 @@ def _rate_spread(fits: list[_ParityFit], rate: float) -> float | None:
 
     Option prices discount at a financing rate (the box rate) tens of basis points above Treasuries; an expiry whose
     own slope is too uncertain gets its discount factor from ``rate`` plus this spread rather than from ``rate``
-    alone. On the synthetic chain, whose box rate is 45 bp above its Treasury rate, the last three expiries (1.4 to
-    1.9 years) measure no slope of their own, and ``rate`` alone put their discount factors 0.6-0.8 % too high and
-    their at-the-money vols 0.09-0.13 vol point too low.
+    alone, which would leave its discount factor too high by about the spread times ``T`` (0.45 % at one year for
+    the synthetic SPX chain's 45 bp). In ``tests/test_forwards.py`` an expiry whose strikes span 2 % of the spot takes
+    a 100 bp spread measured at another expiry, and its implied rate comes out right to 1e-9.
     """
     measured = [fit for fit in fits if fit.measured]
     if not measured:
@@ -329,14 +342,20 @@ def implied_forwards(
     Returns
     -------
     pandas.DataFrame
-        One row per expiry, in order of maturity, with the columns of :data:`FORWARD_COLUMNS`: ``forward`` and
-        ``discount_factor``; the implied ``rate`` (``-ln(DF) / T``) and ``dividend_yield`` (``rate - ln(F/S) / T``);
+        One row per expiry, in order of maturity, with its ``expiry`` label and the columns of
+        :data:`FORWARD_COLUMNS`: ``forward`` and ``discount_factor``; the implied ``rate`` (``-ln(DF) / T``) and
+        ``dividend_yield`` (``rate - ln(F/S) / T``);
         the number of call/put ``pairs`` used and the weighted RMS ``residual`` of their call-minus-put prices
         around the fitted line (price units); the standard errors ``forward_se`` and ``discount_se`` (NaN where the
         discount factor was not fitted); ``gap_bp``, the forward's distance from ``spot e^{(rate - dividend_yield)
         T}`` in basis points of the forward; ``atm_half_spread_bp``, half the at-the-money call and put spreads in
         basis points of the discounted forward (the precision the quotes give the forward); and the ``source``, a
         key of :data:`FORWARD_SOURCES`.
+
+    Raises
+    ------
+    ValueError
+        If a maturity is not positive.
 
     Examples
     --------
@@ -357,6 +376,9 @@ def implied_forwards(
     """
     spot = float(spot)
     data = prices.reset_index(drop=True)
+    if len(data) and not (data["maturity"].to_numpy(float) > 0).all():
+        # parse_quotes never passes one; called directly, a zero maturity divided by zero in the implied rate.
+        raise ValueError("every maturity must be positive (years); the rate implied at T = 0 is undefined")
     labels = np.asarray(data["maturity"].to_numpy(float) if expiry is None else expiry)
     # A floor on each price's error: zero errors (model prices on no grid) would make the weights infinite.
     floor = 1e-10 * max(spot, float(data["strike"].max()) if len(data) else spot)
