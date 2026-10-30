@@ -512,7 +512,7 @@ def test_every_tab_runs_under_the_engine_without_emoji_and_with_the_desk_charts(
     for tab in TABS:
         _open(at, tab)
         for chart in at.get("plotly_chart"):
-            assert json.loads(chart.proto.config)["displayModeBar"] == "hover"
+            assert json.loads(chart.proto.config)["displaylogo"] is False
             assert len(chart.proto.alt) >= 20
         for node in _nodes(at._tree):
             for text in _strings(node.proto) if getattr(node, "proto", None) is not None else ():

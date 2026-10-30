@@ -191,11 +191,55 @@
 /* --- Text on the primary colour (ui/theme.py ON_PRIMARY) ------------------------------------------------------ */
 
 /* Streamlit writes white on the primary colour in the chips of a multiselect and the step buttons of a number input
-   while hovered or focused: 2.16:1 on the dark theme's amber. light-dark() follows the color-scheme that Streamlit
-   sets for the theme it draws, so the rule switches with the theme at once. */
+   while hovered or focused: 2.52:1 on the dark theme's link blue. light-dark() follows the color-scheme that
+   Streamlit sets for the theme it draws, so the rule switches with the theme at once. */
 [data-testid='stMultiSelect'] [data-tag],
 [data-testid='stNumberInput'] :is([data-testid='stNumberInputStepUp'], [data-testid='stNumberInputStepDown']):is(:hover, :focus):enabled {
   color: light-dark(#FFFFFF, #0B0F16);
+}
+
+/* --- Inputs, state and loading (UI spec 2.6, 2.10) ---------------------------------------------------------- */
+
+/* Input boundaries at 3:1 against the page (WCAG 1.4.11): #5B6577 is 3.27:1 on the dark background and 5.73:1 on
+   the light one (ui/theme.py INPUT_BORDER), where the theme's hairline borderColor, which cards and tables keep, is
+   1.36:1. Streamlit has no theme option for input borders alone. The box that draws the border is the one with a
+   test id for number, date and text inputs, and the control box (role group) under a select box or multiselect,
+   which has none (the same box in 1.65 and 1.66). While focused, Streamlit's own primary-colour border stays, and a
+   disabled input keeps the hairline, so that it does not read as one that takes a value. */
+:is([data-testid='stNumberInputContainer'], [data-testid='stDateTimeInputField'], [data-testid='stDateInputField'], [data-testid='stTextInputRootElement'], :is([data-testid='stSelectbox'], [data-testid='stMultiSelect']) > div > [role='group']):not(:focus-within, :has(input:disabled)) {
+  border-color: #5B6577;
+}
+
+/* The what-if strip (ui/whatif.py) while any shift is set: an amber rule at its left, as the SCENARIO badge that
+   leads it, so that a scenario is never read as the market. Amber is user state only (UI spec 2.6). Streamlit gives
+   a container no class of its own choosing, so the state is the badge's presence (the spec's .active). */
+.st-key-whatif:has(.st-key-whatif_scenario) {
+  border-left: 3px solid light-dark(#9E5F00, #E8A33D);
+  padding-left: 0.625rem;
+}
+
+/* A rerun under 300 ms shows no cue; a longer one fades the open tab's elements to 45% until each is replaced
+   (UI spec 2.10). Streamlit fades every stale element to a third after 0.5 s, the header and the sidebar too; they
+   hold the market and the inputs and never fade. */
+[data-testid='stElementContainer'][data-stale='true'] {
+  opacity: 1;
+  transition: none;
+}
+
+.st-key-tab [data-testid='stElementContainer'][data-stale='true'] {
+  opacity: 0.45;
+  transition: opacity 0s 300ms;
+}
+
+/* --- Charts (ui/charts.py show) ------------------------------------------------------------------------------- */
+
+/* On a touch screen Plotly shows its toolbar always (its "hover" mode needs a pointer), over the top of the plot,
+   and Streamlit's element toolbar appears on a tap: both hidden inside each chart's chart_KEY container. A desk
+   user on a phone reads the chart; zoom and download stay on a desktop (UI spec 2.7 item 10, 2.11). */
+@media (hover: none) {
+  [class*='st-key-chart_'] :is(.modebar-container, [data-testid='stElementToolbar']) {
+    display: none;
+  }
 }
 
 /* --- Surface tab --------------------------------------------------------------------------------------------- */
