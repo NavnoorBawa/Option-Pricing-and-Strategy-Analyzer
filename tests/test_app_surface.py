@@ -15,7 +15,7 @@ from streamlit.testing.v1 import AppTest
 
 from options_analyzer import black_scholes, implied_vol, vol_surface
 from options_analyzer.market_data import sample_chain, to_quotes
-from options_analyzer.ui import charts, tab_surface
+from options_analyzer.ui import charts, exports, tab_surface
 
 
 def _ok(at: AppTest) -> None:
@@ -220,7 +220,8 @@ def test_the_excel_workbook_is_only_built_when_downloaded(app, monkeypatch):
     _ok(app)
     assert not built
     surface = vol_surface.fit_market_surface(vol_surface.parse_quotes(vol_surface.sample_quotes())[0], 100, 0.04, 0.0)
-    workbook = tab_surface._workbook(surface, vol_surface.surface_summary(surface), 100.0)
+    provenance = exports.Provenance(exports.UPLOAD, "UPLOAD · quotes.csv — the user's file", None, "Black-76")
+    workbook = tab_surface._workbook(surface, vol_surface.surface_summary(surface), 100.0, provenance)
     assert built
     with zipfile.ZipFile(io.BytesIO(workbook)) as archive:
         sheets = archive.read("xl/workbook.xml").decode()
@@ -228,6 +229,9 @@ def test_the_excel_workbook_is_only_built_when_downloaded(app, monkeypatch):
         # not depend on): xlsxwriter writes them as shared strings, one copy of each across the workbook.
         strings = re.findall(r"<t[^>]*>([^<]*)</t>", archive.read("xl/sharedStrings.xml").decode())
     assert all(f'name="{name}"' in sheets for name in ("ImpliedVol", "LocalVol", "Summary", "Quotes"))
+    # Its provenance first (UI spec 2.13): the source of the numbers travels with the file.
+    assert re.findall(r'<sheet name="([^"]+)"', sheets)[0] == "Provenance"
+    assert {"source", "UPLOAD · quotes.csv — the user's file"} <= set(strings)
     headers = [
         "Strike",
         "Maturity (years)",
@@ -459,16 +463,21 @@ def test_the_3d_surfaces_wrap_instead_of_squeezing_into_narrow_columns(app):
     assert np.hypot(np.hypot(eye.camera.eye.x, eye.camera.eye.y), eye.camera.eye.z) > 3.7  # was 2.9
     blocks = []
 
+    def surface(node) -> bool:
+        return getattr(node, "type", None) == "plotly_chart" and json.loads(node.proto.spec)["data"][0]["type"] == (
+            "surface"
+        )
+
     def walk(node):
         children = getattr(node, "children", None)
         if isinstance(children, dict):
+            # Each chart sits in its own chart_<key> container (charts.show), a child of the row.
             surfaces = [
                 c
                 for c in children.values()
-                if getattr(c, "type", None) == "plotly_chart"
-                and json.loads(c.proto.spec)["data"][0]["type"] == "surface"
+                if surface(c) or any(surface(g) for g in (getattr(c, "children", None) or {}).values())
             ]
-            if surfaces:
+            if surfaces and not any(surface(c) for c in children.values()):  # the row, not a chart_ container
                 blocks.append((node.proto, len(surfaces)))
             for child in children.values():
                 walk(child)

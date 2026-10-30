@@ -14,7 +14,7 @@ import streamlit as st
 
 from .. import black_scholes as bs
 from .. import strategies as strat
-from . import cache, charts
+from . import cache, charts, exports
 from .components import Card, card_row, current_key, link_match
 from .format import (
     DECAY_SWITCH,
@@ -592,7 +592,7 @@ def render(inputs: Inputs) -> None:
     _valuation_note(inputs, position.strategy)
     risk_neutral = st.session_state["risk_neutral"]
     drift = inputs.rate if risk_neutral else st.session_state["drift"] / 100.0
-    _analysis(position, drift, st.session_state["carry"])
+    _analysis(position, drift, st.session_state["carry"], exports.provenance(inputs, model="BSM · European legs"))
 
 
 def _is_sidebar_contract(leg: strat.Leg, inputs: Inputs) -> bool:
@@ -831,7 +831,7 @@ def payoff_range(spot: float, strikes, median: float, sigma_t: float) -> tuple[f
     return max(lo, 0.0), min(hi, 3.0 * high)
 
 
-def _analysis(position: Position, drift: float, carry: bool) -> None:
+def _analysis(position: Position, drift: float, carry: bool, provenance: exports.Provenance) -> None:
     strategy, market, units = position.strategy, position.market, position.units
     metrics = strat.analyze(strategy, market, drift, carry)
     front_days = metrics.horizon * 365
@@ -981,8 +981,8 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
     profile = pd.DataFrame({"Underlying price": spots} | {name: values for values, name, _, _ in curves})
     st.download_button(
         "Download P&L profile (CSV)",
-        profile.to_csv(index=False).encode(),
-        f"{strategy.name.lower().replace(' ', '_')}_pnl.csv",
+        exports.builder(exports.csv, profile, provenance),
+        provenance.file_name(f"{strategy.name.lower().replace(' ', '_')}_pnl", "csv"),
         "text/csv",
         on_click="ignore",
         icon=":material/download:",

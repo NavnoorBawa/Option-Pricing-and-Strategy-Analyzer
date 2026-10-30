@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import functools
 import importlib.util
-import io
 import math
 import zlib
 
@@ -13,7 +12,7 @@ import pandas as pd
 import streamlit as st
 
 from .. import vol_surface as vs
-from . import cache, charts
+from . import cache, charts, exports
 from . import market as mk
 from .components import card_row, current_key
 from .format import md_code, signed
@@ -164,6 +163,16 @@ def _quote_controls(inputs: Inputs) -> vs.VolSurface | None:
         "put; with implied vols a Type column is optional and keeps the out-of-the-money side where a strike has "
         "both. At least two maturities with five or more strikes each.",
     )
+    sample_provenance = exports.provenance(
+        inputs,
+        tag=exports.SYNTHETIC,
+        source=exports.SYNTHETIC_SOURCE,
+        model="Black-76 prices on a parametric SSVI surface",
+        dynamics="none (a snapshot)",
+        forwards="S·e^((r−q)T) from the sidebar r and q",
+        fit="none (the sample's own SSVI surface)",
+        seed=0,  # vol_surface.sample_quotes's noise
+    )
     for label, prices, key in (
         ("Sample with implied vols", False, "sample_quotes"),
         ("Sample with prices", True, "sample_prices"),
@@ -171,8 +180,8 @@ def _quote_controls(inputs: Inputs) -> vs.VolSurface | None:
         sample = vs.sample_quotes(inputs.spot, inputs.rate, inputs.dividend_yield, prices=prices)
         c2.download_button(
             label,
-            sample.to_csv(index=False).encode(),
-            f"sample_option_{'prices' if prices else 'quotes'}.csv",
+            exports.csv(sample, sample_provenance),
+            sample_provenance.file_name(f"sample_option_{'prices' if prices else 'quotes'}", "csv"),
             "text/csv",
             on_click="ignore",
             icon=":material/download:",
@@ -238,7 +247,7 @@ def _quote_controls(inputs: Inputs) -> vs.VolSurface | None:
         return None
     st.caption(context)
     try:
-        raw = pd.read_csv(io.BytesIO(upload.getvalue()))
+        raw = exports.read_csv(upload.getvalue())  # an export of this app starts with its provenance lines
         with st.spinner("Fitting an SVI smile to every maturity…"):
             surface, messages, error = cache.market_surface(
                 raw,
@@ -284,10 +293,11 @@ def _chain_surface(inputs: Inputs) -> vs.VolSurface:
     with st.expander(f"How the chain was read ({len(context.messages)} notes)", icon=":material/info:"):
         for message in context.messages:
             st.caption(message)
+    provenance = _provenance(inputs, CHAIN)
     st.download_button(
         "Download the chain (CSV)",
-        quotes.to_csv(index=False).encode(),
-        f"{mk.INDEX_ROOT.lower()}_chain_SYNTHETIC_{context.as_of:%Y%m%dT%H%M}.csv",
+        exports.builder(exports.csv, quotes, provenance),
+        provenance.file_name(f"{mk.INDEX_ROOT.lower()}_chain", "csv"),
         "text/csv",
         on_click="ignore",
         icon=":material/download:",
@@ -429,35 +439,67 @@ def _contract_readout(surface: vs.VolSurface, inputs: Inputs) -> None:
     )
 
 
-def _workbook(surface: vs.VolSurface, summary: pd.DataFrame, spot: float) -> bytes:
-    """The Excel export: both grids, the summary and, for market quotes, every cleaned quote with its fit."""
+def _provenance(inputs: Inputs, source: str) -> exports.Provenance:
+    """Where the tab's exports come from (UI spec 2.13): the synthetic chain, the user's quotes file with the
+    forwards and calibration chosen for it, or the parametric SSVI surface."""
+    snapshot = "none (a snapshot)"
+    if source == CHAIN:
+        return exports.provenance(inputs, model="Black-76 inversion of the chain's quotes", dynamics=snapshot)
+    if source == SSVI:
+        return exports.provenance(
+            inputs,
+            tag=exports.PARAMETRIC,
+            source=f"{exports.PARAMETRIC} — a parametric SSVI surface, not market data",
+            model="SSVI (Gatheral-Jacquier), parameters typed",
+            dynamics=snapshot,
+            forwards="S·e^((r−q)T) from the sidebar r and q",
+            fit="none (parametric)",
+        )
+    upload = st.session_state.get("quotes_file") or st.session_state.get("quotes_upload")
+    name = getattr(upload, "name", "quotes.csv")
+    forward = st.session_state.get("surface_forward", "Put-call parity")
+    calibration = st.session_state.get("surface_calibration", "Arbitrage-free")
+    return exports.provenance(
+        inputs,
+        tag=exports.UPLOAD,
+        source=f"{exports.UPLOAD} · {' '.join(str(name).split())} — the user's file",
+        model="Black-76 inversion of the file's quotes",
+        dynamics=snapshot,
+        forwards="parity" if FORWARD_CHOICES.get(forward) == "parity" else "the sidebar r and q",
+        fit=f"SVI {calibration.lower()}, spread-weighted",
+    )
+
+
+def _workbook(surface: vs.VolSurface, summary: pd.DataFrame, spot: float, provenance: exports.Provenance) -> bytes:
+    """The Excel export: its provenance, both grids, the summary and, for market quotes, every cleaned quote with
+    its fit."""
     frames = surface.to_frames(spot)
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer) as writer:
-        frames["ImpliedVol"].to_excel(writer, sheet_name="ImpliedVol")
-        frames["LocalVol"].to_excel(writer, sheet_name="LocalVol")
-        summary.to_excel(writer, sheet_name="Summary", index=False)
-        if surface.quotes is not None:
-            surface.quotes.rename(
-                columns={
-                    "strike": "Strike",
-                    "maturity": "Maturity (years)",
-                    "iv": "Quoted implied vol",
-                    "moneyness": "Moneyness K/S",
-                    "fitted_iv": "SVI implied vol",
-                    "vol_half_spread": "Half bid/ask spread in vol",
-                }
-            ).to_excel(writer, sheet_name="Quotes", index=False)
-    return buffer.getvalue()
+    sheets = {
+        "ImpliedVol": frames["ImpliedVol"].reset_index(),
+        "LocalVol": frames["LocalVol"].reset_index(),
+        "Summary": summary,
+    }
+    if surface.quotes is not None:
+        sheets["Quotes"] = surface.quotes.rename(
+            columns={
+                "strike": "Strike",
+                "maturity": "Maturity (years)",
+                "iv": "Quoted implied vol",
+                "moneyness": "Moneyness K/S",
+                "fitted_iv": "SVI implied vol",
+                "vol_half_spread": "Half bid/ask spread in vol",
+            }
+        )
+    return exports.xlsx(sheets, provenance)
 
 
-def _downloads(surface: vs.VolSurface, summary: pd.DataFrame, spot: float) -> None:
+def _downloads(surface: vs.VolSurface, summary: pd.DataFrame, spot: float, provenance: exports.Provenance) -> None:
     frames = surface.to_frames(spot)
     c = st.columns(3)
     c[0].download_button(
         "Implied vol grid (CSV)",
-        frames["ImpliedVol"].to_csv().encode(),
-        "implied_vol_surface.csv",
+        exports.builder(exports.csv, frames["ImpliedVol"], provenance, index=True),
+        provenance.file_name("implied_vol_surface", "csv"),
         "text/csv",
         on_click="ignore",
         icon=":material/download:",
@@ -465,8 +507,8 @@ def _downloads(surface: vs.VolSurface, summary: pd.DataFrame, spot: float) -> No
     )
     c[1].download_button(
         "Local vol grid (CSV)",
-        frames["LocalVol"].to_csv().encode(),
-        "local_vol_surface.csv",
+        exports.builder(exports.csv, frames["LocalVol"], provenance, index=True),
+        provenance.file_name("local_vol_surface", "csv"),
         "text/csv",
         on_click="ignore",
         icon=":material/download:",
@@ -479,8 +521,8 @@ def _downloads(surface: vs.VolSurface, summary: pd.DataFrame, spot: float) -> No
     # on every rerun slowed every interaction on this tab.
     c[2].download_button(
         "Everything (Excel)",
-        functools.partial(_workbook, surface, summary, spot),
-        "volatility_surface.xlsx",
+        exports.builder(_workbook, surface, summary, spot, provenance),
+        provenance.file_name("volatility_surface", "xlsx"),
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         on_click="ignore",
         icon=":material/download:",
@@ -682,4 +724,4 @@ def render(inputs: Inputs) -> None:
     )
 
     st.subheader("Download")
-    _downloads(surface, summary, inputs.spot)
+    _downloads(surface, summary, inputs.spot, _provenance(inputs, source))

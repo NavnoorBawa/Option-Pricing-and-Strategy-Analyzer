@@ -162,6 +162,7 @@ def provenance(
     dynamics: str = "sticky strike",
     forwards: str | None = None,
     fit: str | None = None,
+    seed: int | None = None,
 ) -> Provenance:
     """The provenance of an export made from the sidebar's market, with any field the export sets itself.
 
@@ -181,6 +182,9 @@ def provenance(
         The smile dynamics of a scenario export.
     forwards, fit : str, optional
         Where forwards come from and how vols are fitted, when the export's differ from the market's.
+    seed : int, optional
+        The seed of the random numbers that made the data; default the synthetic chain's under the index preset
+        (``market_data.sample_chain``'s), else none.
 
     Returns
     -------
@@ -197,7 +201,7 @@ def provenance(
         dynamics=dynamics,
         forwards=forwards or ("parity" if index else "S·e^((r−q)T) from the typed r and q"),
         fit=fit or ("SVI arb-free, spread-weighted" if index else "none (one typed vol)"),
-        seed=SYNTHETIC_SEED if index and (tag or default_tag) == SYNTHETIC else None,
+        seed=seed if seed is not None else (SYNTHETIC_SEED if index and (tag or default_tag) == SYNTHETIC else None),
     )
 
 
