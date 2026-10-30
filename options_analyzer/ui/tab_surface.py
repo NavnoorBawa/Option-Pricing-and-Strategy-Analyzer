@@ -340,7 +340,9 @@ def _forwards(surface: vs.VolSurface, inputs: Inputs) -> None:
         st.dataframe(
             # The gap is signed: shown with the minus sign U+2212 and no sign at zero (a format string gives "-" and
             # "+0.0"); a Styler's text is shown only in a column whose config has no format, and sorts by the number.
-            shown.style.format(functools.partial(signed, decimals=1), subset=["Gap to sidebar (bp)"]),
+            shown.style.format(
+                functools.partial(signed, decimals=1), subset=[c for c in ["Gap to sidebar (bp)"] if c in shown]
+            ),
             hide_index=True,
             column_config={
                 "Days": st.column_config.NumberColumn(format="%.2f", help="Calendar days to expiry."),

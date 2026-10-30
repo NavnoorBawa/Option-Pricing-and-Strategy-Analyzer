@@ -183,7 +183,8 @@ def test_the_index_prices_are_black_76_on_the_parity_forward_and_the_surface_vol
     assert cards["Call value"] == f"${call:,.2f}" and cards["Put value"] == f"${put:,.2f}"
     assert cards["Forward price"] == f"${F:,.2f}"
     contract = next(m.value for m in index_app.markdown if m.value.startswith("SPX"))
-    assert f"σ\xa0{vol:.2%}\xa0surface" in contract and f"DF\xa0{DF:.5f}" in contract
+    assert f"σ\xa0{vol:.2%}\xa0·" in contract
+    assert any(f"DF {DF:.5f}" in c.value for c in index_app.sidebar.caption)
 
 
 def test_the_textbook_preset_reproduces_version_2(new_app):
@@ -304,7 +305,7 @@ def test_an_override_vol_is_marked(new_app):
     vol.set_value(vol.value + 1.0).run()
     _ok(at)
     assert ":orange-badge[OVERRIDE]" in _badges(at)
-    assert "\xa0override" in next(m.value for m in at.markdown if m.value.startswith("SPX"))
+    assert "%*" in next(m.value for m in at.markdown if m.value.startswith("SPX"))
     assert _cards(at)["Call value"] != surface_card
     assert any(c.value.startswith("+1.00 vp against the surface's") for c in at.sidebar.caption)
 

@@ -251,8 +251,8 @@ def _index_market(sb, model: ModelConfig | None = None) -> Inputs:
         sb.caption(f"σ {pct(surface_vol, 2)} from the surface at K/F {float(strike) / forward:.4f}")
     rate, dividend_yield = mk.carry(forward, discount, context.spot, maturity)
     sb.caption(
-        f"{mk.INDEX_ROOT} {level(context.spot)}, synthetic (not market data). The expiry's forward and discount "
-        "factor come from put-call parity on its quotes; the header's last row shows them."
+        f"{mk.INDEX_ROOT} {level(context.spot)}, synthetic (not market data). From put-call parity on the expiry's "
+        f"quotes: F {level(forward)}, DF {discount:.5f}, so r {pct(rate, 2)} and q {pct(dividend_yield, 2)}."
     )
     return Inputs(
         spot=context.spot,

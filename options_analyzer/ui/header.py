@@ -24,7 +24,6 @@ group stays on one line down to a 360 px screen. :func:`logo` draws the monogram
 from __future__ import annotations
 
 import datetime as dt
-import math
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit, urlunsplit
@@ -144,9 +143,10 @@ def index_ticker(inputs: Inputs) -> str:
 
 
 def contract_line(inputs: Inputs) -> str:
-    """The index preset's contract, for the line above the price cards: the expiry with its settlement and time to
-    it, the strike, the vol and where it comes from, the expiry's parity forward and discount factor, and the rate
-    and dividend yield they imply (which the models use). Items are joined like the ticker's and do not break.
+    """The index preset's contract, the header strip's last row: the expiry with its settlement and time to it, the
+    strike, the vol (with an asterisk when it is typed over the surface's, beside the OVERRIDE badge) and the
+    expiry's parity forward, in about 50 characters, one line on a 390 px phone (the sidebar gives the discount
+    factor and the carry). Items are joined like the ticker's and do not break.
 
     Examples
     --------
@@ -156,20 +156,16 @@ def contract_line(inputs: Inputs) -> str:
     >>> inputs = Inputs(market.spot, 5815.0, row["maturity"] * 365, 0.1561, r, q, ModelConfig(), mk.INDEX, market,
     ...                 row["expiry"], row["settlement"], row["maturity"], 0.1561)
     >>> contract_line(inputs).replace("\\xa0", " ").replace("\\u2011", "-")
-    'SPX 20-Nov-26 AM 5,815 · 28d · σ 15.61% surface · F 5,813.91 · DF 0.99664 · r 4.43% · q 1.27%'
+    'SPX 20-Nov-26 AM 5,815 · 28d · σ 15.61% · F 5,813.91'
     """
     expiry_date = inputs.expiry_date
     assert expiry_date is not None and inputs.surface_vol is not None  # the index preset
     strike = f"{inputs.strike:,.0f}" if float(inputs.strike).is_integer() else level(inputs.strike)
-    source = "override" if inputs.vol_overridden else "surface"
     items = (
         f"{mk.INDEX_ROOT} {short_date(expiry_date)} {inputs.settlement} {strike}".replace("-", "\u2011"),
         mk.span(inputs.days),
-        f"σ {pct(inputs.volatility, 2)} {source}",
+        f"σ {pct(inputs.volatility, 2)}" + ("*" if inputs.vol_overridden else ""),
         f"F {level(inputs.forward)}",
-        f"DF {math.exp(-inputs.rate * inputs.expiry):.5f}",
-        f"r {_rate(inputs.rate)}",
-        f"q {_rate(inputs.dividend_yield)}",
     )
     return _SEPARATOR.join(item.replace(" ", "\xa0") for item in items)
 
