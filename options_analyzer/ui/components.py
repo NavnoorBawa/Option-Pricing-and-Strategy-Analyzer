@@ -375,6 +375,7 @@ COLUMN_KINDS: dict[str, ColumnKind] = {
     "money": ColumnKind("$", "%,.{d}f", None, "money"),  # unsigned amounts: 2 dp below $1,000, else whole dollars
     "pnl": ColumnKind("$", "%,.{d}f", None, "money"),  # P&L and losses, negative
     "dollar_delta": ColumnKind("$", "%,.{d}f", 0),  # $Δ
+    "futures": ColumnKind("ES", "%.{d}f", 2),  # position delta in E-mini contracts; label "Δ (MES)" for micros
     "gamma_pnl": ColumnKind("$", "%,.{d}f", None, "money"),  # Γ P&L 1%: ½Γ(0.01S)² × units
     "vega": ColumnKind("$/vp", "%,.{d}f", None, "money"),
     "theta": ColumnKind("$/day", "%,.{d}f", None, "money"),
@@ -395,6 +396,9 @@ COLUMN_KINDS: dict[str, ColumnKind] = {
     "days": ColumnKind("", "%,.{d}f", 0),  # DTE, whole days
     "year_fraction": ColumnKind("", "%.{d}f", 6),  # diagnostics only
 }
+#: The precision of a data-dependent kind when :func:`col` is called without ``digits`` (no data to choose from):
+#: whole strikes (the index's 5-point grid), cents, whole basis points.
+_AUTO_DEFAULT = {"strike": 0, "money": 2, "bp": 0}
 #: Rows a table shows before it scrolls (UI spec 2.8): shorter tables take their content's height.
 TABLE_ROWS = 15
 
@@ -465,7 +469,7 @@ def col(
     if kind == "date":
         return st.column_config.DateColumn(header, format="DD-MMM-YY", **common)
     assert spec.format is not None
-    places = spec.digits if spec.digits is not None else (2 if digits is None else digits)
+    places = spec.digits if spec.digits is not None else (_AUTO_DEFAULT[spec.auto] if digits is None else digits)
     return st.column_config.NumberColumn(header, format=spec.format.format(d=places), **common)
 
 
@@ -506,6 +510,7 @@ def table(
     help: Mapping[str, str],
     *,
     labels: Mapping[str, str] | None = None,
+    digits: Mapping[str, int] | None = None,
     max_rows: int = TABLE_ROWS,
     **kwargs: Any,
 ) -> Any:
@@ -526,6 +531,9 @@ def table(
         Every column's help text.
     labels : mapping of str to str, optional
         Headers other than the column names (without their units, which :func:`col` adds).
+    digits : mapping of str to int, optional
+        A precision other than the one chosen from the data, for a column whose kind leaves it to the data (whole
+        dollars in a position's Γ P&L column whose largest value is below $1,000, as the spec's ``−$68``).
     max_rows : int, default 15
         Rows shown before the table scrolls.
     **kwargs
@@ -562,8 +570,11 @@ def table(
         if kind.format is not None:
             values = pd.to_numeric(data[name], errors="coerce").to_numpy(float)
             places = _auto_digits(kind, values)
+            if kind.digits is None and digits and name in digits:
+                places = int(digits[name])
             if kind.format.endswith("d"):  # whole numbers: printf's %d drops a fraction instead of rounding it
-                shown[name] = pd.array(np.round(values), dtype="Int64") if np.isnan(values).any() else np.round(values)
+                whole = np.round(values) + 0.0
+                shown[name] = pd.array(whole, dtype="Int64") if np.isnan(values).any() else whole
             else:
                 shown[name] = _rounded(kind, values, places)
         config[name] = col(
@@ -577,5 +588,6 @@ def table(
 
 def table_height(rows: int) -> int:
     """Height in px of a table that shows ``rows`` rows and its header: what ``height="content"`` gives a table of
-    that many rows (checked in Chromium by ``tests/test_theme.py``)."""
+    that many rows at :data:`ROW_HEIGHT` (header and rows of 28 px and the 3 px of the frame's borders, measured in
+    Chromium on Streamlit 1.66 by ``tests/test_format_standard.py``)."""
     return math.ceil((rows + 1) * ROW_HEIGHT + 3)

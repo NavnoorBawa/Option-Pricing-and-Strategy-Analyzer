@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as dt
 import doctest
 import importlib
+import itertools
 import math
 import re
 from pathlib import Path
@@ -75,7 +76,7 @@ def test_vols_rates_and_basis_points():
 
 
 def test_deltas_and_position_delta_in_futures():
-    assert fmt.greek(0.508, "delta", digits=3) == "+0.508"
+    assert fmt.greek(0.508, "delta", digits=3, unit=False) == "+0.508"
     assert [fmt.delta_label(d, side=False) for d in (0.16, 0.25)] == ["16Δ", "25Δ"]
     assert [fmt.delta_label(d) for d in (-0.25, 0.5, 0.25)] == ["25Δp", "ATM", "25Δc"]
     # Position delta, spec 2.5: −$19,525 · −0.07 ES at S 5,800, the 18-Dec ES future at F 5,830.63 (carry factor
@@ -100,7 +101,7 @@ def test_gamma_pnl_one_percent_and_its_help():
     assert fmt.signed(pnl, 0, prefix="$") == "−$68"
     assert fmt.signed(change, 0, prefix="$") == "−$13,600"
     assert change / pnl == pytest.approx(200.0, rel=1e-12)
-    assert fmt.greek(0.000016137, "gamma", digits=3) == "+0.0000161"  # per option: 3 significant digits
+    assert fmt.greek(0.000016137, "gamma", digits=3, unit=False) == "+0.0000161"  # per option: 3 significant digits
 
 
 def test_vega_theta_rho():
@@ -175,9 +176,12 @@ def test_one_minus_sign_and_no_negative_zero(name):
     for value in _sample():
         text = function(value)
         assert "-" not in text, (name, value, text)  # U+2212 only
-        assert not re.match(f"[{MINUS}+][$]?[0.,]+(?![0-9])", text), (name, value, text)  # never −0.00 or +0.00
-        if MINUS in text:
-            assert value < 0, (name, value, text)
+        lead = re.match(f"([{MINUS}+]?)[$]?([0-9.,]+)", text)
+        assert lead, (name, value, text)
+        sign, digits = lead.groups()
+        if sign:  # never −0.00 or +0.00: a signed value shows a non-zero digit
+            assert digits.strip("0.,"), (name, value, text)
+        assert (sign == MINUS) == (value < 0 and bool(digits.strip("0.,"))), (name, value, text)
 
 
 @pytest.mark.parametrize("name", ["vol_change", "bp", "futures_equiv", "signed"])
@@ -200,7 +204,7 @@ def test_time_left_is_floored_and_monotone():
         return sum(int(m.group(1)) * k for m, k in ((days, 1440), (hours, 60), (mins, 1)) if m)
 
     ranks = [rank(fmt.time_left(m)) for m in minutes]
-    assert all(b >= a for a, b in zip(ranks, ranks[1:], strict=False))
+    assert all(b >= a for a, b in itertools.pairwise(ranks))
     assert all(r <= m + 1e-6 for r, m in zip(ranks, minutes, strict=True))  # never more time than is left
 
 
@@ -230,6 +234,87 @@ def test_every_column_kind_has_a_format_and_a_unit_in_its_header():
             printf = config["type_config"]["format"]
             assert re.fullmatch(r"%[+,]?(\.\d+)?[dfg]", printf), (kind, printf)
             assert "+" not in printf or kind == "quantity"  # printf's "+" also signs zero
+
+
+def _sprintf(printf: str, value: float) -> str:
+    """What Streamlit's NumberColumn shows for ``value`` under ``printf`` (its sprintf-js, 1.65 and 1.66): the sign
+    from ``value >= 0`` (so −0.0 shows no sign), ``toFixed`` for f, ``Number(toPrecision)`` for g, ``parseInt`` for d,
+    and the "," flag's thousands separators in the integer part. Golden values avoid exact binary ties, where
+    JavaScript's toFixed and Python's rounding may differ."""
+    flags, precision, kind = re.fullmatch(r"%([+,]*)(?:\.(\d+))?([dfg])", printf).groups()
+    size = abs(value)
+    if kind == "f":
+        text = f"{size:.{int(precision)}f}"
+    elif kind == "g":
+        text = repr(float(f"{size:.{int(precision)}g}"))
+        text = text[:-2] if text.endswith(".0") else text
+    else:
+        text = str(int(size))
+    if "," in flags:
+        whole, _, fraction = text.partition(".")
+        text = f"{int(whole):,}" + (f".{fraction}" if fraction else "")
+    sign = "-" if value < 0 else ("+" if "+" in flags else "")
+    return sign + text
+
+
+#: One golden cell per column kind: (kind, the column's values in display units, the header for label "X", the
+#: text of the first cell). Signed losses read with the hyphen-minus inside st.dataframe (spec 2.8).
+GOLDEN_CELLS = [
+    ("level", [5815.2249], "X", "5,815.22"),
+    ("strike", [5815.0, 5820.0], "X", "5,815"),
+    ("strike", [582.5, 585.0], "X", "582.5"),
+    ("premium", [98.570661], "X", "98.57"),
+    ("premium_diag", [98.570661], "X", "98.570661"),
+    ("money", [2240.0, 150.0], "X ($)", "2,240"),  # one precision from the largest value: whole from $1,000
+    ("money", [224.0, 15.5], "X ($)", "224.00"),
+    ("pnl", [-7760.0, 1234.4], "X ($)", "-7,760"),  # MAX LOSS: a loss is negative
+    ("pnl", [-0.004, 12.0], "X ($)", "0.00"),  # rounds to zero: no sign
+    ("dollar_delta", [-19525.3], "X ($)", "-19,525"),
+    ("futures", [-0.0673], "X (ES)", "-0.07"),  # −$19,525 of delta at S 5,800 is −0.07 ES
+    ("gamma_pnl", [-68.2], "X ($)", "-68.20"),
+    ("vega", [-306.4, 1200.0], "X ($/vp)", "-306"),
+    ("theta", [41.2], "X ($/day)", "41.20"),
+    ("rho", [31.0], "X ($/1%)", "31.00"),
+    ("vol", [15.4612], "X (%)", "15.46"),
+    ("vol_change", [-0.0701], "X (vp)", "-0.07"),
+    ("rate", [4.75], "X (%)", "4.75"),
+    ("bp", [45.2, 3.0], "X (bp)", "45"),
+    ("bp", [4.5], "X (bp)", "4.5"),
+    ("bp", [0.05], "X (bp)", "0.05"),
+    ("delta", [0.50791], "X", "0.508"),
+    ("gamma", [0.093612], "X", "0.0936"),
+    ("greek", [1.23456e-4], "X", "0.000123"),
+    ("probability", [73.49], "X (%)", "73.5"),
+    ("share", [99.04], "X (%)", "99.0"),
+    ("moneyness", [97.502], "X (%)", "97.5"),
+    ("log_moneyness", [-0.02525], "X", "-0.025"),
+    ("quantity", [-2.0], "X", "-2"),
+    ("quantity", [1.0], "X", "+1"),
+    ("count", [2363.0], "X", "2,363"),
+    ("days", [55.7], "X", "56"),
+    ("year_fraction", [0.07597], "X", "0.075970"),
+]
+
+
+def test_golden_cells_of_every_column_kind(monkeypatch):
+    numeric = {k for k, spec in components.COLUMN_KINDS.items() if spec.format is not None}
+    assert {kind for kind, *_ in GOLDEN_CELLS} == numeric  # every number kind has a golden cell
+    for kind, values, header, cell in GOLDEN_CELLS:
+        data, options = _drawn(monkeypatch, pd.DataFrame({"X": values}), {"X": kind})
+        config = options["column_config"]["X"]
+        assert config["label"] == header, kind
+        assert _sprintf(config["type_config"]["format"], data["X"].iloc[0]) == cell, (kind, values)
+
+
+def test_the_gamma_pnl_column_can_show_whole_dollars(monkeypatch):
+    # Spec 2.5 shows a position's Γ P&L 1% as −$68: a caller may fix the precision of a data-dependent column.
+    data, options = _drawn(monkeypatch, pd.DataFrame({"G": [-68.2, 12.4]}), {"G": "gamma_pnl"}, digits={"G": 0})
+    assert _sprintf(options["column_config"]["G"]["type_config"]["format"], data["G"].iloc[0]) == "-68"
+
+
+def test_the_sprintf_model_reads_streamlits_formats():
+    assert _sprintf("%,.2f", -1234.5) == "-1,234.50" and _sprintf("%+d", 0.0) == "+0"
+    assert _sprintf("%,.0f", -0.0) == "0"  # JavaScript's -0 >= 0 is true: no sign
 
 
 def test_a_label_that_names_its_unit_keeps_it():
@@ -267,7 +352,7 @@ def test_the_table_helper_follows_the_tables_standard(monkeypatch):
     config = options["column_config"]
     assert options["row_height"] == 28 and options["hide_index"] and options["height"] == "content"
     assert options["placeholder"] == MISSING and options["key"] == "tbl_demo"
-    assert config["Strike"]["pinned"] is True and all("pinned" not in config[c] for c in ("IV", "P&L", "Edge"))
+    assert config["Strike"]["pinned"] is True and all(config[c]["pinned"] is not True for c in ("IV", "P&L", "Edge"))
     assert all(config[c]["help"] for c in frame)
     formats = {c: config[c]["type_config"]["format"] for c in frame}
     # One precision per column: strikes whole, P&L whole dollars from $1,000, bp at 1 dp (largest 1.0 bp rounds to 1).

@@ -126,7 +126,8 @@ class Provenance:
         Examples
         --------
         >>> p = Provenance(SYNTHETIC, SYNTHETIC_SOURCE, datetime(2026, 10, 23, 16), "BSM · closed form", seed=0)
-        >>> print("\n".join(p.lines()[:3]))
+        >>> for line in p.lines()[:3]:
+        ...     print(line)
         source: SYNTHETIC — not market data
         as_of: 2026-10-23T16:00-04:00 (cash close)
         model: BSM · closed form; dynamics: sticky strike; forwards: parity; fit: SVI arb-free
