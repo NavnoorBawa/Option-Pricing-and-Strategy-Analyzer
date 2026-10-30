@@ -63,10 +63,18 @@ an independent adversarial check before it merged:
 ## Remaining
 
 ### Volatility surface
-- [ ] SF-3 Forwards and discount factors per expiry from put–call parity, Black-76 inversion (turns the strict xfails
-  in `tests/test_market_data.py` into passes).
-- [ ] SF-4 Spread-weighted SVI calibration constrained against butterfly and calendar arbitrage.
-- [ ] SF-8 Wing extrapolation within Lee's moment bound, flagged in charts.
+- [x] SF-3 Forwards and discount factors per expiry from put–call parity, Black-76 inversion. On the synthetic SPX
+  chain read with the Treasury rate, forwards land within 0.22 bp and at-the-money vols within 0.0064 vol point, with
+  no arbitrage; the sidebar forward was 85 to 142 bp off. American chains are read at the given rates (parity does not
+  hold for them), with a message saying so.
+- [x] SF-4 Spread-weighted SVI calibration constrained against butterfly and calendar arbitrage (SLSQP with analytic
+  gradients and cutting planes). 200 random noisy surfaces end with no static arbitrage, no expiry's RMSE more than
+  8.6 % above its unconstrained fit; Gatheral and Jacquier's arbitrageable slice is fitted 0.63 vol point away with a
+  positive density. The SF-3 acceptance is restated in spread terms: on the synthetic chain every fitted vol is inside
+  the bid/ask and the median error is 0.13 to 0.22 of the half-spread. An expiry where no arbitrage-free smile is
+  found keeps its unconstrained fit with a note, never silently.
+- [x] SF-8 Wing extrapolation within Lee's moment bound (wing slope at most 2), out to four at-the-money standard
+  deviations and at most |ln K/F| = 1.5, flagged as extrapolated in the readout and drawn dotted on the smiles.
 - [ ] SF-1 Surface tab message severity and empty cells.
 - [ ] SF-5 Vectorised inversion at chain scale and de-Americanised quotes.
 - [ ] SF-6 Desk conventions on the Surface tab: delta axes, 25-delta risk reversal and butterfly, term structure,

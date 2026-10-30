@@ -3,6 +3,7 @@
 import base64
 import io
 import json
+import re
 import zipfile
 from datetime import datetime
 
@@ -223,9 +224,11 @@ def test_the_excel_workbook_is_only_built_when_downloaded(app, monkeypatch):
     assert built
     with zipfile.ZipFile(io.BytesIO(workbook)) as archive:
         sheets = archive.read("xl/workbook.xml").decode()
+        # The Quotes sheet's headers, read from the file itself (pd.read_excel needs openpyxl, which the app does
+        # not depend on): xlsxwriter writes them as shared strings, one copy of each across the workbook.
+        strings = re.findall(r"<t[^>]*>([^<]*)</t>", archive.read("xl/sharedStrings.xml").decode())
     assert all(f'name="{name}"' in sheets for name in ("ImpliedVol", "LocalVol", "Summary", "Quotes"))
-    quotes = pd.read_excel(io.BytesIO(workbook), sheet_name="Quotes")
-    assert list(quotes.columns) == [
+    headers = [
         "Strike",
         "Maturity (years)",
         "Quoted implied vol",
@@ -233,6 +236,7 @@ def test_the_excel_workbook_is_only_built_when_downloaded(app, monkeypatch):
         "SVI implied vol",
         "Half bid/ask spread in vol",  # was the raw name vol_half_spread
     ]
+    assert set(headers) <= set(strings) and "vol_half_spread" not in strings
 
 
 def _maturity_column(header: str, values, as_years: bool) -> pd.DataFrame:

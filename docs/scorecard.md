@@ -63,6 +63,8 @@ The numbers a desk would have caught first (docs/improvement-guide.md section 2)
 | Quotes a few ulps above intrinsic (20,000 random double-precision quotes) | 9.5 % inverted more than 1 % off, up to 32× | Rejected as `no_time_value` (2,259); the rest within 7.7e-6 |
 | Fed 2026 severely adverse vol shock | ×4.0 | ×2.73 (72.0 / 26.4, the Fed's table 2.A) |
 | Monte Carlo 95 % interval with about 10 / 30 / 100 paths on the scarce side | Shown; covered 87.8 % / 92.2 % / 94.0 % | Withheld with the reason below 300 such paths |
+| Synthetic SPX chain (spot 5,000) read with the Treasury rate and no dividend yield | Sidebar carry for every expiry: forwards 142 bp off; 49 quotes dropped as outside the no-arbitrage bounds; 62 calendar and 49 butterfly arbitrage points in the fit | Parity forwards and the arbitrage-free SVI fit: forwards within 0.22 bp, at-the-money vols within 0.0064 vol point, no quote dropped, no arbitrage, every fitted vol inside its bid/ask |
+| 200 random noisy arbitrage-free surfaces, arbitrage left after the fit | Not constrained | None; no expiry's RMSE more than 8.6 % above its unconstrained fit |
 | Tree decay against the closed form (501 steps, σ 20 %, strikes 80–120, 2 days to 10 years) | Not shown | Leisen–Reimer within 4.0e-6; Cox–Ross–Rubinstein within 1.5 % (interpolated trees; the same steps were off by 8.5 %) |
 
 ## Free-resources ledger

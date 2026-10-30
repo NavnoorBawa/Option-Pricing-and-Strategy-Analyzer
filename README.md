@@ -75,9 +75,13 @@ built from.
   VaR for comparison.
 
 **Surface and IV**
-- Arbitrage-free SSVI surfaces or your own quotes (implied vols, or option prices inverted with Black–Scholes–Merton),
-  fitted with an SVI smile per expiry and turned into local volatility with Gatheral's formula; calendar and butterfly
-  arbitrage are detected and reported, never silently patched.
+- Surfaces from quotes as a desk builds them: each expiry's forward and discount factor from put–call parity (a
+  weighted fit of C − P = DF·(F − K) near the money, outliers trimmed), prices inverted with Black-76 at them, and an
+  SVI smile per expiry fitted to the bid/ask with spread weights and held free of butterfly and calendar arbitrage,
+  its wings within Lee's moment bound; then local volatility with Gatheral's formula. On the synthetic SPX chain the
+  forwards come back within 0.22 bp and the at-the-money vols within 0.0064 vol point, every fitted vol inside its
+  bid/ask. Arbitrage in the quotes themselves is reported, and an expiry that cannot be fitted without it says so.
+- Parametric SSVI surfaces as a worked example.
 - An implied-volatility solver for European and American quotes that checks the no-arbitrage bounds first and
   rejects a quote whose time value is lost in rounding (within 1e-12·max(S, K) of its zero-volatility value) as
   `no_time_value` rather than return a vol made of rounding error; under the American (ALO) model it inverts the
