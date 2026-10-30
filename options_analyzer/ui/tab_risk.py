@@ -357,6 +357,12 @@ def _as_shown(value: float) -> float:
     return math.copysign(amount, value)
 
 
+def _loss_text(value: float | None) -> str:
+    """A VaR or ES in the table of statistics: ``$70.55``, ``−$4.20`` (U+2212) when even the tail is a gain, and
+    ``–`` when there is none."""
+    return money(value).replace("-", MINUS, 1)
+
+
 def _var_help(result: risk.VaRResult, meaning: str) -> str:
     """Help of a VaR card: what it means, then the exact amount and its 95% simulation interval."""
     lo, hi = result.var_ci95
@@ -575,6 +581,8 @@ def _var(position: Position) -> None:
         alt=f"Histogram of the simulated P&L ($) over {horizon} trading day(s), with the VaR and the Expected "
         "Shortfall",
     )
+    # The analytic comparator: the same in both runs, which share the Greeks, horizon and confidence.
+    dg = result.delta_gamma
     stats = pd.DataFrame(
         [
             {"Statistic": "Mean P&L", "Value": money(result.mean, signed=True)},
@@ -590,6 +598,8 @@ def _var(position: Position) -> None:
             {"Statistic": "Worst simulated P&L", "Value": money(result.worst, signed=True)},
             {"Statistic": "Best simulated P&L", "Value": money(result.best, signed=True)},
             {"Statistic": f"Delta-normal VaR {level}", "Value": money(result.delta_normal_var)},
+            {"Statistic": f"Delta-gamma-theta VaR {level}", "Value": _loss_text(dg.var if dg else None)},
+            {"Statistic": f"Delta-gamma-theta ES {level}", "Value": _loss_text(dg.expected_shortfall if dg else None)},
         ]
     )
     vol_moves = (
@@ -598,10 +608,13 @@ def _var(position: Position) -> None:
         else "implied vol frozen"
     )
     # What delta-normal VaR leaves out, so what its gap to the full-revaluation VaR shows. One-day GARCH returns
-    # with Normal shocks are Normal (the variance starts at its long-run level), so their tails are no fatter.
-    left_out = "gamma, time decay and vega" if with_vol else "gamma and time decay"
+    # with Normal shocks are Normal (the variance starts at its long-run level), so their tails are no fatter. The
+    # delta-gamma-theta comparator keeps gamma and time decay, so its gap shows the spot risk beyond gamma instead.
+    vega = " and vega" if with_vol else ""
+    fat_tails = ""
     if distribution == "student_t" or garch_t or (distribution == "garch" and horizon > 1):
-        left_out += ", and the fatter tails of the return model"
+        fat_tails = ", and the fatter tails of the return model"
+    left_out = ("gamma, time decay and vega" if with_vol else "gamma and time decay") + fat_tails
     c1, c2 = st.columns([1, 1.4])
     c1.dataframe(stats, hide_index=True)
     c2.caption(
@@ -609,7 +622,9 @@ def _var(position: Position) -> None:
         f"(zero drift, volatility {position.market.volatility:.1%}), with {horizon} trading day(s) of time decay and "
         f"{vol_moves}. VaR and ES use the Acerbi–Tasche estimators on the sorted P&L. Delta-normal VaR is the "
         f"linear approximation |Δ|·S·σ·√(h/252)·z with Normal returns: its gap to the full-revaluation VaR shows "
-        f"the position's {left_out}."
+        f"the position's {left_out}. Delta-gamma-theta VaR and ES are exact for the P&L Δ·x + ½Γ·x² + θ·h/252 (θ "
+        f"per year), x a Normal spot move of standard deviation S·σ·√(h/252): their gap to the full revaluation "
+        f"shows the position's spot risk beyond gamma{vega}{fat_tails}."
         + (" Excess kurtosis is unstable for ν ≤ 4." if distribution == "student_t" or garch_t else "")
         + (
             f" {result.settled_legs} option leg(s) expire before the horizon and are settled on the simulated price "
