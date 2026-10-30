@@ -18,7 +18,7 @@ from .. import risk, scenarios
 from .. import strategies as strat
 from . import cache, charts
 from .components import Card, card_row, current_key
-from .format import MINUS, SHORT_SCALES, decay_label, md, money, money_short, signed
+from .format import MINUS, SHORT_SCALES, decay_label, md, money, money_short, number, signed
 from .tab_strategy import Position, expires_within_a_day
 
 CONFIDENCE_LEVELS = (0.95, 0.975, 0.99, 0.995, 0.999)
@@ -338,10 +338,14 @@ def _stress_tests(position: Position) -> None:
         )
 
 
+def _minus(text: str) -> str:
+    """``text`` with the minus sign U+2212 for the leading hyphen-minus that :func:`money` and :func:`number` write."""
+    return MINUS + text[1:] if text.startswith("-") else text
+
+
 def _signed_short(value: float) -> str:
     """:func:`money_short` with an explicit sign, the minus sign U+2212: ``+$1,029`` or ``−$18.40``."""
-    text = money_short(value, signed=True)
-    return MINUS + text[1:] if text.startswith("-") else text
+    return _minus(money_short(value, signed=True))
 
 
 def _as_shown(value: float) -> float:
@@ -355,12 +359,6 @@ def _as_shown(value: float) -> float:
     scale = {suffix: size for size, suffix in SHORT_SCALES}.get(text[-1])
     amount = float(text) if scale is None else float(text[:-1]) * scale
     return math.copysign(amount, value)
-
-
-def _loss_text(value: float | None) -> str:
-    """A VaR or ES in the table of statistics: ``$70.55``, ``−$4.20`` (U+2212) when even the tail is a gain, and
-    ``–`` when there is none."""
-    return money(value).replace("-", MINUS, 1)
 
 
 def _var_help(result: risk.VaRResult, meaning: str) -> str:
@@ -581,7 +579,8 @@ def _var(position: Position) -> None:
         alt=f"Histogram of the simulated P&L ($) over {horizon} trading day(s), with the VaR and the Expected "
         "Shortfall",
     )
-    # The analytic comparator: the same in both runs, which share the Greeks, horizon and confidence.
+    # The analytic comparator: the same in both runs, which share the Greeks, horizon and confidence. Its VaR and ES
+    # are negative when even the tail is a gain (long gamma with little time decay); a missing one reads "–".
     dg = result.delta_gamma
     stats = pd.DataFrame(
         [
@@ -589,32 +588,41 @@ def _var(position: Position) -> None:
             {"Statistic": "Standard deviation", "Value": money(result.std)},
             {
                 "Statistic": "Skewness",
-                "Value": "n/a (riskless)" if np.isnan(result.skewness) else f"{result.skewness:.3f}",
+                "Value": "n/a (riskless)" if np.isnan(result.skewness) else number(result.skewness, 3),
             },
             {
                 "Statistic": "Excess kurtosis",
-                "Value": "n/a (riskless)" if np.isnan(result.excess_kurtosis) else f"{result.excess_kurtosis:.3f}",
+                "Value": "n/a (riskless)" if np.isnan(result.excess_kurtosis) else number(result.excess_kurtosis, 3),
             },
             {"Statistic": "Worst simulated P&L", "Value": money(result.worst, signed=True)},
             {"Statistic": "Best simulated P&L", "Value": money(result.best, signed=True)},
             {"Statistic": f"Delta-normal VaR {level}", "Value": money(result.delta_normal_var)},
-            {"Statistic": f"Delta-gamma-theta VaR {level}", "Value": _loss_text(dg.var if dg else None)},
-            {"Statistic": f"Delta-gamma-theta ES {level}", "Value": _loss_text(dg.expected_shortfall if dg else None)},
+            {"Statistic": f"Delta-gamma-theta VaR {level}", "Value": money(dg.var if dg else None)},
+            {"Statistic": f"Delta-gamma-theta ES {level}", "Value": money(dg.expected_shortfall if dg else None)},
         ]
     )
+    stats["Value"] = stats["Value"].map(_minus)  # one minus sign, U+2212, in every row
     vol_moves = (
         f"implied vol moving (vol of vol {100 * config.vol_of_vol:g}% a year, correlation {signed(corr)} with spot)"
         if with_vol
         else "implied vol frozen"
     )
     # What delta-normal VaR leaves out, so what its gap to the full-revaluation VaR shows. One-day GARCH returns
-    # with Normal shocks are Normal (the variance starts at its long-run level), so their tails are no fatter. The
-    # delta-gamma-theta comparator keeps gamma and time decay, so its gap shows the spot risk beyond gamma instead.
-    vega = " and vega" if with_vol else ""
-    fat_tails = ""
-    if distribution == "student_t" or garch_t or (distribution == "garch" and horizon > 1):
-        fat_tails = ", and the fatter tails of the return model"
-    left_out = ("gamma, time decay and vega" if with_vol else "gamma and time decay") + fat_tails
+    # with Normal shocks are Normal (the variance starts at its long-run level), so their tails are no fatter.
+    fat = distribution == "student_t" or garch_t or (distribution == "garch" and horizon > 1)
+    left_out = ("gamma, time decay and vega" if with_vol else "gamma and time decay") + (
+        ", and the fatter tails of the return model" if fat else ""
+    )
+    # The delta-gamma-theta comparator keeps today's gamma and theta, so its gap shows how they change: with the spot
+    # and, beyond a few days, as expiry nears (a 30-day long straddle over 20 days: $222 against $372 by full
+    # revaluation, a gap that is almost all the faster time decay; measured in tests/test_risk.py).
+    gap = [
+        "spot risk beyond gamma",
+        "how its time decay and gamma change as expiry nears",
+        *(["its vega"] if with_vol else []),
+        *(["the fatter tails of the return model"] if fat else []),
+        *(["the legs that expire before the horizon"] if result.settled_legs else []),
+    ]
     c1, c2 = st.columns([1, 1.4])
     c1.dataframe(stats, hide_index=True)
     c2.caption(
@@ -624,7 +632,7 @@ def _var(position: Position) -> None:
         f"linear approximation |Δ|·S·σ·√(h/252)·z with Normal returns: its gap to the full-revaluation VaR shows "
         f"the position's {left_out}. Delta-gamma-theta VaR and ES are exact for the P&L Δ·x + ½Γ·x² + θ·h/252 (θ "
         f"per year), x a Normal spot move of standard deviation S·σ·√(h/252): their gap to the full revaluation "
-        f"shows the position's spot risk beyond gamma{vega}{fat_tails}."
+        f"shows the position's {', '.join(gap[:-1])}, and {gap[-1]}."
         + (" Excess kurtosis is unstable for ν ≤ 4." if distribution == "student_t" or garch_t else "")
         + (
             f" {result.settled_legs} option leg(s) expire before the horizon and are settled on the simulated price "

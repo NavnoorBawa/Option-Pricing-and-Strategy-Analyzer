@@ -34,7 +34,10 @@ Beside the simulation, :func:`delta_gamma_var` gives the exact VaR and ES of
 the position's delta-gamma-theta P&L, quadratic in a Normal spot move: the
 analytic comparator that :func:`value_at_risk` stores on :class:`VaRResult`.
 Its gap to the full revaluation is what the quadratic leaves out: the spot
-terms beyond the second order, legs that expire within the horizon,
+terms beyond the second order, the change in time decay and gamma as expiry
+nears (theta enters to first order only, so beyond a few days this can
+dominate: over 20 trading days of a 30-day long straddle the comparator's VaR
+is 40 % below the full revaluation's), legs that expire within the horizon,
 implied-vol moves and the fatter tails of the Student-t and GARCH models.
 """
 
@@ -141,9 +144,9 @@ class DeltaGammaVaR:
     expected_shortfall : float
         Minus the mean P&L over the worst ``1 - confidence`` of outcomes ($); at least ``var``.
     es_error : float
-        QUADPACK's estimate of the error of the numerical integration in ``expected_shortfall`` ($). The ES also
-        carries the error of the quantile that bounds the loss region, and rounding: together below 2e-13 of the
-        P&L's size in tests (see :func:`delta_gamma_var`).
+        QUADPACK's estimate of the error of the numerical integration in ``expected_shortfall`` ($). Against mpmath,
+        the ES's whole error (this integration's, the quantile's that bounds the loss region, and rounding) was below
+        3e-13 of the P&L's size (see :func:`delta_gamma_var`).
     """
 
     var: float
@@ -338,10 +341,11 @@ def delta_gamma_var(
     P&L's size on 20,000 random positions with the default ``es_rtol``).
 
     Against 50-digit mpmath (bisection on the Normal probability of the loss region for the quantile, the closed form
-    of the ES integral), the VaR is within 2e-14 and the ES within 2e-13 of the P&L's size
-    ``|θ| h/252 + |Δ| s + ½ |Γ| s²`` on 3,000 random positions and 400 extreme ones (delta or gamma down to 1e-300,
-    the switch to the Normal quantile, confidence up to 99.9999 %), in SciPy 1.11 and 1.18. A call takes about
-    0.4 ms, most of it in ``ncx2``.
+    of the ES integral), the VaR is within about 2e-14 and the ES within 3e-13 of the P&L's size
+    ``|θ| h/252 + |Δ| s + ½ |Γ| s²`` (worst 1.9e-14 and 2.7e-13, the latter the integration's, within ``es_error``)
+    on 3,000 random positions and 400 extreme ones (delta or gamma down to 1e-300, either side of the switch to the
+    Normal quantile, confidence up to 99.9999 %), in SciPy 1.11 and 1.18. A call takes 0.1 to 0.2 ms, most of it in
+    ``ncx2``, after the first, which imports ``scipy.stats`` (0.3 s).
 
     Parameters
     ----------
@@ -433,7 +437,8 @@ def delta_gamma_var(
         d = a / (2.0 * b)  # δ: below (z_alpha + z_far) / 2 in size here, 6.6 at 99.99 %, so λ = δ² is moderate
         lam = d * d
         # A non-centrality below 1e-30 moves the quantile by less than 1e-30 of itself, but a subnormal one throws
-        # ncx2.isf off by up to 1e-3 of it (λ = 1e-320; SciPy 1.11 and 1.18, measured): read the central quantile.
+        # ncx2.isf off by up to tens of percent of it (74 % at λ = 3.5e-323 and a 30 % tail, 1.5 % at λ = 2e-321 and
+        # 25 %; SciPy 1.11 and 1.18, measured): read the central quantile.
         nc = lam if lam >= 1e-30 else 0.0
         y = float(ncx2.ppf(tail, 1, nc) if b > 0 else ncx2.isf(tail, 1, nc))
         quantile = c + b * (y - lam)
