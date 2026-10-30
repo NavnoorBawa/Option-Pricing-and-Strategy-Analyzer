@@ -407,7 +407,7 @@ def test_no_tab_formats_numbers_by_hand():
 def test_the_lint_catches_hand_formatting():
     for line in ('f"{x:.2f}"', 'f"{x:,.0f} cr"', 'f"{p:.1%}"', 'NumberColumn(format="%.4f")', 's.replace("-", "−")'):
         assert HAND_FORMAT.search(line), line
-    for line in ('fmt.vol(x)', 'col("vol", "IV", help="h")', 'f"{name}"', 'f"{as_of:%d %b %Y}"'):
+    for line in ("fmt.vol(x)", 'col("vol", "IV", help="h")', 'f"{name}"', 'f"{as_of:%d %b %Y}"'):
         assert not HAND_FORMAT.search(line), line
 
 
