@@ -86,8 +86,9 @@ HEADER = (
 #: a constrained search (SLSQP) that stops at a tolerance, not at a bit pattern: with OpenBLAS on one thread instead
 #: of several, or with NumPy's AVX-512 paths and OpenBLAS's own kernel switched off (NPY_DISABLE_CPU_FEATURES,
 #: OPENBLAS_CORETYPE=Haswell), the largest relative difference outside the cases below was 1.0e-5 (a fit RMSE of the
-#: bundled chain fixtures) and 5.1e-6 elsewhere; it was 4.2e-8 before SF-4.
-RTOL, ATOL = 2e-5, 1e-9
+#: bundled chain fixtures) and 5.1e-6 elsewhere, and 2.5e-5 on a CI runner with NumPy 1.26 and SciPy 1.11 (the same
+#: fit RMSE); it was 4.2e-8 before SF-4.
+RTOL, ATOL = 1e-4, 1e-9
 #: The median |error| / half-spread of a near-exact fit is about 0.01 to 0.03 half-spread, solver noise: it moved by
 #: up to 1.4e-5 half-spread (5e-4 relative) under those settings, so it is compared to this many half-spreads instead.
 ERROR_RATIO = "Median |error| / half-spread"
@@ -95,9 +96,12 @@ ERROR_RATIO_ATOL = 5e-5
 #: Quotes that hold static arbitrage themselves (or a smile at zero variance): their arbitrage-free fit is the end of
 #: a constrained search whose path depends on the last bits of the BLAS kernels, so off the recording platform it may
 #: end at another arbitrage-free smile, or, on fit_zero_total_variance, at none (and the surface says so). Under the
-#: settings above local vols moved by up to 56 % and implied vols by up to 54 % on these four. Off the recording
-#: platform they are checked for what holds on every path (test_path_sensitive_cases_keep_their_invariants).
+#: settings above local vols moved by up to 56 % and implied vols by up to 54 % on the four fit_ cases; the synthetic
+#: ETF chain (American quotes read as European, so its quotes hold arbitrage) gave 32 calendar and 11 butterfly
+#: points on a CI runner against 26 and 5 here. Off the recording platform they are checked for what holds on every
+#: path (test_path_sensitive_cases_keep_their_invariants).
 PATH_SENSITIVE = (
+    "synthetic_etf",
     "fit_vertical_spread_arbitrage",
     "fit_zero_total_variance",
     "fit_rounded_midpoint_vols",
