@@ -79,7 +79,9 @@ an independent adversarial check before it merged:
 - [ ] SF-5 Vectorised inversion at chain scale and de-Americanised quotes.
 - [ ] SF-6 Desk conventions on the Surface tab: delta axes, 25-delta risk reversal and butterfly, term structure,
   fit diagnostics.
-- [ ] SF-11 Data-source panel, carry diagnostics, and a published fitted surface that other tabs read.
+- [ ] SF-11 Data-source panel, carry diagnostics, and a published fitted surface that other tabs read. Done: the
+  synthetic chain's fitted surface is published to the sidebar's contract (its vol, forward and carry) and shown by
+  default on the Surface tab, with the chain's quotes for download. Left: the data panel, filters and the FIT flag.
 - [ ] SF-9 Trading-time clock for short-dated expiries.
 - [ ] SF-7 Andreasen–Huge arbitrage-free interpolation (optional precision mode).
 - [ ] SF-10 Quote-level static arbitrage with minimal L1 repair (could).
@@ -117,6 +119,10 @@ an independent adversarial check before it merged:
 - [ ] UI-1 Price cards move into the Pricing tab; UI-2 market-level header; UI-3 and DK-4 one number standard
   everywhere; UI-5 stale-state marking; UI-6 phone pass; UI-22 colour roles; UI-28 provenance in every export.
 - [ ] DT-2 Sidebar: expiry dates, intraday valuation time, 0DTE, presets (synthetic index default, textbook preset).
+  Done: the Synthetic index market (default) and the Textbook one, a valuation time on 5-minute steps defaulting to
+  the last cash close, listed expiries with their settlement, strikes on the listed grid with an ATMF button, the
+  surface's vol or a marked override, the carry implied by parity, and links that carry all of it. Left: an ETF
+  (American) preset, 0DTE listings (DT-10), and a typed spot under a chain.
 - [ ] DT-2a Cboe trading sessions; DT-5a quote times from uploaded files; DT-10 SPXW daily listings; RK-9a strikes
   by smile delta snapped to listed strikes.
 - [ ] DT-3 Treasury curve (Federal Reserve H.15) and cash dividend schedules.

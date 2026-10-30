@@ -88,8 +88,16 @@ built from.
   engine's price.
 
 **Desk shell**
-- A header with the contract ticker (spot, strike, expiry and days, vol, rates, forward), the model in use and a
-  Share link that reproduces the exact view: the open tab, the sidebar inputs and the strategy template.
+- The app opens on a synthetic SPX index at a valuation time (by default the last completed cash close, so every
+  visitor sees the same numbers all day): the chain is priced by the app's generator, labelled synthetic everywhere,
+  and read back like real quotes, with parity forwards and the arbitrage-free SVI surface. The sidebar picks a listed
+  expiry (AM or PM settlement, time to it in minutes) and a strike on the listed 5-point grid; the vol is the
+  surface's at that strike (or a typed override, marked), and the rate and dividend yield are those implied by the
+  expiry's forward and discount factor, so every tab prices Black-76 on them. A Textbook market keeps the typed
+  inputs of version 2 (S = K = 100, one year), and links from version 2 open it.
+- A header with the valuation time and the index (or, in the Textbook market, the contract ticker), the contract,
+  the model in use and a Share link that reproduces the exact view: the market and its valuation time, the open tab,
+  the sidebar inputs and the strategy template.
 - Only the open tab computes, so switching tabs and changing inputs stays fast. Old links keep working.
 - The Methodology tab documents every model, formula and assumption with verified references, and opens as a drawer
   beside whichever tab is open.
@@ -161,8 +169,9 @@ st.strike_for_delta(-0.16, market, 0.5, 0.22, "put")  # 88.07, the 16-delta put 
 
 ## Conventions
 
-- Time to expiry is calendar days / 365 in the app; the library's clock also gives minute-based year fractions to
-  the settlement time. Rates and dividend yield are continuously compounded.
+- Time to expiry runs to the expiry's settlement in minutes / 525,600 under the synthetic index (AM monthlies at the
+  opening print, PM weeklies at the 16:00 close), and is calendar days / 365 in the Textbook market. Rates and
+  dividend yield are continuously compounded.
 - Greeks are displayed per calendar day (theta, charm, veta, color), per volatility point (vega, vanna, zomma …), per
   1 % rate move (rho) and per $1 spot move (delta, gamma, speed).
 - VaR horizons are in trading days (252 per year).
@@ -213,7 +222,8 @@ The public app uses synthetic data and files you upload; it never scrapes market
 
 - Strategy valuation uses Black–Scholes–Merton at each leg's implied volatility (no smile dynamics, European
   exercise), and probabilities are log-normal.
-- The app's expiries are whole calendar days; the library supports fractional days down to same-day expiries.
+- Strategy legs and risk scenarios still use one vol and one carry for every leg (the Pricing contract's); legs at
+  other expiries do not yet read the surface.
 - Transaction costs beyond a flat commission, margin and discrete dividends are not modelled.
 
 [ROADMAP.md](ROADMAP.md) lists what is done and what remains, and
