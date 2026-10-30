@@ -8,13 +8,16 @@ Four shifts, each bound to the URL so that a shared link reproduces the scenario
   ``vol_mode`` ``"1m"`` (:func:`options_analyzer.scenarios.scenario_cube`). Its label works an example at the
   reference expiry's ATMF vol: ``Vol +3.00 vp: ATMF 15.52% → 18.52%``;
 * ``wd``, the date as a whole number of trading sessions after the valuation date (``clock.is_trading_day``), labelled
-  ``Date T+10 · Fri 06‑Nov‑26 (41d left)``; the scenario's time is the valuation time's wall-clock time on that date,
+  ``T+10 · Fri 06‑Nov‑26 (41d left)``; the scenario's time is the valuation time's wall-clock time on that date,
   so Friday to Monday is 3 calendar days of decay, as theta counts it;
 * ``wr``, the rate shift in basis points, raising every expiry's rate with spot and dividend yield held (spec 2.0):
   ``Rate +25 bp: 4.75% → 5.00%``.
 
-While any shift is non-zero the strip leads with an amber ``SCENARIO`` badge and draws an amber rule at its left
-(``static/desk.css``), and :func:`note` gives the muted line the other tabs end their context line with. The pure
+While any shift is non-zero the strip draws an amber rule at its left (``static/desk.css``: the spec's
+``.st-key-whatif.active``, written as the strip holding its badge, since Streamlit gives a container no class of the
+app's choosing) and an amber ``SCENARIO`` badge above its Reset button (the spec leads the strip with it; above Reset
+the strip keeps its one line at a laptop's width), and :func:`note` gives the muted line the other tabs end their
+context line with. The pure
 functions (:func:`apply`, :func:`leg_vol`, :func:`session_dates`, :func:`scenario_time`) hold the semantics and are
 unit-tested; :func:`strip` only draws the widgets. Undo (UI-24) is not here.
 """
@@ -31,11 +34,13 @@ import streamlit as st
 from .. import clock
 from ..scenarios import DEFAULT_VOL_TENOR_DECAY
 from ..strategies import VOL_SHOCK_REFERENCE_TENOR, Market
-from .format import MINUS, bp, level, pct, session_label, signed, time_left, vol, vol_change
+from .format import MINUS, bp, level, session_label, signed, time_left, vol, vol_change
 
 #: The vol modes, as the strip's control shows them and a link holds them (``?wvmode=relative``): a bound segmented
 #: control writes its options' labels to the URL, so the labels are the link's values.
 VOL_MODES = ("absolute", "relative", "1M-scaled")
+#: The vol mode in the fewest words, as its popover in the strip shows it: the unit of the vol shift.
+MODE_UNITS = {"absolute": "vp", "relative": "%", "1M-scaled": "1M"}
 #: The URL keys of the four shifts, and of the vol mode.
 SHIFT_KEYS = ("ws", "wv", "wd", "wr")
 #: Smallest vol a shifted leg keeps (decimal), as ``strategies.position_value`` floors a shocked vol.
@@ -280,7 +285,7 @@ def _vol_label(shifts: Shifts, atm_vol: float, tenor: float) -> str:
     shifted = leg_vol(atm_vol, tenor, shifts)
     if shifts.mode == "absolute":
         return f"Vol {vol_change(shifts.vol / 100.0)}: ATMF {vol(atm_vol)} → {vol(shifted)}"
-    scope = " at 1M" if shifts.mode == "1M-scaled" else ""
+    scope = " 1M" if shifts.mode == "1M-scaled" else ""
     return f"Vol {signed(shifts.vol, 1)}%{scope}: ATMF {vol(atm_vol)} → {vol(shifted)}"
 
 
@@ -319,8 +324,11 @@ def strip(
         The shifts as set.
     """
     shifts = current()
+    # One line in the 1,038 px main column of a 1,440 px window with the sidebar open, at rest and with a scenario
+    # set: the vol mode is a popover named by the shift's unit, and the SCENARIO badge takes the label row above Reset
+    # rather than a place of its own (tests/test_desk_foundation_e2e.py measures it in IBM Plex). It wraps on narrower
+    # screens.
     row = st.container(key="whatif", horizontal=True, gap="small", vertical_alignment="bottom")
-    lead = row.empty()  # the SCENARIO badge leads the strip; filled once the widgets have their values
     ws = row.number_input(
         f"Spot {signed(shifts.spot, 1)}% → {level(spot * (1 + shifts.spot / 100))}",
         min_value=SPOT_LIMITS[0],
@@ -331,7 +339,7 @@ def strip(
         key="ws",
         bind="query-params",
         persist_state="session",
-        width=190,
+        width=165,
         help="Spot move in percent of today's level, in steps of 0.5%. Every leg is revalued at the moved spot "
         f"under {dynamics} dynamics.",
     )
@@ -351,16 +359,18 @@ def strip(
         "vol (+10% takes 15.52% to 17.07%). 1M-scaled: a relative shock to one-month vol, damped for longer legs by "
         f"(τ / 1M)^{MINUS}{DEFAULT_VOL_TENOR_DECAY:g}, as a vol index moves more than a one-year vol.",
     )
-    mode = row.segmented_control(
-        "Vol shift",
+    mode = row.popover(
+        MODE_UNITS[shifts.mode],
+        help=f"Vol mode: {shifts.mode}. How the vol shift reads: vol points added to every leg's vol (absolute), "
+        "percent of each leg's vol (relative), or percent of one-month vol, damped with tenor (1M-scaled).",
+    ).segmented_control(
+        "Vol mode",
         list(VOL_MODES),
         default="absolute",
         required=True,
         key="wvmode",
         bind="query-params",
         persist_state="session",
-        help="How the vol shift reads: vol points (vp), relative to each leg's vol, or relative to one-month vol and "
-        "damped with tenor (1M-scaled).",
     )
     last = max(1, sessions_to(as_of.date(), horizon.date()))
     dates = session_dates(as_of.date(), last)
@@ -371,7 +381,7 @@ def strip(
     day = dates[shown]
     left = time_left(clock.year_fraction(datetime.combine(day, as_of.time()), horizon) * clock.MINUTES_PER_YEAR)
     wd = row.slider(
-        f"Date {session_label(shown, day)}" + (f" ({left} left)" if left != "expired" else ""),
+        session_label(shown, day) + (f" ({left} left)" if left != "expired" else ""),
         min_value=0,
         max_value=last,
         value=0,
@@ -380,13 +390,15 @@ def strip(
         key="wd",
         bind="query-params",
         persist_state="session",
-        width=300,
+        width=230,
         help="Trading sessions after the valuation date (NYSE holidays skipped), at the valuation time of day. Time "
         "decay counts calendar days: Friday to Monday is three. The time left runs to the position's front "
         "settlement.",
     )
     wr = row.number_input(
-        f"Rate {bp(shifts.rate / 1e4)}: {pct(rate)} → {pct(rate + shifts.rate / 1e4)}",
+        # A rate reads like a vol: %, 2 dp, U+2212 below zero (format.pct writes a hyphen, and a −500 bp shift can
+        # take a rate below zero).
+        f"Rate {bp(shifts.rate / 1e4)}: {vol(rate)} → {vol(rate + shifts.rate / 1e4)}",
         min_value=BP_LIMITS[0],
         max_value=BP_LIMITS[1],
         value=0,
@@ -394,20 +406,21 @@ def strip(
         key="wr",
         bind="query-params",
         persist_state="session",
-        width=190,
+        width=185,
         help="Basis points added to every expiry's rate, with spot and the dividend yield held, so each forward moves "
         "by e^(Δr·T): the convention of the position's rho.",
     )
     shifts = Shifts(float(ws), float(wv), str(mode or "absolute"), int(wd), float(wr))
-    row.button(
+    end = row.container(width="content", gap="small")
+    if shifts.active:
+        end.container(key="whatif_scenario", width="content").badge("SCENARIO", color="yellow")
+    end.button(
         "Reset",
         key="whatif_reset",
         on_click=_reset,
         disabled=not shifts.active,
         help="Set the spot, vol, date and rate shifts back to zero (the vol mode stays).",
     )
-    if shifts.active:
-        lead.container(key="whatif_scenario", width="content").badge("SCENARIO", color="yellow")
     st.caption(
         f"{dynamics.capitalize()}: leg vols {'fixed by strike' if dynamics == 'sticky strike' else 'move with spot'}."
     )

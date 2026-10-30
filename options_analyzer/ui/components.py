@@ -15,7 +15,6 @@ quantity of the number standard (:data:`COLUMN_KINDS`), and :func:`table` draws 
 
 from __future__ import annotations
 
-import math
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -588,6 +587,6 @@ def table(
 
 def table_height(rows: int) -> int:
     """Height in px of a table that shows ``rows`` rows and its header: what ``height="content"`` gives a table of
-    that many rows at :data:`ROW_HEIGHT` (header and rows of 28 px and the 3 px of the frame's borders, measured in
-    Chromium on Streamlit 1.66 by ``tests/test_format_standard.py``)."""
-    return math.ceil((rows + 1) * ROW_HEIGHT + 3)
+    that many rows at :data:`ROW_HEIGHT`: the header and the rows at 28 px and 6 px of frame (454 px for 15 rows,
+    measured in Chromium on Streamlit 1.65 and 1.66; ``tests/test_desk_foundation_e2e.py`` checks it)."""
+    return (rows + 1) * ROW_HEIGHT + 6

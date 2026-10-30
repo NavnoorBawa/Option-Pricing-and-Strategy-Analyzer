@@ -155,7 +155,7 @@ def test_the_strip_at_rest():
     assert labels["ws"] == "Spot 0.0% → 5,800.00"
     assert labels["wv"] == "Vol 0.00 vp: ATMF 15.52% → 15.52%"
     assert labels["wr"] == "Rate 0 bp: 4.75% → 4.75%"
-    assert labels["wd"] == "Date T+0 · Fri 23\u2011Oct\u201126 (55d left)"
+    assert labels["wd"] == "T+0 · Fri 23\u2011Oct\u201126 (55d left)"
     assert not _scenario(at)
     assert at.button(key="whatif_reset").disabled
     assert at.text[0].value == "shifts=0.0,0.0,absolute,0,0.0"
@@ -171,7 +171,7 @@ def test_the_strip_states_its_semantics_with_worked_examples():
     # UI spec 3.2 acceptance: the date label reads "T+5 · Fri 30‑Oct‑26", here with the time left to 18-Dec AM
     # (Fri 30 October 16:00 to Fri 18 December 09:30: 48 days 17.5 hours, whole days from 30 days on).
     assert at.slider(key="wd").value == 5
-    assert labels["wd"] == "Date T+5 · Fri 30‑Oct‑26 (48d left)"
+    assert labels["wd"] == "T+5 · Fri 30‑Oct‑26 (48d left)"
     assert _scenario(at) and not at.button(key="whatif_reset").disabled
     assert at.text[0].value == "shifts=-2.0,3.0,absolute,5,25.0"
 
@@ -180,7 +180,7 @@ def test_the_relative_mode_reads_in_percent():
     at = _app(wv=10, wvmode="relative")
     assert _labels(at)["wv"] == "Vol +10.0%: ATMF 15.52% → 17.07%"  # spec 3.2: "+10%: 15.52% → 17.07%"
     at = _app(wv=10, wvmode="1M-scaled")
-    assert _labels(at)["wv"].startswith("Vol +10.0% at 1M: ATMF 15.52% → ")
+    assert _labels(at)["wv"].startswith("Vol +10.0% 1M: ATMF 15.52% → ")
 
 
 def test_a_step_relabels_and_every_shift_is_bound_to_the_url():
@@ -189,7 +189,7 @@ def test_a_step_relabels_and_every_shift_is_bound_to_the_url():
     assert _labels(at)["ws"] == "Spot −2.0% → 5,684.00"
     assert _scenario(at)
     at.slider(key="wd").set_value(10).run()
-    assert _labels(at)["wd"].startswith("Date T+10 · Fri 06\u2011Nov\u201126 (")
+    assert _labels(at)["wd"].startswith("T+10 · Fri 06\u2011Nov\u201126 (")
     # The browser writes a bound widget's value to the link (AppTest has no browser): each one names its parameter.
     for widget in (*at.number_input, *at.slider, at.button_group(key="wvmode")):
         assert widget.proto.query_param_key == widget.key
