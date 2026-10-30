@@ -50,6 +50,21 @@ How each number was measured:
 - **Engineering.** Oracle tests against QuantLib and Jäckel's reference code that fail CI if skipped; 60-digit
   mpmath accuracy studies; a test-time network guard; an oldest-dependencies CI job; parallel test runs.
 
+## Since version 3.0
+
+The numbers a desk would have caught first (docs/improvement-guide.md section 2), fixed and measured:
+
+| Measure | v3.0.0 | Now |
+| --- | --- | --- |
+| Automated tests (`pytest --collect-only`) | 5,004 | 5,343 (5,236 pass, 103 skip off the recording platform, 4 strict xfails) |
+| 1-day at-the-money put (S 5,800, σ 18 %), cost of the next day | θ/365 = −10.66 on a 21.56 premium | Decay to expiry −21.56 (full revaluation), shown first |
+| 7-day iron condor, P&L of one day | θ/365 = +$137.50 | +$151.97 by revaluation, beside θ/365 |
+| 45-day short straddle, 99 % 1-day VaR (100,000 paths, seed 7) | $2,833 (implied vol frozen by default) | $3,862 with implied-vol moves by default, the spot-only $2,833 beside it |
+| Quotes a few ulps above intrinsic (20,000 random double-precision quotes) | 9.5 % inverted more than 1 % off, up to 32× | Rejected as `no_time_value` (2,259); the rest within 7.7e-6 |
+| Fed 2026 severely adverse vol shock | ×4.0 | ×2.73 (72.0 / 26.4, the Fed's table 2.A) |
+| Monte Carlo 95 % interval with about 10 / 30 / 100 paths on the scarce side | Shown; covered 87.8 % / 92.2 % / 94.0 % | Withheld with the reason below 300 such paths |
+| Tree decay against the closed form (501 steps, σ 20 %, strikes 80–120, 2 days to 10 years) | Not shown | Leisen–Reimer within 4.0e-6; Cox–Ross–Rubinstein within 1.5 % (interpolated trees; the same steps were off by 8.5 %) |
+
 ## Free-resources ledger
 
 Everything the project uses is free.

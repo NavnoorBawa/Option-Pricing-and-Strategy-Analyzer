@@ -47,7 +47,11 @@ built from.
 - Binomial trees: Leisen–Reimer (≈O(1/n²) convergence for European exercise) and Cox–Ross–Rubinstein, European or
   American exercise, with bump-and-reprice tree Greeks, convergence charts and the early-exercise boundary.
 - Monte Carlo with exact terminal sampling, antithetic and control variates, reproducible seeds and 95 % confidence
-  intervals.
+  intervals, withheld with the reason when fewer than 300 paths finish on the scarce side of the strike (there the
+  interval covered the true price in only 88 % to 95 % of runs).
+- Theta per calendar day beside the one-day decay by full revaluation, which leads when the two differ by more than
+  10 %: inside three days to expiry theta / 365 is off by up to 2×, and for a 1-day at-the-money put it shows −10.66 on
+  a 21.56 premium that the day takes whole.
 - All 14 Greeks (delta … ultima, plus rho and dividend rho) for calls and puts, with explicit units, a sensitivity
   explorer and spot × volatility price heatmaps.
 
@@ -62,16 +66,22 @@ built from.
 **Risk** (for the position built on the Strategy tab, or the template named in the link)
 - P&L heatmaps of spot × implied vol and spot × date, and time-decay curves, all from full revaluation.
 - Stress tests calibrated to Black Monday, the dot-com bust, 2008, Volmageddon, the COVID crash, the 2022 rate shock,
-  the April 2025 tariff shock and the Fed's 2026 severely adverse scenario, plus custom shocks.
-- Monte Carlo VaR and Expected Shortfall with Normal, Student-t or GARCH(1,1) returns and optional implied-vol
-  dynamics, compared with delta-normal VaR.
+  the April 2025 tariff shock and the Fed's 2026 severely adverse scenario, plus custom shocks. Each vol shock is the
+  ratio of the sourced closing levels (FRED VIXCLS and VXOCLS; the Fed's 72.0 / 26.4), checked by a test against a
+  table of sources.
+- Monte Carlo VaR and Expected Shortfall with Normal, Student-t or GARCH(1,1) returns and implied-vol dynamics on by
+  default (index-like: vol of vol 100 %, spot–vol correlation −0.7), shown beside the spot-only VaR and ES with implied
+  vol frozen, which understates a 45-day short straddle's 99 % VaR by 27 % ($2,833 against $3,862), and delta-normal
+  VaR for comparison.
 
 **Surface and IV**
 - Arbitrage-free SSVI surfaces or your own quotes (implied vols, or option prices inverted with Black–Scholes–Merton),
   fitted with an SVI smile per expiry and turned into local volatility with Gatheral's formula; calendar and butterfly
   arbitrage are detected and reported, never silently patched.
-- An implied-volatility solver for European and American quotes that checks the no-arbitrage bounds first; under the
-  American (ALO) model it inverts the engine's price.
+- An implied-volatility solver for European and American quotes that checks the no-arbitrage bounds first and
+  rejects a quote whose time value is lost in rounding (within 1e-12·max(S, K) of its zero-volatility value) as
+  `no_time_value` rather than return a vol made of rounding error; under the American (ALO) model it inverts the
+  engine's price.
 
 **Desk shell**
 - A header with the contract ticker (spot, strike, expiry and days, vol, rates, forward), the model in use and a
@@ -134,7 +144,10 @@ st.strike_for_delta(-0.16, market, 0.5, 0.22, "put")  # 88.07, the 16-delta put 
   and fails if any oracle test is skipped.
 - **High-precision references**: Greeks against 40-digit mpmath derivatives, 100,000 implied-volatility cases priced at
   60 digits (the accuracy bound is proven on the 66,738 quotes that keep time value; the rest round to intrinsic), and the 4,495-put American grid of Healy (2021) generated with QuantLib and stored in the repository, so
-  the main suite needs no QuantLib.
+  the main suite needs no QuantLib. On 20,000 random double-precision quotes, every quote with time value above
+  1e-12·max(S, K) inverts to within 1e-5 of the vol that priced it (worst 7.7e-6); the other 2,259 are rejected.
+- **Coverage studies**: the Monte Carlo 95 % interval's coverage is checked with binomial tests at 10 to 1,000 paths on
+  the scarce side of the strike, and the reliability flag is set where coverage falls short.
 - **Invariants**: put–call parity and symmetry, no-arbitrage bounds, monotonicity, Greeks against finite
   differences, the Greek-ladder identities across all 26 strategy templates, and the vega-bucket sums.
 - **App tests**: Streamlit AppTests of every tab and deep link, plus Chromium browser tests of the layout, run locally

@@ -40,9 +40,9 @@ through the shipped project with the code and the running app; their reports wit
    arbitrary 0–219 % with reason `""`; 9.5 % of random double-precision quotes come back more than 1 % off. Treat
    `otm_price <= 1e-12·max(S, K)` as no time value, add a `no_time_value` reason and a `vega` field to the batch
    result, and pin the behaviour on both sides of intrinsic. (Quant dev 1; sharpens SF-4/SF-5.)
-4. **The Fed severely-adverse scenario overstates the vol shock by about 45 %:** `vol_multiplier=4.0` where the
-   Fed's jump-off VIX of 26 and peak of 72 give 2.77. Fix the multiplier, state the jump-off, and pin every historical
-   scenario to its sourced number with a test. (Validator 3.)
+4. **The Fed severely-adverse scenario overstates the vol shock by about 47 %:** `vol_multiplier=4.0` where the
+   Fed's jump-off VIX of 26.4 (its table 2.A: the quarter's highest close) and peak of 72.0 give 2.73. Fix the
+   multiplier, state the jump-off, and pin every historical scenario to its sourced number with a test. (Validator 3.)
 5. **Monte Carlo intervals under-cover when few paths finish in the money** (coverage 0.85–0.91 below about 300
    in-the-money paths) and the app shows them with no flag. Flag "interval unreliable" below that threshold and make
    the coverage test a two-sided binomial check across in-the-money levels. (Validator 2; this is PR-6's threshold.)
