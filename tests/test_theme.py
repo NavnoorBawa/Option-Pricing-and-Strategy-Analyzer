@@ -261,9 +261,13 @@ def test_input_borders_have_three_to_one_contrast():
     assert prelude.endswith(":not(:focus-within, :has(input:disabled))")  # focus: the primary; disabled: hairline
 
 
-def test_the_what_if_scenario_draws_an_amber_rule():
-    rule = _declarations(".st-key-whatif:has(.st-key-whatif_scenario)")
+def test_user_state_draws_an_amber_rule():
+    # UI spec 2.3 and 3.2: the typed vol over the surface's and a what-if scenario, each with an amber left rule in
+    # the amber of its mode; nothing else in the stylesheet is amber.
+    rule = _declarations(".st-key-vol_override, .st-key-whatif:has(.st-key-whatif_scenario)")
     assert rule["border-left"] == f"3px solid light-dark({theme.AMBER['light']}, {theme.AMBER['dark']})"
+    amber = [prelude for prelude, body in _desk_rules() if any(c in body for c in theme.AMBER.values())]
+    assert amber == [".st-key-vol_override, .st-key-whatif:has(.st-key-whatif_scenario)"]
 
 
 def test_a_slow_rerun_fades_the_open_tab_only():

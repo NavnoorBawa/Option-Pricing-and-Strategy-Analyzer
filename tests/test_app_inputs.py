@@ -304,7 +304,7 @@ def test_an_override_vol_is_marked(new_app):
     assert not any("OVERRIDE" in b for b in _badges(at))
     vol.set_value(vol.value + 1.0).run()
     _ok(at)
-    assert ":orange-badge[OVERRIDE]" in _badges(at)
+    assert ":yellow-badge[OVERRIDE]" in _badges(at)
     assert "%*" in next(m.value for m in at.markdown if m.value.startswith("SPX"))
     assert _cards(at)["Call value"] != surface_card
     assert any(c.value.startswith("+1.00 vp against the surface's") for c in at.sidebar.caption)

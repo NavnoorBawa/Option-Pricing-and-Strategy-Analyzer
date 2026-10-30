@@ -210,9 +210,12 @@
   border-color: #5B6577;
 }
 
-/* The what-if strip (ui/whatif.py) while any shift is set: an amber rule at its left, as the SCENARIO badge that
-   leads it, so that a scenario is never read as the market. Amber is user state only (UI spec 2.6). Streamlit gives
-   a container no class of its own choosing, so the state is the badge's presence (the spec's .active). */
+/* Amber is user state only (UI spec 2.6), and user state is marked by an amber rule at its left: the sidebar's typed
+   vol while it overrides the surface (ui/inputs.py draws its input in the vol_override container only then), and
+   the what-if strip (ui/whatif.py) while any shift is set, with its SCENARIO badge, so that a scenario is never read
+   as the market. Streamlit gives a container no class of the app's choosing, so the strip's state is its badge's
+   presence (the spec's .st-key-whatif.active). */
+.st-key-vol_override,
 .st-key-whatif:has(.st-key-whatif_scenario) {
   border-left: 3px solid light-dark(#9E5F00, #E8A33D);
   padding-left: 0.625rem;

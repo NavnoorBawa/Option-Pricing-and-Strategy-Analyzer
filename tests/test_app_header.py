@@ -189,6 +189,7 @@ LINK_WORDS = {
     "contracts": "contracts",
     "multiplier": "shares per contract",
     "commission": "commission",
+    **dict.fromkeys(("ws", "wv", "wvmode", "wd", "wr"), "the what-if shifts"),
 }
 
 
