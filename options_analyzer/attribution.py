@@ -409,7 +409,7 @@ def _leg_shapley(leg: Leg, market: Market, move: _Move, shift: float) -> Shapley
         vol_shift=np.where(vol_moved, shift, 0.0),
         rate_shift=np.where(rate_moved, move.rate_shift, 0.0),
     )
-    values = np.broadcast_to(np.asarray(values, dtype=float), (16,))
+    values = np.broadcast_to(np.asarray(values, dtype=float), (16,)).tolist()
     parts = {}
     for i, name in enumerate(SHAPLEY_FACTORS):
         bit = 1 << i

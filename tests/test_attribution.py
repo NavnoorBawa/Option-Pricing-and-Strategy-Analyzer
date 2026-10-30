@@ -162,6 +162,9 @@ def test_zero_shocks_give_all_terms_zero(market):
         assert taylor.quality == 0.0
         shapley = A.shapley_explain(strategy, market, market.spot, vol_shift=0.0, rate_shift=0.0, days=0.0)
         assert dataclasses.astuple(shapley) == (0.0,) * 5, name
+        # Plain floats, leg by leg too (not NumPy scalars, which print as np.float64(...)).
+        legs = A.shapley_explain_by_leg(strategy, market, 101, days=1) + A.taylor_explain_by_leg(strategy, market, 101)
+        assert all(type(value) is float for leg in legs for value in dataclasses.astuple(leg)), name
 
 
 @pytest.mark.parametrize("spot", [70.0, 97.5, 100.0, 104.0, 140.0])
@@ -315,6 +318,8 @@ def test_golden_short_straddle_stress_day():
     plans = explain.unexplained + explain.charm + explain.veta + (explain.theta - greek_theta)
     assert plans == pytest.approx(27.04, abs=0.01)
     assert (round(explain.charm, 2), round(explain.veta, 2)) == (-0.46, 2.26)
+    assert list(explain.terms) == list(A.TAYLOR_TERMS)
+    assert explain.explained + explain.unexplained == pytest.approx(explain.total, abs=1e-12)
     assert explain.floor == pytest.approx(2.0, rel=1e-15)  # 1 bp of 2 x 100 shares x $100
     assert explain.quality == pytest.approx(25.17 / 188.36, abs=1e-4)
     textbook = A.taylor_explain(STRADDLE, S.Market(100, 0.05, 0.20, 1.0), 96, vol_shift=0.06, days=1, multiplier=LOT)
