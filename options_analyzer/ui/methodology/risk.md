@@ -49,3 +49,18 @@ $w$-th worst loss and ES the average of the $w$ worst losses. The delta-normal V
 $|\Delta| S \sigma \sqrt{h/252}\, z_\alpha$, with Normal returns, is shown for comparison in the table of P&L
 statistics. It leaves out the position's gamma, its time decay over the horizon, its vega (with implied-vol
 moves on) and the fatter tails of Student-t returns, or of GARCH returns beyond one day.
+
+The table also gives the delta-gamma-theta VaR and ES, the analytic comparator: exact for the P&L of today's
+position Greeks to second order in the spot move $x$ and first order in time,
+${\theta h/252 + \Delta x + \tfrac12\Gamma x^2}$, with $\theta$ per year and $x$ Normal with mean zero and standard
+deviation ${s = S\sigma\sqrt{h/252}}$. Completing the square, this is
+${\theta h/252 - \Delta^2/(2\Gamma) + \tfrac12\Gamma s^2\,Y}$ with $Y$ non-central chi-square with one degree of
+freedom and non-centrality ${\lambda = (\Delta/(\Gamma s))^2}$. VaR is read off its quantile, the lower tail of $Y$
+for long gamma and the upper tail for short gamma; ES integrates the same distribution numerically, within
+${2 \times 10^{-13}}$ of the P&L's size in tests against 50-digit mpmath. At ${\Gamma = 0}$ it is the delta-normal
+VaR minus the time decay ${\theta h/252}$, and it moves there continuously as ${\Gamma \to 0}$. Its gap to the full
+revaluation shows the spot risk beyond gamma, the vega and the fatter tails. On the 45-day straddle above with
+implied vol frozen, the one-day 99 % VaR is \$2,882 delta-gamma-theta and \$2,833 by full revaluation (\$1,016
+delta-normal). On ten strategy templates, at least one of each kind (30 days, spot 100, volatility 20 %, 400,000
+paths), the one-day gap is at most 3.2 %; on a put ratio backspread it is 10 %, since its gamma grows as the spot
+falls towards its two long puts.
