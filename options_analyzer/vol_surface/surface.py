@@ -58,8 +58,10 @@ class VolSurface:
     calibration, how much the constraints raised each maturity's spread-weighted RMSE (the
     error the fit minimises; 0 where they did not bind, NaN where no arbitrage-free smile was
     found and the maturity keeps its unconstrained fit, with a note). ``wing_reach`` is how far beyond its quotes
-    each maturity's smile is read when extrapolating (:func:`.svi.wing_reach`). Implied vol is NaN outside a
-    maturity's quoted strike range and local vol is NaN wherever it is undefined.
+    each maturity's smile is read when extrapolating (:func:`.svi.wing_reach`). ``local_vol_error`` is, for every
+    maturity, the estimated truncation error of its local vols from the spacing of the expiries, as a vol (0.01 is
+    one vol point; see :func:`fit_market_surface`), and None for SSVI, whose ``dw/dT`` is analytic. Implied vol is
+    NaN outside a maturity's quoted strike range and local vol is NaN wherever it is undefined.
     """
 
     moneyness: np.ndarray
@@ -84,6 +86,7 @@ class VolSurface:
     calibration: str | None = None
     wing_reach: np.ndarray | None = None
     arbitrage_cost: np.ndarray | None = None
+    local_vol_error: np.ndarray | None = None
 
     @property
     def strikes_over_spot(self) -> np.ndarray:
@@ -383,6 +386,7 @@ def fit_market_surface(
     # forwards existed), ln(F/S) of the parity forward elsewhere.
     log_fs = np.array([carry * piece.T if piece.from_rates else np.log(piece.forward / spot) for piece in slices])
     moneyness, values = _evaluate_grid(slices, Ts, quoted_y, log_fs, n_moneyness)
+    assert values.local_error is not None  # _evaluate_grid asks for it
     notes += _diagnostics(slices, Ts, values, quotes, spot)
     clean_quotes = pd.concat([piece.quotes for piece in slices]).reset_index(drop=True)
     return VolSurface(
@@ -403,6 +407,7 @@ def fit_market_surface(
             np.array([piece.arbitrage_cost for piece in slices]) if calibration == "arbitrage_free" else None
         ),
         wing_reach=np.array([piece.reach for piece in slices]),
+        local_vol_error=np.fmax.reduce(values.local_error, axis=1),  # NaN, without a warning, where none is estimated
         svi=tuple(piece.svi for piece in slices),
         quoted_y=quoted_y,
         log_forward_ratio=log_fs,
@@ -649,9 +654,10 @@ def _evaluate_grid(
     slices: list[_Slice], Ts: np.ndarray, quoted_y: np.ndarray, log_fs: np.ndarray, n_moneyness: int
 ) -> tuple[np.ndarray, _MarketValues]:
     """Stage 3 of :func:`fit_market_surface`: the K/S grid (:func:`_moneyness_grid`), and implied and local vol on it
-    (:func:`_market_values`); ``log_fs`` is ``ln(F / S)`` at each maturity."""
+    with the truncation error of local vol (:func:`_market_values`); ``log_fs`` is ``ln(F / S)`` at each maturity."""
     moneyness = _moneyness_grid(np.exp(quoted_y + log_fs[:, None]), n_moneyness)
-    return moneyness, _market_values([piece.svi for piece in slices], Ts, quoted_y, log_fs, moneyness)
+    fits = [piece.svi for piece in slices]
+    return moneyness, _market_values(fits, Ts, quoted_y, log_fs, moneyness, truncation_error=True)
 
 
 def _diagnostics(
