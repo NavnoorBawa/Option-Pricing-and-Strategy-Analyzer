@@ -12,14 +12,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .svi import QUOTE_PRECISION
+from .svi import QUOTE_PRECISION, durrleman_g
 
 EXTRAPOLATION = 0.25  # a neighbour may be evaluated this fraction of its quoted y-range beyond its quotes
-
-
-def durrleman_g(y, w, w_y, w_yy):
-    """Durrleman's butterfly-arbitrage function (the local-variance denominator)."""
-    return 1.0 - (y / w) * w_y + 0.25 * (-0.25 - 1.0 / w + y**2 / w**2) * w_y**2 + 0.5 * w_yy
 
 
 def _local_vol(y, w, w_y, w_yy, w_t):
@@ -85,10 +80,11 @@ class _MarketValues:
     zero_variance: bool
 
 
-def _market_values(fits, Ts, quoted_y, carry, moneyness) -> _MarketValues:
-    """Implied and local vol of the SVI slices at K/S ``moneyness`` (1-D) on every quoted maturity (rows)."""
+def _market_values(fits, Ts, quoted_y, log_fs, moneyness) -> _MarketValues:
+    """Implied and local vol of the SVI slices at K/S ``moneyness`` (1-D) on every quoted maturity (rows), where the
+    forward of maturity ``i`` is ``S e^{log_fs[i]}``."""
     n_T = len(Ts)
-    y = np.log(np.asarray(moneyness, dtype=float))[None, :] - carry * Ts[:, None]
+    y = np.log(np.asarray(moneyness, dtype=float))[None, :] - np.asarray(log_fs, dtype=float)[:, None]
     lo, hi = quoted_y[:, 0], quoted_y[:, 1]
     allow = EXTRAPOLATION * (hi - lo)
     w, cover, tol = {}, {}, {}

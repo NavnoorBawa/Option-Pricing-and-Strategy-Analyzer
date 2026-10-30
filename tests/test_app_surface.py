@@ -1,15 +1,19 @@
 """Surface tab, end to end with streamlit.testing (headless)."""
 
+import base64
 import io
 import json
 import zipfile
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pytest
 from streamlit.testing.v1 import AppTest
 
 from options_analyzer import black_scholes, implied_vol, vol_surface
+from options_analyzer.market_data import sample_chain, to_quotes
 from options_analyzer.ui import charts, tab_surface
 
 
@@ -32,6 +36,13 @@ def _picker(at: AppTest):
 
 def _trace_names(at: AppTest) -> list[str]:
     return [t.get("name") or "" for c in at.get("plotly_chart") for t in json.loads(c.proto.spec)["data"]]
+
+
+def _array(value) -> np.ndarray:
+    """A trace's data array; Plotly sends numeric NumPy arrays as base64 ``bdata``, and NaN in a list as None."""
+    if isinstance(value, dict) and "bdata" in value:
+        return np.frombuffer(base64.b64decode(value["bdata"]), dtype=value["dtype"])
+    return np.array([np.nan if v is None else v for v in value], dtype=float)
 
 
 def _metric(at: AppTest, label: str) -> str:
@@ -96,7 +107,10 @@ def test_option_prices_build_a_surface_with_quote_markers_and_fit_quality(app):
     _ok(app)
     captions = " ".join(c.value for c in app.caption)
     assert "Inverted 104 option price(s)" in captions
-    assert "spot (100.00), rate (5.00%) and dividend yield (0.00%)" in captions
+    assert "spot (100.00) and each expiry's forward and discount factor from put-call parity" in captions
+    assert "else from the sidebar rate (5.00%) and dividend yield (0.00%)" in captions
+    # Only out-of-the-money options are quoted, so no strike has a call and a put: every forward is the sidebar's.
+    assert any("put-call parity needs a call and a put quoted at 6+ common strikes" in c for c in captions.split("  "))
     assert _metric(app, "Calendar arbitrage") == "0" and _metric(app, "Local vol defined") == "100%"
     names = _trace_names(app)
     assert {"Quotes · 30d", "Quotes · 273d", "Quotes · 2.00y"} <= set(names)
@@ -124,6 +138,11 @@ def test_interior_calendar_arbitrage_is_reported(app):
     maturities = np.sort(quotes["Maturity"].unique())
     quotes.loc[quotes["Maturity"] == maturities[4], "ImpliedVol"] *= 0.8
     _upload(app, quotes)
+    _ok(app)
+    # The default arbitrage-free calibration holds the arbitrage out of the surface and says so.
+    assert _metric(app, "Calendar arbitrage") == "0"
+    assert any("held free of static arbitrage" in w.value for w in app.warning)
+    app.segmented_control(key="surface_calibration").set_value("Unconstrained").run()
     _ok(app)
     assert int(_metric(app, "Calendar arbitrage")) > 0  # was 0, with a local vol of exactly 0%
     assert _metric(app, "Local vol defined") == "75.0%"  # two of the eight maturities are left undefined
@@ -159,8 +178,18 @@ def test_sidebar_contract_at_the_first_expiry_of_the_sample_file_gets_an_implied
     _upload(app, vol_surface.sample_quotes(100, 0.05, 0.0))
     _ok(app)
     readout = [i.value for i in app.info if "the surface's implied vol is" in i.value]
-    assert readout and "expiry 30 days" in readout[0]
-    assert not any("outside the surface's quoted region" in c.value for c in app.caption)
+    assert readout and "expiry 30 days" in readout[0] and "extrapolated" not in readout[0]
+    assert not any("gives no implied vol" in c.value for c in app.caption)
+
+
+def test_a_sidebar_strike_beyond_the_quotes_reads_an_extrapolated_vol(app):
+    """The sample quotes run from K/S 0.7 to 1.3; a strike of 140 is read off the SVI wing and labelled."""
+    app.sidebar.number_input(key="days").set_value(91).run()
+    app.sidebar.number_input(key="strike").set_value(140.0).run()
+    _upload(app, vol_surface.sample_quotes(100, 0.05, 0.0))
+    _ok(app)
+    readout = [i.value for i in app.info if "the surface's implied vol is" in i.value]
+    assert readout and "extrapolated beyond the quoted strikes" in readout[0]
 
 
 def test_an_expiration_date_column_next_to_days_to_expiry_builds_a_surface(app):
@@ -195,6 +224,15 @@ def test_the_excel_workbook_is_only_built_when_downloaded(app, monkeypatch):
     with zipfile.ZipFile(io.BytesIO(workbook)) as archive:
         sheets = archive.read("xl/workbook.xml").decode()
     assert all(f'name="{name}"' in sheets for name in ("ImpliedVol", "LocalVol", "Summary", "Quotes"))
+    quotes = pd.read_excel(io.BytesIO(workbook), sheet_name="Quotes")
+    assert list(quotes.columns) == [
+        "Strike",
+        "Maturity (years)",
+        "Quoted implied vol",
+        "Moneyness K/S",
+        "SVI implied vol",
+        "Half bid/ask spread in vol",  # was the raw name vol_half_spread
+    ]
 
 
 def _maturity_column(header: str, values, as_years: bool) -> pd.DataFrame:
@@ -447,3 +485,110 @@ def test_the_3d_surfaces_wrap_instead_of_squeezing_into_narrow_columns(app):
 def test_the_kept_file_size_reads_as_the_uploader_shows_it(n_bytes, shown):
     # Streamlit's uploader (outside Windows) moves to the next decimal unit above 500 and shows one decimal.
     assert tab_surface._size(n_bytes) == shown
+
+
+def _forwards_table(at: AppTest) -> pd.DataFrame:
+    return next(d.value for d in at.dataframe if "Gap to sidebar (bp)" in d.value.columns)
+
+
+def _shown_gaps(at: AppTest) -> list[str]:
+    """The Gap to sidebar column as displayed: the text of the table's pandas Styler."""
+    element = next(d for d in at.dataframe if "Gap to sidebar (bp)" in d.value.columns)
+    shown = pa.ipc.open_stream(element.proto.arrow_data.styler.display_values).read_all().to_pandas()
+    return shown["Gap to sidebar (bp)"].tolist()
+
+
+def test_parity_forwards_are_shown_and_a_sidebar_carry_the_quotes_contradict_is_flagged(new_app):
+    """A synthetic SPX chain (box rate 4.45 %, dividend yield 1.3 %) read with a sidebar of 4 % and no yield: each
+    expiry's forward comes from put-call parity, within 0.5 bp of the generator's, and the warning says that the
+    sidebar's carry is contradicted by the quotes. With "Sidebar r, q" the forwards are the sidebar's, no warning."""
+    as_of = datetime(2026, 10, 26, 10, 0)
+    chain = sample_chain(6000.0, 0.04, 0.013, as_of=as_of)
+    at = new_app(tab="Surface", spot=6000, rate=4.0, div=0.0).run()
+    _upload(at, to_quotes(chain.quotes, as_of=as_of))
+    _ok(at)
+    table = _forwards_table(at)
+    assert len(table) == len(chain.expiries) and (table["Source"] == "parity").all()
+    assert table["Forward"].to_numpy() == pytest.approx(chain.expiries["forward"].to_numpy(), rel=5e-5)
+    assert table["Implied rate (%)"].iloc[-1] == pytest.approx(4.45, abs=0.05)
+    assert table["Implied yield (%)"].iloc[-1] == pytest.approx(1.3, abs=0.05)
+    assert any("forward that put-call parity reads from the quotes" in w.value for w in at.warning)
+    assert _metric(at, "Calendar arbitrage") == "0" and _metric(at, "Butterfly arbitrage") == "0"
+    # Signed with the minus sign U+2212, as the generator's forwards sit below the sidebar's (no yield there).
+    assert all(gap.startswith("\u2212") for gap in _shown_gaps(at))
+    assert _shown_gaps(at)[0] == f"\u2212{abs(table['Gap to sidebar (bp)'].iloc[0]):.1f}"
+
+    at.segmented_control(key="surface_forward").set_value("Sidebar r, q").run()
+    _ok(at)
+    table = _forwards_table(at)
+    assert (table["Source"] == "sidebar").all() and table["Gap to sidebar (bp)"].abs().max() < 1e-9
+    assert set(_shown_gaps(at)) == {"0.0"}  # was "+0.0" (and "-0.0" for a rounding-level negative gap)
+    assert not any("put-call parity reads" in w.value for w in at.warning)
+
+
+def test_american_quotes_take_the_sidebar_forwards_and_say_so(new_app):
+    """With an American pricing model in the sidebar, put-call parity is not used for the quotes (it holds only for
+    European options): every forward is the sidebar's, the carry-gap warning stays away, the Forwards control says
+    why, and the parse message says the prices are still inverted as European."""
+    rows = []
+    for days in (30, 91, 182):
+        T = days / 365
+        for strike in np.arange(80.0, 120.01, 2.5):
+            for kind in ("call", "put"):
+                price = black_scholes.price(100.0, strike, T, 0.05, 0.25, 0.02, kind)
+                rows.append({"Strike": strike, "Days": days, "Type": kind, "Bid": price - 0.02, "Ask": price + 0.02})
+    european = new_app(tab="Surface", rate=5.0, div=0.0).run()
+    _upload(european, pd.DataFrame(rows))
+    _ok(european)
+    assert (_forwards_table(european)["Source"] == "parity").all()  # the 2 % yield the sidebar lacks, read by parity
+    assert any("put-call parity reads" in w.value for w in european.warning)
+    assert not any("pricing model is American" in c.value for c in european.caption)
+
+    at = new_app(tab="Surface", rate=5.0, div=0.0, model="American (ALO)").run()
+    _upload(at, pd.DataFrame(rows))
+    _ok(at)
+    assert (_forwards_table(at)["Source"] == "sidebar").all()
+    assert not any("put-call parity reads" in w.value for w in at.warning)
+    captions = [c.value for c in at.caption]
+    assert any(
+        c.startswith("The sidebar's pricing model is American, so put-call parity is not used") for c in captions
+    )
+    assert any("because the quotes are read as American" in c for c in captions)
+    assert any("prices are read as American (the sidebar's pricing model) but still inverted" in c for c in captions)
+    assert at.segmented_control(key="surface_forward").value == "Put-call parity"  # kept, for European quotes
+
+
+def test_a_strike_beyond_the_extrapolation_reach_says_how_far_the_reach_is(app):
+    """30 days, strike 65 on the sample quotes (K/S 0.7 to 1.3): |ln K/F| is 0.435, beyond the 30-day smile's reach of
+    four at-the-money standard deviations, 0.286, though only 0.07 beyond its lowest quote. The caption gives the
+    reach, measured from the forward; it used to say 1.5, the cap."""
+    app.sidebar.number_input(key="days").set_value(30).run()
+    app.sidebar.number_input(key="strike").set_value(65.0).run()
+    _upload(app, vol_surface.sample_quotes(100, 0.05, 0.0))
+    _ok(app)
+    caption = next(c.value for c in app.caption if "gives no implied vol" in c.value)
+    assert "beyond them the surface extrapolates only out to |ln K/F| = 0.29 from that expiry's forward F" in caption
+    app.sidebar.number_input(key="days").set_value(1000).run()
+    _ok(app)
+    caption = next(c.value for c in app.caption if "gives no implied vol" in c.value)
+    assert "lies outside the surface's maturities (30d to 2.00y)" in caption
+
+
+def test_the_smiles_show_their_extrapolated_wings_dotted(app):
+    """Beyond each maturity's quotes, where the grid has room, its smile goes on as a dotted line: the 30-day sample
+    smile is quoted over K/S 0.7-1.3 like the others, so the sample quotes are cut to 0.85-1.15 at 30 days."""
+    quotes = vol_surface.sample_quotes(100, 0.05, 0.0)
+    first = quotes["Maturity"] == quotes["Maturity"].min()
+    quotes = quotes[~first | quotes["Strike"].between(85.0, 115.0)]
+    _upload(app, quotes)
+    _ok(app)
+    traces = [t for c in app.get("plotly_chart") for t in json.loads(c.proto.spec)["data"]]
+    assert [t["name"] for t in traces if t.get("name", "").startswith("Extrapolated")] == ["Extrapolated · 30d"]
+    wing = next(t for t in traces if t.get("name") == "Extrapolated · 30d")
+    assert wing["line"]["dash"] == "dot"
+    implied = next(t for t in traces if t.get("name") == "Implied · 30d")
+    x = _array(implied["x"])
+    shown, inside = np.isfinite(_array(wing["y"])), np.isfinite(_array(implied["y"]))
+    # The wing covers grid points outside the quotes (and the last one inside, to join the smile), never inside.
+    assert shown.any() and (x[shown & ~inside] < 0.85).any() and not (shown & inside & (x > 0.86) & (x < 1.14)).any()
+    assert any("Dotted lines carry an implied-vol smile on beyond its quoted strikes" in c.value for c in app.caption)

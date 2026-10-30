@@ -266,11 +266,12 @@ def test_identical_strikes_with_carry_keep_the_full_quoted_range(low, high, days
 
 
 def test_interior_calendar_arbitrage_is_flagged_and_left_undefined():
-    # PCHIP set dw/dT to exactly 0 at an interior sign change: 0 violations and a local vol of 0%.
+    # PCHIP set dw/dT to exactly 0 at an interior sign change: 0 violations and a local vol of 0%. Fitted without
+    # the arbitrage constraints, so that the surface keeps the quotes' arbitrage (the default holds it out: below).
     quotes, _ = vs.parse_quotes(vs.sample_quotes())
     maturities = np.sort(quotes["maturity"].unique())
     quotes.loc[quotes["maturity"] == maturities[4], "iv"] *= 0.8
-    fitted = vs.fit_market_surface(quotes, 100, 0.04, 0.0)
+    fitted = vs.fit_market_surface(quotes, 100, 0.04, 0.0, calibration="unconstrained")
     assert fitted.calendar_violations > 0
     assert np.isnan(fitted.local_vol[3]).all() and np.isnan(fitted.local_vol[4]).all()  # both ends of the drop
     defined = fitted.local_vol[np.isfinite(fitted.local_vol)]
@@ -281,9 +282,26 @@ def test_calendar_arbitrage_at_the_last_maturity_flags_both_ends():
     quotes, _ = vs.parse_quotes(vs.sample_quotes())
     last = quotes["maturity"].max()
     quotes.loc[quotes["maturity"] == last, "iv"] *= 0.6
-    fitted = vs.fit_market_surface(quotes, 100, 0.04, 0.0)
+    fitted = vs.fit_market_surface(quotes, 100, 0.04, 0.0, calibration="unconstrained")
     assert fitted.calendar_violations > 0
     assert np.isnan(fitted.local_vol[-1]).all() and np.isnan(fitted.local_vol[-2]).all()
+
+
+@pytest.mark.parametrize(("index", "factor"), [(4, 0.8), (-1, 0.6)], ids=["interior", "last"])
+def test_the_arbitrage_free_fit_holds_calendar_arbitrage_out_and_says_what_it_cost(index, factor):
+    """The default calibration keeps the surface free of the quotes' calendar arbitrage, and a note names the
+    maturity, the arbitrage and its cost in RMSE, which the summary's Arbitrage cost column shows too."""
+    quotes, _ = vs.parse_quotes(vs.sample_quotes())
+    maturities = np.sort(quotes["maturity"].unique())
+    quotes.loc[quotes["maturity"] == maturities[index], "iv"] *= factor
+    fitted = vs.fit_market_surface(quotes, 100, 0.04, 0.0)
+    assert fitted.calendar_violations == 0 and fitted.butterfly_violations == 0
+    held = [note for note in fitted.notes if note.startswith("The SVI fit was held free of static arbitrage")]
+    assert len(held) == 1 and f"{maturities[index]:.3g}y the quotes' total variance falls below" in held[0]
+    cost = vs.surface_summary(fitted)["Arbitrage cost (vol pts)"].to_numpy()
+    # Elsewhere the constraints cost nothing material (keeping the wings' density positive out to |ln K/F| = 1.5
+    # costs one expiry 0.003 vol point).
+    assert cost[index] > 1.0 and np.delete(cost, index).max() < 0.01
 
 
 def test_a_steep_noisy_equity_surface_is_fitted_without_a_poor_fit_note():
@@ -427,7 +445,7 @@ def test_implied_vol_is_blank_outside_each_maturitys_quotes_and_local_vol_needs_
 def test_quotes_and_fit_quality_are_kept_on_the_surface():
     quotes, _ = vs.parse_quotes(vs.sample_quotes())
     fitted = vs.fit_market_surface(quotes, 100, 0.04, 0.0)
-    assert list(fitted.quotes.columns) == ["strike", "maturity", "iv", "moneyness", "fitted_iv"]
+    assert list(fitted.quotes.columns) == ["strike", "maturity", "iv", "moneyness", "fitted_iv", "vol_half_spread"]
     assert len(fitted.quotes) == len(quotes)
     assert fitted.fit_rmse.shape == fitted.maturities.shape
     first = fitted.quotes[fitted.quotes["maturity"] == fitted.maturities[0]]
@@ -1040,18 +1058,26 @@ def test_bid_ask_quotes_keep_the_out_of_the_money_side_and_drop_impossible_price
     clean, messages = vs.parse_quotes(frame, spot, r, q)
     text = " ".join(messages)
     assert "out-of-the-money" in text and "no-arbitrage" in text and "zero bid" in text and "trading volume" in text
-    assert len(clean) == 27  # one option per strike and expiry
+    # One option per strike and expiry, less the 30-day 80 call: its put (worth 0.0013) has a negative bid, and its
+    # own time value, 0.0013, is within its 0.01 half-spread, so it says nothing about the vol.
+    assert len(clean) == 26
+    assert "Dropped 1 in-the-money quote(s) whose time value at the expiry's forward is within their" in text
     assert np.allclose(clean["iv"], sigma, atol=0.01)
     fitted = vs.fit_market_surface(clean, spot, r, q)
     assert fitted.implied_vol_at(1.0, 0.4) == pytest.approx(sigma, abs=0.005)
+    # So is it with the sidebar rate and dividend yield instead of parity forwards.
+    by_rates, _ = vs.parse_quotes(frame, spot, r, q, forward="rates")
+    assert len(by_rates) == 26
 
 
 def test_prices_without_time_value_or_an_implied_vol_are_counted_apart_from_those_outside_the_bounds():
     # A 30-day chain at 25 % plus three prices without an implied vol, each for its own reason: a put below its
-    # intrinsic value, a call at its discounted intrinsic value (no time value; it used to be inverted to 0 and
-    # dropped as "zero implied vol") and a call so close to its upper bound that its vol exceeds 2,000 % (which used
-    # to be counted as outside the bounds). And a put struck one part in 10¹³ below the forward quoted at 1e-15: out
-    # of the money, so inverted, to a vol of 1.1e-13, below 1e-12 and so zero to machine precision. (At the forward
+    # intrinsic value (in the money with a negative time value at the expiry's forward, so dropped before inversion
+    # since SF-3; it used to be counted as outside the bounds), a call at its discounted intrinsic value (no time
+    # value; it used to be inverted to 0 and dropped as "zero implied vol") and a call so close to its upper bound
+    # that its vol exceeds 2,000 % (which used to be counted as outside the bounds). And a put struck one part in
+    # 10¹³ below the forward quoted at 1e-15: out of the money, so inverted, to a vol of 1.1e-13, below 1e-12 and so
+    # zero to machine precision. (At the forward
     # itself the sign of ln(F/K), and so the side the put is on, would depend on the last bit of exp; here ln(F/K) is
     # 1e-13 and its rounding about 1e-16.)
     spot, rate, t = 100.0, 0.04, 30 / 365
@@ -1070,9 +1096,10 @@ def test_prices_without_time_value_or_an_implied_vol_are_counted_apart_from_thos
     clean, messages = vs.parse_quotes(pd.DataFrame(rows), spot, rate)
     assert len(clean) == 9 and np.allclose(clean["iv"], 0.25, atol=0.002)
     assert [str(m) for m in messages[1:]] == [
-        "Dropped 1 price quote(s) outside the no-arbitrage bounds at spot 100.00, rate 4.00% and dividend yield 0.00% "
-        "(e.g. price 1 is below the no-arbitrage lower bound 17.1143 (discounted intrinsic value); no volatility can "
-        "produce it).",
+        "Forwards and discount factors of the 1 expiry from the sidebar rate and dividend yield: put-call parity "
+        "needs a call and a put quoted at 6+ common strikes of an expiry.",
+        "Dropped 1 in-the-money quote(s) whose time value at the expiry's forward is within their bid/ask spread "
+        "(their out-of-the-money side has no usable quote): they carry no information about the vol.",
         f"Dropped 1 price quote(s) with no time value (e.g. price {intrinsic:.6g} is within 1e-10 (1e-12·max(S, K)) "
         "of the no-arbitrage lower bound "
         f"{intrinsic:.6g} (discounted intrinsic value), so it has no time value to identify a volatility from: its "
@@ -1394,7 +1421,7 @@ def test_vertical_spread_arbitrage_in_the_quotes_is_reported_even_when_the_fit_i
     quotes.loc[(quotes["maturity"] == 30 / 365) & (quotes["strike"] == 110.0), "iv"] += 0.06
     fitted = vs.fit_market_surface(quotes, 100.0, 0.05, 0.0)
     assert fitted.fit_rmse[1] < vs.POOR_FIT_RMSE
-    notes = [note for note in fitted.notes if "static arbitrage" in note]
+    notes = [note for note in fitted.notes if note.startswith("The quotes have static arbitrage")]
     assert (
         len(notes) == 1 and "a call more than one at a lower strike, even if each quote is 1 vol point off" in notes[0]
     )

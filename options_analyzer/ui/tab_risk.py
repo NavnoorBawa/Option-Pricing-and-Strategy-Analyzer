@@ -7,6 +7,7 @@ re-prices it leg by leg, so the numbers are consistent across the app.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import math
 
 import numpy as np
@@ -33,13 +34,12 @@ INDEX_SPOT_VOL_CORRELATION = -0.7
 
 
 def shock_label(x: float) -> str:
-    """A relative shock as a percentage: whole percents when exact, otherwise one decimal; zero unsigned."""
+    """A relative shock as a percentage: whole percents when exact, otherwise one decimal; zero unsigned; U+2212 for
+    minus."""
     pct = 100.0 * x
     if abs(pct) < 1e-9:
         return "0%"
-    if abs(pct - round(pct)) < 1e-9:
-        return f"{pct:+.0f}%"
-    return f"{pct:+.1f}%"
+    return signed(pct, 0 if abs(pct - round(pct)) < 1e-9 else 1, suffix="%")
 
 
 def price_labels(prices) -> list[str]:
@@ -157,7 +157,7 @@ def _time_decay(position: Position, front_days: float) -> None:
     moves = np.exp(zs * sigma_t) - 1.0
     grid = scenarios.pnl_grid(position.strategy, position.market, moves, days=days, multiplier=position.units)
     series = {
-        (f"Spot {z:+g}σ ({shock_label(m)})" if z else "Spot unchanged"): grid[:, i]
+        (f"Spot {'+' if z > 0 else MINUS}{abs(z):g}σ ({shock_label(m)})" if z else "Spot unchanged"): grid[:, i]
         for i, (z, m) in enumerate(zip(zs, moves, strict=True))
     }
     fig = charts.lines_chart(days, series, "Days from today", "P&L ($)", styles=charts.scenario_styles(len(series)))
@@ -297,8 +297,12 @@ def _stress_tests(position: Position) -> None:
     # A mark, not a checkbox: a CheckboxColumn drew toggles that looked editable in this read-only table.
     table["IV shock damped"] = table["IV shock damped"].map({True: "yes", False: "—"})
     st.dataframe(
-        # Short headers so that every one fits its narrow column; the help gives the full name.
-        table[columns].rename(columns=STRESS_HEADERS),
+        # Short headers so that every one fits its narrow column; the help gives the full name. The rate change is
+        # signed with the minus sign U+2212 and no sign at zero (a format string gives "-" and "+0"); a Styler's text
+        # is shown only in a column whose config has no format, and sorts by the number.
+        table[columns]
+        .rename(columns=STRESS_HEADERS)
+        .style.format(functools.partial(signed, decimals=0), subset=["Rate Δ (bp)"]),
         hide_index=True,
         height=35 * (len(table) + 1) + 3,  # show every scenario without an inner scrollbar
         column_config={
@@ -313,7 +317,7 @@ def _stress_tests(position: Position) -> None:
                 "above); — for a shock applied as it is to every leg.",
             ),
             "Rate Δ (bp)": st.column_config.NumberColumn(
-                format="%+.0f", width="small", help="Rate change in basis points (100 bp = 1 percentage point)."
+                width="small", help="Rate change in basis points (100 bp = 1 percentage point)."
             ),
             "P&L": st.column_config.NumberColumn(format="dollar", width="small"),
             "Days elapsed": st.column_config.NumberColumn(width="small"),

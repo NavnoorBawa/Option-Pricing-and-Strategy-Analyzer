@@ -8,6 +8,7 @@ import urllib.parse
 from decimal import Decimal
 
 import numpy as np
+import pyarrow as pa
 import pytest
 from _apptest import make_app
 from scipy.stats import lognorm, norm
@@ -1247,7 +1248,7 @@ def test_risk_heatmap_labels_show_the_exact_spot_shocks():
     at = _app("Risk")
     at.slider(key="grid_span").set_value(25).run()
     spec = _chart(at, "risk_heatmap")["data"][0]
-    assert spec["y"][:4] == ["-25%", "-20.8%", "-16.7%", "-12.5%"]
+    assert spec["y"][:4] == ["−25%", "−20.8%", "−16.7%", "−12.5%"]
     assert spec["y"][6] == "0%"
     assert spec["x"][2] == "IV 0%"
 
@@ -1258,8 +1259,8 @@ def test_spot_iv_heatmap_cells_stay_wide_enough_for_a_phone():
     # rows (highest at the top), and the colour bar is left out: the cell values already say it.
     heat = _chart(_app("Risk"), "risk_heatmap")["data"][0]
     assert heat["showscale"] is False
-    assert heat["x"] == ["IV -50%", "IV -25%", "IV 0%", "IV +25%", "IV +50%", "IV +100%"]
-    assert heat["y"][0] == "-30%" and heat["y"][6] == "0%" and heat["y"][-1] == "+30%"
+    assert heat["x"] == ["IV −50%", "IV −25%", "IV 0%", "IV +25%", "IV +50%", "IV +100%"]
+    assert heat["y"][0] == "−30%" and heat["y"][6] == "0%" and heat["y"][-1] == "+30%"
     z = _array(heat["z"])
     assert z.shape == (13, 6)
 
@@ -1300,8 +1301,8 @@ def test_spot_date_grid_labels_stay_distinct_at_the_sidebar_limits(query):
 def test_time_decay_moves_scale_with_volatility():
     names = [trace["name"] for trace in _chart(_app("Risk", vol=40), "time_decay")["data"]]
     assert names == [
-        "Spot -1σ (-33.0%)",
-        "Spot -0.5σ (-18.1%)",
+        "Spot −1σ (−33.0%)",
+        "Spot −0.5σ (−18.1%)",
         "Spot unchanged",
         "Spot +0.5σ (+22.1%)",
         "Spot +1σ (+49.2%)",
@@ -1342,6 +1343,11 @@ def test_stress_table_headers_are_short_with_the_full_name_in_the_help():
     config = json.loads(frame.proto.columns)
     assert "IV shock damped" in config["IV damped"]["help"]
     assert "basis points" in config["Rate Δ (bp)"]["help"]
+    # The rate change is signed with the minus sign U+2212 and has no sign at zero (a format string gave "+0").
+    shown = pa.ipc.open_stream(frame.proto.arrow_data.styler.display_values).read_all().to_pandas()["Rate Δ (bp)"]
+    rates = frame.value["Rate Δ (bp)"]
+    assert shown.tolist() == [("" if r == 0 else "+" if r > 0 else "\u2212") + f"{abs(r):,.0f}" for r in rates]
+    assert (rates < 0).any() and (rates == 0).any()
 
 
 def test_stress_table_and_var_cards():
@@ -1684,7 +1690,9 @@ def test_risk_heatmaps_give_the_colour_scale_width_to_their_cells():
     assert _chart(at, "risk_heatmap")["data"][0]["showscale"] is False
 
 
-@pytest.mark.parametrize(("x", "label"), [(-0.125, "-12.5%"), (0.0, "0%"), (0.3, "+30%"), (-1 / 12, "-8.3%")])
+@pytest.mark.parametrize(
+    ("x", "label"), [(-0.125, "−12.5%"), (0.0, "0%"), (0.3, "+30%"), (-1 / 12, "−8.3%"), (12.5, "+1,250%")]
+)
 def test_shock_label(x, label):
     assert tab_risk.shock_label(x) == label
 

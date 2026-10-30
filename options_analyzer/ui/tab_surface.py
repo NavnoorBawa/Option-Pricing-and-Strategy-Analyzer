@@ -15,11 +15,15 @@ import streamlit as st
 from .. import vol_surface as vs
 from . import cache, charts
 from .components import card_row, current_key
-from .format import md_code
+from .format import md_code, signed
 from .inputs import Inputs
 
 SSVI = "Parametric (SSVI)"
 QUOTES = "Market quotes (CSV)"
+#: Where each expiry's forward comes from when option prices are inverted (``vol_surface.parse_quotes``).
+FORWARD_CHOICES = {"Put-call parity": "parity", "Sidebar r, q": "rates"}
+#: How the SVI slices are fitted (``vol_surface.fit_market_surface``).
+CALIBRATION_CHOICES = {"Arbitrage-free": "arbitrage_free", "Unconstrained": "unconstrained"}
 COLORSCALES = ("Viridis", "Plasma", "Inferno", "Magma", "Cividis", "Turbo")
 VOL_LIMITS = (0.5, 500.0)
 SURFACE_CHART_WIDTH = 380  # px: two fit side by side in the 804 px main column at 1,280 px with the sidebar open
@@ -173,9 +177,55 @@ def _quote_controls(inputs: Inputs) -> vs.VolSurface | None:
             key=key,
             width="stretch",
         )
+    forward_choice = c2.segmented_control(
+        "Forwards",
+        list(FORWARD_CHOICES),
+        default="Put-call parity",
+        required=True,
+        key="surface_forward",
+        persist_state="session",
+        help="Where each expiry's forward and discount factor come from when option prices are inverted: put-call "
+        "parity on the expiry's calls and puts (C − P = DF·(F − K), fitted near the money), or the sidebar rate and "
+        "dividend yield. Parity needs a call and a put quoted at 6 or more common strikes of an expiry; the others "
+        "use the sidebar.",
+    )
+    forward = FORWARD_CHOICES[forward_choice]
+    american = inputs.model.is_american
+    if american:
+        # The control stays, so that its choice is kept for European quotes; it has no effect on American ones.
+        c2.caption(
+            "The sidebar's pricing model is American, so put-call parity is not used: it holds only for European "
+            "options, and the early-exercise premium would read as a wrong forward. Every expiry's forward and "
+            "discount factor come from the sidebar rate and dividend yield."
+        )
+    calibration_choice = c2.segmented_control(
+        "Calibration",
+        list(CALIBRATION_CHOICES),
+        default="Arbitrage-free",
+        required=True,
+        key="surface_calibration",
+        persist_state="session",
+        help="Arbitrage-free: each SVI smile is held free of butterfly arbitrage (a negative density) and of calendar "
+        "arbitrage against the expiry before it, where both are quoted; the summary's Arbitrage cost column shows "
+        "what that costs in RMSE. Unconstrained: the best smile through each expiry's quotes, arbitrage and all. "
+        "Either way each quote counts as one over its bid/ask half-spread in vol.",
+    )
+    calibration = CALIBRATION_CHOICES[calibration_choice]
+    source = (
+        "each expiry's forward and discount factor from put-call parity where calls and puts are quoted at common "
+        "strikes, else from the sidebar"
+        if forward == "parity" and not american
+        else "the sidebar"
+    )
+    exercise = (
+        "prices are read as American (the sidebar's pricing model) but still inverted with Black-76 as European "
+        "options, which overstates their vols by the early-exercise premium"
+        if american
+        else "prices are inverted with Black-76 (European exercise)"
+    )
     context = (
-        f"Quotes are read with the sidebar spot ({inputs.spot:,.2f}), rate ({inputs.rate:.2%}) and dividend yield "
-        f"({inputs.dividend_yield:.2%}); prices are inverted with Black-Scholes-Merton (European exercise)."
+        f"Quotes are read with the sidebar spot ({inputs.spot:,.2f}) and {source} rate ({inputs.rate:.2%}) and "
+        f"dividend yield ({inputs.dividend_yield:.2%}); {exercise}."
     )
     kept = st.session_state.get("quotes_upload")
     if upload is None and kept is not None:
@@ -188,7 +238,15 @@ def _quote_controls(inputs: Inputs) -> vs.VolSurface | None:
     try:
         raw = pd.read_csv(io.BytesIO(upload.getvalue()))
         with st.spinner("Fitting an SVI smile to every maturity…"):
-            surface, messages, error = cache.market_surface(raw, inputs.spot, inputs.rate, inputs.dividend_yield)
+            surface, messages, error = cache.market_surface(
+                raw,
+                inputs.spot,
+                inputs.rate,
+                inputs.dividend_yield,
+                forward,
+                calibration,
+                "american" if american else "european",
+            )
     except pd.errors.EmptyDataError:
         st.error("The uploaded file is empty.")
         return None
@@ -206,6 +264,80 @@ def _quote_controls(inputs: Inputs) -> vs.VolSurface | None:
     if error:
         st.error(f"Could not build a surface from this file: {error}")
     return surface
+
+
+FORWARD_SOURCE_LABELS = {"parity": "parity", "parity_forward": "parity (DF: rate)", "rates": "sidebar"}
+#: The implied rates a parity fit may give (vol_surface.forwards.RATE_LIMITS), as the help text shows them.
+RATE_RANGE = " to ".join(f"{limit:.0%}".replace("-", "\u2212") for limit in vs.forwards.RATE_LIMITS)
+
+
+def _forwards(surface: vs.VolSurface, inputs: Inputs) -> None:
+    """The forward and discount factor of every fitted expiry, and a warning where the quotes resolve a forward
+    that the sidebar rate and dividend yield miss (``vol_surface.carry_gaps``)."""
+    table = surface.forwards
+    if table is None or table.empty:
+        return
+    gaps = vs.carry_gaps(table)
+    if gaps.any():
+        worst = float(np.max(np.abs(table["gap_bp"].to_numpy(float)[gaps])))
+        st.warning(
+            f"At {int(gaps.sum())} of {len(table)} expiries the forward that put-call parity reads from the quotes "
+            f"is more than {vs.forwards.MIN_CARRY_GAP_BP:g} bp, and more than half the at-the-money spread, from the "
+            f"sidebar's (rate {inputs.rate:.2%}, dividend yield {inputs.dividend_yield:.2%}); up to {worst:,.1f} bp. "
+            "The surface uses the parity forwards; the other tabs still price with the sidebar rate and yield.",
+            icon=":material/compare_arrows:",
+        )
+    shown = pd.DataFrame(
+        {
+            "Days": table["maturity"].to_numpy(float) * 365,
+            "Forward": table["forward"],
+            "Discount factor": table["discount_factor"],
+            "Implied rate (%)": table["rate"] * 100,
+            "Implied yield (%)": table["dividend_yield"] * 100,
+            "Gap to sidebar (bp)": table["gap_bp"],
+            "Pairs": table["pairs"],
+            "Residual": table["residual"],
+            "Source": table["source"].map(FORWARD_SOURCE_LABELS),
+        }
+    )
+    with st.expander("Forwards and discounting", icon=":material/compare_arrows:"):
+        st.dataframe(
+            # The gap is signed: shown with the minus sign U+2212 and no sign at zero (a format string gives "-" and
+            # "+0.0"); a Styler's text is shown only in a column whose config has no format, and sorts by the number.
+            shown.style.format(functools.partial(signed, decimals=1), subset=["Gap to sidebar (bp)"]),
+            hide_index=True,
+            column_config={
+                "Days": st.column_config.NumberColumn(format="%.2f", help="Calendar days to expiry."),
+                "Forward": st.column_config.NumberColumn(format="%.2f"),
+                "Discount factor": st.column_config.NumberColumn(format="%.6f"),
+                "Implied rate (%)": st.column_config.NumberColumn(
+                    format="%.2f", help="−ln(DF) / T: the rate the options are discounted at (the box rate)."
+                ),
+                "Implied yield (%)": st.column_config.NumberColumn(
+                    format="%.2f", help="Implied rate − ln(F / S) / T: the dividend yield that gives this forward."
+                ),
+                "Gap to sidebar (bp)": st.column_config.NumberColumn(
+                    help="ln(F / sidebar forward), in basis points of the forward."
+                ),
+                "Pairs": st.column_config.NumberColumn(
+                    format="%d", help="Call/put pairs near the money used for the fit, after outliers are removed."
+                ),
+                "Residual": st.column_config.NumberColumn(
+                    format="%.4f", help="Root-mean-square gap of C − P from the fitted line DF·(F − K), in price units."
+                ),
+                "Source": st.column_config.TextColumn(
+                    help="parity: forward and discount factor fitted to the pairs; parity (DF: rate): forward from "
+                    "parity, discount factor from the sidebar rate plus the spread over it measured at the other "
+                    "expiries, because this expiry's own fit could not measure it (its strikes span too little, or "
+                    f"it implied a rate outside {RATE_RANGE}); sidebar: too few pairs, the Sidebar r, q choice, or "
+                    "American quotes."
+                ),
+            },
+        )
+        st.caption(
+            "Black-76 with this forward F and discount factor DF is Black-Scholes-Merton at the implied rate and "
+            "yield, so each quote is inverted at its own expiry's carry."
+        )
 
 
 def _local_vol_share(valid: int, quoted: int) -> str:
@@ -232,19 +364,31 @@ def _maturity_labels(maturities: np.ndarray) -> list[str]:
 
 def _contract_readout(surface: vs.VolSurface, inputs: Inputs) -> None:
     moneyness = inputs.strike / inputs.spot
-    iv = surface.implied_vol_at(moneyness, inputs.expiry)
+    iv = surface.implied_vol_at(moneyness, inputs.expiry, extrapolate=True)
     where = f"strike {inputs.strike:,.2f} (K/S = {moneyness:.3f}) and expiry {inputs.days} days"
+    region = "quoted strikes" if surface.quotes is not None else "grid"
     if np.isfinite(iv):
+        extrapolated = surface.is_extrapolated(moneyness, inputs.expiry)
+        how = f", extrapolated beyond the {region}" if extrapolated else ""
         st.info(
-            f"At the sidebar {where}, the surface's implied vol is **{iv:.2%}** "
+            f"At the sidebar {where}, the surface's implied vol is **{iv:.2%}**{how} "
             f"(sidebar volatility {inputs.volatility:.2%}).",
             icon=":material/my_location:",
         )
-    else:
-        region = "quoted region" if surface.quotes is not None else "grid"
+        return
+    Ts = surface.maturities
+    if not Ts[0] - vs.MATURITY_TOLERANCE <= inputs.expiry <= Ts[-1] + vs.MATURITY_TOLERANCE:
         st.caption(
-            f"The sidebar {where} lies outside the surface's {region}, so the surface gives no implied vol for it."
+            f"The sidebar {where} lies outside the surface's maturities ({_maturity_labels(Ts[[0]])[0]} to "
+            f"{_maturity_labels(Ts[[-1]])[0]}), so the surface gives no implied vol for it."
         )
+        return
+    reach = surface.reach_at(inputs.expiry)
+    st.caption(
+        f"The sidebar {where} lies outside the {region}, and beyond them the surface extrapolates only out to "
+        f"|ln K/F| = {reach:.2f} from that expiry's forward F (four at-the-money standard deviations, at most "
+        f"{vs.svi.WING_CAP:g}), so it gives no implied vol for it."
+    )
 
 
 def _workbook(surface: vs.VolSurface, summary: pd.DataFrame, spot: float) -> bytes:
@@ -263,6 +407,7 @@ def _workbook(surface: vs.VolSurface, summary: pd.DataFrame, spot: float) -> byt
                     "iv": "Quoted implied vol",
                     "moneyness": "Moneyness K/S",
                     "fitted_iv": "SVI implied vol",
+                    "vol_half_spread": "Half bid/ask spread in vol",
                 }
             ).to_excel(writer, sheet_name="Quotes", index=False)
     return buffer.getvalue()
@@ -324,6 +469,9 @@ def _smiles(surface: vs.VolSurface) -> None:
     if not picked:
         return
     slices = [(labels[i], surface.implied_vol[i], surface.local_vol[i]) for i in picked]
+    # Each smile read on beyond its quotes (SVI wings within Lee's bound, out to its reach), where the grid has room.
+    extended = surface.at_moneyness(surface.moneyness, extrapolate=True)[0]
+    wings = [_wing(surface.implied_vol[i], extended[i]) for i in picked]
     quotes = None
     if surface.quotes is not None:
         quotes = []
@@ -331,13 +479,32 @@ def _smiles(surface: vs.VolSurface) -> None:
             rows = surface.quotes[np.isclose(surface.quotes["maturity"], maturities[i], rtol=0.0, atol=1e-9)]
             quotes.append((rows["moneyness"].to_numpy(), rows["iv"].to_numpy(), rows["fitted_iv"].to_numpy()))
     charts.show(
-        charts.smile_chart(surface.moneyness, slices, "Moneyness K/S", quotes=quotes),
+        charts.smile_chart(surface.moneyness, slices, "Moneyness K/S", quotes=quotes, wings=wings),
         key="smiles",
         alt="Implied and local volatility against moneyness for the selected maturities"
         + (", with the market quotes" if quotes is not None else ""),
     )
+    region = "quoted strikes" if quotes is not None else "grid"
+    extrapolation = (
+        f" Dotted lines carry an implied-vol smile on beyond its {region}: extrapolated, out to four at-the-money "
+        f"standard deviations from the forward (|ln K/F| at most {vs.svi.WING_CAP:g}), as far as this chart reaches."
+        if any(np.isfinite(wing).any() for wing in wings)
+        else ""
+    )
     if quotes is not None:
-        st.caption("Circles are the quotes; hover one to see how far the SVI fit misses it.")
+        st.caption("Circles are the quotes; hover one to see how far the SVI fit misses it." + extrapolation)
+    elif extrapolation:
+        st.caption(extrapolation.strip())
+
+
+def _wing(inside: np.ndarray, extended: np.ndarray) -> np.ndarray:
+    """The extrapolated part of one smile on the grid: ``extended`` where ``inside`` (the smile within its quotes) is
+    blank, and the last point within the quotes next to each wing, so that the wing joins the smile; NaN elsewhere."""
+    beyond = np.isfinite(extended) & ~np.isfinite(inside)
+    next_to = np.zeros_like(beyond)
+    next_to[1:] |= beyond[:-1]
+    next_to[:-1] |= beyond[1:]
+    return np.where(beyond | (next_to & np.isfinite(inside)), extended, np.nan)
 
 
 @st.fragment
@@ -387,6 +554,7 @@ def render(inputs: Inputs) -> None:
             ),
         ],
     )
+    _forwards(surface, inputs)
     for note in surface.notes:
         st.warning(note)
     if valid < quoted:
@@ -396,7 +564,10 @@ def render(inputs: Inputs) -> None:
             "variance changes too little between maturities to measure it."
         )
     if quoted < surface.implied_vol.size:
-        st.caption("Implied volatility is left blank outside each maturity's quoted strikes (no extrapolation).")
+        st.caption(
+            "The grid and the 3-D surfaces leave implied volatility blank outside each maturity's quoted strikes; the "
+            "contract readout and the Smiles chart read on beyond them, marked as extrapolated."
+        )
     _contract_readout(surface, inputs)
 
     colorscale = st.selectbox("Colour scale", COLORSCALES, key="surface_colors", persist_state="session")
@@ -442,6 +613,23 @@ def render(inputs: Inputs) -> None:
             "Butterfly (vol pts)": st.column_config.NumberColumn(format="%.2f"),
             "Fit RMSE (vol pts)": st.column_config.NumberColumn(
                 format="%.3f", help="Root-mean-square gap between the SVI smile and the quotes at this maturity."
+            ),
+            "Inside bid/ask (%)": st.column_config.NumberColumn(
+                format="%.0f",
+                help="Share of the quotes whose fitted vol lies within their bid/ask spread in vol (or within one "
+                "step of the file's price grid). Blank for quoted implied vols and for prices with neither.",
+            ),
+            "Median |error| / half-spread": st.column_config.NumberColumn(
+                format="%.2f",
+                help="Median gap between fit and quote, in units of the quote's half-spread in vol. Blank where the "
+                "quotes have no spread.",
+            ),
+            "Arbitrage cost (vol pts)": st.column_config.NumberColumn(
+                format="%.3f",
+                help="How much holding this maturity's smile free of static arbitrage raised the fit's error: the "
+                "RMSE with each quote weighted as in the fit (by one over its half-spread in vol, relative to the "
+                "median quote). 0 where the smile had no arbitrage; blank where no arbitrage-free smile was found "
+                "(a note above says so).",
             ),
         },
     )
