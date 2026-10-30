@@ -824,11 +824,16 @@ def test_accuracy_does_not_depend_on_the_conditioning_once_there_is_time_value()
     forward = 100.0 * np.exp((r - q) * T)
     in_the_money = np.where(kind == "call", forward > K, forward < K)
     at_upper = result.reason == "at_or_above_upper_bound"  # worth its upper bound (S e^(-qT) or K e^(-rT)) to 16 digits
-    assert at_upper.sum() == 5 and (time_value[at_upper] <= margin[at_upper]).all()
+    # Within 4 ε of its upper bound a quote's outcome is decided by the last bit of exp, which differs between CPUs
+    # (5 of these 7 were at the bound here and 6 on a CI runner): either outcome is right there, and only there.
+    upper = np.where(kind == "call", 100.0 * np.exp(-q * T), K * np.exp(-r * T))
+    near_upper = prices >= upper * (1 - 4 * np.finfo(float).eps)
+    assert near_upper.sum() == 7 and (at_upper <= near_upper).all()
+    assert (time_value[at_upper] <= margin[at_upper]).all()
     # The rounding of the price and of the intrinsic value, a few ε·max(S, K), is 2.2e-4 of the margin per ε: within
     # 1e-3 of the margin either outcome is right.
     clear = time_value > margin * (1 + 1e-3)
-    flat = in_the_money & (time_value <= margin * (1 - 1e-3)) & ~at_upper
+    flat = in_the_money & (time_value <= margin * (1 - 1e-3)) & ~near_upper
     assert (result.reason[clear] == "").all()
     assert (result.reason[flat] == "no_time_value").all()
     assert (result.reason[~in_the_money] == "").all()  # out of the money every positive quote is inverted
@@ -844,9 +849,9 @@ def test_accuracy_does_not_depend_on_the_conditioning_once_there_is_time_value()
     # precision, and so does the volatility. Measured: at most 1.4e-12.
     tiny = ~in_the_money & ~clear
     assert error[tiny].max() < 1e-11
-    # Measured: 15,427 quotes with more time value than the margin, 2,259 in the money with less (no time value) and
-    # 2,309 out of the money with less.
-    assert clear.sum() == 15_427 and flat.sum() == 2_259 and tiny.sum() == 2_309
+    # Measured: 15,427 quotes with more time value than the margin, 2,257 in the money with less (no time value; 2,259
+    # with the two near their upper bound that this machine's exp leaves below it) and 2,309 out of the money with less.
+    assert clear.sum() == 15_427 and flat.sum() == 2_257 and tiny.sum() == 2_309
 
 
 @pytest.mark.oracle
