@@ -25,6 +25,7 @@ from .format import (
     money_short,
     number,
     number_short,
+    probability_text,  # moved to the number standard; the card's basis tag waits for the tab's redesign
     shown_decimals,
     signed,
 )
@@ -685,19 +686,6 @@ def price_decimals(value: float, most: int = 8) -> int:
         if abs(round(value, decimals) - value) <= 1e-9 * max(1.0, abs(value)):
             return decimals
     return most
-
-
-def probability_text(p: float, sure: bool = False, never: bool = False) -> str:
-    """Probability of profit with one decimal, never rounded to a certainty the payoff does not have.
-
-    ``sure`` says the position cannot lose and ``never`` that it cannot profit. Otherwise a probability that
-    rounds (or saturates in floating point) to 100 % or 0 % is shown as ``>99.9%`` or ``<0.1%``.
-    """
-    if p >= 0.9995 and not sure:
-        return ">99.9%"
-    if p <= 0.0005 and not never:
-        return "<0.1%"
-    return f"{p:.1%}"
 
 
 def premium_label(cost: float) -> str:

@@ -8,16 +8,24 @@ values one baseline, and no value is ever cut off.
 
 :func:`current_key` serves the widgets that keep their values while their tab is closed but whose keys change on
 purpose, and :func:`link_match` reads the names in a hand-typed link.
+
+Tables follow the tables standard (UI spec 2.8): :func:`col` is the column registry, one ``st.column_config`` per
+quantity of the number standard (:data:`COLUMN_KINDS`), and :func:`table` draws an ``st.dataframe`` with it.
 """
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import streamlit as st
+
+from .format import MISSING, ROW_HEIGHT
 
 #: Card text in the theme's IBM Plex Sans: values in Medium at 22.75 px (the theme's metricValueFontSize, 1.625rem
 #: of its 14 px base) and deltas in Regular at 12.25 px. Digits (tabular), "$", "+" and "−" are 0.6 em wide in Plex
@@ -331,3 +339,243 @@ def link_match(value: str, names: Iterable[str], *, aliases: Mapping[str, str] |
         return None
     candidates = [(name, name) for name in names] + list((aliases or {}).items())
     return next((name for spelling, name in candidates if _plain(spelling) == wanted), None)
+
+
+# --- Tables: the column registry and the table helper (UI spec 2.5 and 2.8) ---------------------------------------
+
+
+@dataclass(frozen=True)
+class ColumnKind:
+    """How one quantity of the number standard shows in an ``st.dataframe`` column.
+
+    ``unit`` goes in the header (``IV (%)``); the data are in that unit already (15.46 for 15.46%, 0.35 for 0.35 vp,
+    45 for 45 bp), so the numbers on screen, copied and exported are the same. ``digits`` is the column's one
+    precision; ``None`` means :func:`table` chooses it from the column's largest value (``auto``). ``format`` is the
+    printf format with ``{d}`` for the digits; ``None`` for a text or date column.
+    """
+
+    unit: str
+    format: str | None
+    digits: int | None
+    auto: str = ""  # how table() chooses the digits when ``digits`` is None: "money", "strike" or "bp"
+    significant: bool = False  # ``digits`` are significant digits (%g), not decimals
+
+
+#: The column kinds, named after the quantities of the number standard (UI spec 2.5). Number columns keep the printf
+#: hyphen-minus: a NumberColumn format cannot emit U+2212, and a text column would lose its right alignment and its
+#: sorting. Signed columns have no "+": printf's "+" flag also signs zero ("+0.00"), which the standard forbids.
+#: Thousands separators come from printf's "," flag (Streamlit's sprintf, 1.65 and later), not from the locale.
+COLUMN_KINDS: dict[str, ColumnKind] = {
+    "text": ColumnKind("", None, None),
+    "date": ColumnKind("", None, None),
+    "level": ColumnKind("", "%,.{d}f", 2),  # spot, forward, index level: 5,815.22
+    "strike": ColumnKind("", "%,.{d}f", None, "strike"),  # 5,815, or 582.5 where a strike needs a decimal
+    "premium": ColumnKind("", "%,.{d}f", 2),  # theo, bid, ask, mid per share: 98.57
+    "premium_diag": ColumnKind("", "%,.{d}f", 6),  # diagnostics only: 98.570661
+    "money": ColumnKind("$", "%,.{d}f", None, "money"),  # unsigned amounts: 2 dp below $1,000, else whole dollars
+    "pnl": ColumnKind("$", "%,.{d}f", None, "money"),  # P&L and losses, negative
+    "dollar_delta": ColumnKind("$", "%,.{d}f", 0),  # $Δ
+    "gamma_pnl": ColumnKind("$", "%,.{d}f", None, "money"),  # Γ P&L 1%: ½Γ(0.01S)² × units
+    "vega": ColumnKind("$/vp", "%,.{d}f", None, "money"),
+    "theta": ColumnKind("$/day", "%,.{d}f", None, "money"),
+    "rho": ColumnKind("$/1%", "%,.{d}f", None, "money"),
+    "vol": ColumnKind("%", "%.{d}f", 2),  # implied vol: 15.46
+    "vol_change": ColumnKind("vp", "%.{d}f", 2),  # vol changes, RR, BF, mid vs fit, edges
+    "rate": ColumnKind("%", "%.{d}f", 2),  # rates and yields: 4.75
+    "bp": ColumnKind("bp", "%,.{d}f", None, "bp"),  # 0 dp; 1 dp below 10 bp, 2 dp below 1 bp
+    "delta": ColumnKind("", "%.{d}f", 3),  # per option, spot convention: 0.508
+    "gamma": ColumnKind("", "%.{d}g", 3, significant=True),  # Γ 1% per option: 0.0936
+    "greek": ColumnKind("", "%.{d}g", 3, significant=True),  # vanna, volga, charm, veta and third order
+    "probability": ColumnKind("%", "%.{d}f", 1),
+    "share": ColumnKind("%", "%.{d}f", 1),  # a share of a whole: in band, confidence
+    "moneyness": ColumnKind("%", "%.{d}f", 1),  # K/F
+    "log_moneyness": ColumnKind("", "%.{d}f", 3),  # k = ln(K/F)
+    "quantity": ColumnKind("", "%+d", 0),  # a leg's signed size; a zero quantity is refused before it shows
+    "count": ColumnKind("", "%,d", 0),
+    "days": ColumnKind("", "%,.{d}f", 0),  # DTE, whole days
+    "year_fraction": ColumnKind("", "%.{d}f", 6),  # diagnostics only
+}
+#: Rows a table shows before it scrolls (UI spec 2.8): shorter tables take their content's height.
+TABLE_ROWS = 15
+
+
+def _unit_in(label: str, unit: str) -> bool:
+    """Whether ``label`` names ``unit`` already (``$Δ`` names dollars; ``Mid vs fit (vp)`` names vol points)."""
+    return unit in label or (unit.startswith("$") and "$" in label)
+
+
+def col(
+    kind: str,
+    label: str,
+    *,
+    help: str,
+    digits: int | None = None,
+    pinned: bool | None = None,
+    width: Any = None,
+) -> Any:
+    """The ``st.column_config`` of one column, from the column registry (:data:`COLUMN_KINDS`).
+
+    The header gets the kind's unit in brackets unless it names it already (``col("vol", "IV", ...)`` heads the
+    column ``IV (%)``); the numbers take the kind's one precision. Keep headers to 14 characters or fewer (spec 2.8).
+
+    Parameters
+    ----------
+    kind : str
+        A key of :data:`COLUMN_KINDS`: ``"strike"``, ``"premium"``, ``"vol"``, ``"vol_change"``, ``"pnl"``, ...
+    label : str
+        The header, without its unit.
+    help : str
+        The header's tooltip: what the column is, its sign convention and its basis. Every column has one.
+    digits : int, optional
+        The column's precision where the kind leaves it to the data (strikes, money, bp); :func:`table` passes the
+        one it chose. Ignored by kinds with a fixed precision.
+    pinned : bool, optional
+        Keep the column in view while the table scrolls sideways (:func:`table` pins the first column).
+    width : optional
+        ``st.column_config``'s width (``"small"``, ``"medium"``, ``"large"`` or px).
+
+    Returns
+    -------
+    dict
+        The column configuration for ``st.dataframe(column_config=...)``.
+
+    Raises
+    ------
+    ValueError
+        If ``kind`` is unknown or ``help`` is blank.
+
+    Examples
+    --------
+    >>> col("vol", "IV", help="Implied vol at the mid.")["label"]
+    'IV (%)'
+    >>> col("vega", "Vega", help="$ per vol point.")["type_config"]["format"]
+    '%,.2f'
+    >>> col("pnl", "P&L ($)", help="At expiry.", digits=0)["type_config"]["format"]
+    '%,.0f'
+    """
+    if kind not in COLUMN_KINDS:
+        raise ValueError(f"unknown column kind {kind!r}; the kinds are {', '.join(COLUMN_KINDS)}")
+    if not help or not help.strip():
+        raise ValueError(f"column {label!r} needs a help text (UI spec 2.8: every column has one)")
+    spec = COLUMN_KINDS[kind]
+    header = f"{label} ({spec.unit})" if spec.unit and not _unit_in(label, spec.unit) else label
+    common = {"help": help, "pinned": pinned, "width": width}
+    if kind == "text":
+        return st.column_config.TextColumn(header, **common)
+    if kind == "date":
+        return st.column_config.DateColumn(header, format="DD-MMM-YY", **common)
+    assert spec.format is not None
+    places = spec.digits if spec.digits is not None else (2 if digits is None else digits)
+    return st.column_config.NumberColumn(header, format=spec.format.format(d=places), **common)
+
+
+def _auto_digits(kind: ColumnKind, values: np.ndarray) -> int:
+    """The precision :func:`table` chooses for a column whose kind leaves it to the data (one per column)."""
+    finite = values[np.isfinite(values)]
+    if kind.digits is not None:
+        return kind.digits
+    if not finite.size:
+        return 0 if kind.auto == "bp" else 2
+    largest = float(np.max(np.abs(finite)))
+    if kind.auto == "money":  # cents below $1,000, whole dollars from $1,000 (spec 2.5, money)
+        return 2 if round(largest, 2) < 1000 else 0
+    if kind.auto == "bp":
+        return 2 if round(largest, 2) < 1 else 1 if round(largest, 1) < 10 else 0
+    # Strikes: no decimals while every strike is whole, else the fewest (up to two) that write them all.
+    for places in range(3):
+        if np.allclose(finite, np.round(finite, places), rtol=0, atol=1e-9):
+            return places
+    return 2
+
+
+def _rounded(kind: ColumnKind, values: np.ndarray, places: int) -> np.ndarray:
+    """``values`` at the column's precision, without negative zeros: printf writes −0.0001 at two decimals as
+    ``-0.00``, the standard's ``0.00``."""
+    if kind.significant:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            scale = 10.0 ** (places - 1 - np.floor(np.log10(np.abs(values))))
+            rounded = np.where(np.isfinite(scale) & (values != 0), np.round(values * scale) / scale, values)
+    else:
+        rounded = np.round(values, places)
+    return rounded + 0.0  # -0.0 + 0.0 is +0.0
+
+
+def table(
+    data: pd.DataFrame,
+    kinds: Mapping[str, str],
+    help: Mapping[str, str],
+    *,
+    labels: Mapping[str, str] | None = None,
+    max_rows: int = TABLE_ROWS,
+    **kwargs: Any,
+) -> Any:
+    """Draw ``data`` as a desk table (UI spec 2.8): the registry's format for every column, one precision per
+    column, the first column pinned, help on every column, rows of 28 px, and the content's height up to
+    ``max_rows`` rows (then a fixed height of that many rows, which scrolls).
+
+    Numeric columns are rounded to their precision before they are sent, so that no cell shows ``-0.00``; data are
+    in the units of the kind (see :class:`ColumnKind`). Missing values show the en dash.
+
+    Parameters
+    ----------
+    data : pandas.DataFrame
+        The table, its columns in display units (vols in %, vol changes in vp, rate changes in bp).
+    kinds : mapping of str to str
+        Every column's kind (a key of :data:`COLUMN_KINDS`).
+    help : mapping of str to str
+        Every column's help text.
+    labels : mapping of str to str, optional
+        Headers other than the column names (without their units, which :func:`col` adds).
+    max_rows : int, default 15
+        Rows shown before the table scrolls.
+    **kwargs
+        Further keyword arguments of ``st.dataframe``: ``key``, ``selection_mode``, ``on_select``, ``width``, ...
+
+    Returns
+    -------
+    DeltaGenerator or DataframeState
+        What ``st.dataframe`` returns.
+
+    Raises
+    ------
+    ValueError
+        If a column has no kind or no help, or a kind is unknown.
+
+    Examples
+    --------
+    Outside a running app Streamlit draws nothing:
+
+    >>> frame = pd.DataFrame({"Strike": [5800.0, 5805.0], "IV": [15.4612, 15.3201]})
+    >>> _ = table(frame, {"Strike": "strike", "IV": "vol"}, {"Strike": "Listed strike.", "IV": "Mid implied vol."})
+    """
+    missing = [c for c in data.columns if c not in kinds or c not in help]
+    if missing:
+        raise ValueError(f"every column needs a kind and a help text (UI spec 2.8); missing for {missing}")
+    labels = labels or {}
+    shown = data.copy()
+    config = {}
+    for i, name in enumerate(data.columns):
+        kind = COLUMN_KINDS.get(kinds[name])
+        if kind is None:
+            raise ValueError(f"unknown column kind {kinds[name]!r} for column {name!r}")
+        places = None
+        if kind.format is not None:
+            values = pd.to_numeric(data[name], errors="coerce").to_numpy(float)
+            places = _auto_digits(kind, values)
+            if kind.format.endswith("d"):  # whole numbers: printf's %d drops a fraction instead of rounding it
+                shown[name] = pd.array(np.round(values), dtype="Int64") if np.isnan(values).any() else np.round(values)
+            else:
+                shown[name] = _rounded(kind, values, places)
+        config[name] = col(
+            kinds[name], labels.get(name, str(name)), help=help[name], digits=places, pinned=True if i == 0 else None
+        )
+    rows = len(data)
+    height: int | str = "content" if rows <= max_rows else table_height(max_rows)
+    options = {"hide_index": True, "row_height": ROW_HEIGHT, "height": height, "placeholder": MISSING}
+    return st.dataframe(shown, column_config=config, **(options | kwargs))
+
+
+def table_height(rows: int) -> int:
+    """Height in px of a table that shows ``rows`` rows and its header: what ``height="content"`` gives a table of
+    that many rows (checked in Chromium by ``tests/test_theme.py``)."""
+    return math.ceil((rows + 1) * ROW_HEIGHT + 3)

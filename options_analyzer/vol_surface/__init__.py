@@ -42,6 +42,8 @@ The package's modules, each importing only those before it:
 * :mod:`.forwards` - each expiry's forward and discount factor from put-call parity (:func:`implied_forwards`);
 * :mod:`.quotes` - reading a quotes table (:func:`parse_quotes`) and model-free static-arbitrage checks of the quotes;
 * :mod:`.surface` - :class:`VolSurface`, :func:`ssvi_surface`, :func:`fit_market_surface` and :func:`surface_summary`.
+* :mod:`.published` - :class:`PublishedSurface`, what every tab reads from a fitted surface and its chain: forwards,
+  vols, the risk-neutral distribution from the smile, quotes with their vols and strikes by delta (SF-11).
 
 Every name the single module ``vol_surface.py`` had is importable from here, its imports included (roadmap item
 SF-2). Code that patches a constant or a helper must patch it in the module that uses it.
@@ -66,6 +68,7 @@ from .. import black_scholes as bs
 from ..implied_vol import ImpliedVolError, implied_volatility
 from .forwards import FORWARD_SOURCES, carry_gaps, implied_forwards
 from .local_vol import EXTRAPOLATION, _local_vol, _market_values, _MarketValues, _time_derivative, durrleman_g
+from .published import PublishedSurface
 from .quotes import (
     _ALIAS_KEYS,
     _ALIASES,
@@ -138,6 +141,7 @@ __all__ = [
     "EXERCISE_STYLES",
     "FORWARD_METHODS",
     "FORWARD_SOURCES",
+    "PublishedSurface",
     "QuoteParseError",
     "QuoteWarning",
     "SSVIParams",
