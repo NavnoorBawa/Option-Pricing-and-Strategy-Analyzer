@@ -41,16 +41,21 @@ DENSE_POINTS = 2001
 CUTTING_ROUNDS = 4
 THIN_ABOVE = 200
 CUT_POINTS = 5
-#: The solver's iterations for one slice, over all its starts and cutting-plane rounds (SLSQP_BUDGET), and for one
-#: solve (SLSQP_MAXITER, with SLSQP_FTOL its tolerance on the mean squared error in squared vol points); a start that
-#: has not met the constraints when the budget runs out fails, and a slice whose every start fails keeps its
+#: The solver's iterations for one slice, over all its starts and cutting-plane rounds (SLSQP_BUDGET), for a whole
+#: surface (SURFACE_BUDGET, shared by its slices in order of maturity, so a slice gets at most what is left of it), and
+#: for one solve (SLSQP_MAXITER, with SLSQP_FTOL its tolerance on the mean squared error in squared vol points); a start
+#: that has not met the constraints when either budget runs out fails, and a slice whose every start fails keeps its
 #: unconstrained fit with a note (see :func:`fit_svi`). The reviewer's slowest case, 20 expiries of 41 strikes with 8
-#: vol points of noise, took 3.9-14 s with BLAS threads (3.4-3.9 s with one) over four seeds, before the budget, the
-#: thinned cutting planes and the evaluation of the smile once per solver step; it takes 1.8-2.9 s after them (2.7-4.5
-#: s with one thread; 0.5-0.8 s unconstrained), on a shared four-core machine. No slice of the bundled sample quotes,
-#: of the synthetic SPX chains or of the 200 random surfaces of tests/test_svi_constraints.py runs out of it (the
-#: most any used is 419 iterations), so their fits are as they were.
+#: vol points of noise over seeds 5-8, took 2.8-14 s with BLAS threads and 3.4-5.0 s of processor time with one thread
+#: before the budgets, the thinned cutting planes and the evaluation of the smile once per solver step; it takes 1.8-2.9
+#: s with threads on a lightly loaded shared four-core machine (up to 10 s under a load of 8) and 2.4-4.5 s with one
+#: thread after them (0.5-0.8 s unconstrained). It spends 2,761-3,872 iterations in all (at most 600 on a slice), about
+#: 0.8-1.1 ms each with one thread: SURFACE_BUDGET caps any surface at about 3-4.5 s of solver time with one thread,
+#: whatever its noise; the slices it leaves unsolved are noted. No slice of the bundled sample quotes, of the synthetic
+#: SPX chains or of the 200 random surfaces of tests/test_svi_constraints.py runs out of either budget (the most a slice
+#: used is 419 iterations, a surface 940), so their fits are as they were.
 SLSQP_BUDGET = 600
+SURFACE_BUDGET = 4000
 SLSQP_MAXITER = 300
 SLSQP_FTOL = 1e-12
 #: The calendar constraint holds where the two slices' quoted ranges overlap, widened by this fraction of their
@@ -232,11 +237,16 @@ def fit_svi(
     parameter whose gradient is cut to zero; a negative minimum variance and a
     breach of Lee's wing bound ``b (1 + |rho|) <= 2`` are penalised. Several
     quasi-explicit starting points (:func:`_svi_start_points`) are refined and
-    the best fit is kept. The penalty leaves a wing slope a few parts in 1e5 above
-    Lee's bound at most (2.000059 measured), so the fit's ``b`` is then cut to it
-    (:func:`_within_lee`): every fit's wing slope is at most 2, with or without the
-    arbitrage constraints. Noise-free SVI (hence SSVI) quotes are recovered to
-    solver precision.
+    the best fit is kept. A penalty is not a hard bound: fitted to 25 quotes of a
+    raw SVI smile whose wing slope is beyond 2, the fit's slope ends above it, by
+    up to 6e-5 for true slopes of 2.2 to 3 and 2e-4 to 0.0024 for slopes of 5.7 to
+    10 (2.0024074 for ``b = 4``, ``rho = -0.99``). So the fit's ``b`` is then
+    projected onto the bound (:func:`_within_lee`), with ``a``, ``rho``, ``m`` and
+    ``s`` kept: every fit's wing slope is at most 2, with or without the arbitrage
+    constraints. The projection is not re-optimised (the Levenberg-Marquardt
+    solver takes no inequalities); it moved those fits' RMSE by 0.005 vol point at
+    most, except on that steepest smile, from 93.395 to 93.457 vol points.
+    Noise-free SVI (hence SSVI) quotes are recovered to solver precision.
 
     With ``arbitrage_free`` (the default) the fit is then checked for static arbitrage, on
     :data:`DENSE_POINTS` points: butterfly arbitrage where Durrleman's ``g`` (:func:`durrleman_g`) is not positive,
@@ -250,7 +260,8 @@ def fit_svi(
     those 10 %, and if none does, from the previous slice shifted up and from a nearly flat smile above it (which
     meets the constraints); the best of them is kept. So on arbitrage-free quotes the result is the unconstrained fit
     itself. Where no start reaches an arbitrage-free smile (within :data:`CUTTING_ROUNDS` rounds each and
-    :data:`SLSQP_BUDGET` iterations in all), the unconstrained fit is returned, arbitrage and all:
+    :data:`SLSQP_BUDGET` iterations in all, or what is left of a surface's :data:`SURFACE_BUDGET`), the unconstrained
+    fit is returned, arbitrage and all:
     :func:`static_arbitrage` tells, and :func:`.surface.fit_market_surface` says so in a note.
     """
     return fit_svi_pair(y, iv, T, weights=weights, previous=previous, arbitrage_free=arbitrage_free)[0]
@@ -264,10 +275,15 @@ def fit_svi_pair(
     weights=None,
     previous: tuple[SVISlice, tuple[float, float]] | None = None,
     arbitrage_free: bool = True,
+    budget: _Budget | None = None,
 ) -> tuple[SVISlice, SVISlice]:
     """:func:`fit_svi` and the fit without the arbitrage constraints: ``(fit, unconstrained)``, the same object
     twice where the unconstrained fit has no arbitrage, where ``arbitrage_free`` is False, or where no start reached
-    an arbitrage-free smile (then :func:`static_arbitrage` of the fit is not ``(False, False)``)."""
+    an arbitrage-free smile (then :func:`static_arbitrage` of the fit is not ``(False, False)``).
+
+    ``budget`` is the solver iterations left for a whole surface (:data:`SURFACE_BUDGET`, shared by its slices): the
+    arbitrage-free search spends at most :data:`SLSQP_BUDGET` of them, or what is left where that is less, and takes
+    what it spent off it. Without it the search has :data:`SLSQP_BUDGET` to itself."""
     y = np.asarray(y, dtype=float)
     iv = np.asarray(iv, dtype=float)
     weight = None if weights is None else np.asarray(weights, dtype=float)
@@ -360,6 +376,28 @@ def fit_svi_pair(
     constraints = _Constraints.build(lo, hi, T, previous, wing_reach(unconstrained))
     if constraints.met(unconstrained):
         return unconstrained, unconstrained
+    allowed = SLSQP_BUDGET if budget is None else max(min(SLSQP_BUDGET, budget.left), 0)
+    left = _Budget(allowed)
+    fit = _arbitrage_free(constraints, y, iv, T, weight, unconstrained, previous, left)
+    if budget is not None:
+        budget.left -= allowed - left.left
+    if fit is None:
+        return unconstrained, unconstrained  # no start reached an arbitrage-free smile: the surface notes it
+    return _within_lee(fit), unconstrained
+
+
+def _arbitrage_free(
+    constraints: _Constraints,
+    y: np.ndarray,
+    iv: np.ndarray,
+    T: float,
+    weight: np.ndarray | None,
+    unconstrained: SVISlice,
+    previous: tuple[SVISlice, tuple[float, float]] | None,
+    budget: _Budget,
+) -> SVISlice | None:
+    """The search of :func:`fit_svi_pair` for the arbitrage-free smile nearest the quotes, from its starts in turn,
+    spending at most ``budget``; None where no start reaches one."""
     # The nearest arbitrage-free smile: sequential quadratic programming on the raw parameters with the constraints
     # as inequalities, from the unconstrained optimum and from the quasi-explicit starts, keeping the best that meets
     # them. A penalty method (constraint rows added to the least squares) was tried first: on 200 random
@@ -370,12 +408,11 @@ def fit_svi_pair(
     def cost(fit: SVISlice) -> float:
         return float(np.sum((weights * (_vols(fit, y, T) - iv)) ** 2))
 
-    budget = _Budget(SLSQP_BUDGET)
     nearest = constraints.nearest(y, iv, T, weight, unconstrained, budget)
     # From the unconstrained optimum the search usually ends next to it; only a fit that lost more than 10 % of
     # RMSE (21 % of squared error) is worth the other starts.
     if nearest is not None and cost(nearest) <= 1.21 * cost(unconstrained):
-        return _within_lee(nearest), unconstrained
+        return nearest
     feasible = [nearest] if nearest is not None else []
     for start in _svi_start_points(y, iv, T, weights=weight):
         fit = constraints.nearest(y, iv, T, weight, SVISlice(*map(float, start)), budget)
@@ -395,9 +432,7 @@ def fit_svi_pair(
         for start in extra:
             fit = constraints.nearest(y, iv, T, weight, start, budget)
             feasible += [fit] if fit is not None else []
-    if not feasible:
-        return unconstrained, unconstrained  # no start reached an arbitrage-free smile: the surface notes it
-    return _within_lee(min(feasible, key=cost)), unconstrained
+    return min(feasible, key=cost) if feasible else None
 
 
 def _smile(p, points: np.ndarray, *, derivatives: bool = False) -> tuple[np.ndarray, ...]:
@@ -430,9 +465,10 @@ def _raised(previous: SVISlice, y: np.ndarray, iv: np.ndarray, T: float) -> SVIS
 
 
 def _within_lee(fit: SVISlice) -> SVISlice:
-    """``fit`` with ``b`` cut to Lee's bound ``2 / (1 + |rho|)`` where it exceeds it (by a rounding-level amount after
-    the solvers, whose bound is a penalty or an inequality met to a tolerance), and ``a`` raised as much as keeps the
-    minimum variance from falling below zero; ``fit`` itself where it is within the bound."""
+    """``fit`` with ``b`` cut to Lee's bound ``2 / (1 + |rho|)`` where it exceeds it, and ``a`` raised as much as keeps
+    the minimum variance from falling below zero; ``fit`` itself where it is within the bound. The unconstrained
+    solver's bound is a penalty, which leaves slopes up to 2.0024 on quotes far steeper than Lee allows (see
+    :func:`fit_svi`); SLSQP's is an inequality met to its tolerance, a slope above 2 by rounding at most."""
     bound = 2.0 / (1.0 + abs(fit.rho))
     if fit.b <= bound:
         return fit
@@ -442,7 +478,8 @@ def _within_lee(fit: SVISlice) -> SVISlice:
 
 @dataclass(eq=False)
 class _Budget:
-    """The solver iterations left for one slice's arbitrage-free fit (:data:`SLSQP_BUDGET`)."""
+    """The solver iterations left for one slice's arbitrage-free fit (:data:`SLSQP_BUDGET`), or for a whole surface's
+    (:data:`SURFACE_BUDGET`, see :func:`fit_svi_pair`)."""
 
     left: int
 
@@ -693,9 +730,22 @@ def _thinned(y: np.ndarray, bad: np.ndarray, score: np.ndarray) -> np.ndarray:
 
 
 def static_arbitrage(
-    fit: SVISlice, quoted: tuple[float, float], T: float, previous: tuple[SVISlice, tuple[float, float]] | None
+    fit: SVISlice,
+    quoted: tuple[float, float],
+    T: float,
+    previous: tuple[SVISlice, tuple[float, float]] | None,
+    *,
+    reach: float | None = None,
 ) -> tuple[bool, bool]:
     """``(butterfly, calendar)``: whether ``fit`` breaks the constraints :func:`fit_svi` holds an arbitrage-free fit
-    to: butterfly arbitrage over its ``quoted`` range of ``y`` widened by :data:`CONSTRAINT_REACH` and out to its
-    :func:`wing_reach`, calendar arbitrage against ``previous`` on the overlap of the two quoted ranges."""
-    return _Constraints.build(quoted[0], quoted[1], T, previous, wing_reach(fit)).broken(fit)
+    to: butterfly arbitrage over its ``quoted`` range of ``y`` widened by :data:`CONSTRAINT_REACH` and out to
+    ``reach``, calendar arbitrage against ``previous`` on the overlap of the two quoted ranges.
+
+    ``reach`` defaults to ``fit``'s own :func:`wing_reach`, but :func:`fit_svi` holds an arbitrage-free fit out to the
+    reach of the unconstrained fit, which the surface also reads it to (``wing_reach(unconstrained)``): pass that to
+    check a constrained fit. Its own reach can lie further out, where nothing held its density positive: on one 8 vol
+    point noisy surface two arbitrage-free fits had g <= 0 at 30 and 53 points between the solver's reach (0.73 and
+    0.81) and their own (0.75 and 1.21), and none within the solver's."""
+    return _Constraints.build(quoted[0], quoted[1], T, previous, wing_reach(fit) if reach is None else reach).broken(
+        fit
+    )

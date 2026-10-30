@@ -100,19 +100,24 @@ constraints (a few of each stretch of them where there are more than 200). On ar
 and the fit is unchanged; Gatheral and Jacquier's arbitrageable example slice (Vogt's) is fitted 0.63 vol point
 (RMSE) away with a positive density, and over 200 random arbitrage-free surfaces with 0.2 vol point of noise no
 expiry's RMSE grew by more than 8.6% and the slowest surface took 0.6 s. The search has a budget of 600 solver
-iterations per expiry, which none of those surfaces, the sample quotes or the synthetic SPX chains reaches; 20
-expiries of 41 strikes with 8 vol points of noise, which took up to 14 s, now take 2 to 3 s. An expiry where no
-start finds an arbitrage-free smile within the budget keeps its unconstrained fit, and a note names it and the
-arbitrage left. The summary table's Arbitrage cost is what the constraints add to each expiry's spread-weighted RMSE
-(the error the fit minimises; blank where they could not be met), a note names the expiries where the cost is
-material, and the Unconstrained calibration shows the quotes' own arbitrage instead.
+iterations per expiry and 4,000 per surface, which none of those surfaces, the sample quotes or the synthetic SPX
+chains comes near (at most 419 on an expiry and 940 on a surface). 20 expiries of 41 strikes with 8 vol points of
+noise, which took 2.8 to 14 s before these budgets and a faster search (3.4 to 5.0 s on one processor thread), now
+take 1.8 to 2.9 s on a lightly loaded four-core machine, up to 10 s when it is busy, and 2.4 to 4.5 s on one thread,
+using 2,761 to 3,872 iterations; the surface budget caps any chain at about 3 to 4.5 s of search on one thread,
+however noisy. An expiry where no start finds an arbitrage-free smile within the budgets keeps its unconstrained
+fit, and a note names it, the arbitrage left and whether the surface's budget had run out. The summary table's
+Arbitrage cost is what the constraints add to each expiry's spread-weighted RMSE (the error the fit minimises; blank
+where they could not be met), a note names the expiries where the cost is material, and the Unconstrained
+calibration shows the quotes' own arbitrage instead.
 
 ### Wing extrapolation
 Beyond its quotes a smile is read off its SVI wings out to the same reach of four standard deviations from the
 forward, at most ${|\ln K/F| = 1.5}$, where the density is held positive; an SVI wing grows linearly with a
-total-variance slope ${b(1+|\rho|) \le 2}$, Lee's moment bound. Extrapolated vols are labelled as such: the
-contract readout says "extrapolated", and the Smiles chart draws them dotted beyond each expiry's quotes. Local vol
-is not extrapolated.
+total-variance slope ${b(1+|\rho|) \le 2}$, Lee's moment bound (an inequality of the arbitrage-free search; the
+unconstrained fit penalises a steeper wing and then cuts ${b}$ to the bound, as the penalty alone left slopes up to
+2.0024 on quotes far steeper than Lee allows). Extrapolated vols are labelled as such: the contract readout says
+"extrapolated", and the Smiles chart draws them dotted beyond each expiry's quotes. Local vol is not extrapolated.
 
 The reach is fixed rather than a setting, because it is part of the fit: the arbitrage-free calibration holds the
 density positive out to it, so a vol read further out would come from a wing nobody checked for arbitrage, and a

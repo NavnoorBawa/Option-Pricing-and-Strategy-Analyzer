@@ -16,7 +16,7 @@ from .. import risk, scenarios
 from .. import strategies as strat
 from . import cache, charts
 from .components import card_row, current_key
-from .format import md, money, money_short, signed
+from .format import MINUS, md, money, money_short, signed
 from .tab_strategy import Position
 
 CONFIDENCE_LEVELS = (0.95, 0.975, 0.99, 0.995, 0.999)
@@ -25,13 +25,12 @@ STRESS_HEADERS = {"IV shock damped": "IV damped", "Rate change (bp)": "Rate Δ (
 
 
 def shock_label(x: float) -> str:
-    """A relative shock as a percentage: whole percents when exact, otherwise one decimal; zero unsigned."""
+    """A relative shock as a percentage: whole percents when exact, otherwise one decimal; zero unsigned; U+2212 for
+    minus."""
     pct = 100.0 * x
     if abs(pct) < 1e-9:
         return "0%"
-    if abs(pct - round(pct)) < 1e-9:
-        return f"{pct:+.0f}%"
-    return f"{pct:+.1f}%"
+    return signed(pct, 0 if abs(pct - round(pct)) < 1e-9 else 1, suffix="%")
 
 
 def price_labels(prices) -> list[str]:
@@ -149,7 +148,7 @@ def _time_decay(position: Position, front_days: float) -> None:
     moves = np.exp(zs * sigma_t) - 1.0
     grid = scenarios.pnl_grid(position.strategy, position.market, moves, days=days, multiplier=position.units)
     series = {
-        (f"Spot {z:+g}σ ({shock_label(m)})" if z else "Spot unchanged"): grid[:, i]
+        (f"Spot {'+' if z > 0 else MINUS}{abs(z):g}σ ({shock_label(m)})" if z else "Spot unchanged"): grid[:, i]
         for i, (z, m) in enumerate(zip(zs, moves, strict=True))
     }
     fig = charts.lines_chart(days, series, "Days from today", "P&L ($)", styles=charts.scenario_styles(len(series)))

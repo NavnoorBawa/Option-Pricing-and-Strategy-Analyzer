@@ -21,6 +21,7 @@ from typing import cast
 import numpy as np
 import pandas as pd
 
+from . import svi as svi_module
 from .local_vol import _local_vol, _market_values, _MarketValues
 from .quotes import (
     FLY_CHECK_VOL,
@@ -464,6 +465,7 @@ class _Slice:
     butterflies: tuple[int, tuple[float, float, float] | None]  # see _butterfly_arbitrage
     certain: bool  # whether arbitrage found in quoted vols is beyond what rounding their prices could cause
     quotes: pd.DataFrame  # its rows of the cleaned quotes, with their K/S (moneyness) and fitted vol (fitted_iv)
+    budget_spent: bool = False  # whether the surface's solver iterations (svi.SURFACE_BUDGET) had run out by its end
 
 
 def _prepare(quotes: pd.DataFrame, spot: float, rate: float, carry: float, notes: list[str]) -> Iterator[_Prepared]:
@@ -542,13 +544,23 @@ def _fit_slices(prepared: Iterable[_Prepared], spot: float, arbitrage_free: bool
 
     The constraints' cost is the rise in spread-weighted RMSE, the error the fit minimises, clipped at 0: the
     unweighted RMSE can fall under the constraints (by 0.0004 vol point at one expiry of the synthetic SPX chain at a
-    spot of 6,000 on 30 October at 10:00, noise seed 2), which read as a negative cost."""
+    spot of 6,000 on 30 October at 10:00, noise seed 2), which read as a negative cost.
+
+    The maturities share :data:`.svi.SURFACE_BUDGET` solver iterations, in order of maturity: once they are spent,
+    a maturity whose unconstrained fit has arbitrage keeps it, with a note (:func:`_arbitrage_left`)."""
     slices: list[_Slice] = []
+    budget = svi_module._Budget(svi_module.SURFACE_BUDGET)
     for piece in prepared:
         T, y, iv = piece.T, piece.y, piece.iv
         previous = (slices[-1].svi, slices[-1].quoted) if slices else None
         svi, free = fit_svi_pair(
-            piece.y_fit, piece.iv_fit, T, weights=piece.weights_fit, previous=previous, arbitrage_free=arbitrage_free
+            piece.y_fit,
+            piece.iv_fit,
+            T,
+            weights=piece.weights_fit,
+            previous=previous,
+            arbitrage_free=arbitrage_free,
+            budget=budget,
         )
         fitted = np.sqrt(np.maximum(svi.total_variance(y)[0], 0.0) / T)
         rmse = float(np.sqrt(np.mean((fitted - iv) ** 2)))
@@ -558,8 +570,11 @@ def _fit_slices(prepared: Iterable[_Prepared], spot: float, arbitrage_free: bool
         # the unconstrained fit of an arbitrage-free calibration, either that had no arbitrage or no start found a
         # smile without it.
         fit_range = (float(piece.y_fit.min()), float(piece.y_fit.max()))
-        held = (False, False) if free is svi else static_arbitrage(free, fit_range, T, previous)
-        left = static_arbitrage(svi, fit_range, T, previous) if arbitrage_free and free is svi else (False, False)
+        reach = wing_reach(free)
+        held = (False, False) if free is svi else static_arbitrage(free, fit_range, T, previous, reach=reach)
+        left = (False, False)
+        if arbitrage_free and free is svi:
+            left = static_arbitrage(svi, fit_range, T, previous, reach=reach)
         weights = np.ones_like(y) if piece.weights is None else piece.weights
         weighted_free = _weighted_rmse(unconstrained, iv, weights)
         cost = math.nan if any(left) else max(_weighted_rmse(fitted, iv, weights) - weighted_free, 0.0)
@@ -588,6 +603,7 @@ def _fit_slices(prepared: Iterable[_Prepared], spot: float, arbitrage_free: bool
                 butterflies,
                 certain,
                 with_fit,
+                budget_spent=budget.left <= 0,
             )
         )
     return slices
@@ -739,7 +755,8 @@ def _held_arbitrage(slices: list[_Slice], Ts: np.ndarray) -> list[str]:
 
 def _arbitrage_left(slices: list[_Slice], Ts: np.ndarray) -> list[str]:
     """A note on the maturities where the arbitrage-free calibration found no smile free of static arbitrage, so they
-    keep their unconstrained fit, arbitrage and all (:func:`.svi.fit_svi`)."""
+    keep their unconstrained fit, arbitrage and all (:func:`.svi.fit_svi`), and on those where that was because the
+    surface's solver iterations (:data:`.svi.SURFACE_BUDGET`) had run out."""
     butterfly = np.array([piece.left[0] for piece in slices])
     calendar = np.array([piece.left[1] for piece in slices])
     if not (butterfly.any() or calendar.any()):
@@ -750,11 +767,18 @@ def _arbitrage_left(slices: list[_Slice], Ts: np.ndarray) -> list[str]:
     if butterfly.any():
         parts.append(f"at {_years(Ts[butterfly])} it has a negative density (butterfly)")
     one = int((calendar | butterfly).sum()) == 1
-    return [
+    note = (
         f"No SVI smile free of static arbitrage was found at maturit{'y' if one else 'ies'} "
         f"{_years(Ts[calendar | butterfly])}, so {'it keeps its' if one else 'they keep their'} unconstrained fit and "
         f"its arbitrage: {'; '.join(parts)}. {'Its' if one else 'Their'} Arbitrage cost is blank; check those quotes."
-    ]
+    )
+    starved = (calendar | butterfly) & np.array([piece.budget_spent for piece in slices])
+    if starved.any():
+        note += (
+            f" At {_years(Ts[starved])} the search had run out of the {svi_module.SURFACE_BUDGET:,} solver iterations "
+            "allowed for the whole surface, a cap that keeps a very noisy chain to a few seconds."
+        )
+    return [note]
 
 
 def _static_arbitrage(slices: list[_Slice], Ts: np.ndarray, crossed: np.ndarray, quotes: pd.DataFrame) -> list[str]:

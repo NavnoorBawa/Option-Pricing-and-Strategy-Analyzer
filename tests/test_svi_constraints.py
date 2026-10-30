@@ -260,12 +260,16 @@ def test_extrapolated_wings_keep_lees_slope_and_a_positive_density():
             assert fit.total_variance(wings)[0].min() > 0 and _g(fit, wings).min() > 0
 
 
-@pytest.mark.parametrize(("b", "rho", "T", "m"), [(1.3, -0.7, 1.0, 0.0), (2.5, -0.2, 2.0, 0.0), (1.2, -0.95, 0.5, 0.3)])
+@pytest.mark.parametrize(
+    ("b", "rho", "T", "m"),
+    [(1.3, -0.7, 1.0, 0.0), (2.5, -0.2, 2.0, 0.0), (1.2, -0.95, 0.5, 0.3), (4.0, -0.99, 0.25, 0.0)],
+)
 def test_lees_bound_holds_without_the_arbitrage_constraints_too(b, rho, T, m):
-    """Raw SVI smiles whose wing slope b (1 + |rho|) is 2.21 to 3, beyond Lee's bound, fitted unconstrained on 25
-    quotes over [-1, 0.4]: the fit's slope is at most 2. With the bound only a penalty, the last two were fitted with
-    slopes of 2.000019 and 2.000059, and the readout extrapolated from wings a little steeper than any arbitrage-free
-    one; the fit's b is now cut to the bound. 1e-12 allows the rounding of 2 / (1 + |rho|) times (1 + |rho|)."""
+    """Raw SVI smiles whose wing slope b (1 + |rho|) is 2.21 to 7.96, beyond Lee's bound, fitted unconstrained on 25
+    quotes over [-1, 0.4]: the fit's slope is at most 2. With the bound only a penalty, the second and third were
+    fitted with slopes of 2.000019 and 2.000059 and the last with 2.0024, and the readout extrapolated from wings
+    steeper than any arbitrage-free one; the fit's b is now projected onto the bound. 1e-12 allows the rounding of
+    2 / (1 + |rho|) times (1 + |rho|)."""
     true = svi.SVISlice(0.04 * T, b, rho, m, 0.3)
     y = np.linspace(-1.0, 0.4, 25)
     fit = svi.fit_svi(y, np.sqrt(true.total_variance(y)[0] / T), T, arbitrage_free=False)
@@ -369,7 +373,8 @@ def test_quotes_below_the_previous_smile_everywhere_get_the_nearest_arbitrage_fr
     held = vs.fit_market_surface(quotes, 100.0, 0.0, 0.0)
     assert held.calendar_violations == 0 and held.butterfly_violations == 0
     previous = (held.svi[0], tuple(held.quoted_y[0]))
-    assert svi.static_arbitrage(held.svi[1], (y.min(), y.max()), T, previous) == (False, False)
+    reach = float(held.wing_reach[1])  # the unconstrained fit's, which the constraints are held out to
+    assert svi.static_arbitrage(held.svi[1], (y.min(), y.max()), T, previous, reach=reach) == (False, False)
     assert not [note for note in held.notes if note.startswith("No SVI smile free of static arbitrage")]
     assert 34.0 < _rmse(held.svi[1], y, iv, T) * 100 < 35.0
     assert 33.0 < vs.surface_summary(held)["Arbitrage cost (vol pts)"].iloc[1] < 34.5
@@ -392,7 +397,8 @@ def test_a_noisy_first_slice_reaches_an_arbitrage_free_fit_from_a_flat_smile():
     others = [free, *(svi.SVISlice(*start) for start in svi._svi_start_points(y, iv, T))]
     assert all(constraints.nearest(y, iv, T, None, start, svi._Budget(10**6)) is None for start in others)
     assert constraints.met(constraints.flat(y, iv, T))
-    assert fit is not free and svi.static_arbitrage(fit, (y.min(), y.max()), T, None) == (False, False)
+    assert fit is not free
+    assert svi.static_arbitrage(fit, (y.min(), y.max()), T, None, reach=svi.wing_reach(free)) == (False, False)
     assert _rmse(fit, y, iv, T) <= 1.1 * _rmse(free, y, iv, T)  # the 10 % the search accepts
 
 
@@ -411,17 +417,84 @@ def test_a_slice_no_start_can_free_of_arbitrage_keeps_its_fit_with_a_note_and_a_
     assert "at 0.332y it has a negative density (butterfly)" in left[0]
     assert vs.surface_summary(held)["Arbitrage cost (vol pts)"].isna().all()
     assert not [note for note in held.notes if note.startswith("The SVI fit was held free")]
+    assert "allowed for the whole surface" not in left[0]  # each slice's budget ran out, not the surface's
     # One such maturity, in the singular.
     from types import SimpleNamespace
 
     from options_analyzer.vol_surface.surface import _arbitrage_left
 
-    slices = [SimpleNamespace(left=(False, False)), SimpleNamespace(left=(False, True))]
+    slices = [
+        SimpleNamespace(left=(False, False), budget_spent=False),
+        SimpleNamespace(left=(False, True), budget_spent=False),
+    ]
     assert _arbitrage_left(slices, np.array([0.25, 0.5])) == [  # type: ignore[arg-type]
         "No SVI smile free of static arbitrage was found at maturity 0.5y, so it keeps its unconstrained fit and its "
         "arbitrage: at 0.5y its total variance falls below that of the maturity before (calendar). Its Arbitrage cost "
         "is blank; check those quotes."
     ]
+
+
+def test_a_surface_that_spends_its_solver_iterations_leaves_the_rest_with_a_note(monkeypatch):
+    """The maturities share svi.SURFACE_BUDGET iterations in order of maturity. With 20 of them, the crossing smiles'
+    first maturity (a negative density) still reaches an arbitrage-free smile, and the second, which needs more, keeps
+    its unconstrained fit and its calendar arbitrage, with a note saying the surface's iterations ran out; its
+    Arbitrage cost is blank and the first's is not."""
+    monkeypatch.setattr(svi, "SURFACE_BUDGET", 20)
+    held = vs.fit_market_surface(_crossing_smiles(), 100.0, 0.0, 0.0)
+    assert held.butterfly_violations == 0 and held.calendar_violations > 0
+    left = [note for note in held.notes if note.startswith("No SVI smile free of static arbitrage")]
+    assert len(left) == 1 and "maturity 0.436y, so it keeps its unconstrained fit" in left[0]
+    assert left[0].endswith(
+        "At 0.436y the search had run out of the 20 solver iterations allowed for the whole surface, a cap that keeps "
+        "a very noisy chain to a few seconds."
+    )
+    cost = vs.surface_summary(held)["Arbitrage cost (vol pts)"]
+    assert np.isfinite(cost.iloc[0]) and np.isnan(cost.iloc[1])
+
+
+def test_a_shared_budget_changes_no_fit_it_covers_and_is_spent_by_it():
+    """fit_svi_pair given a surface's budget spends at most SLSQP_BUDGET of it and returns the fit it returns alone
+    (the noisy 7-day slice above, 308 iterations); given none left, it keeps the unconstrained fit."""
+    params, rng = vs.SSVIParams(), np.random.default_rng(6)
+    rng.normal(size=2 * 20 * 41)
+    T = 7 / 365
+    y = np.linspace(-2.5, 1.5, 41) * math.sqrt(params.theta(T))
+    iv = np.maximum(0.02, np.sqrt(params.total_variance(y, T)[0] / T) + rng.normal(0, 0.08, len(y)))
+    alone, free = svi.fit_svi_pair(y, iv, T)
+    budget = svi._Budget(10**6)
+    assert svi.fit_svi_pair(y, iv, T, budget=budget) == (alone, free)
+    assert 0 < 10**6 - budget.left <= svi.SLSQP_BUDGET
+    empty = svi._Budget(0)
+    fit, free = svi.fit_svi_pair(y, iv, T, budget=empty)
+    assert fit is free and empty.left == 0
+
+
+@pytest.mark.slow
+def test_static_arbitrage_checks_a_constrained_fit_out_to_the_reach_it_was_held_to():
+    """One of the reviewer's noisy surfaces (20 expiries of 41 strikes, 8 vol points of noise, seed 5): every
+    arbitrage-free fit meets the constraints out to the unconstrained fit's wing reach, where fit_svi holds them and
+    the surface reads its wings. Some reach further themselves, and their density is negative out there, which
+    static_arbitrage with its default reach reports: with one BLAS thread the 0.644y and 1.79y fits reach 0.754 and
+    1.211 against 0.732 and 0.806, with g <= 0 at 30 and 53 points beyond; with threads only the first."""
+    rng, params = np.random.default_rng(5), vs.SSVIParams()
+    frames = []
+    for noise in (0.01, 0.03, 0.08):
+        rows = []
+        for days in np.linspace(7, 730, 20).round():
+            T = days / 365
+            for k in np.linspace(-2.5, 1.5, 41) * math.sqrt(params.theta(T)):
+                iv = math.sqrt(params.total_variance(k, T)[0] / T) + rng.normal(0, noise)
+                rows.append({"strike": 100 * math.exp(k), "maturity": T, "iv": max(0.02, iv)})
+        frames.append(pd.DataFrame(rows))
+    surface = vs.fit_market_surface(frames[-1], 100.0, 0.0, 0.0)
+    assert not [note for note in surface.notes if note.startswith("No SVI smile free of static arbitrage")]
+    own = []
+    for i, fit in enumerate(surface.svi):
+        previous = (surface.svi[i - 1], tuple(surface.quoted_y[i - 1])) if i else None
+        args = (fit, tuple(surface.quoted_y[i]), float(surface.maturities[i]), previous)
+        assert svi.static_arbitrage(*args, reach=float(surface.wing_reach[i])) == (False, False)
+        own.append(svi.static_arbitrage(*args))
+    assert any(butterfly for butterfly, _ in own)  # the fits differ in their last digits with the BLAS threads
 
 
 def test_exact_prices_without_a_spread_leave_inside_bid_ask_blank():
