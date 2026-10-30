@@ -49,3 +49,41 @@ $w$-th worst loss and ES the average of the $w$ worst losses. The delta-normal V
 $|\Delta| S \sigma \sqrt{h/252}\, z_\alpha$, with Normal returns, is shown for comparison in the table of P&L
 statistics. It leaves out the position's gamma, its time decay over the horizon, its vega (with implied-vol
 moves on) and the fatter tails of Student-t returns, or of GARCH returns beyond one day.
+
+### P&L explain
+The library explains the P&L of a market move in two ways; the Risk tab does not show them yet. The P&L is the
+full revaluation: each leg's value at the new spot, implied vols and rate after the time elapsed, minus its value
+today. The Greek waterfall splits it into the terms of a Taylor expansion around today's market, with today's
+Greeks, the spot move $\delta S$, each leg's vol shift $\delta\sigma$, the rate shift $\delta r$ and the time
+elapsed $\delta t$:
+* **First order** — delta ${\Delta\,\delta S}$, vega ${\nu\,\delta\sigma}$, rho ${\rho\,\delta r}$ and theta
+  ${\Theta_{\delta t} = V(t + \delta t) - V(t)}$, the time decay by repricing with nothing else moving (for one
+  day, the one-day decay above).
+* **Second order** — gamma ${\tfrac12\,\Gamma\,\delta S^2}$, vanna ${\text{vanna}\,\delta S\,\delta\sigma}$, volga
+  ${\tfrac12\,\text{volga}\,\delta\sigma^2}$, charm ${\text{charm}\,\delta S\,\delta t}$ and veta
+  ${\text{veta}\,\delta\sigma\,\delta t}$.
+* **Unexplained** — $U$, the P&L less the nine terms.
+
+Theta as $\theta\,\delta t$ would leave ${\tfrac12\,\partial_{tt}V\,\delta t^2}$ unexplained: 0.8 % of a 30-day
+at-the-money straddle's one-day decay and half of a 1-day option's. The unexplained P&L $U$ is third order in the
+spot and vol moves, so halving them divides it by about 8 (7.84, 8.10 and 8.11 on an iron condor); the
+second-order terms of a rate move are left in it too. The quality ${|U| / \max(|\text{P\&L}|, f)}$ is the share
+of the P&L that the Greeks miss; its floor $f$, one basis point of the notional (spot times the number of options
+and shares held, long or short), keeps a P&L close to zero from turning a small $U$ into a large share. On a
+30-day at-the-money short straddle (spot and strike 100, vol 20 %, rate 4 %, no dividends, one 100-share
+contract), a day on which spot falls 4 % and implied vol rises 6 points loses \$188.36, and the nine terms leave
+\$25.17 unexplained (13.4 %): mostly zomma, since the higher vol lowers the straddle's gamma (its third-order term
+${\tfrac12\,\partial_{SS\sigma}V\,\delta S^2\,\delta\sigma}$ is +\$33.19).
+
+The Shapley split shares the same P&L exactly between the four factors spot, vol, time and rate. With $v(A)$ the
+P&L when only the factors in $A$ move (16 revaluations), factor $i$ gets
+${\phi_i = \sum_A w_{|A|}\,[v(A \cup \{i\}) - v(A)]}$ over the sets $A$ of the other three factors, with the
+weights ${w_k = k!\,(3 - k)!/4!}$ (1/4, 1/12, 1/12 and 1/4 for 0 to 3 factors): its average contribution over
+the 24 orders in which the factors can be moved one after the other. The parts add up to the P&L, with no
+residual, and depend on no order: on the straddle's day they are spot −\$72.17, vol −\$124.04 and time +\$7.85,
+while moving the factors in turn credits the spot move with anything from −\$84.87 to −\$59.72, depending on the
+order. Each leg is explained on its own, and a position's explain is the sum of its legs'.
+
+For the P&L attribution test of a backtest, the Spearman correlation of the ranks of the hypothetical and
+risk-theoretical P&L and the Kolmogorov–Smirnov distance between their empirical distributions are computed as the
+Basel framework defines them (MAR32.36 to 32.41).
