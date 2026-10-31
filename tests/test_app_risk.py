@@ -444,6 +444,26 @@ def _array(value) -> np.ndarray:
     return np.asarray(value, dtype=float)
 
 
+def test_small_var_cards_are_to_the_cent_and_add_up_on_screen():
+    # The textbook contract's VaR is about $55: whole dollars read −$54 beside a spot-only −$55 and "+$0.58 vs spot
+    # only". Below $1,000 the six cards are to the cent and each gap is the difference of two amounts shown.
+    cards = {m.label: m for m in _risk(report="VaR", preset="Textbook").metric}
+    amount = {k: _amount(cards[k].value) for k in ("VaR 99% 1D · MC", "Spot-only VaR", "DGT VaR 99% 1D")}
+    assert all(re.fullmatch(r"−\$\d+\.\d\d", cards[k].value) for k in amount), [cards[k].value for k in amount]
+    vs_spot = signed(amount["VaR 99% 1D · MC"] - amount["Spot-only VaR"], 2, "$")
+    assert cards["VaR 99% 1D · MC"].delta == vs_spot.replace("$", "\\$") + " vs spot only"  # Markdown
+    assert cards["Non-linearity"].value == signed(amount["Spot-only VaR"] - amount["DGT VaR 99% 1D"], 2, "$")
+
+
+def test_the_tabs_doctests_hold():
+    import doctest
+
+    runner = doctest.DocTestRunner()
+    for test in doctest.DocTestFinder().find(tab_risk):
+        runner.run(test)
+    assert runner.tries >= 9 and runner.failures == 0
+
+
 def test_the_quoted_backtest_is_the_methodologys_and_follows_the_vol_dynamics():
     # One source: the numbers the VaR report quotes are those of the Methodology's Backtesting section (whose own
     # numbers tests/test_backtest.py's acceptance 7 measures).

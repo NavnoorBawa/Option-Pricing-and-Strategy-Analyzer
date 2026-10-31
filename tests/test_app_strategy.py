@@ -296,7 +296,8 @@ def test_a_link_to_the_risk_tab_analyses_the_linked_template():
         (frozen, "Spot-only VaR"),
     ):
         var = risk.value_at_risk(strategy, strat.Market(100, 0.05, 0.2, 1.0), config, 200)
-        assert _metric(at, var_label).value == tab_risk.dollars(-var.var)
+        # The VaR cards are to the cent while every amount on them is below $1,000 (about $300 here).
+        assert var.var < 900 and _metric(at, var_label).value == tab_risk.exact(-var.var)
 
 
 CONDOR = "**Iron Condor** — Long 1 × 80 Put, Short 1 × 90 Put, Short 1 × 110 Call, Long 1 × 120 Call"

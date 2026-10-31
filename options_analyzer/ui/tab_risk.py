@@ -161,17 +161,23 @@ def shown(value: float) -> float:
     return float(text) if scale is None else float(text[:-1]) * scale
 
 
-def difference(a: float, b: float) -> str:
+def difference(a: float, b: float, cents: bool = False) -> str:
     """``a − b`` for a tile that compares two tiles: from the amounts :func:`dollars` shows when it is $10 or more, so
     that the three tiles add up on screen (−$1,922 − (−$1,978) = +$56); to the cent from the unrounded amounts below
     $10, where the shown amounts' difference is a rounding artefact (the textbook option's −$54.87 and −$55.50 read
     −$55 and −$56, whose difference "+$1.00" was not the gap, +$0.63).
 
+    With ``cents`` (a row of cards shown to the cent, :func:`_var`), from the amounts to the cent.
+
     >>> difference(-1921.6, -1977.7), difference(-54.87, -55.50), difference(-54.60, -55.24)
     ('+$56', '+$0.63', '+$0.64')
+    >>> difference(-54.304, -54.886, cents=True)
+    '+$0.59'
     """
     if not (math.isfinite(a) and math.isfinite(b)):
         return signed(a - b)
+    if cents:
+        return signed(round(a, 2) - round(b, 2), 2, "$")
     if abs(round(a - b, 2)) < 10:
         return signed(a - b, 2, "$")
     gap = shown(a) - shown(b)
@@ -988,8 +994,9 @@ def _stress(book: Book) -> None:
     )
 
 
-def _var_card(label: str, value: float | str, help_text: str, delta: str | None = None) -> Card:
-    return _card(label, value if isinstance(value, str) else dollars(value), help_text, delta)
+def _var_card(label: str, value: float | str, help_text: str, delta: str | None = None, cents: bool = False) -> Card:
+    shown_value = value if isinstance(value, str) else exact(value) if cents else dollars(value)
+    return _card(label, shown_value, help_text, delta)
 
 
 def _var(book: Book) -> None:
@@ -1072,19 +1079,26 @@ def _var(book: Book) -> None:
     basis = f"{model} Monte Carlo, {int(paths):,} paths, seed {int(seed)}"
     vol_text = "spot and implied vol moving" if with_vol else "implied vol frozen"
     ci = 2 if abs(var) < 1000 else 0  # the interval to the cent on a small position (−$54.30: −$54.08 to −$54.55)
+    # The cards compare amounts a few dollars apart: on the textbook contract the VaR read −$54 beside a spot-only
+    # VaR of −$55 and "+$0.58 vs spot only". Below $1,000 every card is to the cent, so that each gap is the
+    # difference of the amounts on screen (−$54.30 − (−$54.88)).
+    tail = [var, es, spot_var, spot_es] + ([] if dg is None else [dg.var])
+    cents = max(abs(v) for v in tail if math.isfinite(v)) < 1000
     cards = [
         _var_card(
             f"VaR 99% {h} · MC",
             -var,
             f"The 1% worst P&L over {h} by full revaluation, {vol_text} ({basis}): {exact(-var)}; 95% "
             f"simulation interval {exact(-result.var_ci95[0], ci)} to {exact(-result.var_ci95[1], ci)}.",
-            f"{difference(-var, -spot_var)} vs spot only" if with_vol else None,
+            f"{difference(-var, -spot_var, cents)} vs spot only" if with_vol else None,
+            cents,
         ),
         _var_card(
             f"ES 97.5% {h} · MC",
             -es,
             f"The mean P&L of the worst 2.5% (FRTB's level), {vol_text}: {exact(-es)}.",
-            f"{difference(-es, -spot_es)} vs spot only" if with_vol else None,
+            f"{difference(-es, -spot_es, cents)} vs spot only" if with_vol else None,
+            cents,
         ),
     ]
     if with_vol:
@@ -1094,16 +1108,17 @@ def _var(book: Book) -> None:
                 -spot_var,
                 f"VaR 99% {h} of the same spot paths with implied vol frozen, which leaves out the vega risk: "
                 f"{exact(-spot_var)}.",
+                cents=cents,
             ),
-            _var_card("Spot-only ES", -spot_es, f"ES 97.5% {h}, implied vol frozen: {exact(-spot_es)}."),
+            _var_card("Spot-only ES", -spot_es, f"ES 97.5% {h}, implied vol frozen: {exact(-spot_es)}.", cents=cents),
         ]
     # The comparator's like: the delta-gamma-theta VaR moves spot alone, Normally, at the leg vol, so its gap is taken
     # to the spot-only run (the full VaR when implied vol is frozen), which differs from it by the full revaluation
     # alone (and by fatter tails under a Student-t or GARCH model). Against the spot-plus-vol VaR the gap would mix
     # in the vega risk: on the default call spread at the pinned valuation time (ASOF in tests/_apptest.py), +$248
     # against the full VaR (−$1,729, implied vol moving) but +$56 against the spot-only one (−$1,922; DGT −$1,978).
-    # From $10 the amounts shown are subtracted, so that the tiles add up on screen; below, the unrounded amounts.
-    gap = None if dg is None else difference(-spot_var, -dg.var)
+    # The amounts shown are subtracted (whole dollars, or cents below $1,000), so that the cards add up on screen.
+    gap = None if dg is None else difference(-spot_var, -dg.var, cents)
     comparator = f"Spot-only VaR {MINUS} DGT VaR" if with_vol else f"VaR {MINUS} DGT VaR"
     cards += [
         _var_card(
@@ -1112,6 +1127,7 @@ def _var(book: Book) -> None:
             "Exact VaR of Δ·x + ½Γ·x² + Θ·h for a Normal spot move at the leg vol, implied vol frozen (the analytic "
             f"comparator): {MISSING if dg is None else exact(-dg.var)}; its ES 97.5%: "
             f"{MISSING if dg_es is None else exact(-dg_es)}.",
+            cents=cents,
         ),
         _var_card(
             "Non-linearity",
