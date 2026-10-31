@@ -97,8 +97,9 @@ def ticker(inputs: Inputs, *, today: dt.date | None = None) -> str:
     inputs : Inputs
         The sidebar inputs.
     today : datetime.date, optional
-        The valuation date that the days to expiry count from (default: the server's date, as everywhere in the
-        app).
+        The valuation date that the days to expiry count from. Default: the date of the last cash close
+        (:func:`.market.last_close`), the valuation time of the Strategy, Risk and Surface tabs under the textbook
+        market, so that the header's expiry date and their scenario dates count from one day.
 
     Returns
     -------
@@ -118,7 +119,7 @@ def ticker(inputs: Inputs, *, today: dt.date | None = None) -> str:
     items = (
         f"S {level(inputs.spot)}",
         f"K {level(inputs.strike)}",
-        expiry(inputs.days, today).replace("-", "\u2011"),
+        expiry(inputs.days, today or mk.last_close().date()).replace("-", "\u2011"),
         f"σ {pct(inputs.volatility, 2)}",
         f"r {_rate(inputs.rate)}",
         f"q {_rate(inputs.dividend_yield)}",

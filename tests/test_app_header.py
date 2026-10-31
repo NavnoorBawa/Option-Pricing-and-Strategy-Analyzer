@@ -61,8 +61,9 @@ _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct",
 
 
 def _expiry(days: int) -> str:
-    """The expiry date ``days`` calendar days from today, as ``26-Oct-27``."""
-    day = dt.date.today() + dt.timedelta(days=days)
+    """The expiry date ``days`` calendar days from the last cash close (the textbook market's valuation date on
+    every tab), as ``26-Oct-27``."""
+    day = market.last_close().date() + dt.timedelta(days=days)
     return f"{day.day:02d}-{_MONTHS[day.month - 1]}-{day.year % 100:02d}"
 
 
