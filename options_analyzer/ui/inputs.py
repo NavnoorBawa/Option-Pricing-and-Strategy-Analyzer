@@ -378,24 +378,3 @@ def sidebar() -> Inputs:
 def market_notes() -> list[str]:
     """Notes from this run's sidebar (an expiry moved to a listed one), once."""
     return st.session_state.pop(_NOTES, [])
-
-
-def days_text(days: float) -> str:
-    """Days to expiry as a caption gives them: ``365 days``, ``27.7 days`` or ``5.3 hours``.
-
-    >>> days_text(365), days_text(27.73), days_text(0.22)
-    ('365 days', '27.7 days', '5.3 hours')
-    """
-    if days < 1:
-        return f"{days * 24:.1f} hours"
-    return f"{days:,.0f} days" if float(days).is_integer() else f"{days:,.1f} days"
-
-
-def describe(inputs: Inputs) -> str:
-    """The contract in a few words: ``SPX 27-Nov-26 PM 5,815 · 30.0 days`` or ``K 100.00 · 365 days``."""
-    if inputs.expiry_date is not None:
-        return (
-            f"{mk.INDEX_ROOT} {short_date(inputs.expiry_date)} {inputs.settlement} {inputs.strike:,.0f} · "
-            f"{days_text(inputs.days)}"
-        )
-    return f"K {level(inputs.strike)} · {days_text(inputs.days)}"

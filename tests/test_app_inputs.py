@@ -18,7 +18,7 @@ from options_analyzer.market_data import synthetic
 from options_analyzer.ui import header
 from options_analyzer.ui import market as mk
 from options_analyzer.ui.app import _link_asof
-from options_analyzer.ui.inputs import SURFACE, days_text
+from options_analyzer.ui.inputs import SURFACE
 
 NEW_YORK = ZoneInfo("America/New_York")
 #: The pinned valuation time as a datetime (New York wall time).
@@ -97,14 +97,12 @@ def test_the_session_note(moment, note):
 
 
 @pytest.mark.parametrize(
-    ("days", "text"), [(27.73, "28d"), (7.0, "7d"), (3.26, "3d 6h"), (2.999, "3d 0h"), (0.22, "5.3h")]
+    ("days", "text"),
+    # A countdown in whole units, as every tab writes it (format.time_left): 55d 17h 31m is 55d, never 56d.
+    [(55.73, "55d"), (30.0, "30d"), (27.73, "27d 17h"), (7.0, "7d 0h"), (2.999, "2d 23h"), (0.22, "5h 16m")],
 )
 def test_time_to_expiry_in_short(days, text):
     assert mk.span(days) == text
-
-
-def test_days_in_captions():
-    assert (days_text(365), days_text(27.73), days_text(0.22)) == ("365 days", "27.7 days", "5.3 hours")
 
 
 def test_the_index_market_reads_the_chain_back():
@@ -124,7 +122,7 @@ def test_the_index_market_reads_the_chain_back():
     # The listed expiry nearest 30 days: 20-Nov-26 AM at 27.7 days beats 27-Nov-26 PM at 34.9.
     assert market.default_expiry() == date(2026, 11, 20)
     assert market.atm_strike(date(2026, 11, 20)) == 5815.0  # F 5,813.91 on the 5-point grid
-    assert mk.expiry_label(market.expiry_row(date(2026, 11, 20))) == "20‑Nov‑26 AM · 28d"
+    assert mk.expiry_label(market.expiry_row(date(2026, 11, 20))) == "20‑Nov‑26 AM · 27d 17h"
     assert mk.index_market(AT) is market  # cached per valuation time
 
 
@@ -158,9 +156,12 @@ def test_the_app_opens_on_the_synthetic_index(index_app):
     assert at.sidebar.selectbox(key="preset").value == mk.INDEX
     with pytest.raises(KeyError):  # under a chain the spot is observed, not typed
         at.sidebar.number_input(key="spot")
-    identity, contract = at.markdown[0].value, next(m.value for m in at.markdown if m.value.startswith("SPX"))
+    identity = at.markdown[0].value
     assert _plain(identity) == "**Options Analytics** 23-Oct-26 16:00 ET · SPX 5,800.00"
-    assert _plain(contract).startswith("SPX 20-Nov-26 AM 5,815 · 28d · σ ")
+    # The contract is the Pricing tab's, above its tiles, not the header's (UI spec 2.2).
+    contract = [_plain(c.value) for c in at.main.caption if c.value.startswith("SPX")]
+    assert contract == ["SPX 20-Nov-26 AM 5,815 · last trade Thu 19-Nov · settles at the SOQ"]
+    assert not [m.value for m in at.markdown if m.value.startswith("SPX")]  # not in the header
     assert ":gray-badge[SYNTHETIC]" in _badges(at)
     assert at.sidebar.selectbox(key="expiry").value == "2026-11-20"
     assert at.sidebar.number_input(key="strike").value == 5815.0
@@ -182,8 +183,7 @@ def test_the_index_prices_are_black_76_on_the_parity_forward_and_the_surface_vol
     cards = _cards(index_app)  # the Pricing tab's tiles (UI-1)
     assert cards["Call"] == f"{call:,.2f}" and cards["Put"] == f"{put:,.2f}"
     assert cards["Forward"] == f"{F:,.2f}"
-    contract = next(m.value for m in index_app.markdown if m.value.startswith("SPX"))
-    assert f"σ\xa0{vol:.2%}\xa0·" in contract
+    assert cards["Vol"] == f"{vol:.2%}"
     assert any(f"DF {DF:.5f}" in c.value for c in index_app.sidebar.caption)
 
 
@@ -253,7 +253,7 @@ def test_a_link_picks_a_listed_expiry(new_app, expiry, chosen, note):
     # The link holds the listed expiry, or nothing for the default one.
     assert at.query_params.get("expiry") == (None if chosen == "2026-11-20" else chosen)
     label = mk.expiry_label(mk.index_market(AT).expiry_row(date.fromisoformat(chosen)))
-    assert _plain(label).split(" · ")[0] in _plain(next(m.value for m in at.markdown if m.value.startswith("SPX")))
+    assert _plain(label).split(" · ")[0] in _plain(next(c.value for c in at.main.caption if c.value.startswith("SPX")))
 
 
 def test_the_index_offers_no_american_engine(new_app):
@@ -310,7 +310,8 @@ def test_an_override_vol_is_marked(new_app):
     vol.set_value(vol.value + 1.0).run()
     _ok(at)
     assert ":yellow-badge[OVERRIDE]" in _badges(at)
-    assert "%*" in next(m.value for m in at.markdown if m.value.startswith("SPX"))
+    vol_tile = next(m for m in at.metric if m.label == "Vol")
+    assert vol_tile.value == f"{vol.value:.2f}%" and _plain(vol_tile.delta) == "override +1.00 vp"
     assert _cards(at)["Call"] != surface_card
     assert any(c.value.startswith("+1.00 vp against the surface's") for c in at.sidebar.caption)
 

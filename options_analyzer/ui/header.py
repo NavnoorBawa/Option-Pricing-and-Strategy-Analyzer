@@ -8,10 +8,11 @@ One row above the price cards, ``st.container(horizontal=True, key="desk_header"
   this exact view (:func:`share_link`) and a Methodology button (or Alt+Shift+M), with which the app opens the
   Methodology in a drawer on the right, over the open tab (:func:`.tab_methodology.drawer`).
 
-Under the synthetic index the ticker is market-level (:func:`index_ticker`: valuation time and index level), a
-SYNTHETIC badge (and an OVERRIDE one while the vol is typed) leads the action group, and the contract is the strip's
-last row (:func:`contract_line`). An amber FIT badge shows while a fit setting of the Surface tab is not at its
-default (:func:`.surface_state.settings`).
+Under the synthetic index the ticker is market-level (:func:`index_ticker`: valuation time and index level) and a
+SYNTHETIC badge (and an OVERRIDE one while the vol is typed) leads the action group. The contract is not in the
+header (UI spec 2.2): its strike, expiry and vol are the Pricing and IV tabs' (each states its contract above its
+tiles), and the forward and carry are per expiry (the sidebar). An amber FIT badge shows while a fit setting of the
+Surface tab is not at its default (:func:`.surface_state.settings`).
 
 How the row wraps is set in ``static/desk.css``. The ticker wraps between its items, never inside one, in lines
 of balanced length. Where the ticker's two lines fit beside the brand, they start one under the other (a hanging
@@ -128,7 +129,7 @@ def ticker(inputs: Inputs, *, today: dt.date | None = None) -> str:
 
 def index_ticker(inputs: Inputs) -> str:
     """The index preset's ticker, which is market-level: the valuation time and the index level. The contract
-    (expiry, strike, vol, forward) is per expiry and has its own line above the price cards (:func:`contract_line`).
+    (expiry, strike, vol, forward) is per expiry: the Pricing and IV tabs state it above their tiles.
 
     Examples
     --------
@@ -143,34 +144,6 @@ def index_ticker(inputs: Inputs) -> str:
     items = (
         f"{short_date(asof.date())} {asof:%H:%M} ET".replace("-", "\u2011"),
         f"{mk.INDEX_ROOT} {level(inputs.spot)}",
-    )
-    return _SEPARATOR.join(item.replace(" ", "\xa0") for item in items)
-
-
-def contract_line(inputs: Inputs) -> str:
-    """The index preset's contract, the header strip's last row: the expiry with its settlement and time to it, the
-    strike, the vol (with an asterisk when it is typed over the surface's, beside the OVERRIDE badge) and the
-    expiry's parity forward, in about 50 characters, one line on a 390 px phone (the sidebar gives the discount
-    factor and the carry). Items are joined like the ticker's and do not break.
-
-    Examples
-    --------
-    >>> market = mk.index_market(dt.datetime(2026, 10, 23, 16, 0))
-    >>> row = market.expiry_row(market.default_expiry())
-    >>> r, q = mk.carry(row["forward"], row["discount_factor"], market.spot, row["maturity"])
-    >>> inputs = Inputs(market.spot, 5815.0, row["maturity"] * 365, 0.1561, r, q, ModelConfig(), mk.INDEX, market,
-    ...                 row["expiry"], row["settlement"], row["maturity"], 0.1561)
-    >>> contract_line(inputs).replace("\\xa0", " ").replace("\\u2011", "-")
-    'SPX 20-Nov-26 AM 5,815 · 28d · σ 15.61% · F 5,813.91'
-    """
-    expiry_date = inputs.expiry_date
-    assert expiry_date is not None and inputs.surface_vol is not None  # the index preset
-    strike = f"{inputs.strike:,.0f}" if float(inputs.strike).is_integer() else level(inputs.strike)
-    items = (
-        f"{mk.INDEX_ROOT} {short_date(expiry_date)} {inputs.settlement} {strike}".replace("-", "\u2011"),
-        mk.span(inputs.days),
-        f"σ {pct(inputs.volatility, 2)}" + ("*" if inputs.vol_overridden else ""),
-        f"F {level(inputs.forward)}",
     )
     return _SEPARATOR.join(item.replace(" ", "\xa0") for item in items)
 
@@ -371,8 +344,6 @@ def render(inputs: Inputs, *, on_methodology: Callable[[], None]) -> DeltaGenera
         "(Option+Shift+M on a Mac).",
         shortcut=METHODOLOGY_SHORTCUT,
     )
-    if inputs.context is not None:  # the index preset's ticker is market-level: the contract is the strip's last row
-        row.container(key="contract_line").markdown(contract_line(inputs))
     return share
 
 

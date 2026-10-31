@@ -1258,7 +1258,6 @@ _SHELL = """() => {
     return p.scrollWidth > p.clientWidth + 0.5 || t.getBoundingClientRect().right > end; };
   const header = q('.st-key-desk_header');
   return {header: box(header), identity: box(q('.st-key-desk_identity')), actions: box(q('.st-key-desk_actions')),
-    contract: box(q('.st-key-contract_line')),
     kpi: box(q('[data-testid=stMain] [data-testid=stMetric]')), tabs: box(list), panel: box(panel),
     content: box([...panel.querySelector('[data-testid=stVerticalBlock]').children].find(e => e.offsetHeight)),
     centres: [...document.querySelectorAll('.st-key-desk_actions > *')].map(e => {
@@ -1279,13 +1278,13 @@ def _shell(page) -> dict:
 @pytest.mark.parametrize("scheme", ["dark", "light"])
 def test_the_desk_shell_on_a_laptop(chromium, app_url, scheme):
     # The 44 px title and the feature caption under it pushed the price cards to 225 px and the tabs to 386 px.
-    # One header row under 40 px now holds the identity and the actions on one line; under the synthetic index the
-    # contract is the strip's second row (one line of 16 px).
+    # One header row under 40 px now holds the identity and the actions on one line (the contract is the Pricing
+    # tab's, not the header's: UI spec 2.2).
     page = _open(chromium, app_url, scheme, 1440)
     try:
         shell = _shell(page)
         row = max(shell["identity"]["bottom"], shell["actions"]["bottom"]) - shell["header"]["top"]
-        assert row < 40 and (shell["contract"] is None or shell["contract"]["height"] < 20), shell
+        assert row < 40 and shell["header"]["height"] < 40, shell
         assert shell["kpi"]["top"] < 200
         assert shell["tabs"]["top"] <= 260
         assert max(shell["centres"]) - min(shell["centres"]) < 2  # the action group on one line
@@ -1435,10 +1434,7 @@ def test_the_header_wraps_cleanly_on_a_laptop(chromium, app_url, inputs):
             assert max(shell["centres"]) - min(shell["centres"]) < 2, width  # the group never splits
             assert abs(shell["actions"]["right"] - shell["header"]["right"]) < 1, width
             assert shell["headerScroll"] <= 0 and shell["pageScroll"] <= 0, width
-            # The identity and the actions; under the synthetic index the contract is one more line below them.
             rows = max(shell["identity"]["bottom"], shell["actions"]["bottom"]) - shell["header"]["top"]
-            if shell["contract"] is not None:
-                assert shell["contract"]["height"] < 20, width  # one line
             if shell["actions"]["top"] < shell["identity"]["bottom"] - 1:  # beside the ticker: one row
                 assert rows < 40, width
             else:  # under it, on the right

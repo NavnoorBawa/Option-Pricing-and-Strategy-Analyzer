@@ -33,6 +33,7 @@ from .. import vol_surface as vs
 from ..market_data import SyntheticChain, sample_chain, to_quotes
 from ..market_data.synthetic import BOX_SPREAD, SYNTHETIC_LABEL, strike_interval
 from ..vol_surface.diagnostics import DEFAULT_SETTINGS, ChainFit, FitSettings, fit_chain
+from .format import time_left
 
 #: The presets, by the label the sidebar shows and a link holds (``?preset=Textbook``).
 INDEX, TEXTBOOK = "Synthetic index", "Textbook"
@@ -150,25 +151,20 @@ def index_market(as_of: datetime, settings: FitSettings = DEFAULT_SETTINGS) -> M
 
 
 def expiry_label(row: pd.Series, *, as_of: datetime | None = None) -> str:
-    """A listed expiry as the desk names it: ``20‑Nov‑26 AM · 27d`` (non-breaking hyphens in the date), with hours
-    within a week of expiry (``3d 6h``)."""
+    """A listed expiry as the desk names it: ``20‑Nov‑26 AM · 27d 17h`` (non-breaking hyphens in the date), with the
+    time left to its settlement as every tab writes it (:func:`span`)."""
     when = pd.Timestamp(row["expiry"]).strftime("%d-%b-%y").replace("-", "\u2011")
     return f"{when} {row['settlement']} · {span(float(row['maturity']) * 365.0)}"
 
 
 def span(days: float) -> str:
-    """Time to expiry, short: ``27d``, and within a week ``3d 6h`` or ``5.3h``.
+    """Time to expiry by the number standard (:func:`.format.time_left`, a countdown: whole units, never rounded
+    up): ``55d`` from 30 days, ``27d 17h`` from a day, ``5h 16m`` below.
 
-    >>> span(27.73), span(3.26), span(0.22)
-    ('28d', '3d 6h', '5.3h')
+    >>> span(55.73), span(27.73), span(3.26), span(0.22)
+    ('55d', '27d 17h', '3d 6h', '5h 16m')
     """
-    if days >= 7:
-        return f"{round(days)}d"
-    whole = math.floor(days)
-    hours = round((days - whole) * 24)
-    if hours == 24:
-        whole, hours = whole + 1, 0
-    return f"{whole}d {hours}h" if whole else f"{days * 24:.1f}h"
+    return time_left(days * 1440.0)
 
 
 def carry(forward: float, discount_factor: float, spot: float, maturity: float) -> tuple[float, float]:

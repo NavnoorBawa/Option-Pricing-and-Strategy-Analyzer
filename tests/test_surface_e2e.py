@@ -1,6 +1,6 @@
 """The Surface tab in Chromium (UI spec 3.4's Playwright acceptance tests): the smile draws one bid/ask bar per used
 quote and dashes its extrapolated wings, a click on the expiry table moves the focus expiry (the smile's note and the
-header's contract line follow), and the layout budget at 1,440 × 900 (tiles, smile and page height).
+sidebar's expiry follow), and the layout budget at 1,440 × 900 (tiles, smile and page height).
 
 The app runs at the pinned valuation time (``?asof=2026-10-23T16:00``, the cash close of Friday 23 October 2026).
 """
@@ -87,7 +87,7 @@ def test_the_tiles_and_the_smile_are_above_the_fold(chromium, app_url):  # noqa:
 
 def test_a_row_click_moves_the_focus_expiry(chromium, app_url):  # noqa: F811
     """A click on the 18-Dec-26 row of the expiry table (the sixth) makes it the focus: the smile's note and the
-    header's contract line (shown on every tab) name it."""
+    sidebar's expiry (the contract every tab prices) name it."""
     page = _open(chromium, app_url)
     try:
         assert page.evaluate(_NOTE).startswith("20-Nov-26 AM · 27d 17h")
@@ -98,8 +98,8 @@ def test_a_row_click_moves_the_focus_expiry(chromium, app_url):  # noqa: F811
         page.mouse.click(box["x"] + 20, box["y"] + 28 * 6 + 14)
         page.wait_for_function(f"() => ({_NOTE})().startsWith('18-Dec-26 AM')", timeout=60_000)
         page.wait_for_function(f"() => {_IDLE}", timeout=60_000)
-        contract = page.locator(".st-key-contract_line").inner_text().replace("\xa0", " ").replace("‑", "-")
-        assert contract.startswith("SPX 18-Dec-26 AM ")
+        expiry = page.locator("[data-testid=stSidebar] .st-key-expiry input").input_value()
+        assert "18-Dec-26 AM · 55d" in expiry.replace("\u2011", "-"), expiry
         assert page.evaluate(_NOTE).endswith(f" · {_used('2026-12-18')} used")
     finally:
         page.context.close()
@@ -111,8 +111,8 @@ def test_a_step_of_the_focus_expiry_redraws_the_tab_in_a_loose_time(chromium, ap
 
     Measured at 1,440 × 900 on a 4-core machine shared with other jobs: 0.64 to 0.85 s a step (1.13 s for the first),
     of which the script run is 0.15 to 0.19 s (AppTest, warm) and the rest the browser's redraw. The spec's fragment
-    does not apply: the focus expiry is the sidebar's (``?expiry=``), which sets the contract that the header and
-    every tab price, so a step reruns the whole app."""
+    does not apply: the focus expiry is the sidebar's (``?expiry=``), which sets the contract that every tab
+    prices, so a step reruns the whole app."""
     page = _open(chromium, app_url)
     try:
         times = []

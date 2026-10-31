@@ -13,7 +13,7 @@ import json
 import math
 import re
 import zipfile
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import numpy as np
@@ -79,10 +79,10 @@ def _array(values) -> np.ndarray:
     return np.asarray(values, dtype=float)
 
 
-def _contract(at: AppTest) -> str:
-    """The header's contract line (its spaces are no-break spaces, its hyphens no-break hyphens)."""
-    lines = (m.value.replace("\xa0", " ").replace("\u2011", "-") for m in at.markdown)
-    return next(line for line in lines if line.startswith("SPX ") and "· F " in line)
+def _carry(at: AppTest) -> str:
+    """The sidebar's note of the contract's expiry: its parity forward, discount factor and carry, which every tab
+    prices (the header holds no contract: UI spec 2.2)."""
+    return next(c.value for c in at.sidebar.caption if "put-call parity" in c.value)
 
 
 def _smile(at: AppTest) -> dict:
@@ -297,14 +297,16 @@ def test_every_status_of_the_quotes_view_is_used_or_a_reason(new_app):
 
 def test_a_focus_expiry_from_the_table_moves_the_smile_and_the_contract(new_app):
     """The row click's callback writes the sidebar's expiry (tested below); here the run after it: the smile, the
-    table's marker and the header's contract line follow."""
+    table's marker and the sidebar's contract (its expiry's parity forward) follow."""
     at = new_app(preset=None, asof=ASOF, tab="Surface")
     at.session_state["expiry"] = "2026-12-18"
     at.run()
     _ok(at)
     note = next(a["text"] for a in _smile(at)["layout"]["annotations"] if "used" in a["text"])
     assert note.startswith("18-Dec-26 AM · 55d")
-    assert _contract(at).startswith("SPX 18-Dec-26 AM ")
+    forward = mk.index_market(datetime.fromisoformat(ASOF)).expiry_row(date(2026, 12, 18))["forward"]
+    assert at.sidebar.selectbox(key="expiry").value == "2026-12-18"
+    assert f"F {forward:,.2f}," in _carry(at) and "F 5,813.91" not in _carry(at)
 
 
 def test_the_row_click_and_the_step_buttons_set_the_focus_expiry(monkeypatch):
@@ -494,8 +496,8 @@ def test_an_uploaded_chain_is_screened_quote_by_quote_and_not_published(new_app)
     table = _expiries(at)
     np.testing.assert_allclose(table["F"].to_numpy(), chain.expiries["forward"].to_numpy(), rtol=2e-4)
     assert not any(m.value == ":yellow-badge[FIT]" for m in at.markdown)
-    # The header's contract is still the synthetic chain's.
-    assert _contract(at).endswith("F 5,813.91")
+    # The contract every tab prices is still the synthetic chain's.
+    assert "F 5,813.91," in _carry(at)
 
 
 def test_a_table_of_quotes_still_builds_a_surface(app):

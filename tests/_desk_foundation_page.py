@@ -16,7 +16,7 @@ st.set_page_config(page_title="Desk foundation", layout="wide")
 theme.apply_stylesheet()
 # A sidebar, so that the main column is as wide as the app's (1,038 px at a 1,440 px window).
 st.sidebar.number_input("Strike", value=5815.0, step=5.0, key="page_strike")
-st.sidebar.selectbox("Expiry", ["20-Nov-26 AM · 28d", "18-Dec-26 AM · 56d"], key="page_expiry")
+st.sidebar.selectbox("Expiry", ["20-Nov-26 AM · 27d 17h", "18-Dec-26 AM · 55d"], key="page_expiry")
 st.sidebar.number_input("Locked", value=1.0, disabled=True, key="page_locked")
 shifts = whatif.strip(
     spot=5800.0,
