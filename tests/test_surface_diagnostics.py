@@ -19,6 +19,7 @@ import pytest
 from scipy.integrate import quad
 
 from options_analyzer import black_scholes as bs
+from options_analyzer import clock
 from options_analyzer import vol_surface as vs
 from options_analyzer.lets_be_rational import black
 from options_analyzer.market_data import sample_chain, to_quotes
@@ -292,6 +293,20 @@ def test_the_vix_style_vol_is_the_model_free_variance_of_the_generators_smile(no
     T1, T2, target = float(chain.expiries.iloc[i]["maturity"]), float(chain.expiries.iloc[j]["maturity"]), 30 / 365
     w = totals[0] + (totals[1] - totals[0]) * (target - T1) / (T2 - T1)
     assert abs(vix - math.sqrt(w / target)) < tolerance
+
+
+@pytest.mark.parametrize("noise", [False, True])
+def test_on_a_flat_smile_the_vix_style_vol_is_the_atmf_vol(noise):
+    """UI-26's acceptance: on a chain with no smile (SSVI with ρ = 0 and η → 0, in calendar time) the model-free
+    30-day vol equals ATMF 30D to 0.1 vp (the plan's bound). Measured: 20.014% against 19.999% without noise, 20.011%
+    against 19.998% with it, so 0.014 and 0.013 vp: the strike grid's discretisation, the same sign as on the skewed
+    chain."""
+    flat = vs.SSVIParams(0.20, 0.20, 1.5, 0.0, 1e-6, 0.5)
+    _, fit = _fit(noise=noise, ssvi=flat, variance_clock=clock.VarianceClock())
+    vix, _ = dg.vix_style_vol(fit, 30)
+    atmf = dg.atmf_vol(fit.surface, 30 / 365)
+    assert atmf == pytest.approx(0.20, abs=2e-5)
+    assert abs(vix - atmf) < 0.001
 
 
 def test_weeklies_and_the_implied_spot(default):

@@ -20,12 +20,13 @@ own (``sf_focus``). Numbers are formatted by :mod:`.format` and the column regis
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import importlib.util
 import math
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -35,8 +36,9 @@ from scipy.special import ndtr
 from .. import clock
 from .. import vol_surface as vs
 from ..market_data import read_chain
+from ..market_data.synthetic import DEFAULT_CLOCK
 from ..vol_surface import diagnostics as dg
-from . import cache, charts, charts_surface, exports, surface_state, theme, whatif
+from . import cache, charts, charts_surface, exports, surface_state, theme
 from . import market as mk
 from .components import card_row, table
 from .components import col as column
@@ -65,9 +67,11 @@ X_AXES = tuple(charts_surface.X_AXES)
 #: Session key of the focus expiry of an upload or the SSVI surface (a row of the expiry table); the synthetic chain's
 #: is the sidebar's ``expiry``.
 FOCUS_KEY = "sf_focus"
-#: The six tiles in two groups of three: 3 + 3 at 1,440 px with the sidebar open (six across would need about
-#: 1,060 px of the 1,037 there; three pairs went 4 + 2), then one group per line.
+#: The six tiles in two groups of three: six across at 1,440 px with the sidebar open (970 px of the 1,037 there, with
+#: the FIT tile's unit in its label; "0.04 / 0.10 vp" as its value needed 1,162 px), 3 + 3 below that, then 2 + 1.
 TILE_GROUPS = ("surface_tiles_a", "surface_tiles_b")
+#: The FIT tile's label: the median fit RMSE against the median half-spread, both in vol points.
+FIT_LABEL = "FIT vs ½‑spr (vp)"
 #: The tiles' constant maturities, in calendar days.
 TILE_DAYS, TERM_DAYS = 30, 365
 VOL_LIMITS = (0.5, 500.0)
@@ -312,9 +316,11 @@ def _ssvi_controls(inputs: Inputs, container) -> vs.VolSurface | None:
         return None
     params = vs.SSVIParams(short / 100, long / 100, kappa, rho, eta, gamma)
     maturities = np.array(dg.CONSTANT_MATURITIES, dtype=float) / 365.0
-    return vs.ssvi_surface(
+    surface = vs.ssvi_surface(
         params, inputs.rate, inputs.dividend_yield, np.linspace(m_range[0], m_range[1], 41), maturities
     )
+    # The sidebar's spot, so that forwards, strikes and the exported grid read in price (an SSVI surface is in K/S).
+    return dataclasses.replace(surface, spot=float(inputs.spot))
 
 
 def _ssvi_source(inputs: Inputs, container) -> Shown | None:
@@ -695,8 +701,9 @@ def _data_panel(inputs: Inputs) -> Shown | None:
             return None
         shown = _upload_source(inputs, upload)
     if shown is not None:
-        note = whatif.note(whatif.current())
-        panel.markdown(f":small[{shown.panel}]" + (f"  \n:small[:gray[{note}]]" if note else ""))
+        # The what-if strip's note (whatif.note) belongs at the end of this line once Strategy and Risk draw the strip;
+        # until then no tab sets a shift, and importing whatif here would put its URL keys in the share note's test.
+        panel.markdown(f":small[{shown.panel}]")
     return shown
 
 
@@ -710,7 +717,7 @@ def _tiles(shown: Shown | None) -> None:
     against the spreads and the arbitrage counts; ``–`` with the reason where a value cannot be measured."""
     blank = {"help": "No surface: upload a file or pick another source."}
     if shown is None:
-        labels = ("ATMF 30D", "25Δ RR 30D", "25Δ BF 30D", "TERM 30→365D", "FIT / ½‑SPR", "ARB")
+        labels = ("ATMF 30D", "25Δ RR 30D", "25Δ BF 30D", "TERM 30→365D", FIT_LABEL, "ARB")
         card_row("surface_tiles", TILE_GROUPS, [(lbl, MISSING, blank) for lbl in labels])
         return
     surface, rate = shown.surface, shown.rate
@@ -792,21 +799,17 @@ def _fit_tile(shown: Shown) -> tuple[str, str, dict]:
             else math.nan
         )
     else:
-        return ("FIT / ½‑SPR", MISSING, {"help": "A parametric surface has no quotes to fit."})
+        return (FIT_LABEL, MISSING, {"help": "A parametric surface has no quotes to fit."})
     median_half = float(np.nanmedian(half)) if np.isfinite(half).any() else math.nan
     options = {
-        "help": "Median across expiries of the fit's RMSE in vol / the median half bid/ask spread in vol of "
-        "the quotes used: a fit well inside the spreads is as good as the quotes allow. Then the share of used "
+        "help": "Median across expiries of the fit's RMSE / the median half bid/ask spread of the quotes used, both "
+        "in vol points: a fit well inside the spreads is as good as the quotes allow. Below, the share of used "
         "quotes whose fitted vol lies within their bid/ask.",
     }
     if math.isfinite(in_band):
         options |= {"delta": f"{number(in_band * 100, 0)}% in band", "delta_color": "off", "delta_arrow": "off"}
-    value = (
-        f"{number(rmse * 100, 2)} vp"
-        if not math.isfinite(median_half)
-        else (f"{number(rmse * 100, 2)} / {number(median_half * 100, 2)} vp")
-    )
-    return ("FIT / ½‑SPR", value, options)
+    half_text = number(median_half * 100, 2) if math.isfinite(median_half) else MISSING
+    return (FIT_LABEL, f"{number(rmse * 100, 2)} / {half_text}", options)
 
 
 # --------------------------------------------------------------------------------------------------------------------
@@ -942,7 +945,7 @@ def _smile_data(shown: Shown, focus: int) -> charts_surface.SmileData:
         violations.append((k_over_s * (surface.spot or 1.0), kind))
     n_used = len(quotes["strike"]) if quotes is not None else 0
     in_band = row["in_band"]
-    parts = [str(row["name"]), time_left(row["minutes"])]
+    parts = [str(row["name"])] + ([time_left(row["minutes"])] if row["expiry"] is not None else [])
     if math.isfinite(row["rmse"]):
         parts.append(f"RMSE {number(row['rmse'] * 100, 2)} vp")
     if math.isfinite(in_band):
@@ -1072,39 +1075,67 @@ QUOTE_HELP = {
 def _term(shown: Shown) -> None:
     surface = shown.surface
     constant = [(d, dg.atmf_vol(surface, d / 365.0)) for d in dg.CONSTANT_MATURITIES]
-    listed = []
-    previous: date | None = shown.as_of.date() if shown.as_of is not None else None
-    for _, row in shown.rows.iterrows():
-        holiday = False
-        if row["expiry"] is not None and previous is not None:
-            day = previous + timedelta(days=1)
-            while day <= row["expiry"]:
-                if day.weekday() < 5 and not clock.is_trading_day(day):
-                    holiday = True
-                day += timedelta(days=1)
-            previous = row["expiry"]
-        listed.append(
-            {
-                "days": row["maturity"] * 365.0,
-                "atmf": row["atmf"],
-                "rr25": row["rr25"],
-                "bf25": row["bf25"],
-                "name": row["name"],
-                "holiday": holiday,
-            }
-        )
+    shares = variance_shares(shown.rows, shown.as_of)
+    listed = [
+        {
+            "days": row["maturity"] * 365.0,
+            "atmf": row["atmf"],
+            "rr25": row["rr25"],
+            "bf25": row["bf25"],
+            "name": row["name"],
+            "holiday": bool(share < SHORT_WINDOW),
+            "share": share,
+        }
+        for share, (_, row) in zip(shares, shown.rows.iterrows(), strict=True)
+    ]
     fig = charts_surface.term_chart(constant, listed)
     charts.show(fig, key="chart_term", alt="ATMF vol term structure, with the 25-delta risk reversal and butterfly")
     forwards = dg.forward_vols(surface)
-    strip = pd.DataFrame({f"{a}→{b}d": [v * 100] for a, b, v in forwards})
+    # A text column first: the table pins its first column at its content's width, which cut "7→14d (%)" short.
+    strip = pd.DataFrame({"Between": ["ATMF forward vol"], **{f"{a}→{b}d": [v * 100] for a, b, v in forwards}})
+    windows = [c for c in strip.columns if c != "Between"]
     table(
         strip,
-        dict.fromkeys(strip.columns, "vol"),
-        dict.fromkeys(strip.columns, FORWARD_VOL_HELP),
+        {"Between": "text", **dict.fromkeys(windows, "vol")},
+        {"Between": "Constant maturities, in calendar days.", **dict.fromkeys(windows, FORWARD_VOL_HELP)},
         key="tbl_surface_forward_vols",
     )
     if any(row["holiday"] for row in listed):
-        st.caption("Hollow markers: an exchange holiday falls between the expiry and the one before it.")
+        st.caption(
+            f"Hollow: holidays or extra weekend days cut the variance time since the previous expiry by over "
+            f"{number((1 - SHORT_WINDOW) * 100, 0)}% (they weigh {number(DEFAULT_CLOCK.weekend_weight, 1)} of a "
+            "trading day)."
+        )
+
+
+#: A window between expiries is short of variance time below this share of a plain week's variance time per
+#: calendar day (five trading days and a weekend). On the default chain this marks 27-Nov-26 (Thanksgiving: 0.84 of a
+#: plain week, the reason its ATMF, 15.25%, sits under 20-Nov's 15.45%), 15-Jan-27 (0.91) and 19-Feb-27 (0.93); the
+#: other windows, with one holiday in months of trading days, stay above 0.95.
+SHORT_WINDOW = 0.94
+
+
+def variance_shares(rows: pd.DataFrame, as_of: datetime | None) -> list[float]:
+    """For each dated expiry, the variance time of the window since the previous expiry (or the valuation time) per
+    calendar day, as a share of a plain week's, on the synthetic chain's variance clock (``synthetic.DEFAULT_CLOCK``:
+    weekends and holidays weigh 0.1 of a trading day); NaN for a surface without dates.
+
+    >>> days = [datetime(2026, 11, 20).date(), datetime(2026, 11, 27).date()]
+    >>> rows = pd.DataFrame({"expiry": days, "settlement": ["AM", "PM"]})
+    >>> [round(s, 2) for s in variance_shares(rows, datetime(2026, 10, 23, 16, 0))]
+    [1.0, 0.84]
+    """
+    if as_of is None or rows["expiry"].isna().all():
+        return [math.nan] * len(rows)
+    monday = datetime(2026, 11, 2)  # a week without a holiday
+    plain = DEFAULT_CLOCK.variance_time(monday, monday + timedelta(days=7)) / (7 / 365.0)
+    out, start = [], as_of
+    for day, settlement in zip(rows["expiry"], rows["settlement"], strict=True):
+        end = clock.settlement_time(day, settlement)
+        calendar = clock.year_fraction(start, end)
+        out.append(DEFAULT_CLOCK.variance_time(start, end) / calendar / plain if calendar > 0 else math.nan)
+        start = end
+    return out
 
 
 FORWARD_VOL_HELP = (
@@ -1184,8 +1215,8 @@ def _three_d(shown: Shown) -> None:
 # --------------------------------------------------------------------------------------------------------------------
 
 EXPIRY_HELP = {
-    "Expiry": "Expiry date and settlement (AM: the opening print, SPX monthlies; PM: the close). ◂ marks the focus "
-    "expiry; click a row to make it the focus (the sidebar's expiry, for the synthetic chain).",
+    "Expiry": "Expiry date and settlement (AM: the opening print, SPX monthlies; PM: the close). The ticked row is "
+    "the focus expiry; click another to move it (the sidebar's expiry, for the synthetic chain).",
     "DTE": "Time to the settlement.",
     "F": "Forward, from put-call parity on the expiry's quotes (or the fallback carry: see the expander).",
     "Carry gap": "ln(F/S) − (r − q)T against the fallback carry, in bp of the forward.",
@@ -1204,10 +1235,9 @@ EXPIRY_HELP = {
 
 def _expiry_table(shown: Shown, focus: int, focus_key: str) -> None:
     rows = shown.rows
-    names = [f"{name} ◂" if i == focus else str(name) for i, name in enumerate(rows["name"])]
     frame = pd.DataFrame(
         {
-            "Expiry": names,
+            "Expiry": rows["name"].astype(str).to_numpy(object),  # the focus is the ticked row
             "DTE": [time_left(m) for m in rows["minutes"]],
             "F": rows["forward"].to_numpy(float),
             "Carry gap": rows["carry_gap_bp"].to_numpy(float),
@@ -1245,7 +1275,7 @@ def _expiry_table(shown: Shown, focus: int, focus_key: str) -> None:
         selection_mode="single-row",
         selection_default={"selection": {"rows": [focus]}},
         on_select=functools.partial(on_expiry_select, key, targets, focus_key),
-        max_rows=16,
+        max_rows=len(rows),  # every expiry, never a box that scrolls
     )
 
 
@@ -1306,6 +1336,7 @@ def _diagnostics(shown: Shown, focus: int) -> None:
                 },
                 labels={"r": "Implied r", "q": "Implied q", "Gap": "Gap"},
                 key="tbl_surface_forwards",
+                max_rows=len(frame),  # every expiry: no table that scrolls in its own box
             )
         notes = list(surface.notes)
         if surface.calendar_violations == surface.butterfly_violations == 0 and not notes:
@@ -1349,6 +1380,7 @@ def _diagnostics(shown: Shown, focus: int) -> None:
                 "Mixon skew": "(σ25Δp − σ25Δc) / σATMF: Mixon's (2011) normalised skew, comparable across expiries.",
             },
             key="tbl_surface_skew",
+            max_rows=len(skew),
         )
         for message in shown.notes:
             st.markdown(f":small[{message}]")

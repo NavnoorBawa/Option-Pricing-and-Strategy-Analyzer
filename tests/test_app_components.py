@@ -74,7 +74,7 @@ def _app_states(new_app) -> dict[str, list[AppTest]]:
         return [new_app(tab=tab, **query).run() for tab in CARD_TABS]
 
     quotes = new_app(tab="Surface").run()
-    quotes.segmented_control(key="surface_source").set_value("Market quotes (CSV)").run()
+    quotes.segmented_control(key="surface_source").set_value("Upload").run()
     csv = vol_surface.sample_quotes().to_csv(index=False).encode()
     quotes.file_uploader(key="quotes_file").upload("quotes.csv", csv, "text/csv").run()
     limits = pages(
@@ -294,7 +294,7 @@ ROWS = {
     "greek_cards": [["Delta (shares)", "Gamma"], ["Theta / day", "Vega / vol pt"]],
     "expectation_cards": [["Expected P&L at expiry", "P&L standard deviation", "Drift used"]],
     "var_cards": [["VaR 99.0%", "Expected Shortfall 99.0%"], ["Spot-only VaR 99.0%", "Spot-only ES 99.0%"]],
-    "surface_cards": [["Grid", "Calendar arbitrage"], ["Butterfly arbitrage", "Local vol defined"]],
+    "surface_tiles": [["ATMF 30D", "25Δ RR 30D", "25Δ BF 30D"], ["TERM 30→365D", "FIT vs ½‑spr (vp)", "ARB"]],
     "iv_cards": [["Implied volatility", "Model check"], ["Vega at IV", "Time value"]],
 }
 
@@ -330,12 +330,12 @@ def test_the_four_card_rows_stay_two_by_two_on_a_phone(states):
     checked = set()
     for state, at in states.items():
         for row, groups in _card_rows(at).items():
-            if len(groups) != 2 or (state == "limits" and row in ("price_cards", "iv_cards")):
+            if len(groups) != 2 or len(groups[0]) != 2 or (state == "limits" and row in ("price_cards", "iv_cards")):
                 continue
             style = next(s for s in _styles(at) if f".st-key-{row} {{ container:" in s)
             assert _layout(style, PHONE_ROW)[0] == 2, (state, row)
             checked.add(row)
-    assert checked == {"price_cards", "strategy_cards", "greek_cards", "var_cards", "surface_cards", "iv_cards"}
+    assert checked == {"price_cards", "strategy_cards", "greek_cards", "var_cards", "iv_cards"}
 
 
 @pytest.mark.parametrize(

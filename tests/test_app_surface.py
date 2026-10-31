@@ -7,6 +7,7 @@ market is the default of ``new_app``.
 
 from __future__ import annotations
 
+import base64
 import io
 import json
 import math
@@ -58,7 +59,9 @@ def _metric(at: AppTest, label: str):
 
 
 def _panel(at: AppTest) -> str:
-    return next(m.value for m in at.markdown if m.value.startswith(":small[") and " quoted → " in m.value)
+    """The data panel's line: a chain's ``quoted → used``, a table of quotes' ``rows → used``."""
+    lines = (m.value for m in at.markdown if m.value.startswith(":small["))
+    return next(line for line in lines if re.search(r" (quoted|rows) → ", line))
 
 
 def _expiries(at: AppTest) -> pd.DataFrame:
@@ -67,6 +70,19 @@ def _expiries(at: AppTest) -> pd.DataFrame:
 
 def _charts(at: AppTest) -> list[dict]:
     return [json.loads(c.proto.spec) for c in at.get("plotly_chart")]
+
+
+def _array(values) -> np.ndarray:
+    """A trace's array as sent: a list, or plotly's typed array (base64 bytes and a dtype)."""
+    if isinstance(values, dict):
+        return np.frombuffer(base64.b64decode(values["bdata"]), dtype=np.dtype(values["dtype"]))
+    return np.asarray(values, dtype=float)
+
+
+def _contract(at: AppTest) -> str:
+    """The header's contract line (its spaces are no-break spaces, its hyphens no-break hyphens)."""
+    lines = (m.value.replace("\xa0", " ").replace("\u2011", "-") for m in at.markdown)
+    return next(line for line in lines if line.startswith("SPX ") and "· F " in line)
 
 
 def _smile(at: AppTest) -> dict:
@@ -120,8 +136,8 @@ def test_the_tiles_are_the_desk_measures_of_the_published_surface(index):
     assert _metric(index, "25Δ RR 30D").value == "−4.20 vp" == f"−{abs(rr) * 100:.2f} vp"
     assert _metric(index, "25Δ BF 30D").value == "+0.23 vp" == f"+{bf * 100:.2f} vp"
     assert _metric(index, "TERM 30→365D").value == "+1.62 vp"
-    fit = _metric(index, "FIT / ½‑SPR")
-    assert fit.value == "0.04 / 0.10 vp" and fit.delta == "100% in band"
+    fit = _metric(index, tab_surface.FIT_LABEL)
+    assert fit.value == "0.04 / 0.10" and fit.delta == "100% in band"
     assert _metric(index, "ARB").value == "0 / 0" and "0 / 0: passes" in _metric(index, "ARB").help
     assert len([m for m in index.metric if m.label in ("ATMF 30D", "ARB")]) == 2  # six tiles, the row of the spec
 
@@ -132,9 +148,8 @@ def test_the_expiry_table_has_the_twelve_columns_dates_with_settlement_and_no_ye
     assert len(table) == 16
     context = mk.index_market(AS_OF)
     names = [f"{short_date(d)} {s}" for d, s in context.expiries[["expiry", "settlement"]].itertuples(index=False)]
-    assert [e.removesuffix(" ◂") for e in table["Expiry"]] == names
-    assert table["Expiry"].iloc[3] == "20-Nov-26 AM ◂"  # the focus expiry: the sidebar's, nearest 30 days
-    assert all(re.fullmatch(r"\d\d-[A-Z][a-z]{2}-\d\d (AM|PM)( ◂)?", e) for e in table["Expiry"])
+    assert list(table["Expiry"]) == names
+    assert all(re.fullmatch(r"\d\d-[A-Z][a-z]{2}-\d\d (AM|PM)", e) for e in table["Expiry"])
     # The ATMF column is the surface at each expiry's parity forward, which the sidebar prices with.
     # (sent at the column's two decimals)
     np.testing.assert_allclose(table["ATMF"].to_numpy(), context.expiries["atm_vol"].to_numpy() * 100, atol=0.005)
@@ -241,7 +256,7 @@ def test_the_call_delta_axis_runs_from_90_to_10_delta(new_app):
 def test_the_smile_draws_one_bid_ask_bar_per_used_quote_and_dashes_the_extrapolated_fit(index):
     smile = _smile(index)
     bars = [t for t in smile["data"] if "bid–ask" in (t.get("name") or "")]
-    count = sum(len(t["x"]["bdata"]) // 8 if isinstance(t["x"], dict) else len(t["x"]) for t in bars)
+    count = sum(len(_array(t["x"])) for t in bars)
     table = _expiries(index)
     assert count == table.loc[3, "Used"] == 138
     extrapolated = next(t for t in smile["data"] if t.get("name") == "Fit, extrapolated")
@@ -268,11 +283,9 @@ def test_a_focus_expiry_from_the_table_moves_the_smile_and_the_contract(new_app)
     at.session_state["expiry"] = "2026-12-18"
     at.run()
     _ok(at)
-    assert _expiries(at)["Expiry"].iloc[5] == "18-Dec-26 AM ◂"
     note = next(a["text"] for a in _smile(at)["layout"]["annotations"] if "used" in a["text"])
     assert note.startswith("18-Dec-26 AM · 55d")
-    contract = next(m.value for m in at.markdown if m.value.startswith("SPX ") and "· F " in m.value)
-    assert "18‑Dec‑26 AM" in contract.replace("\xa0", " ")
+    assert _contract(at).startswith("SPX 18-Dec-26 AM ")
 
 
 def test_the_row_click_and_the_step_buttons_set_the_focus_expiry(monkeypatch):
@@ -297,7 +310,8 @@ def test_the_term_view_has_forward_vols_and_the_grid_is_by_delta(new_app):
     at.segmented_control(key="sf_view").set_value("Term").run()
     _ok(at)
     strip = next(d.value for d in at.dataframe if "30→60d" in d.value.columns)
-    assert list(strip.columns) == ["7→14d", "14→30d", "30→60d", "60→91d", "91→182d", "182→365d", "365→730d"]
+    windows = ["7→14d", "14→30d", "30→60d", "60→91d", "91→182d", "182→365d", "365→730d"]
+    assert list(strip.columns) == ["Between", *windows]
     assert math.isnan(strip["365→730d"].iloc[0])  # beyond the last expiry (692 days): no extrapolation in time
     at.segmented_control(key="sf_view").set_value("Grid").run()
     _ok(at)
@@ -341,10 +355,14 @@ def test_the_textbook_surface_is_parametric_ssvi_on_constant_maturities(app):
     assert app.segmented_control(key="surface_source").value == tab_surface.SSVI
     assert app.segmented_control(key="surface_source").options == [tab_surface.SSVI, tab_surface.QUOTES]
     table = _expiries(app)
-    assert list(table["Expiry"].str.removesuffix(" ◂")) == [f"{d}d" for d in dg.CONSTANT_MATURITIES]
+    assert list(table["Expiry"]) == [f"{d}d" for d in dg.CONSTANT_MATURITIES]
+    # Forwards in index points, S·e^((r − q)T) at the sidebar's S 100, r 5% and q 0 (they read 1.00 to 1.11, in K/S,
+    # before the surface carried the spot); sent at the column's two decimals.
+    days = np.array(dg.CONSTANT_MATURITIES, dtype=float)
+    np.testing.assert_allclose(table["F"].to_numpy(), 100 * np.exp(0.05 * days / 365), atol=0.005)
     params = vol_surface.SSVIParams(0.24, 0.20, 1.5, -0.6, 1.0, 0.5)  # the defaults at the sidebar's 20% vol
     assert _metric(app, "ATMF 30D").value == f"{math.sqrt(params.theta(30 / 365) / (30 / 365)) * 100:.2f}%"
-    assert _metric(app, "FIT / ½‑SPR").value == "–"  # no quotes to fit
+    assert _metric(app, tab_surface.FIT_LABEL).value == "–"  # no quotes to fit
 
 
 def test_ssvi_atm_vols_follow_the_sidebar_volatility(app):
@@ -375,8 +393,7 @@ def test_an_uploaded_chain_is_screened_quote_by_quote_and_not_published(new_app)
     np.testing.assert_allclose(table["F"].to_numpy(), chain.expiries["forward"].to_numpy(), rtol=2e-4)
     assert not any(m.value == ":yellow-badge[FIT]" for m in at.markdown)
     # The header's contract is still the synthetic chain's.
-    contract = next(m.value for m in at.markdown if m.value.startswith("SPX ") and "· F " in m.value)
-    assert "5,813.91" in contract.replace("\xa0", " ")
+    assert _contract(at).endswith("F 5,813.91")
 
 
 def test_a_table_of_quotes_still_builds_a_surface(app):
@@ -385,7 +402,7 @@ def test_a_table_of_quotes_still_builds_a_surface(app):
     panel = _panel(app)
     assert "the user's table of quotes" in panel and "104 used" in panel
     assert _metric(app, "ARB").value == "0 / 0"
-    assert list(_expiries(app)["Expiry"].str.removesuffix(" ◂"))[:2] == ["30d", "91d"]
+    assert list(_expiries(app)["Expiry"]) == ["30d", "60d", "91d", "182d", "273d", "365d", "547d", "730d"]
 
 
 def test_parse_messages_stay_visible_when_the_fit_fails(app):

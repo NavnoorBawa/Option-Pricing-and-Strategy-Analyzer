@@ -515,7 +515,10 @@ def test_no_export_lacks_its_source(monkeypatch, new_app, query, tag):
     from options_analyzer.ui import tab_surface
 
     surface = _exports(
-        monkeypatch, new_app(tab="Surface", **query), source(tab_surface.QUOTES), source(tab_surface.SSVI)
+        monkeypatch,
+        new_app(tab="Surface", **query),
+        source(tab_surface.QUOTES),
+        source(tab_surface.SSVI if tag == "TEXTBOOK" else tab_surface.CHAIN),  # SSVI: the textbook market only
     )
     strategy = _exports(monkeypatch, new_app(tab="Strategy", **query))
     files = surface + strategy
@@ -525,7 +528,8 @@ def test_no_export_lacks_its_source(monkeypatch, new_app, query, tag):
         "sample_option_prices",
         "bull_call_spread_pnl",
     }
-    assert any("PARAMETRIC" in n for n in names) and any(n.endswith(".xlsx") for n in names) == bool(
+    assert any("PARAMETRIC" in n for n in names) == (tag == "TEXTBOOK")
+    assert any(n.endswith(".xlsx") for n in names) == bool(
         importlib.util.find_spec("xlsxwriter") or importlib.util.find_spec("openpyxl")
     )
     if tag == "SYNTHETIC":
@@ -556,4 +560,4 @@ def test_an_export_reads_back_into_the_app(new_app):
     data = exports.csv(vol_surface.sample_quotes(100.0, 0.05, 0.0), prov)
     at.file_uploader(key="quotes_file").upload("sample.csv", data, "text/csv").run()
     assert not at.exception and not at.error, [e.value for e in at.error]
-    assert any(m.label == "Grid" for m in at.metric)
+    assert next(m.value for m in at.metric if m.label == "ARB") == "0 / 0"  # a fitted surface

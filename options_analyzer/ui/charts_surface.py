@@ -118,18 +118,27 @@ def smile_fit(data: SmileData, axis: str = "K/F (%)", *, call_delta=None, palett
         )
     if data.excluded is not None and len(data.excluded["strike"]):
         ex = data.excluded
-        fig.add_trace(
-            go.Scatter(
-                x=x_of(ex["strike"]),
-                y=100.0 * np.asarray(ex["iv"], dtype=float),
-                name="Excluded",
-                mode="markers",
-                marker=dict(color=colors["muted"], size=7, symbol="circle-open", line=dict(width=1.5)),
-                customdata=np.column_stack([np.asarray(ex["strike"], dtype=float), np.asarray(ex["status"])]),
-                hovertemplate="K %{customdata[0]:,.0f} · %{y:.2f}% · %{customdata[1]}<extra></extra>",
-            ),
-            **where,
-        )
+        status = np.asarray(ex["status"], dtype=object)
+        # An offer with no bid has no mid: drawn at its ask vol as a downward triangle, an upper bound on the vol, not
+        # a point the fit should pass through (as hollow circles they read as a smile turning up in the wing).
+        for mask, name, symbol, what in (
+            (status != "zero bid", "Excluded", "circle-open", "mid"),
+            (status == "zero bid", "Offer only (ask vol)", "triangle-down-open", "ask"),
+        ):
+            if not mask.any():
+                continue
+            fig.add_trace(
+                go.Scatter(
+                    x=x_of(np.asarray(ex["strike"], dtype=float)[mask]),
+                    y=100.0 * np.asarray(ex["iv"], dtype=float)[mask],
+                    name=name,
+                    mode="markers",
+                    marker=dict(color=colors["muted"], size=7, symbol=symbol, line=dict(width=1.5)),
+                    customdata=np.column_stack([np.asarray(ex["strike"], dtype=float)[mask], status[mask]]),
+                    hovertemplate=f"K %{{customdata[0]:,.0f}} · {what} %{{y:.2f}}% · %{{customdata[1]}}<extra></extra>",
+                ),
+                **where,
+            )
     if has_quotes:
         q = data.quotes
         assert q is not None
@@ -182,7 +191,7 @@ def smile_fit(data: SmileData, axis: str = "K/F (%)", *, call_delta=None, palett
         x=forward_x,
         line=dict(color=colors["accent"], width=charts.REFERENCE_WIDTH),
         annotation_text="F",
-        annotation_position="top right",
+        annotation_position="bottom right",  # the top holds the note
         annotation_font=dict(size=charts.LABEL_SIZE, color=colors["accent"]),
         **where,
     )
@@ -220,7 +229,19 @@ def smile_fit(data: SmileData, axis: str = "K/F (%)", *, call_delta=None, palett
         hovermode="closest", legend=dict(orientation="h", x=1.0, xanchor="right", y=1.0, yanchor="bottom")
     )
     fig.update_xaxes(showspikes=False)
-    fig.update_yaxes(title_text="IV (%)", ticksuffix="", **({"row": 1, "col": 1} if has_quotes else {}))
+    # Headroom above the highest vol for the note and the F label, which otherwise sit on the first quotes' bars.
+    shown = [100.0 * np.asarray(data.fit_vols, dtype=float)]
+    if has_quotes:
+        shown += [100.0 * np.asarray(data.quotes[c], dtype=float) for c in ("iv_bid", "iv_ask")]  # type: ignore[index]
+    if data.excluded is not None:
+        shown.append(100.0 * np.asarray(data.excluded["iv"], dtype=float))
+    values = np.concatenate([v[np.isfinite(v)] for v in shown])
+    y_range = None
+    if values.size:
+        lo, hi = float(values.min()), float(values.max())
+        span = max(hi - lo, 1.0)
+        y_range = [max(lo - 0.05 * span, 0.0), hi + 0.16 * span]
+    fig.update_yaxes(title_text="IV (%)", ticksuffix="", range=y_range, **({"row": 1, "col": 1} if has_quotes else {}))
     x_title = X_AXES[axis]
     if has_quotes:
         fig.update_yaxes(title_text="Resid.", row=2, col=1, zeroline=False)
@@ -239,11 +260,13 @@ def term_chart(
     listed: Sequence[dict],
     palette: dict[str, str] | None = None,
 ):
-    """The term structure: ATMF vol at constant maturities (a line) with the listed expiries as markers, those whose
-    variance window holds a holiday hollow; under it, the 25-delta risk reversal and butterfly by expiry (vp).
+    """The term structure: ATMF vol at constant maturities (a line) with the listed expiries as markers, hollow where
+    holidays or extra weekend days leave the window since the previous expiry short of variance time; under it, the
+    25-delta risk reversal and butterfly by expiry (vp).
 
-    ``constant`` is ``(days, vol)``; each of ``listed`` holds ``days``, ``atmf``, ``rr25``, ``bf25``, ``name`` and
-    ``holiday`` (bool).
+    ``constant`` is ``(days, vol)``; each of ``listed`` holds ``days``, ``atmf``, ``rr25``, ``bf25``, ``name``,
+    ``holiday`` (bool: drawn hollow) and optionally ``share`` (the window's variance time as a share of a plain
+    week's, for the hover).
     """
     colors = palette or desk_theme.palette()
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.62, 0.38], vertical_spacing=0.06)
@@ -265,7 +288,13 @@ def term_chart(
     x = np.array([row["days"] for row in listed], dtype=float)
     holiday = np.array([row["holiday"] for row in listed], dtype=bool)
     names = np.array([row["name"] for row in listed], dtype=object)
-    for mask, label, symbol in ((~holiday, "Listed expiry", "circle"), (holiday, "Holiday in window", "circle-open")):
+    shares = np.array([row.get("share", np.nan) for row in listed], dtype=float)
+    windows = np.array(
+        [f" · window {100 * s:.0f}% of a plain week's variance time" if np.isfinite(s) else "" for s in shares],
+        dtype=object,
+    )
+    marks = ((~holiday, "Listed expiry", "circle"), (holiday, "Short of variance time", "circle-open"))
+    for mask, label, symbol in marks:
         if mask.any():
             fig.add_trace(
                 go.Scatter(
@@ -274,8 +303,8 @@ def term_chart(
                     name=label,
                     mode="markers",
                     marker=dict(color=colors["accent"], size=8, symbol=symbol, line=dict(width=2)),
-                    customdata=names[mask],
-                    hovertemplate="%{customdata} · ATMF %{y:.2f}%<extra></extra>",
+                    customdata=np.column_stack([names[mask], windows[mask]]),
+                    hovertemplate="%{customdata[0]} · ATMF %{y:.2f}%%{customdata[1]}<extra></extra>",
                 ),
                 row=1,
                 col=1,
@@ -346,7 +375,7 @@ def implied_3d(
             yaxis=dict(title=dict(text="Days to expiry", font=text), tickfont=text),
             zaxis=dict(title=dict(text="IV (%)", font=text), tickfont=text),
             aspectmode="cube",
-            camera=dict(eye=dict(x=2.0, y=-2.0, z=1.2), center=dict(x=0.0, y=0.0, z=-0.12)),
+            camera=dict(eye=dict(x=1.45, y=-1.45, z=0.85), center=dict(x=0.0, y=0.0, z=-0.1)),
         ),
     )
     return fig

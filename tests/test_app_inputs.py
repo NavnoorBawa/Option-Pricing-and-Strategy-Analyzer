@@ -330,8 +330,8 @@ def test_the_surface_tab_shows_the_published_surface(new_app):
     _ok(at)
     assert at.segmented_control(key="surface_source").value == "Synthetic chain"
     cards = _cards(at)
-    assert cards["Calendar arbitrage"] == "0" and cards["Butterfly arbitrage"] == "0"
-    assert any(c.value.startswith(mk.SYNTHETIC_NOTE) for c in at.caption)
+    assert cards["ARB"] == "0 / 0"  # calendar / butterfly violations
+    assert any(mk.SYNTHETIC_NOTE.rstrip(".") in m.value for m in at.markdown)  # the data panel
     assert not any("sidebar's (rate" in w.value for w in at.warning)  # no carry-gap warning on the chain
 
 

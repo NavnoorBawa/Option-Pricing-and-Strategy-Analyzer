@@ -1060,7 +1060,7 @@ def test_monte_carlo_intervals_are_never_cut_off(chromium, app_url, width):
 
 #: A chart that each tab draws (the key given to charts.show), and the number of charts it draws, at the default URL.
 TAB_CHART = {"Pricing": ("sensitivity_chart", 3), "Strategy": ("payoff_chart", 1), "Risk": ("var_hist", 6),
-             "Surface": ("surf_iv", 4), "IV": ("iv_curve", 1), "Methodology": (None, 0)}  # fmt: skip
+             "Surface": ("chart_smile", 1), "IV": ("iv_curve", 1), "Methodology": (None, 0)}  # fmt: skip
 
 
 def _query(page) -> dict[str, list[str]]:
@@ -1185,13 +1185,13 @@ def test_the_kept_quotes_file_is_named_at_the_size_of_its_caption(chromium, app_
     from options_analyzer import vol_surface
 
     quotes = tmp_path / "quotes.csv"
-    quotes.write_text(vol_surface.sample_quotes().to_csv(index=False), encoding="utf-8")
+    quotes.write_text(vol_surface.sample_quotes(5800.0).to_csv(index=False), encoding="utf-8")  # at the index level
     page = _open(chromium, f"{app_url}/?tab=Surface", scheme, 1440)
     try:
-        page.get_by_text("Market quotes (CSV)", exact=True).click()
+        page.get_by_text("Upload", exact=True).click()
         _settle(page)
         page.locator("[data-testid=stFileUploader] input[type=file]").set_input_files(quotes)
-        fitted = page.locator("[data-testid=stMetric]").filter(has_text="Calendar arbitrage")  # a card of the fit
+        fitted = page.get_by_text("the user's table of quotes", exact=False)  # the data panel of the fit
         fitted.wait_for(state="visible", timeout=120_000)
         _settle(page)
         _tab(page, "IV")
