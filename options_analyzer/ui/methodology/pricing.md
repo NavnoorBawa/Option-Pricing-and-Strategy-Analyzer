@@ -6,8 +6,10 @@ The sidebar prices the contract with one of two engines: *European (BSM)*, the c
 European-exercise (Cboe); the American engine prices the textbook market. The binomial trees and Monte Carlo are
 checks on those numbers, not engines of the app: they run in the Pricing tab's *Engine diagnostics*, only while it
 is open, beside the reference engine (the closed form for European exercise, the American engine's *high* scheme
-for American), with their convergence and their own Greeks. A link from version 2 that names a tree or Monte Carlo
-opens the closed form with Engine diagnostics open.
+for American), with their convergence and their own Greeks. The convergence charts are log-log: each tree's error
+against its steps beside a guide of its order (Cox–Ross–Rubinstein first, ${1/n}$; Leisen–Reimer second, ${1/n^2}$),
+and the width of Monte Carlo's 95% interval against its paths beside ${1/\sqrt{N}}$, on the same seed. A link from
+version 2 that names a tree or Monte Carlo opens the closed form with Engine diagnostics open.
 
 ### Black–Scholes–Merton
 

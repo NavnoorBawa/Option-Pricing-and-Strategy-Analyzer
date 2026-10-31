@@ -314,7 +314,8 @@ def interval_chart(
         The samples, ascending (``cache.mc_convergence_paths``).
     widths : dict
         ``kind -> widths`` for ``"call"`` and ``"put"``; NaN widths (a sample with no estimate of its error) are left
-        out.
+        out. Equal widths (with the control variate the call and the put differ by a constant on the same draws, so
+        their errors are one) draw one line, ``Call and put``, which a put drawn over the call hid.
     palette : dict, optional
         The mode's colours.
 
@@ -327,19 +328,24 @@ def interval_chart(
     >>> fig = interval_chart([1000, 4000], {"call": [0.4, 0.2], "put": [0.3, 0.15]})
     >>> [(t.name, [float(y) for y in t.y]) for t in fig.data]
     [('Call', [0.4, 0.2]), ('Put', [0.3, 0.15]), ('1/√N', [1.0, 0.5])]
+    >>> [t.name for t in interval_chart([1000, 4000], {"call": [0.4, 0.2], "put": [0.4, 0.2]}).data]
+    ['Call and put', '1/√N']
     """
     colors = palette or desk_theme.palette()
     n = np.asarray(paths, dtype=float)
     fig = go.Figure()
     firsts = []
-    for kind, values in widths.items():
+    call, put = (np.asarray(widths[kind], dtype=float) for kind in ("call", "put"))
+    same = call.shape == put.shape and np.allclose(call, put, rtol=1e-9, atol=0.0, equal_nan=True)
+    shown = {"Call and put": ("call", call)} if same else {k.capitalize(): (k, v) for k, v in widths.items()}
+    for name, (kind, values) in shown.items():
         w = np.asarray(values, dtype=float)
         keep = np.isfinite(w) & (w > 0)
         if keep[:1].all():  # the guide starts at the first sample's widest interval
             firsts.append(float(w[0]))
         fig.add_trace(
             go.Scatter(
-                x=n[keep], y=w[keep], name=kind.capitalize(), mode="lines+markers",
+                x=n[keep], y=w[keep], name=name, mode="lines+markers",
                 line=dict(color=colors[kind], width=charts.LINE_WIDTH), marker=dict(size=5),
             )
         )  # fmt: skip
@@ -359,7 +365,19 @@ def interval_chart(
         fig, None, "Paths", "95% interval width ($)", height=charts.HEIGHT_SECONDARY, palette=colors
     )
     fig.update_xaxes(type="log", tickmode="array", tickvals=list(n), ticktext=[number(v, 0) for v in n])
-    fig.update_yaxes(type="log", exponentformat="power")
+    # Ticks at 1, 2 and 5 times a power of ten: within a decade Plotly's own log ticks label every digit, 2 to 9,
+    # stacked a few pixels apart.
+    drawn = [y for t in fig.data for y in np.asarray(t.y, dtype=float) if np.isfinite(y) and y > 0]
+    if drawn:
+        low, high = min(drawn), max(drawn)
+        ticks = [
+            m * 10.0**k
+            for k in range(math.floor(math.log10(low)) - 1, math.ceil(math.log10(high)) + 1)
+            for m in (1, 2, 5)
+            if low / 1.5 <= m * 10.0**k <= high * 1.5
+        ]
+        fig.update_yaxes(tickmode="array", tickvals=ticks, ticktext=[f"{t:g}" for t in ticks])
+    fig.update_yaxes(type="log")
     return fig
 
 

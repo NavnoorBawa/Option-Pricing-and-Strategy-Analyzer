@@ -565,6 +565,10 @@ def test_the_engine_comparison_against_the_closed_form(new_app):
     assert abs(_sci(table.loc["LR 2,001 · European", "Call − ref"])) < 1e-7
     assert all(re.fullmatch(r"0|[+−]\d\.\de−?\d+", text) for text in table["Call − ref"]), list(table["Call − ref"])
     assert "call 10.4237 – 10.4582" in table.loc["MC 100,000 · European", "MC 95% interval"]
+    # European trees keep put-call parity, so the call's and the put's errors are one: one line a lattice, each with
+    # the guide of its order.
+    names = [t["name"] for t in _chart(at, "pricing_convergence")["data"]]
+    assert names == ["CRR call and put", "LR call and put", "CRR: slope −1 (1/n)", "LR: slope −2 (1/n²)"]
 
 
 def test_a_simulated_price_with_too_few_paths_in_the_money_is_flagged(new_app):
@@ -857,13 +861,12 @@ def test_the_monte_carlo_interval_narrows_as_one_over_root_n(new_app):
     spec = _chart(at, "pricing_mc_convergence")
     traces = {t["name"]: t for t in spec["data"]}
     paths = [1562, 6250, 25000, 100000]
-    assert list(_values(traces["Call"]["x"])) == paths
-    for kind in ("call", "put"):
-        expected = [
-            2 * 1.96 * monte_carlo.price_european(100, 100, 1.0, 0.05, 0.2, 0.0, n_paths=n, seed=42)[kind].std_error
-            for n in paths
-        ]
-        np.testing.assert_allclose(_values(traces[kind.capitalize()]["y"]), expected, rtol=1e-12)
+    runs = [monte_carlo.price_european(100, 100, 1.0, 0.05, 0.2, 0.0, n_paths=n, seed=42) for n in paths]
+    expected = {kind: [2 * 1.96 * run[kind].std_error for run in runs] for kind in ("call", "put")}
+    # With the control variate the call and the put differ by a constant on the same draws: one error, one line.
+    assert expected["call"] == expected["put"] and "Call" not in traces
+    assert list(_values(traces["Call and put"]["x"])) == paths
+    np.testing.assert_allclose(_values(traces["Call and put"]["y"]), expected["call"], rtol=1e-12)
     guide = _values(traces["1/√N"]["y"])
     assert guide[1] / guide[0] == pytest.approx(math.sqrt(paths[0] / paths[-1]))
     assert spec["layout"]["xaxis"]["type"] == "log" and spec["layout"]["yaxis"]["type"] == "log"

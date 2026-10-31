@@ -930,8 +930,10 @@ def chain_strikes(listed: np.ndarray, lo: float, hi: float, stride: int | str, c
     ``stride`` ``"Auto"`` is the smallest of 5, 10, 25, 50 and 100 points that gives at most :data:`CHAIN_ROWS` rows
     (before the Pricing strike is added); 100 when none does.
 
+    The default window, 5,425 to 6,075: 50 points (13 strikes) and 5,815.
+
     >>> chain_strikes(np.arange(5400.0, 6101.0, 5.0), 5425.0, 6075.0, "Auto", 5815.0).size
-    28
+    14
     """
     inside = listed[(listed >= lo - 1e-9) & (listed <= hi + 1e-9)]
     steps = [s for s in STRIDES if s != "Auto"]
@@ -1440,15 +1442,24 @@ def engine_rows(inputs: Inputs, tree: ModelConfig, mc: ModelConfig) -> tuple[pd.
 
 
 def _convergence(inputs: Inputs, tree: ModelConfig, ref_name: str, reference: dict[str, float]) -> None:
-    """|tree − reference| against the steps, log-log, for both lattices and both options."""
+    """|tree − reference| against the steps, log-log, for both lattices and both options. A lattice whose call and
+    put errors are one (European exercise: the tree keeps put-call parity, so they differ by a constant) draws one
+    line, ``LR call and put``: the put's line hid the call's."""
     S, K, T, r, sigma, q = _args(inputs)
     series, _ = cache.tree_convergence(S, K, T, r, sigma, q, tree.steps, tree.american)
     lines = {}
-    for kind in cache.KINDS:
-        for name, (steps, values) in series[kind].items():
-            short = "LR" if name.startswith("Leisen") else "CRR"
-            dash = "solid" if short == "LR" else "dot"
-            lines[f"{short} {kind}"] = (steps, np.asarray(values, dtype=float) - reference[kind], kind, dash)
+    for name in series["call"]:
+        short = "LR" if name.startswith("Leisen") else "CRR"
+        dash = "solid" if short == "LR" else "dot"
+        errors = {}
+        for kind in cache.KINDS:
+            steps, values = series[kind][name]
+            errors[kind] = np.asarray(values, dtype=float) - reference[kind]
+        # Equal to a part in 1e6 of the error, or to 1e-9 (a tenth of the engine table's last digit).
+        if np.allclose(errors["call"], errors["put"], rtol=1e-6, atol=1e-9, equal_nan=True):
+            lines[f"{short} call and put"] = (steps, errors["call"], "call", dash)
+        else:
+            lines |= {f"{short} {kind}": (steps, errors[kind], kind, dash) for kind in cache.KINDS}
     charts.show(
         charts_pricing.error_chart(lines, reference=ref_name, guides=(("CRR", 1), ("LR", 2))),
         key="pricing_convergence",

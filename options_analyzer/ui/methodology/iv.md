@@ -5,7 +5,9 @@ vols of the bid, the mid and the ask beside the published surface's vol at the s
 in vol points). Under the synthetic index the bid and ask start at the chain's quote and their tick is Cboe's for
 SPX: \$0.05 below \$3 and \$0.10 from \$3. Under the index the sidebar's rate and dividend yield are the
 expiry's parity carry, so the inversion is Black-76 on the parity forward and discount factor, as the surface's own.
-Chain-scale inversion lives on the Surface tab.
+A quote with a zero bid is an offer only, as the chain, the contract table and the surface read it: its bid starts
+empty and only the ask is inverted, so there is no mid and no *mid vs fit*. Chain-scale inversion lives on the
+Surface tab.
 
 Quotes outside the no-arbitrage bounds ${\max(S e^{-qT} - K e^{-rT}, 0) \le C < S e^{-qT}}$ (and the put analogue)
 are rejected, because no volatility can produce them. Otherwise the quote is converted to its out-of-the-money
