@@ -472,8 +472,8 @@ def col(
     help : str
         The header's tooltip: what the column is, its sign convention and its basis. Every column has one.
     digits : int, optional
-        The column's precision where the kind leaves it to the data (strikes, money, bp); :func:`table` passes the
-        one it chose. Ignored by kinds with a fixed precision.
+        The column's precision: where the kind leaves it to the data (strikes, money, bp), :func:`table` passes the
+        one it chose; for a kind with a fixed precision, the one a caller of :func:`table` asked for instead.
     pinned : bool, optional
         Keep the column in view while the table scrolls sideways (:func:`table` pins the first column).
     width : optional
@@ -510,7 +510,7 @@ def col(
     if kind == "date":
         return st.column_config.DateColumn(header, format="DD-MMM-YY", **common)
     assert spec.format is not None
-    places = spec.digits if spec.digits is not None else (_AUTO_DEFAULT[spec.auto] if digits is None else digits)
+    places = digits if digits is not None else (spec.digits if spec.digits is not None else _AUTO_DEFAULT[spec.auto])
     return st.column_config.NumberColumn(header, format=spec.format.format(d=places), **common)
 
 

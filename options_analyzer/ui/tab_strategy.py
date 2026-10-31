@@ -199,8 +199,8 @@ def read_link(params: dict[str, list[str]]) -> list[str]:
         params.update({key: [value] for key, value in selection.items()})
     elif link_selection(asked, False) is not None:
         notes.append(
-            f"This link asks for {_name(link_selection(asked, False)['strategy'])}, which holds stock: the "
-            f"{mk.INDEX} cannot be traded itself, so the {default_template(True)} is shown."
+            f"This link asks for {_name(link_selection(asked, False)['strategy'])}, which holds stock: "
+            f"{mk.INDEX_ROOT} itself cannot be traded, so the {default_template(True)} is shown."
         )
     elif asked.strip():
         notes.append(
@@ -342,8 +342,8 @@ def _choice(inputs: Inputs) -> _Choice:
     if index:
         _, expiry = _template_expiry(published)
         by = _control("strategy_strikes_by", BY_DELTA, str, (BY_DELTA, BY_WIDTH).__contains__)
-        delta = _control("strategy_short_delta", lg.DEFAULT_SHORT_DELTA, _delta_value, lg.SHORT_DELTAS.__contains__)
-        wing = _control("strategy_wing_pts", lg.DEFAULT_WING, _whole, lg.WING_POINTS.__contains__)
+        delta = _control("strategy_short_delta", lg.DEFAULT_SHORT_DELTA, int, lg.SHORT_DELTAS.__contains__)
+        wing = _control("strategy_wing_pts", lg.DEFAULT_WING, int, lg.WING_POINTS.__contains__)
         width_pct = _control("strategy_width_pct", None, float, _within((MIN_WIDTH_PCT, MAX_WIDTH_PCT)))
         if name == CUSTOM:
             atm = lg.snap(published.strikes(expiry), published.forward(expiry))
@@ -381,10 +381,6 @@ def _choice(inputs: Inputs) -> _Choice:
     store = f"{inputs.preset}::{label}"
     return _Choice(name, label, base, store, expiry, int(contracts), float(multiplier), float(commission),
                    risk_neutral, drift, carry)  # fmt: skip
-
-
-def _delta_value(text: str) -> int:
-    return int(float(str(text).rstrip("Δ")))
 
 
 def _width(inputs: Inputs, width_pct: float | None) -> float:
@@ -462,11 +458,12 @@ def controls(inputs: Inputs) -> None:
         if by == BY_WIDTH:
             _width_input(bar, uses_width, "the listed strike nearest the forward")
         else:
+            # Plain numbers, no format_func: a bound menu writes its options as shown to the link and reads them
+            # back so, and the link should hold ?strategy_short_delta=16, as a hand-typed one would.
             bar.selectbox(
-                "Shorts",
+                "Shorts (Δ)",
                 lg.SHORT_DELTAS,
                 index=lg.SHORT_DELTAS.index(lg.DEFAULT_SHORT_DELTA),
-                format_func=lambda d: f"{d}Δ",
                 key="strategy_short_delta",
                 bind="query-params",
                 width=90,
@@ -475,10 +472,9 @@ def controls(inputs: Inputs) -> None:
                 "listed strike nearest it.",
             )
             bar.selectbox(
-                "Wings",
+                "Wings (pts)",
                 lg.WING_POINTS,
                 index=lg.WING_POINTS.index(lg.DEFAULT_WING),
-                format_func=lambda p: f"{p} pts",
                 key="strategy_wing_pts",
                 bind="query-params",
                 width=100,
@@ -1442,9 +1438,9 @@ def _steppers(ctx: _Context, grid: lg.Grid, row) -> None:
         ("step_width_in", "Width −", lambda f: lg.widen(f, -1, grid, forward),
          "The wings one interval in, never onto the body.", False),
         ("step_width_out", "Width +", lambda f: lg.widen(f, 1, grid, forward), "The wings one interval out.", False),
-        ("step_roll_back", "Roll ◂", lambda f: lg.roll(f, -1, grid),
+        ("step_roll_back", "Roll ←", lambda f: lg.roll(f, -1, grid),
          "Every leg to the previous listed expiry." + roll_help, not ctx.index),
-        ("step_roll_next", "Roll ▸", lambda f: lg.roll(f, 1, grid), "Every leg to the next listed expiry." + roll_help,
+        ("step_roll_next", "Roll →", lambda f: lg.roll(f, 1, grid), "Every leg to the next listed expiry." + roll_help,
          not ctx.index),
         ("step_flip", "Flip", lg.flip, "Every quantity negated: long becomes short.", False),
     ):  # fmt: skip
@@ -1460,7 +1456,7 @@ def _steppers(ctx: _Context, grid: lg.Grid, row) -> None:
 
 def _row_actions(ctx: _Context, grid: lg.Grid) -> None:
     """The action bar over the selected row (spec 2.8): a leg menu, the widget route of a click on a blotter row, and
-    Flip, Duplicate, Roll ▸ and Remove."""
+    Flip, Duplicate, Roll → and Remove."""
     legs = ctx.book.legs
     if not legs:
         return
@@ -1480,7 +1476,7 @@ def _row_actions(ctx: _Context, grid: lg.Grid) -> None:
     for key, label, change, help_text, disabled in (
         ("row_flip", "Flip leg", lambda f: lg.flip(f, [i]), "This leg's quantity negated.", False),
         ("row_duplicate", "Duplicate", lambda f: lg.duplicate(f, i), "A copy of this leg after it.", False),
-        ("row_roll", "Roll leg ▸", lambda f: lg.roll(f, 1, grid, [i]), "This leg to the next listed expiry.",
+        ("row_roll", "Roll leg →", lambda f: lg.roll(f, 1, grid, [i]), "This leg to the next listed expiry.",
          not ctx.index),
         ("row_remove", "Remove", lambda f: lg.remove(f, i), "This leg out of the position.", len(legs) < 2),
     ):  # fmt: skip
@@ -1585,7 +1581,7 @@ def _blotter(ctx, inputs, choice, state, frame, editor_key, book, profile) -> No
             _download(ctx, profile, head)
     for message in book.errors:
         st.error(message)
-    if choice.name != CUSTOM and not _same(state["base"], choice.base) and not _same(frame, choice.base):
+    if choice.name != CUSTOM and not _same(frame, choice.base):
         st.caption(
             "Edited legs: kept as they are while the builder or the market changes. Reset legs to template (Edit) "
             "rebuilds them."
