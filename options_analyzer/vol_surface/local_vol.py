@@ -108,15 +108,20 @@ def _stencils(i: int, n: int) -> list[tuple[int, ...]]:
     return [(-1, 0)] if i == n - 1 else [(-1, 0, 1), (-1, 0), (0, 1)]
 
 
-def _extended(offsets: tuple[int, ...], i: int, n: int) -> list[tuple[int, ...]]:
-    """The stencils one order higher than ``offsets`` at row ``i`` of ``n``: one maturity more on the far side of a
-    one-sided stencil, on either side of a centred one; those that exist."""
-    candidates = []
+def _extended(offsets: tuple[int, ...], i: int, n: int) -> list[tuple[tuple[int, ...], tuple[int, ...] | None]]:
+    """The stencils one order higher than ``offsets`` at row ``i`` of ``n``, as ``(offsets, theta_offsets)`` for
+    :func:`_scaled_slope`: one maturity more on the far side of a one-sided stencil, on either side of a centred
+    one. The slice before and the row, ``(-1, 0)``, take ``theta'`` from three slices where they can
+    (:func:`_end_theta_slope`), so one slice more is also the last three with ``theta'`` from four. Those that
+    exist."""
+    candidates: list[tuple[tuple[int, ...], tuple[int, ...] | None]] = []
     if offsets[-1] > 0:
-        candidates.append((*offsets, offsets[-1] + 1))
+        candidates.append(((*offsets, offsets[-1] + 1), None))
     if offsets[0] < 0:
-        candidates.append((offsets[0] - 1, *offsets))
-    return [extended for extended in candidates if i + extended[0] >= 0 and i + extended[-1] < n]
+        candidates.append(((offsets[0] - 1, *offsets), None))
+    if offsets == (-1, 0):
+        candidates.append(((-2, -1, 0), (-3, -2, -1, 0)))
+    return [(s, t) for s, t in candidates if i + (t or s)[0] >= 0 and i + s[-1] < n]
 
 
 @dataclass(frozen=True, eq=False)  # holds arrays: compared by identity
@@ -138,7 +143,37 @@ class _Neighbours:
     atm_covered: np.ndarray
 
 
-def _scaled_slope(nb: _Neighbours, i: int, offsets: tuple[int, ...], limit: np.ndarray | None = None) -> np.ndarray:
+def _end_theta_slope(nb: _Neighbours, i: int, log_secant: float, secant: float) -> float:
+    """``theta'`` at maturity ``i`` from it and the one before (the last maturity, or a row whose next slice cannot
+    be used), given the slopes the two slices give: ``log_secant`` with ``theta`` a power of ``T`` between them,
+    ``secant`` with it linear in ``T`` (the mean forward variance over the gap).
+
+    Where the forward variance ``theta'`` settles monotonically towards its long-run level, as it does at the long end,
+    the two bracket it: rising, the secant (a mean over the gap) is below it and the power law, whose elasticity
+    ``T theta' / theta`` falls back towards 1, above it; falling, the other way round. Within that bracket the
+    parabola through ``ln theta`` against ``ln T`` at ``i - 2``, ``i - 1`` and ``i`` picks the slope, second order
+    where the term structure is smooth on the spacing of the expiries; outside it, that parabola is not trusted (an
+    ATM vol falling from 80% to 20% within months, sampled a year apart, puts it 29% below the true ``theta'``) and
+    the nearer end is used. Without a usable slice ``i - 2`` (quoted near the forward, ``theta`` rising from it to
+    ``i - 1`` by more than the quotes' precision) it is ``log_secant``.
+    """
+    if i < 2 or not (nb.atm_covered[i - 2] and nb.theta[i - 2] > 0):
+        return log_secant
+    if not nb.theta[i - 1] - nb.theta[i - 2] > nb.theta_tol[i - 2] + nb.theta_tol[i - 1]:
+        return log_secant
+    nodes = [i - 2, i - 1, i]
+    log_slope = float(np.dot(_slope_weights(np.log(nb.Ts[nodes]), 2), np.log(nb.theta[nodes])))
+    parabola = log_slope * nb.theta[i] / nb.Ts[i]
+    return min(max(parabola, min(log_secant, secant)), max(log_secant, secant))
+
+
+def _scaled_slope(
+    nb: _Neighbours,
+    i: int,
+    offsets: tuple[int, ...],
+    limit: np.ndarray | None = None,
+    theta_offsets: tuple[int, ...] | None = None,
+) -> np.ndarray:
     """``dw/dT`` at row ``i``'s ``y`` from the slices at ``offsets`` (:func:`_time_derivative`): NaN where they
     cannot give it.
 
@@ -146,26 +181,32 @@ def _scaled_slope(nb: _Neighbours, i: int, offsets: tuple[int, ...], limit: np.n
     in ``y / sqrt(theta)`` would be ``r_k w_i(y / sqrt(r_k))`` at maturity ``k``, whose slope at ``T_i`` is
     ``theta'_i / theta_i (w_i - y w_i' / 2)``. The rest, ``w_k(y) - r_k w_i(y / sqrt(r_k))`` (0 at ``T_i``), is
     differentiated with the polynomial through it in ``T``, and ``theta'_i`` with the polynomial through
-    ``ln theta`` in ``ln T`` (``theta`` is close to proportional to ``T``). With a ``limit`` (the reported value)
-    ``theta'_i`` keeps a monotone interpolant's limits, at most :data:`MONOTONE_LIMIT` times the smaller adjacent
-    secant of ``theta`` and, where it is not positive (an end formula can be), that secant; and the result is NaN
-    where it is not positive or above ``limit``. Either way it is NaN unless every slice of the stencil is quoted
-    near ``y`` and near the forward (``y = 0``: the smile scales about it, and quotes far from it make ``theta`` an
-    extrapolation), and both ``w`` at ``y`` and ``theta`` rise from each of its maturities to the next by more than
-    the quotes' precision.
+    ``ln theta`` in ``ln T`` (``theta`` is close to proportional to ``T``) at ``theta_offsets`` (``offsets`` if
+    None). With a ``limit`` (the reported value) ``theta'_i`` keeps a monotone interpolant's limits, at most
+    :data:`MONOTONE_LIMIT` times the smaller adjacent secant of ``theta`` and, where it is not positive (an end
+    formula can be), that secant; from the slice before and the row it comes from three slices where it can
+    (:func:`_end_theta_slope`); and the result is NaN where it is not positive or above ``limit``. Either way it is
+    NaN unless every slice of both stencils is quoted near ``y`` and near the forward (``y = 0``: the smile scales
+    about it, and quotes far from it make ``theta`` an extrapolation), and both ``w`` at ``y`` and ``theta`` rise
+    from each of its maturities to the next by more than the quotes' precision.
     """
     nodes = [i + k for k in offsets]
+    theta_nodes = nodes if theta_offsets is None else [i + k for k in theta_offsets]
+    every = sorted({*nodes, *theta_nodes})
     at = offsets.index(0)
     theta, Ts = nb.theta[nodes], nb.Ts[nodes]
     nan = np.full(nb.y.shape[1], np.nan)
-    rising = np.diff(theta) > nb.theta_tol[nodes][1:] + nb.theta_tol[nodes][:-1]
-    if not (nb.atm_covered[nodes].all() and (theta > 0).all() and rising.all()):
+    rising = np.diff(nb.theta[every]) > nb.theta_tol[every][1:] + nb.theta_tol[every][:-1]
+    if not (nb.atm_covered[every].all() and (nb.theta[every] > 0).all() and rising.all()):
         return nan
-    log_slope = float(np.dot(_slope_weights(np.log(Ts), at), np.log(theta)))  # d ln(theta) / d ln(T)
+    weights = _slope_weights(np.log(nb.Ts[theta_nodes]), theta_nodes.index(i))
+    log_slope = float(np.dot(weights, np.log(nb.theta[theta_nodes])))  # d ln(theta) / d ln(T)
     theta_t = log_slope * nb.theta[i] / nb.Ts[i]
     if limit is not None:
         secants = np.diff(theta) / np.diff(Ts)
         adjacent = secants[max(at - 1, 0) : at + 1]
+        if offsets == (-1, 0):
+            theta_t = _end_theta_slope(nb, i, theta_t, float(adjacent[0]))
         if theta_t <= 0:  # only at an end: inside, the slope is a weighted mean of the two secants
             theta_t = float(adjacent[0])
         theta_t = min(theta_t, MONOTONE_LIMIT * float(adjacent.min()))
@@ -267,12 +308,19 @@ def _time_derivative(nb: _Neighbours, *, checks: bool = False):
             scaled = _scaled_slope(nb, i, offsets, limit)
             use = open_ & np.isfinite(scaled)
             w_t[i] = np.where(use, scaled, w_t[i])
-            for check, extended in zip(higher, _extended(offsets, i, n) if use.any() else [], strict=False):
-                check[i] = np.where(use, _scaled_slope(nb, i, extended), check[i])
+            if use.any():
+                _higher_order(higher, nb, i, offsets, use)
             open_ &= ~use
-        for check, extended in zip(higher, _extended(stencils[0], i, n) if open_.any() else [], strict=False):
-            check[i] = np.where(open_, _scaled_slope(nb, i, extended), check[i])  # where the secants decided
+        if open_.any():
+            _higher_order(higher, nb, i, stencils[0], open_)  # where the secants decided
     return w_t, negative, available, higher
+
+
+def _higher_order(higher: list, nb: _Neighbours, i: int, offsets: tuple[int, ...], where: np.ndarray) -> None:
+    """Write ``dw/dT`` from the stencils one order higher than ``offsets`` (:func:`_extended`) into the arrays
+    ``higher`` (none if empty) at row ``i``'s points ``where``, in turn (:func:`_time_derivative`)."""
+    for check, (extended, theta_offsets) in zip(higher, _extended(offsets, i, len(nb.Ts)), strict=False):
+        check[i] = np.where(where, _scaled_slope(nb, i, extended, theta_offsets=theta_offsets), check[i])
 
 
 @dataclass(frozen=True)

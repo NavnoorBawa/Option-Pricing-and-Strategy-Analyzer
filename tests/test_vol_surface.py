@@ -391,7 +391,7 @@ def test_the_truncation_error_needs_a_larger_stencil_and_ssvi_has_none():
     assert vs.ssvi_surface(params, 0.0, 0.0, M, T).local_vol_error is None  # analytic dw/dT
 
 
-def _secants_only(nb, i, offsets, limit=None):
+def _secants_only(nb, i, offsets, limit=None, theta_offsets=None):
     """local_vol._scaled_slope that never applies: only the secant scheme is left."""
     return np.full(nb.y.shape[1], np.nan)
 
