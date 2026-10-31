@@ -19,7 +19,7 @@ from plotly.subplots import make_subplots
 
 from . import charts
 from . import theme as desk_theme
-from .format import level, signed
+from .format import signed
 
 #: Heights (px): the P&L row (a primary chart) and the Greek strip under it, in one figure (spec 2.7 item 1).
 PNL_HEIGHT, STRIP_HEIGHT = 360, 140
@@ -30,6 +30,44 @@ MAX_STRIKE_LABELS, MERGE_SHARE = 6, 0.03
 RN_OPACITY = (0.06, 0.03)
 #: Label size of reference lines and curve ends (px).
 SMALL = 10
+#: Room above the highest curve, as a share of the curves' span: two 14 px lines of labels in about 270 px of plot.
+HEADROOM = 0.16
+#: Least distance between two curves' right-end labels, as a share of the P&L axis' span: 18 px of the 360 px row,
+#: whose plot area (less the legend and the axis) is about 270 px, so about 13 px of plot.
+LABEL_GAP = 18 / PNL_HEIGHT
+
+
+def _spread(ys: Sequence[float], gap: float, floor: float = -np.inf) -> list[float]:
+    """Label heights near ``ys`` with at least ``gap`` between neighbours, none below ``floor``.
+
+    Labels closer than ``gap`` form a cluster laid out ``gap`` apart around the mean of their heights; clusters that
+    then overlap merge, until none do. A last pass from the bottom up keeps every label at or above ``floor`` and
+    ``gap`` above the one below it, so converging curves at the plot's bottom keep their labels inside it.
+
+    >>> _spread([0.0, 0.1, 5.0], 1.0)
+    [-0.45, 0.55, 5.0]
+    >>> _spread([0.0, 0.1, 0.2], 1.0, floor=0.0)
+    [0.0, 1.0, 2.0]
+    """
+    order = sorted(range(len(ys)), key=lambda i: ys[i])
+    clusters: list[list[int]] = []
+
+    def bottom(cluster: list[int]) -> float:
+        return float(np.mean([ys[k] for k in cluster])) - gap * (len(cluster) - 1) / 2
+
+    for i in order:
+        clusters.append([i])
+        while len(clusters) > 1 and bottom(clusters[-1]) - (bottom(clusters[-2]) + gap * (len(clusters[-2]) - 1)) < gap:
+            last = clusters.pop()
+            clusters[-1] += last
+    placed = [0.0] * len(ys)
+    previous = -np.inf
+    for cluster in clusters:
+        first = bottom(cluster)
+        for n, k in enumerate(cluster):
+            placed[k] = max(first + n * gap, floor, previous + gap)
+            previous = placed[k]
+    return [round(v, 12) for v in placed]
 
 
 @dataclass(frozen=True)
@@ -164,6 +202,7 @@ def payoff_figure(
             col=1,
         )
     inside = (spots >= lo) & (spots <= hi)
+    ends = []
     for curve in curves:
         color, dash = styles.get(curve.role) or (colors["muted"], next(dated, "dot"))
         fig.add_trace(
@@ -171,6 +210,8 @@ def payoff_figure(
                 x=spots,
                 y=curve.values,
                 name=curve.name,
+                # The curves are named at their right ends; the legend keeps T+0, whose name carries the shifts.
+                showlegend=curve.role == "t0",
                 line=dict(color=color, width=charts.LINE_WIDTH, dash=dash),
                 hovertemplate="%{y:+$,.0f}",
             ),
@@ -179,9 +220,16 @@ def payoff_figure(
         )
         if inside.any():  # the right-end label, at the last point in view
             j = int(np.flatnonzero(inside)[-1])
+            ends.append((float(curve.values[j]), curve.end, color, float(spots[j])))
+    if ends:
+        shown = np.concatenate([np.asarray(c.values, dtype=float)[inside] for c in curves] + [np.zeros(1)])
+        span = float(np.nanmax(shown) - np.nanmin(shown)) or 1.0
+        floor = float(np.nanmin(shown)) - 0.04 * span  # the axis' lower end (see the range below), less a margin
+        heights = _spread([e[0] for e in ends], span * LABEL_GAP, floor)
+        for (_y, text, color, x), placed in zip(ends, heights, strict=True):
             fig.add_annotation(
-                x=spots[j], y=float(curve.values[j]), text=curve.end, xanchor="right", yanchor="bottom",
-                showarrow=False, font=dict(size=SMALL, color=color), row=1, col=1,
+                x=x, y=placed, text=text, xanchor="right", yanchor="middle", showarrow=False,
+                font=dict(size=SMALL, color=color), bgcolor=colors["surface"], row=1, col=1,
             )  # fmt: skip
     fig.add_hline(y=0.0, line=dict(color=colors["rule"], width=charts.REFERENCE_WIDTH), row=1, col=1)
     # Reference lines across both rows (the strip shares the x-axis): spot, forward, strikes.
@@ -190,18 +238,18 @@ def payoff_figure(
             fig.add_vline(x=k, line=dict(color=colors["muted"], width=charts.REFERENCE_WIDTH, dash="dot"))
     for x, label in _strike_labels(strikes, (lo, hi), strike_text):
         fig.add_annotation(
-            x=x, y=1.0, xref="x", yref="paper", text=label, showarrow=False, yanchor="bottom",
-            font=dict(size=SMALL, color=colors["muted"]),
+            x=x, y=1.0, xref="x", yref="y domain", text=label, showarrow=False, yanchor="top",
+            font=dict(size=SMALL, color=colors["muted"]), bgcolor=colors["surface"], row=1, col=1,
         )  # fmt: skip
     fig.add_vline(x=spot, line=dict(color=colors["muted"], width=charts.REFERENCE_WIDTH, dash="dash"))
     fig.add_annotation(
-        x=spot, y=1.0, xref="x", yref="paper", text=f"S {level(spot).split('.')[0]}", showarrow=False,
-        yanchor="bottom", yshift=12, font=dict(size=SMALL, color=colors["muted"]),
+        x=spot, y=1.0, xref="x", yref="y domain", text=f"S {strike_text(spot)} ", showarrow=False, xanchor="right",
+        yanchor="top", yshift=-14, row=1, col=1, font=dict(size=SMALL, color=colors["muted"]),
     )  # fmt: skip
     if forward is not None:
         fig.add_vline(x=forward, line=dict(color=colors["accent"], width=charts.REFERENCE_WIDTH))
         fig.add_annotation(
-            x=forward, y=1.0, xref="x", yref="paper", text="F", showarrow=False, yanchor="bottom", yshift=12,
+            x=forward, y=1.0, xref="x", yref="y domain", text=" F", showarrow=False, yanchor="top", yshift=-14,
             xanchor="left", font=dict(size=SMALL, color=colors["accent"]),
         )  # fmt: skip
     if breakevens:
@@ -211,8 +259,10 @@ def payoff_figure(
                 y=[0.0] * len(breakevens),
                 mode="markers+text",
                 name="Breakeven",
+                showlegend=False,
                 text=[label for _, label in breakevens],
-                textposition="bottom center",
+                # Outward and above the zero line, where the curves of a short-premium structure are not.
+                textposition=["top left" if x < spot else "top right" for x, _ in breakevens],
                 textfont=dict(size=SMALL, color=colors["accent"]),
                 marker=dict(size=9, color=colors["accent"], symbol="diamond"),
                 hovertemplate="%{text}<extra></extra>",
@@ -245,7 +295,7 @@ def payoff_figure(
     if note:
         fig.add_annotation(
             x=0.0, y=1.0, xref="x domain", yref="y domain", text=note, showarrow=False, xanchor="left",
-            yanchor="top", align="left", font=dict(size=11, color=colors["muted"]), row=1, col=1,
+            yanchor="top", yshift=-14, align="left", font=dict(size=11, color=colors["muted"]), row=1, col=1,
         )  # fmt: skip
     if strip is not None:
         values, title = strip
@@ -265,7 +315,13 @@ def payoff_figure(
         fig.update_yaxes(title_text=title, row=2, col=1, nticks=3)
     height = PNL_HEIGHT + (STRIP_HEIGHT if strip is not None else 0)
     charts.style(fig, colors, height)
-    fig.update_yaxes(title_text="P&L ($)", row=1, col=1, tickformat="$,.0f")
+    # Headroom above the curves for the two lines of labels at the plot's top (strikes; then the note, S and F).
+    shown = np.concatenate([np.asarray(c.values, dtype=float)[inside] for c in curves] + [np.zeros(1)])
+    low, high = float(np.nanmin(shown)), float(np.nanmax(shown))
+    pad = (high - low) or max(abs(high), 1.0)
+    fig.update_yaxes(
+        title_text="P&L ($)", row=1, col=1, tickformat="$,.0f", range=[low - 0.06 * pad, high + HEADROOM * pad]
+    )
     fig.update_xaxes(range=[lo, hi], showspikes=True, spikemode="across", spikesnap="cursor", spikedash="dot")
     fig.update_xaxes(title_text="Spot", row=rows, col=1, tickformat=",.0f")
     fig.update_layout(margin=dict(t=40), legend=dict(font=dict(size=11)))

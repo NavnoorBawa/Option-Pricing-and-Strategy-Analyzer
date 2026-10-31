@@ -124,6 +124,7 @@ def _cards_style(
     group_keys: Sequence[str],
     *,
     size_with: Sequence[tuple[str, ...]] = (),
+    one_line_px: float | None = None,
 ) -> str:
     """Stylesheet that sizes a card row and wraps it by whole groups.
 
@@ -146,6 +147,10 @@ def _cards_style(
     cards of a line share their label, value and delta rows (CSS subgrid), so their values sit on one baseline
     however many lines their labels take. The sizes follow the row's own width (a container query), so an open
     sidebar on a narrow window is covered too.
+
+    With ``one_line_px`` the values take that smaller size (px) while the whole row fits on one line at it, and the
+    theme's size with the layouts above once it wraps: a row of six that must hold one line beside the open sidebar,
+    whose wrapped lines then match the other rows of a phone screen.
     """
 
     def width(card: tuple[str, ...], value_px: float = _VALUE_PX, label_lines: int | None = 1) -> float:
@@ -189,6 +194,7 @@ def _cards_style(
         # their group; the bordered box fills its card by the desk stylesheet (static/desk.css), as Streamlit's own
         # style has it too.
         f"{row}, {', '.join(groups)} {{ align-items: stretch; }}",
+        *_one_line(one_line_px, sized, per_group, len(group_keys), gap, row, name, group_items, each_card),
         f"@container {name} (width < {group}px) {{ "
         f"{group_items} {{ flex-basis: 100% !important; }} "
         f"{', '.join(groups)} {{ display: grid !important; row-gap: 0 !important; }} "
@@ -207,7 +213,30 @@ def _cards_style(
     return f"<style>{' '.join(rules)}</style>"
 
 
-def card_row(key: str, group_keys: Sequence[str], cards: Sequence[Card], *, size_with: Sequence[Card] = ()) -> None:
+def _one_line(value_px, sized, per_group, groups, gap, row, name, group_items, each_card) -> list[str]:
+    """The rules of :func:`_cards_style`'s ``one_line_px``: the cards sized for values of that size while the row
+    holds every card on one line, before the theme-size rules that a narrower row's container queries set."""
+    if value_px is None:
+        return []
+    card = int(np.ceil(max(_card_width(c[0], c[1], value_px, 1, *c[2:]) for c in sized)))
+    group = per_group * card + (per_group - 1) * gap
+    line = groups * group + (groups - 1) * gap
+    return [
+        f"@container {name} (width >= {line}px) {{ "
+        f"{group_items} {{ flex: 1 1 {group}px !important; }} "
+        f"{each_card} {{ flex: 1 1 {card}px !important; }} "
+        f"{row} [data-testid='stMetricValue'] {{ font-size: {value_px:g}px; }} }}"
+    ]
+
+
+def card_row(
+    key: str,
+    group_keys: Sequence[str],
+    cards: Sequence[Card],
+    *,
+    size_with: Sequence[Card] = (),
+    one_line_px: float | None = None,
+) -> None:
     """Draw a row of bordered metric cards that wraps by whole groups, so that no value is cut off at any width.
 
     The cards are dealt in order into equal groups, one per key of ``group_keys``. Four cards in two pairs go 4
@@ -232,6 +261,9 @@ def card_row(key: str, group_keys: Sequence[str], cards: Sequence[Card], *, size
         The cards of a row of the same shape that sits next to this one, drawn with this row's cards in its own
         ``size_with``: both rows are then sized from the cards of both, so they wrap at the same widths and their
         cards line up. Not drawn here.
+    one_line_px : float, optional
+        A smaller value size (px) that the row takes while all its cards fit on one line at it (the Strategy tab's six
+        tiles beside the open sidebar at 1,440 px, at 1.375rem); once the row wraps, the theme's size.
 
     Raises
     ------
@@ -255,7 +287,15 @@ def card_row(key: str, group_keys: Sequence[str], cards: Sequence[Card], *, size
     """
     if not cards or not group_keys or len(cards) % len(group_keys):
         raise ValueError(f"{len(cards)} cards do not divide into {len(group_keys)} equal groups")
-    st.html(_cards_style([_texts(c) for c in cards], key, group_keys, size_with=[_texts(c) for c in size_with]))
+    st.html(
+        _cards_style(
+            [_texts(c) for c in cards],
+            key,
+            group_keys,
+            size_with=[_texts(c) for c in size_with],
+            one_line_px=one_line_px,
+        )
+    )
     row = st.container(horizontal=True, gap="small", key=key)
     groups = [row.container(horizontal=True, gap="small", key=k) for k in group_keys]
     per_group = len(cards) // len(groups)

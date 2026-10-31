@@ -76,7 +76,11 @@ GREEKS = ("Δ", "Γ", "Vega", "Θ")
 UNITS = ("$", "% of max loss", "% of premium")
 BLOTTER_MODES = ("View", "Edit")
 #: The dated curves, as fractions of the front expiry's trading sessions (spec 3.2 item 4: ⅓ and ⅔ by default).
-DATED = {"⅓": 1 / 3, "⅔": 2 / 3}
+DATED = {"Dated ⅓": 1 / 3, "Dated ⅔": 2 / 3}
+#: The tiles' value size (px) while the six of them hold one line: 1.375rem of the theme's 14 px, a step below the
+#: theme's 1.625rem, so that they fit beside the open sidebar at 1,440 px (spec 3.2's chart above the fold needs the
+#: room); once they wrap (a laptop, a phone) they take the theme's size.
+TILE_VALUE_PX = 19.25
 #: Points of the P&L chart's spot grid.
 GRID_POINTS = 600
 
@@ -109,9 +113,11 @@ class Position:
 
 
 def _leg_short(p: lg.PricedLeg) -> str:
-    """``+1 5,300P 18‑Dec‑26 AM``."""
+    """``+1 5,300P 18‑Dec‑26 AM`` (``+1 102.5C 365d`` in the textbook market, ``+100 shares``)."""
     qty = signed(p.quantity, 0) if p.quantity else "0"
-    return f"{qty} {p.strike:,.0f}{p.kind[0].upper()} {p.label}"
+    if p.kind == "stock":
+        return f"{qty} share{'s' if abs(p.quantity) != 1 else ''}"
+    return f"{qty} {strike(p.strike, math.nan)}{p.kind[0].upper()} {p.label}"
 
 
 # --- Templates and the builder's values --------------------------------------------------------------------------
@@ -709,8 +715,9 @@ def _money(value: float) -> str:
 
 
 def _level_text(x: float, spot: float) -> str:
-    """A spot level at the precision of its axis: whole points from 1,000, else two decimals."""
-    return f"{x:,.0f}" if spot >= 1000 else f"{x:,.2f}"
+    """A spot level to about 0.1% of spot: whole points from 1,000 (``5,378``), one decimal from 100 (``85.6``), and
+    so on (:func:`breakeven_decimals` less one, which the help's exact figures keep)."""
+    return f"{x:,.{max(0, breakeven_decimals(spot) - 1 - (spot >= 1000))}f}"
 
 
 def _pct_text(x: float) -> str:
@@ -874,9 +881,9 @@ def _tiles(ctx: _Context) -> None:
         cross = (pkg.ask - pkg.bid) / 2 * units
         package_tile: Card = (
             "Package",
-            f"{premium(pkg.bid)} / {premium(pkg.ask)} {tag}",
+            f"{premium(pkg.bid)} / {premium(pkg.ask)}",
             {
-                "delta": f"theo {premium(pkg.theo)}",
+                "delta": f"{tag} · theo {premium(pkg.theo)}",
                 "delta_color": "off",
                 "delta_arrow": "off",
                 "help": md(
@@ -936,7 +943,7 @@ def _tiles(ctx: _Context) -> None:
         more = len(be) - len(nearest)
         value = " / ".join(_level_text(b, spot) for b in nearest)
         delta = " / ".join(_pct_text(b / spot - 1) for b in nearest) + (f" · +{more} more" if more else "")
-        listing = ", ".join(f"{_level_text(b, spot)} ({_pct_text(b / spot - 1)})" for b in be)
+        listing = ", ".join(f"{b:,.{breakeven_decimals(spot)}f} ({_pct_text(b / spot - 1)})" for b in be)
         be_tile = (
             "Breakevens",
             value,
@@ -959,8 +966,9 @@ def _tiles(ctx: _Context) -> None:
     )
     card_row(
         "strategy_tiles",
-        ("strategy_tiles_a", "strategy_tiles_b"),
+        ("strategy_tiles_a", "strategy_tiles_b", "strategy_tiles_c"),
         [premium_tile, package_tile, profit_tile, loss_tile, be_tile, prob_tile],
+        one_line_px=TILE_VALUE_PX,
     )
 
 
@@ -976,8 +984,9 @@ def _empty_tiles() -> None:
     labels = ("Net premium", "Package", "Max profit", "Max loss", "Breakevens", "P(profit)")
     card_row(
         "strategy_tiles",
-        ("strategy_tiles_a", "strategy_tiles_b"),
+        ("strategy_tiles_a", "strategy_tiles_b", "strategy_tiles_c"),
         [(label, MISSING, {"help": "No leg is on."}) for label in labels],
+        one_line_px=TILE_VALUE_PX,
     )
 
 
@@ -1048,7 +1057,7 @@ def _strip_values(ctx: _Context, kind: str, strategy, market, spots, t) -> tuple
     return np.broadcast_to(np.asarray(raw["theta"]) / 365 * units, spots.shape).copy(), "Θ ($/day)"
 
 
-def _chart(ctx: _Context, shifts: whatif.Shifts, range_choice: str, dated: list[str], greek: str) -> None:
+def _chart(ctx: _Context, shifts: whatif.Shifts, range_choice: str, dated: list[str], greek: str) -> pd.DataFrame:
     market, units, carry = ctx.market, ctx.units, ctx.choice.carry
     m = ctx.metrics
     bands = _bands(ctx)
@@ -1083,7 +1092,7 @@ def _chart(ctx: _Context, shifts: whatif.Shifts, range_choice: str, dated: list[
     breakevens = [(b, f"BE {_level_text(b, spot)} ({_pct_text(b / spot - 1)})") for b in m.breakevens if lo <= b <= hi]
     straddle = None
     forward = None
-    increment = 0.01
+    increment = math.nan  # a textbook strike shows the decimals it has
     if ctx.index and ctx.front is not None:
         forward = ctx.published.forward(ctx.front)
         increment = ctx.inputs.context.strike_step
@@ -1125,9 +1134,13 @@ def _chart(ctx: _Context, shifts: whatif.Shifts, range_choice: str, dated: list[
         alt="Profit and loss of the position against spot at the front expiry, today and on later dates, with its "
         "Greek strip, strikes, breakevens and risk-neutral ranges",
     )
-    profile = pd.DataFrame({"Spot": spots} | {c.name: c.values for c in curves} | {strip[1]: strip[0]})
+    return pd.DataFrame({"Spot": spots} | {c.name: c.values for c in curves} | {strip[1]: strip[0]})
+
+
+def _download(ctx: _Context, profile: pd.DataFrame, where) -> None:
+    """The P&L profile's download (built on click), with its provenance (spec 2.13)."""
     provenance = exports.provenance(ctx.inputs, model="BSM · European legs")
-    st.download_button(
+    where.download_button(
         "P&L profile (CSV)",
         exports.builder(exports.csv, profile, provenance),
         provenance.file_name(f"{ctx.entered.name.lower().replace(' ', '_')}_pnl", "csv"),
@@ -1135,6 +1148,7 @@ def _chart(ctx: _Context, shifts: whatif.Shifts, range_choice: str, dated: list[
         on_click="ignore",
         icon=":material/download:",
         key="dl_pnl",
+        help="The chart's curves and Greek strip against spot, with the source and valuation time in its first lines.",
     )
 
 
@@ -1222,7 +1236,7 @@ def blotter_frame(ctx: _Context) -> pd.DataFrame:
         mid_vs_fit = (quote.iv_mid - p.fit) * 100 if quote is not None and np.isfinite(quote.iv_mid) else math.nan
         rows.append(
             {
-                "On": "✓" if p.on and not p.expired else ("expired" if p.expired else "off"),
+                "On": "on" if p.on and not p.expired else ("expired" if p.expired else "off"),
                 "Qty": p.quantity,
                 "Type": p.kind.capitalize(),
                 "Expiry": p.label,
@@ -1260,7 +1274,7 @@ BLOTTER_KINDS = {
     "Γ P&L 1%": "gamma_pnl", "Vega": "vega", "Θ": "theta", "Decay": "gamma_pnl",
 }  # fmt: skip
 BLOTTER_HELP = {
-    "On": "✓: in every number. off: kept in the blotter but out of every number (Edit to switch). expired: settled at "
+    "On": "on: in every number. off: kept in the blotter but out of every number (Edit to switch). expired: settled at "
     "or before the valuation time, out of every number. Σ: a subtotal per expiry; Total: the position.",
     "Qty": "Signed contracts per position unit: positive long, negative short.",
     "Type": "Call or put (or shares under the textbook market).",
@@ -1342,11 +1356,11 @@ def _editor_config(index: bool, published) -> dict:
     return config
 
 
-def _steppers(ctx: _Context, grid: lg.Grid) -> None:
-    """The structure steppers (UI-8): Shift, Width, Roll and Flip, one row of small buttons."""
+def _steppers(ctx: _Context, grid: lg.Grid, row) -> None:
+    """The structure steppers (UI-8): Shift, Width, Roll and Flip, small buttons in the blotter's head row. The
+    delta-hedge ticket waits for futures legs (roadmap RK-11)."""
     store = ctx.choice.store
     forward = ctx.published.forward(ctx.front) if ctx.index and ctx.front is not None else ctx.market.spot
-    row = st.container(horizontal=True, key="strategy_steppers", gap="small", vertical_alignment="center")
     roll_help = "" if ctx.index else " The textbook market lists no expiries."
     for label, change, help_text, disabled in (
         ("Shift −", lambda f: lg.shift(f, -1, grid), "Every strike one listed interval lower.", False),
@@ -1422,7 +1436,7 @@ def render(inputs: Inputs) -> None:
     if book.strategy is None:
         _empty_tiles()
         st.info("No legs are on. Pick a template or switch a leg on in the blotter.")
-        _blotter(None, inputs, choice, state, frame, editor_key, book)
+        _blotter(None, inputs, choice, state, frame, editor_key, book, None)
         return
     position = Position(book.strategy, book.market, choice.contracts, choice.multiplier, book)
     entered = _entered(book.strategy, book.market)
@@ -1465,7 +1479,7 @@ def render(inputs: Inputs) -> None:
             help="The Greek strip under the chart, at the T+0 date and shifts: $Δ, Γ P&L 1%, vega ($/vp) or Θ "
             "($/day), whole position.",
         )  # fmt: skip
-        _chart(ctx, shifts, str(range_choice), list(dated or []), str(greek))
+        profile = _chart(ctx, shifts, str(range_choice), list(dated or []), str(greek))
     else:
         unit = view_bar.segmented_control(
             "Units", UNITS, default="$", required=True, key="st_units", bind="query-params", persist_state="session",
@@ -1473,11 +1487,12 @@ def render(inputs: Inputs) -> None:
             help="Cell values: dollars, percent of the maximum loss, or percent of the net premium.",
         )  # fmt: skip
         _table(ctx, shifts, str(unit))
-    _blotter(ctx, inputs, choice, state, frame, editor_key, book)
+        profile = None
+    _blotter(ctx, inputs, choice, state, frame, editor_key, book, profile)
     _footer(ctx)
 
 
-def _blotter(ctx, inputs, choice, state, frame, editor_key, book) -> None:
+def _blotter(ctx, inputs, choice, state, frame, editor_key, book, profile) -> None:
     published = _published(inputs)
     index = published is not None
     grid = lg.Grid(published, step=_width(inputs, None) if not index else 1.0)
@@ -1488,7 +1503,9 @@ def _blotter(ctx, inputs, choice, state, frame, editor_key, book) -> None:
         label_visibility="collapsed",
     )  # fmt: skip
     if ctx is not None:
-        _steppers(ctx, grid)
+        _steppers(ctx, grid, head)
+        if profile is not None:
+            _download(ctx, profile, head)
     for message in book.errors:
         st.error(message)
     if mode == "Edit" or ctx is None:

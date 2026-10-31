@@ -160,20 +160,18 @@ def test_the_badge_names_the_model_of_the_values_on_screen(app):
 
 def test_the_share_popover_holds_the_link_to_this_view(new_app):
     # The link is written last in the run, so it holds every input bound to the URL, including the Strategy tab's
-    # menus that a short link (?strategy=...) expands to. In a test there is no browser address: the popover shows
-    # the query string to add to it.
-    at = new_app(spot=105, tab="Risk", strategy="Iron Condor").run()
+    # template menu that a short link (?strategy=<name>) expands to. In a test there is no browser address: the
+    # popover shows the query string to add to it.
+    at = new_app(spot=105, tab="Risk", strategy="Jade Lizard").run()
     _ok(at)
     [code] = _block(at, "desk_share").code
-    assert code.value == (
-        "?spot=105&tab=Risk&preset=Textbook&strategy_category=Range-bound&strategy_Range-bound=Iron+Condor"
-    )
+    assert code.value == "?spot=105&tab=Risk&preset=Textbook&strategy=Range-bound+%C2%B7+Jade+Lizard"
     captions = [c.value for c in _block(at, "desk_share").caption]
     assert captions == ["Add this to the app's address to open this view:", header.SHARE_NOTE]
 
 
 #: Each URL parameter of the app (the key of a widget bound to the URL), and the words of the Share note that name
-#: it. The Strategy tab's template has one parameter per category, ``strategy_<category>``.
+#: it.
 LINK_WORDS = {
     "preset": "the preset",
     "asof": "valuation time",
@@ -183,18 +181,29 @@ LINK_WORDS = {
     **dict.fromkeys(("tree", "steps", "style", "paths", "seed", "antithetic", "control_variate"), "its settings"),
     "scheme": "its settings",
     "tab": "the open tab",
-    "strategy_category": "template",
-    "strategy_<category>": "template",
+    "strategy": "template",
+    "strategy_strikes_by": "strikes (by delta or width",
+    "strategy_short_delta": "shorts",
+    "strategy_wing_pts": "wings",
     "strategy_width_pct": "strike width",
     "contracts": "contracts",
     "multiplier": "shares per contract",
     "commission": "commission",
+    "st_view": "chart or table",
+    "st_range": "range",
+    "st_greek": "Greek strip",
+    "st_units": "units",
+    "ws": "what-if shifts (spot",
+    "wv": "vol",
+    "wvmode": "its mode",
+    "wd": "date",
+    "wr": "rate)",
 }
 
 
 def _drawn_modules() -> set[Path]:
     """The ui modules the app imports, from main.py through every relative or package import: a shared module no
-    page imports yet (the what-if strip, until Strategy and Risk draw it) puts nothing in the link."""
+    page imports puts nothing in the link."""
     seen, todo = set(), [UI.parents[1] / "main.py"]
     while todo:
         path = todo.pop()
@@ -217,7 +226,7 @@ def _drawn_modules() -> set[Path]:
 def test_the_drawn_modules_are_the_apps():
     drawn = {path.stem for path in _drawn_modules()}
     assert {"streamlit_app", "app", "header", "inputs", "tab_strategy", "tab_surface", "exports"} <= drawn
-    assert "whatif" not in drawn  # drawn by Strategy and Risk from their own stage: add its keys to the note then
+    assert "whatif" in drawn  # the what-if strip, drawn by the Strategy tab: its shifts are in the note
 
 
 def _bound_keys() -> set[str]:
@@ -243,13 +252,13 @@ def test_the_share_note_names_everything_the_link_holds():
 
 
 def test_the_share_link_holds_the_strategy_settings(new_app):
-    query = {"strategy": "Iron Condor", "strategy_width_pct": "5.00", "contracts": 3, "multiplier": 50}
+    query = {"strategy": "Bull Put Spread", "strategy_width_pct": "5.00", "contracts": 3, "multiplier": 50}
     at = new_app(**query, commission="0.65").run()
     _ok(at)
     [code] = _block(at, "desk_share").code
     assert code.value == (
         "?strategy_width_pct=5.00&contracts=3&multiplier=50&commission=0.65&preset=Textbook"
-        "&strategy_category=Range-bound&strategy_Range-bound=Iron+Condor"
+        "&strategy=Vertical+spread+%C2%B7+Bull+Put+Spread"
     )
 
 
