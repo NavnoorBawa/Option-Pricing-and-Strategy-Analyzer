@@ -31,6 +31,9 @@
 * Board of Governors of the Federal Reserve System (2026). *2026 Stress Test Scenarios*, February 2026 (the final
   scenarios).
   [federalreserve.gov](https://www.federalreserve.gov/publications/files/2026-final-supervisory-stress-test-scenarios-20260204.pdf)
+* Shapley, L. S. (1953). A value for n-person games. In H. W. Kuhn and A. W. Tucker (eds.), *Contributions to the
+  Theory of Games II*, Annals of Mathematics Studies 28, 307–317. Princeton University Press.
+  [doi:10.1515/9781400881970-018](https://doi.org/10.1515/9781400881970-018)
 
 ### Backtests and forecast comparison
 * Kupiec, P. H. (1995). Techniques for verifying the accuracy of risk measurement models. *Journal of Derivatives*
