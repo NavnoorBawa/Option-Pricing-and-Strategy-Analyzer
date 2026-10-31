@@ -61,7 +61,7 @@ def _styles(at: AppTest | list[AppTest]) -> list[str]:
     return [h.proto.body for page in _apps(at) for h in page.get("html")]
 
 
-#: The tabs with card rows (only the open tab runs; the price cards sit above the tabs, on every page).
+#: The tabs with card rows (only the open tab runs; the Pricing tab owns its headline tiles, UI-1).
 CARD_TABS = ("Pricing", "Strategy", "Risk", "Surface", "IV")
 
 

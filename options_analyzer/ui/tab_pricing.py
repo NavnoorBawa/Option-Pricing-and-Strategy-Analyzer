@@ -957,14 +957,21 @@ def chain_frame(inputs: Inputs, market: Contract, strikes: np.ndarray) -> pd.Dat
         vols = np.array([market.surface.vol(k, market.expiry).vol for k in strikes])
     else:
         vols = np.full(strikes.shape, sigma)
+    # Beyond the surface's reach the vol is NaN (on the default 20-Nov expiry the nine listed strikes 4,150 to 4,550,
+    # which only the "All" window shows): those rows keep their quotes and read "–" for theo and delta.
+    priced = np.isfinite(vols)
     sides = {}
     for kind in cache.KINDS:
-        if _alo(inputs):
-            theo = cache.alo_values(S, strikes, T, r, vols, q, kind, inputs.model.scheme)
-            delta = _alo_metric("Δ", S, strikes, T, r, vols, q, kind, inputs.model.scheme)
+        theo, delta = np.full(strikes.shape, np.nan), np.full(strikes.shape, np.nan)
+        k, v = strikes[priced], vols[priced]
+        if not priced.any():
+            pass
+        elif _alo(inputs):
+            theo[priced] = cache.alo_values(S, k, T, r, v, q, kind, inputs.model.scheme)
+            delta[priced] = _alo_metric("Δ", S, k, T, r, v, q, kind, inputs.model.scheme)
         else:
-            theo = np.asarray(bs.price(S, strikes, T, r, vols, q, kind), dtype=float)
-            delta = np.asarray(bs.greeks(S, strikes, T, r, vols, q, kind)["delta"], dtype=float)
+            theo[priced] = np.asarray(bs.price(S, k, T, r, v, q, kind), dtype=float)
+            delta[priced] = np.asarray(bs.greeks(S, k, T, r, v, q, kind)["delta"], dtype=float)
         side = {"Theo": theo, "Δ": delta}
         if market.listed:
             quotes = []
@@ -1046,10 +1053,12 @@ def _chain(inputs: Inputs, market: Contract) -> None:
             "Bid": f"The chain's {option} bid, $ per share.",
             "Ask": f"The chain's {option} ask, $ per share.",
             "Theo": f"{engine} {option} value at the strike's "
-            + ("surface vol" if market.listed else "flat vol")
-            + ", $ per share.",
-            "IV": f"Black-76 implied vol of the {option} mid.",
-            "Δ": f"{engine} {option} delta at the strike's " + ("surface vol." if market.listed else "flat vol."),
+            + (
+                "surface vol, $ per share. – beyond the surface's reach." if market.listed else "flat vol, $ per share."
+            ),
+            "IV": f"Black-76 implied vol of the {option} mid. – for an offer only.",
+            "Δ": f"{engine} {option} delta at the strike's "
+            + ("surface vol. – beyond the surface's reach." if market.listed else "flat vol."),
         }[name]
     kinds |= {"Strike": "strike", "Mark": "text"}
     help_text |= {"Strike": "The strike. Click a row to price it.", "Mark": "← marks the Pricing strike."}

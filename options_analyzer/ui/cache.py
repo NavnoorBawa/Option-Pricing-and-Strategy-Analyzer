@@ -52,10 +52,11 @@ def alo_iv(price, S, K, T, r, q, option_type, scheme) -> float:
 
 
 @st.cache_data(show_spinner=False, max_entries=16)
-def alo_curve(S, K, T, r, q, option_type, max_vol, scheme) -> tuple[np.ndarray, np.ndarray]:
-    """The engine's value at the 41 volatilities of the tree's curve (:func:`american_curve`): a smooth curve
-    needs no more, and where the engine falls back to the tree each point costs two trees (about 0.1 s)."""
-    vols = np.linspace(0.005, max_vol, 41)
+def alo_curve(S, K, T, r, q, option_type, low, high, scheme) -> tuple[np.ndarray, np.ndarray]:
+    """The engine's value at 41 vols from ``low`` to ``high``, as the tree's curve (:func:`american_curve`): a
+    smooth curve needs no more, and where the engine falls back to the tree each point costs two trees (about
+    0.1 s)."""
+    vols = np.linspace(low, high, 41)
 
     def value(vol: float) -> float:
         try:
@@ -162,10 +163,13 @@ def american_iv(price, S, K, T, r, q, option_type, steps=DEFAULT_TREE[0], method
 
 @st.cache_data(show_spinner=False, max_entries=16)
 def american_curve(
-    S, K, T, r, q, option_type, max_vol, steps=DEFAULT_TREE[0], method=DEFAULT_TREE[1]
+    S, K, T, r, q, option_type, low, high, steps=DEFAULT_TREE[0], method=DEFAULT_TREE[1]
 ) -> tuple[np.ndarray, np.ndarray]:
+    """The tree's value at 41 vols from ``low`` to ``high``, starting no lower than the lowest vol the tree can
+    represent (``implied_vol.lowest_tree_volatility``)."""
     lowest = implied_vol.lowest_tree_volatility(T, r, q, steps, method)
-    vols = np.linspace(max(0.005, lowest), max(max_vol, 2 * lowest), 41)
+    start = max(low, lowest)
+    vols = np.linspace(start, max(high, start + 0.01), 41)
 
     def value(vol: float) -> float:
         try:

@@ -1,5 +1,12 @@
 ## Implied vol
 
+The IV tab inverts one quote of the sidebar's contract, a bid and an ask or a single price, and shows the implied
+vols of the bid, the mid and the ask beside the published surface's vol at the strike (*mid vs fit*, σ mid − σ fit
+in vol points). Under the synthetic index the bid and ask start at the chain's quote and their tick is Cboe's for
+SPX: \$0.05 below \$3 and \$0.10 from \$3. Under the index the sidebar's rate and dividend yield are the
+expiry's parity carry, so the inversion is Black-76 on the parity forward and discount factor, as the surface's own.
+Chain-scale inversion lives on the Surface tab.
+
 Quotes outside the no-arbitrage bounds ${\max(S e^{-qT} - K e^{-rT}, 0) \le C < S e^{-qT}}$ (and the put analogue)
 are rejected, because no volatility can produce them. Otherwise the quote is converted to its out-of-the-money
 equivalent through put–call parity, which keeps its time value, and inverted with Jäckel's *Let's Be Rational*: two
@@ -19,10 +26,10 @@ with more time value than that margin comes back within $10^{-5}$ (relative) of 
 
 American quotes must be at least the exercise value and the European lower bound, and below the most exercise can
 be worth: $K\max(1, e^{-rT})$ for a put (more than the strike when the rate is negative) and $S\max(1, e^{-qT})$
-for a call. They are inverted on the sidebar's binomial tree when that model is selected, with the sidebar's
-American engine and its scheme when that is (so the headline American price gives back the sidebar volatility), and
-otherwise on a 501-step Leisen–Reimer tree. The engine values zero volatility exactly, so its search starts there.
-A quote no more than ${10^{-12}\max(S, K)}$ above the option's zero-volatility value has no time value either:
+for a call. They are inverted with the sidebar's American engine and its scheme when that is selected (so the
+engine's price gives back the sidebar volatility), and otherwise on a 501-step Leisen–Reimer tree. SPX options are
+European, so under the synthetic index the IV tab inverts European quotes only. The engine values zero volatility
+exactly, so its search starts there. A quote no more than ${10^{-12}\max(S, K)}$ above the option's zero-volatility value has no time value either:
 every volatility up to some level gives a value that close to it (deep in the money exactly that value: every
 volatility at which exercising at once stays optimal, up to 38.5 % for a one-year put struck at \$100 with the spot
 at \$60 and a rate of 5 %). The margin applies out of the money too, because near zero volatility the American

@@ -620,8 +620,8 @@ def test_both_static_folders_are_identical():
 #: Labels of the headline cards (Pricing and IV tabs), whose widths ui/components.py estimates. (The
 #: other card rows are checked as whole rows in tests/test_app_components.py.)
 CARD_LABELS = (
-    "Call value", "Put value", "Forward price", "Call ITM probability", "Exercise premium", "Tree error vs BSM",
-    "Std. error", "Implied volatility", "Model check", "Vega at IV", "Time value",
+    "Call", "Put", "Straddle", "Vol", "Forward", "Time", "IV bid", "IV mid", "IV", "IV ask", "Surface", "Vega",
+    "Bounds",
 )  # fmt: skip
 
 
@@ -821,11 +821,11 @@ _RUNNING = "document.querySelector('[data-test-script-state]')?.getAttribute('da
 #: app leaves the closed tabs empty but for the Strategy tab's controls): once it is on the page, a click on the tab
 #: has run it. (The script-state mark does not do: a fast run can come and go between two frames.)
 TAB_READY = {
-    "Pricing": ".st-key-sensitivity_chart",
+    "Pricing": ".st-key-pricing_tiles",
     "Strategy": ".st-key-strategy_cards",
     "Risk": ".st-key-var_cards",
     "Surface": ".st-key-surface_cards",
-    "IV": ".st-key-iv_cards",
+    "IV": ".st-key-iv_tiles",
     "Methodology": ".st-key-methodology",
 }
 
@@ -881,15 +881,15 @@ _CARD_VALUES = """() => {
 }"""
 
 
-#: The tab of every card row (the price cards sit above the tabs).
+#: The tab of every card row.
 CARD_ROW_TABS = {
-    "price_cards": "Pricing",
+    "pricing_tiles": "Pricing",
     "strategy_cards": "Strategy",
     "greek_cards": "Strategy",
     "expectation_cards": "Strategy",
     "var_cards": "Risk",
     "surface_cards": "Surface",
-    "iv_cards": "IV",
+    "iv_tiles": "IV",
 }
 
 
@@ -982,7 +982,7 @@ def test_card_rows_line_up(chromium, app_url, width, query, three_up):
                 _tab(page, tab)
             rows[key] = page.evaluate(_CARD_ROW, key)
         for key, cards in rows.items():
-            assert len(cards) in (3, 4), key
+            assert len(cards) in (3, 4, 6), key
             for line in _lines(cards):
                 for measure in ("width", "height", "valueTop"):
                     values = [card[measure] for card in line]
@@ -1011,10 +1011,9 @@ def test_card_rows_line_up(chromium, app_url, width, query, three_up):
         page.close()
 
 
-#: The price cards with a delta line: label, value and delta as written, the width of the card at max-content and
-#: whether the delta is cut off with an ellipsis where it is.
-_PRICE_CARD_DELTAS = """() => [...document.querySelectorAll('.st-key-price_cards [data-testid=stMetric]')]
-  .filter(card => card.querySelector('[data-testid=stMetricDelta]')).map(card => {
+#: The Pricing tab's tiles: label, value and delta as written, the width of the card at max-content, whether the
+#: delta is cut off with an ellipsis where it is, and the card's top.
+_TILE_DELTAS = """() => [...document.querySelectorAll('.st-key-pricing_tiles [data-testid=stMetric]')].map(card => {
     const delta = card.querySelector('[data-testid=stMetricDelta]');
     const cut = [delta, ...delta.querySelectorAll('*')]
       .some(t => t.scrollWidth > t.clientWidth && getComputedStyle(t).overflow !== 'visible');
@@ -1023,44 +1022,38 @@ _PRICE_CARD_DELTAS = """() => [...document.querySelectorAll('.st-key-price_cards
     const natural = card.getBoundingClientRect().width;
     card.style.width = width;
     return {label: card.querySelector('[data-testid=stMetricLabel]').innerText,
-            value: card.querySelector('[data-testid=stMetricValue]').innerText, delta: delta.innerText, natural, cut};
+            value: card.querySelector('[data-testid=stMetricValue]').innerText, delta: delta.innerText, natural, cut,
+            top: Math.round(card.getBoundingClientRect().top)};
   })"""
 
 
 @pytest.mark.e2e
 @pytest.mark.slow
 @pytest.mark.parametrize("width", [1440, 1024, 390])
-def test_monte_carlo_intervals_are_never_cut_off(chromium, app_url, width):
-    # The cards' model made the pill of "$10.4237 – $10.4582, 95%" 13 px narrower than Chromium draws it (0.517 em a
-    # character and no padding), so at a row's narrowest that interval would end in an ellipsis. Each card with a
-    # delta, reliable or not, is now modelled at most 2 px wider than its max-content width, never narrower. And on a
-    # desktop with the sidebar open the four cards stay on one line whether the interval is shown or withheld: the
-    # reason it was withheld, "Interval unreliable: 85 of 100,000 paths finish out of the money", made its card
-    # 387 px wide where four across leave 249 px a card at 1440 px, so the row went 2 + 2.
+def test_the_pricing_tiles_deltas_are_never_cut_off(chromium, app_url, width):
+    # The six tiles' deltas ("pair −0.29 bp", "±3.39%", "AM settle") are modelled at most 2 px wider than their
+    # max-content width, never narrower, so none ends in an ellipsis; on a desktop with the sidebar open the six
+    # stay on one line (UI spec 2.9: at most six tiles a row).
     from options_analyzer.ui import components
 
-    for query in ("?model=Monte+Carlo", "?model=Monte+Carlo&strike=120&days=30"):
+    for query in ("?asof=2026-10-23T16:00", "?preset=Textbook&model=American+%28ALO%29"):
         page = _open(chromium, f"{app_url}/{query}", "light", width)
         try:
-            cards = page.evaluate(_PRICE_CARD_DELTAS)
-            assert [card["label"].lower() for card in cards] == ["call value", "put value"], query
+            cards = page.evaluate(_TILE_DELTAS)
+            assert [card["label"].lower() for card in cards] == ["call", "put", "straddle", "vol", "forward", "time"]
             for card in cards:
                 assert not card["cut"], (query, card)
                 model = components._card_width(card["label"].capitalize(), card["value"], delta=card["delta"])
                 assert card["natural"] <= model <= card["natural"] + 2, (query, card, model)
             if width == 1440:
-                tops = page.evaluate(
-                    "() => [...document.querySelectorAll('.st-key-price_cards [data-testid=stMetric]')]"
-                    ".map(card => Math.round(card.getBoundingClientRect().top))"
-                )
-                assert len(tops) == 4 and len(set(tops)) == 1, (query, tops)
+                assert len({card["top"] for card in cards}) == 1, (query, cards)
         finally:
             page.close()
 
 
 #: A chart that each tab draws (the key given to charts.show), and the number of charts it draws, at the default URL.
-TAB_CHART = {"Pricing": ("sensitivity_chart", 3), "Strategy": ("payoff_chart", 1), "Risk": ("var_hist", 6),
-             "Surface": ("surf_iv", 4), "IV": ("iv_curve", 1), "Methodology": (None, 0)}  # fmt: skip
+TAB_CHART = {"Pricing": ("pricing_profile", 1), "Strategy": ("payoff_chart", 1), "Risk": ("var_hist", 6),
+             "Surface": ("surf_iv", 4), "IV": ("iv_price", 1), "Methodology": (None, 0)}  # fmt: skip
 
 
 def _query(page) -> dict[str, list[str]]:
@@ -1340,13 +1333,12 @@ def _items(line: str) -> list[str]:
     return [item for item in line.removeprefix("Options Analytics").split(" · ") if item.strip(" ·")]
 
 
-#: Long inputs that made the header wrap badly: an index level with a 2,000-step American CRR tree, and a five-digit
-#: level with a million Monte Carlo paths (the longest badges, and tickers of 86 and 89 characters).
+#: Long inputs that made the header wrap badly: an index level and a five-digit level, with the longest badge the
+#: sidebar can now set, the American engine's (the trees' and Monte Carlo's badges went with those engines into the
+#: Pricing tab's Engine diagnostics, Appendix B decision 8).
 LONG_INPUTS = {
-    "tree": dict(
-        spot="5812.37", strike="5800", model="Binomial tree", tree="Cox-Ross-Rubinstein", steps="2000", style="American"
-    ),
-    "paths": {"spot": "45123.5", "strike": "45000", "model": "Monte Carlo", "paths": "1,000,000"},
+    "tree": dict(spot="5812.37", strike="5800", model="American (ALO)", scheme="Accurate"),
+    "paths": {"spot": "45123.5", "strike": "45000", "model": "American (ALO)", "scheme": "High"},
 }
 SHELL_INPUTS = {"default": {}, **LONG_INPUTS}
 

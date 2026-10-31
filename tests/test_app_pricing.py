@@ -420,8 +420,21 @@ def test_the_chain_ladder_spans_ten_delta_to_ten_delta(index_app):
 
 def test_the_chain_window_and_stride(index_app):
     index_app.segmented_control(key="pr_chain_win").set_value("All").run()
-    strikes = list(_frame(index_app, "tbl_pricing_chain_").value["Strike"])
+    _ok(index_app)
+    table = _frame(index_app, "tbl_pricing_chain_").value
+    strikes = list(table["Strike"])
     assert len(strikes) <= tab_pricing.CHAIN_ROWS + 1 and all(k % 100 == 0 or k == 5815.0 for k in strikes)
+    # Every listed strike, 4,150 to 6,850: below 4,600 the surface has no vol (beyond its reach), so those rows keep
+    # their quotes and read "–" for theo and delta (they raised an error before).
+    context = mk.index_market(AT)
+    T = float(context.expiry_row(date(2026, 11, 20))["maturity"])
+    reach = np.array(
+        [np.isfinite(context.surface.implied_vol_at(k / context.spot, T, extrapolate=True)) for k in strikes]
+    )
+    assert (strikes[0], strikes[-1]) == (4200.0, 6800.0) and not reach.all()
+    np.testing.assert_array_equal(np.isfinite(table["C Theo"].to_numpy(float)), reach)
+    np.testing.assert_array_equal(np.isfinite(table["P Δ"].to_numpy(float)), reach)
+    assert table["C Ask"].notna().all()
     index_app.selectbox(key="pr_chain_stride").set_value(50).run()
     _ok(index_app)
     assert all(k % 50 == 0 or k == 5815.0 for k in _frame(index_app, "tbl_pricing_chain_").value["Strike"])
@@ -574,6 +587,54 @@ def test_the_tabs_format_numbers_only_through_the_standard(module):
     assert not hits, hits
 
 
+# --- The noise-free chain (UI spec 3.1 and 3.5 acceptance) -----------------------------------------------------------
+
+
+@pytest.fixture
+def noise_free(monkeypatch):
+    """The synthetic index priced without its quote noise (``sample_chain(noise=False)``: each mid is the
+    generator's model value, each spread its base width), the fixture the spec's probability and IV checks name.
+    The market and its published surface are cached per valuation time, so both caches are cleared on the way in
+    and out."""
+    import functools
+
+    from options_analyzer.market_data import sample_chain
+    from options_analyzer.ui import surface_state
+
+    def clear() -> None:
+        mk.index_market.clear()
+        surface_state._published.clear()
+
+    monkeypatch.setattr(mk, "sample_chain", functools.partial(sample_chain, noise=False))
+    clear()
+    yield
+    clear()
+
+
+def test_on_the_noise_free_chain_p_itm_is_the_smiles_and_the_mid_is_the_fit(new_app, noise_free):
+    # UI spec 3.1: P(ITM) (RN smile) within 0.5 pp of 57.3% (call) and 42.7% (put); this fit gives 57.1% and 42.9%.
+    # N(d2) at the flat vol is 49.0% and 51.0% here (the spec's 49.2% and 50.8% came from an earlier fit).
+    at = new_app(**INDEX).run()
+    _ok(at)
+    table = _frame(at, "tbl_pricing_greeks").value.set_index("Greek")
+    call, put = (_number(table.loc["P(ITM)", f"{kind} (BSM)"]) for kind in ("Call", "Put"))
+    assert abs(call - 57.3) <= 0.5 and abs(put - 42.7) <= 0.5 and (call, put) == (57.1, 42.9)
+    assert any("N(d₂) at flat vol: 49.0% call, 51.0% put." in c.value for c in at.caption)
+    # Without noise each mid is the model value, so the fit goes through it: Mid vs fit reads 0.00, in band, for both.
+    contract = _frame(at, "tbl_pricing_contract").value.set_index("Type")
+    assert list(contract["Mid vs fit"]) == [0.0, 0.0] and list(contract["Band"]) == ["in band", "in band"]
+
+
+def test_on_the_noise_free_chain_the_iv_tiles_bracket_the_surface(new_app, noise_free):
+    at = new_app(**INDEX, tab="IV").run()
+    _ok(at)
+    tiles = _tiles(at)
+    bid, mid, ask, surface = (_number(tiles[k].value) for k in ("IV bid", "IV mid", "IV ask", "Surface"))
+    assert bid <= mid <= ask and bid <= surface <= ask
+    assert (bid, mid, ask, surface) == (15.36, 15.44, 15.51, 15.44)
+    assert tiles["Surface"].delta == "mid vs fit 0.00 vp"
+
+
 # --- The IV tab (UI spec 3.5) -----------------------------------------------------------------------------------------
 
 
@@ -628,12 +689,24 @@ def test_a_deep_in_the_money_quote_starts_inside_the_bounds(new_app):
     assert next(n for n in at.number_input if n.label == "Price").value == 40.02
 
 
-def test_the_iv_chart_marks_the_quotes_and_their_vols(new_app):
+def test_the_iv_chart_marks_the_quotes_and_their_vols(new_app, default_index):
+    # Each quote reads across to the curve and down to its vol; the legend names its price and vol. The vol axis
+    # spans 1 vol point either side of the mid's vol (the bid and ask lines 0.17 vol points apart stand apart).
     at = new_app(**INDEX, tab="IV").run()
     spec = _chart(at, "iv_price")
     names = [t["name"] for t in spec["data"]]
-    assert names[0] == "Model value (BSM)" and {"IV bid", "IV mid", "IV ask"} <= set(names)
-    assert [a["text"] for a in spec["layout"]["annotations"]][-3:] == ["Bid", "Mid", "Ask"]
+    assert names == [
+        "Model value (BSM)", "Bid 97.20 · 15.34%", "IV bid", "Mid 97.75 · 15.43%", "IV mid", "Ask 98.30 · 15.51%",
+        "IV ask",
+    ]  # fmt: skip
+    d = default_index
+    bid, ask = d["book"]["call"]
+    mid = _implied((bid + ask) / 2, d["F"], d["K"], d["T"], d["DF"], "call") * 100
+    assert spec["layout"]["xaxis"]["range"] == [pytest.approx(mid - 1.0, abs=1e-6), pytest.approx(mid + 1.0, abs=1e-6)]
+    marker = next(t for t in spec["data"] if t["name"] == "IV ask")
+    assert marker["x"][0] == pytest.approx(_implied(ask, d["F"], d["K"], d["T"], d["DF"], "call") * 100, abs=1e-6)
+    # No floor band: the call's floor (zero, out of the money forward) is far below the window.
+    assert not spec["layout"].get("shapes")
 
 
 def test_the_iv_tick_follows_the_index_rule():

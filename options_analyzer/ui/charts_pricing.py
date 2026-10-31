@@ -17,7 +17,7 @@ import plotly.graph_objects as go
 
 from . import charts
 from . import theme as desk_theme
-from .format import MINUS, number
+from .format import MINUS, number, premium, vol
 
 
 @dataclass(frozen=True)
@@ -124,7 +124,9 @@ def profile_chart(
         else:
             charts._vline(fig, value, _text(text), colors, dash="dot", position="top right")
     fig = charts.apply_layout(fig, None, x_title, y_title, palette=colors)
-    fig.update_xaxes(range=[lo, hi])
+    # Plotly groups thousands only from five digits: without this the spot axis reads 5400 beside "S 5,800.00".
+    fig.update_xaxes(range=[lo, hi], separatethousands=True)
+    fig.update_yaxes(separatethousands=True)
     return fig
 
 
@@ -199,20 +201,24 @@ def iv_price_chart(
     name: str,
     palette: dict[str, str] | None = None,
 ) -> go.Figure:
-    """The IV tab's chart: the model value against vol, a horizontal line at each quoted price, a vertical line at
-    each implied vol, and the prices below the no-arbitrage floor shaded.
+    """The IV tab's chart: the model value against vol, a horizontal line at each quoted price, a marker where it
+    meets the curve (its implied vol), and the prices below the no-arbitrage floor shaded.
+
+    The lines are named in the legend with their price and implied vol (``Bid 97.20 · 15.34%``), not labelled on the
+    plot: a bid and an ask 0.17 vol points apart would print their labels on top of each other (the SPX default).
 
     Parameters
     ----------
     vols : sequence of float
-        Vols in percent, ascending.
+        Vols in percent, ascending: the x range of the chart.
     values : sequence of float
         The model value at each vol ($ per share).
     quotes : sequence of (str, float, float)
         ``(label, price, implied vol in percent)`` for the bid, mid and ask (or the single price); a NaN implied vol
         (a price outside the bounds) draws the price line alone.
     floor : float or None
-        The no-arbitrage lower bound ($); the band below it is shaded muted and labelled. None or 0 draws none.
+        The no-arbitrage lower bound ($). The band below it is shaded muted and labelled while it reaches the data
+        (a price below it, or the curve near zero vol); None or 0 draws none.
     name : str
         The curve's name (``Model value (BSM)``).
     palette : dict, optional
@@ -221,19 +227,29 @@ def iv_price_chart(
     Returns
     -------
     plotly.graph_objects.Figure
+
+    Examples
+    --------
+    >>> fig = iv_price_chart([10.0, 20.0, 30.0], [4.0, 8.0, 12.0], quotes=[("Price", 8.0, 20.0)], floor=None,
+    ...                      name="Model value (BSM)")
+    >>> [trace.name for trace in fig.data]
+    ['Model value (BSM)', 'Price 8.00 · 20.00%', 'IV price']
     """
     colors = palette or desk_theme.palette()
+    xs = np.asarray(vols, dtype=float)
+    ys = np.asarray(values, dtype=float)
     fig = go.Figure()
     fig.add_trace(
-        go.Scatter(x=vols, y=values, name=name, mode="lines", line=dict(color=colors["call"], width=charts.LINE_WIDTH))
+        go.Scatter(x=xs, y=ys, name=name, mode="lines", line=dict(color=colors["call"], width=charts.LINE_WIDTH))
     )
-    finite = [v for v in values if np.isfinite(v)]
+    finite = ys[np.isfinite(ys)].tolist()
     prices = [p for _, p, _ in quotes if np.isfinite(p)]
-    top = max([*finite, *prices, floor or 0.0]) if finite or prices else 1.0
-    bottom = min([*finite, *prices, floor or 0.0]) if finite or prices else 0.0
-    if floor:
+    data = [*finite, *prices]
+    bottom = min(data) if data else 0.0
+    if floor and floor > bottom:
+        top = max(data)
         fig.add_hrect(
-            y0=min(bottom, floor) - 0.05 * (top - bottom + 1e-9),
+            y0=bottom - 0.05 * (top - bottom + 1e-9),
             y1=floor,
             fillcolor=charts.translucent(colors["muted"], 0.12),
             line_width=0,
@@ -241,21 +257,32 @@ def iv_price_chart(
             annotation_position="bottom right",
             annotation_font=dict(size=charts.LABEL_SIZE, color=colors["muted"]),
         )
-    dashes = {"Bid": "dot", "Mid": "dash", "Ask": "dot", "Price": "dash"}
+    # Each quote reads off the curve as on paper: across from its price to the curve, then down to its vol.
+    pad = 0.04 * ((max(data) - bottom) if data else 1.0) or 1.0
+    y_low = bottom - pad
+    dashes = {"Bid": "dot", "Mid": "dash", "Ask": "dashdot", "Price": "dash"}
     for label, price, iv in quotes:
         if not np.isfinite(price):
             continue
-        charts._hline(fig, price, colors, None, line_dash=dashes.get(label, "dash"))
-        fig.add_annotation(
-            x=0.0, xref="paper", xanchor="left", y=price, yanchor="bottom", text=label, showarrow=False,
-            font=dict(size=charts.LABEL_SIZE, color=colors["muted"]),
+        shown = f"{label} {premium(price)} · " + (vol(iv / 100.0) if np.isfinite(iv) else "no IV")
+        inside = np.isfinite(iv) and xs[0] <= iv <= xs[-1]
+        x, y = ([xs[0], iv, iv], [price, price, y_low]) if inside else ([xs[0], xs[-1]], [price, price])
+        fig.add_trace(
+            go.Scatter(
+                x=x, y=y, name=_text(shown), mode="lines", hoverinfo="skip",
+                line=dict(color=colors["muted"], width=charts.REFERENCE_WIDTH + 0.5, dash=dashes.get(label, "dash")),
+            )
         )  # fmt: skip
-        if np.isfinite(iv):
-            fig.add_vline(x=iv, line=dict(color=colors["accent"], width=charts.REFERENCE_WIDTH, dash="dot"))
+        if inside:
             fig.add_trace(
                 go.Scatter(
                     x=[iv], y=[price], mode="markers", name=f"IV {label.lower()}", showlegend=False,
                     marker=dict(color=colors["accent"], size=8, symbol="diamond"),
+                    hovertemplate=f"{label}: %{{x:.2f}}%<extra></extra>",
                 )
             )  # fmt: skip
-    return charts.apply_layout(fig, None, "Vol (%)", "Option value ($)", palette=colors)
+    fig = charts.apply_layout(fig, None, "Vol (%)", "Option value ($ per share)", palette=colors)
+    fig.update_xaxes(range=[float(xs[0]), float(xs[-1])])
+    if data:
+        fig.update_yaxes(range=[y_low, max(data) + pad], separatethousands=True)
+    return fig

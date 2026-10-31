@@ -1,5 +1,14 @@
 ## Pricing engines
 
+### Engines in the app
+The sidebar prices the contract with one of two engines: *European (BSM)*, the closed form below, or *American
+(ALO)*, the engine further down. Under the synthetic index only the closed form is offered, because SPX options are
+European-exercise (Cboe); the American engine prices the textbook market. The binomial trees and Monte Carlo are
+checks on those numbers, not engines of the app: they run in the Pricing tab's *Engine diagnostics*, only while it
+is open, beside the reference engine (the closed form for European exercise, the American engine's *high* scheme
+for American), with their convergence and their own Greeks. A link from version 2 that names a tree or Monte Carlo
+opens the closed form with Engine diagnostics open.
+
 ### Black–Scholes–Merton
 
 $$
@@ -39,7 +48,7 @@ verified against high-precision finite differences in the test-suite.
   bounds: at least the European and the exercise value, at most the perpetual American value.
 
 ### American engine (Andersen–Lake–Offengenden)
-The sidebar's *American (ALO)* model values American calls and puts by spectral collocation of the
+The sidebar's *American (ALO)* engine values American calls and puts by spectral collocation of the
 early-exercise boundary (Andersen, Lake and Offengenden 2016), after the design of QuantLib's QdFp engine. A
 put is worth its European value plus the early-exercise premium, an integral over the boundary $B(\tau)$. The
 boundary solves a fixed-point equation and is interpolated as ${H = \ln(B/X)^2}$ on Chebyshev nodes in
@@ -75,11 +84,9 @@ control variate (the discounted terminal price, with known mean $S e^{-qT}$) red
 standard error uses the unbiased sample deviation of the independent samples. It is left blank when the
 sample cannot estimate it: every simulated price finished out of the money, or every one in the money with
 the control variate on (the residuals are then constant). Calls and puts share
-draws and a fixed seed makes results reproducible. The sample-path chart draws the first 60 of these
-scenarios, each filled in from today to its sampled $S_T$ with a Brownian bridge (exact for GBM given the
-end point).
+draws and a fixed seed makes results reproducible.
 
-The 95% interval, price ± 1.96 standard errors, is shown under each price card and in the diagnostics table.
+The 95% interval, price ± 1.96 standard errors, is shown in the Engine diagnostics table.
 It assumes the estimate is close to normal, which fails when few simulated prices finish on the side of the
 strike that its error rests on: the in-the-money side when the payoff is averaged as it is, and whichever
 side is scarcer with the control variate, which takes out the payoff's linear part (a deep in-the-money call
@@ -93,9 +100,9 @@ paths), however many paths finish on each side: with antithetic pairs and the co
 covered the value in 92.8 to 93.7% of 8,000 runs, 2,000 pairs in 94.2 to 94.9% and 5,000 pairs in 94.6 to
 94.9% (at-the-money options of 30 days to 2 years at 20 to 60% volatility, and an out-of-the-money 9-month
 call). Below 300 such paths or 5,000 independent samples, or when the standard error cannot be estimated,
-the result is flagged unreliable, and the cards and the diagnostics table say how many paths finished in (or
-out of) the money instead of showing the interval. The sidebar's fewest paths, 10,000, are 5,000 antithetic
-pairs, so in the app only the count of paths applies. The flag counts each run's own paths, so near the
+the result is flagged unreliable, and the diagnostics table says how many paths finished in (or out of) the
+money instead of showing the interval. The diagnostics' fewest paths, 10,000, are 5,000 antithetic pairs, so in
+the app only the count of paths applies. The flag counts each run's own paths, so near the
 threshold it also sorts the runs of one level: at about 300 expected paths, over 100,000 seeds, the half
 with at least 300 covered 95.7% and the rest 93.5%. The intervals shown just above the threshold thus cover
 more than 95%: the runs kept drew at least the expected number of paths into the scarce side, so their
@@ -110,14 +117,13 @@ the money over 4 years with 100,000 antithetic paths, the interval covered the v
 94.6% without it (the put averaged directly and the call by parity).
 
 ### One-day decay
-The Greeks table, the option chain and the sensitivity explorer (dashed, in its theta view) show the *1-day decay*
-beside theta per day (see Conventions): the value with one calendar day less to expiry minus the value now, all else
-equal, or the intrinsic value minus the value now when the option expires within the day. It uses the model of the
-table it is in: the closed form for Black–Scholes–Merton, and the engine for the American engine. Under a binomial
-tree the Greeks table stays Black–Scholes–Merton's for European exercise, decay included, so with American exercise
-it is not the decay of the tree's American value in the price cards; the tree's Greeks give that one, and put it
-first by the same 10 % rule against the tree's own theta. Under Monte Carlo the decay is the closed-form one: the
-simulation estimates that same value, and the difference of two simulations would only add sampling error.
+The Pricing tab's Greeks table and its profile (dashed, in the Θ view) show the *1-day decay* beside theta per
+day (see Conventions): the value with one calendar day less to expiry minus the value now, all else equal, or the
+intrinsic value minus the value now when the option expires within the day. The table puts it before theta when
+the two differ by more than 10 %. It uses the sidebar's engine: the closed form, or the American engine. In Engine
+diagnostics the tree's own Greeks carry the tree's decay, put first by the same 10 % rule against the tree's own
+theta. Monte Carlo has no decay of its own: it estimates the closed-form value, and the difference of two
+simulations would only add sampling error.
 
 On a tree the decay is the difference of two trees, so how the shorter tree is built decides its accuracy. Measured
 against the closed-form decay of European options (spot 100, strikes 80 to 120 in steps of 0.5, rate 5 %, no

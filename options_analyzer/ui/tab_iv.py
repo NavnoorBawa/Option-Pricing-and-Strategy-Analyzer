@@ -46,6 +46,9 @@ INDEX_TICKS = ((3.0, 0.05), (math.inf, 0.10))
 TEXTBOOK_TICK = 0.01
 #: The quote inputs' format: cents, as the chain quotes them.
 PRICE_FORMAT = "%.2f"
+#: Half the chart's vol range about the mid's implied vol (:func:`chart_window`): 1 vol point, where an SPX
+#: month's 0.17-point spread puts the bid and the ask about 20 px apart on the 360 px chart.
+WINDOW = 0.01
 _TREE_LIMIT = "The 501-step tree cannot price this option at the vols the search needs"
 _ENGINE_LIMIT = "The American engine cannot price this option at the vols the search needs"
 
@@ -93,7 +96,8 @@ def _no_time_value_text(price: float, lower: float, scale: float, american: bool
 @dataclass(frozen=True)
 class Solved:
     """One quoted price and its implied vol (NaN when it has none), with why not: ``"below"`` or ``"above"`` the
-    bounds, ``"no_time_value"``, or another solver message."""
+    bounds, ``"below_zero_vol"`` (inside them but below the American value at zero vol), ``"no_time_value"``, or
+    another solver message."""
 
     label: str
     price: float
@@ -185,10 +189,13 @@ def render(inputs: Inputs) -> None:
     # Without a quote the price starts at the model value to the cent, never below the floor in cents: a deep
     # in-the-money option with no time value (a call at 60 on 100 two days out, floor 40.0131) would otherwise start
     # at 40.01, below the bound, an error on opening the tab.
+    # Nor at or above the cap: at 500% vol over five years the call is worth 99.999998 on a spot of 100, which would
+    # round to the cap, 100.00.
     floor_cents = math.ceil(lower * 100 - 1e-9) / 100
+    cap_cents = math.floor(upper * 100 - 1e-9) / 100
 
     def cents(value: float) -> float:
-        return max(round(value, 2), floor_cents)
+        return min(max(round(value, 2), floor_cents), cap_cents)
 
     if single:
         start = cents(model_value) if quote is None else quote.mid if quote.bid > 0 else quote.ask
@@ -225,7 +232,10 @@ def render(inputs: Inputs) -> None:
         )
         prices = [("Bid", float(bid)), ("Mid", 0.5 * (float(bid) + float(ask))), ("Ask", float(ask))]
 
-    floor_name = "the intrinsic value" if american else "the discounted intrinsic value"
+    # An American floor is the larger of the intrinsic value and the European floor (implied_vol.american_bounds):
+    # the at-the-money call with a 5% rate and a 2% yield is floored at 2.90, its discounted intrinsic value.
+    intrinsic = max(bs.option_sign(option_type) * (S - K), 0.0)
+    floor_name = "the intrinsic value" if american and intrinsic >= lower else "the discounted intrinsic value"
     solved = [
         _solve(label, p, (S, K, T, r, q, option_type), american, alo, model.scheme, lower, upper) for label, p in prices
     ]
@@ -237,6 +247,11 @@ def render(inputs: Inputs) -> None:
             )
         elif s.problem == "above":
             errors.append(f"{s.label} {premium(s.price)} is at or above the no-arbitrage cap {money(upper, 2)}")
+        elif s.problem == "below_zero_vol":
+            errors.append(
+                f"{s.label} {premium(s.price)} is below {money(model_price(0.0), 2)}, the American value at zero vol, "
+                "the least any vol gives"
+            )
         elif s.problem == "no_time_value":
             st.warning(_no_time_value_text(s.price, lower, max(S, K), american, option_type))
         elif s.problem:
@@ -250,13 +265,13 @@ def render(inputs: Inputs) -> None:
     mid = by_label.get("Mid", by_label.get("Price"))
     _tiles(inputs, market, by_label, mid, single, american, alo, (lower, upper), floor_name, option_type)
 
-    max_vol = max(2.5 * max((s.iv for s in solved if np.isfinite(s.iv)), default=sigma), 2.0 * sigma, 0.6)
+    low, high = chart_window([s.iv for s in solved], mid.iv, sigma)
     if american and alo:
-        vols, curve = cache.alo_curve(S, K, T, r, q, option_type, max_vol, model.scheme)
+        vols, curve = cache.alo_curve(S, K, T, r, q, option_type, low, high, model.scheme)
     elif american:
-        vols, curve = cache.american_curve(S, K, T, r, q, option_type, max_vol)
+        vols, curve = cache.american_curve(S, K, T, r, q, option_type, low, high)
     else:
-        vols = np.linspace(0.005, max_vol, 400)
+        vols = np.linspace(low, high, 201)
         curve = bs.price(S, K, T, r, vols, q, option_type)
     engine = ("ALO" if alo else "LR 501 tree") if american else "BSM"
     fig = charts_pricing.iv_price_chart(
@@ -287,6 +302,26 @@ def _open_methodology() -> None:
     st.session_state[DRAWER] = True
 
 
+def chart_window(ivs: list[float], mid: float, sigma: float) -> tuple[float, float]:
+    """The chart's vol range (decimals): :data:`WINDOW` either side of the mid's implied vol (or the one finite
+    one), widened to three times the quotes' spread in vol, so that the bid, mid and ask lines stand apart. On the SPX
+    default the bid and ask are 0.17 vol points apart: over 0.5% to 60% they printed on top of each other. With no
+    implied vol (every price outside the bounds) the whole range, 0.5% to the larger of 60% and twice ``sigma``,
+    where the floor and the quote outside it show.
+
+    >>> [round(v, 4) for v in chart_window([0.1534, 0.1543, 0.1551], 0.1543, 0.1544)]
+    [0.1443, 0.1643]
+    >>> chart_window([float("nan")], float("nan"), 0.2)
+    (0.005, 0.6)
+    """
+    finite = [v for v in ivs if np.isfinite(v)]
+    if not finite:
+        return 0.005, max(0.6, 2.0 * sigma)
+    centre = mid if np.isfinite(mid) else finite[0]
+    half = max(WINDOW, 3.0 * (max(finite) - min(finite)))
+    return max(0.005, centre - half), centre + half
+
+
 def _solve(label, price, contract_args, american, alo, scheme, lower, upper) -> Solved:
     """Invert one price: NaN with the reason where it is outside the bounds or has no time value."""
     S, K, T, r, q, option_type = contract_args
@@ -305,7 +340,9 @@ def _solve(label, price, contract_args, american, alo, scheme, lower, upper) -> 
     except ImpliedVolError as exc:
         reason = exc.reason
         if reason == "below_lower_bound":
-            return Solved(label, price, math.nan, "below")
+            # Above the floor but below the American value at zero vol: with a dividend yield above the rate, a long
+            # put can be worth most exercised at a date before expiry (25 at zero vol, floor 23.25, 20 years out).
+            return Solved(label, price, math.nan, "below" if price < lower else "below_zero_vol")
         if reason == "at_or_above_upper_bound":
             return Solved(label, price, math.nan, "above")
         # The solvers' own messages carry raw numbers; the tab names the reason in words (the number standard).
@@ -353,6 +390,7 @@ def _tiles(inputs, market, by_label, mid, single, american, alo, bounds, floor_n
             "below": f"{premium(solved.price)} is below the no-arbitrage floor {money(lower, 2)} ({floor_name}).",
             "above": f"{premium(solved.price)} is at or above the no-arbitrage cap {money(upper, 2)}.",
             "no_time_value": f"{premium(solved.price)} has no time value.",
+            "below_zero_vol": f"{premium(solved.price)} is below the American value at zero vol.",
         }.get(solved.problem, f"No implied vol: {solved.problem}.")
         return (label, MISSING, {"help": md(why)})
 
