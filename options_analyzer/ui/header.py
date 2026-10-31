@@ -54,9 +54,9 @@ SHARE_NOTE = (
     "The link holds the market (the preset, and its valuation time or typed inputs), the contract, the pricing model "
     "and its settings, the open tab, the Strategy tab's template, strikes (by delta or width: shorts, wings, strike "
     "width), expiry, contracts, shares per contract and commission, and, while the Strategy tab is open, its view "
-    "(chart or table, range, Greek strip, units) and the what-if shifts (spot, vol and its mode, date, rate), and, "
-    "shared from the Pricing tab, its view (profile, chain window and stride, Greeks order, diagnostics). Edited "
-    "legs, uploaded quotes and the other settings of a tab stay in this session."
+    "(chart or table, range, Greek strip, units), the what-if shifts (spot, vol and its mode, date, rate), the Risk "
+    "tab's report and its views, and, shared from the Pricing tab, its view (profile, chain window and stride, "
+    "Greeks order, diagnostics). Edited legs, uploaded quotes and the other settings of a tab stay in this session."
 )
 #: The keyboard shortcut of the Methodology button (Streamlit shows Option for Alt on a Mac).
 METHODOLOGY_SHORTCUT = "Alt+Shift+M"

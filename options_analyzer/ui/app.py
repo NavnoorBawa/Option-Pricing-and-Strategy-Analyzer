@@ -282,7 +282,7 @@ def run() -> None:
             tab_strategy.render(inputs)
     if risk.open:
         with risk:
-            tab_risk.render(position)
+            tab_risk.render(position, inputs)
     if surface.open:
         with surface:
             tab_surface.render(inputs)

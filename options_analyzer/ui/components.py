@@ -596,6 +596,7 @@ def table(
     *,
     labels: Mapping[str, str] | None = None,
     digits: Mapping[str, int] | None = None,
+    widths: Mapping[str, Any] | None = None,
     max_rows: int = TABLE_ROWS,
     pin: bool = True,
     **kwargs: Any,
@@ -623,6 +624,9 @@ def table(
         A precision other than the one the kind sets or chooses from the data: whole dollars in a column of fees
         below $1,000, say, or cents in a column of position Greeks that are all below $10 (a one-lot on a $100
         underlying, whose whole-dollar theta would read 0).
+    widths : mapping of str to str or int, optional
+        A column's width (``"small"``, ``"medium"``, ``"large"`` or px), for a text column whose longest entries come
+        late: the grid sizes a column from its first rows, so ``Full revaluation`` under ``Δ`` and ``Γ`` was cut off.
     max_rows : int, default 15
         Rows shown before the table scrolls.
     pin : bool, default True
@@ -675,7 +679,12 @@ def table(
         if kinds[name] in _PERCENT_OF_CERTAINTY and clipped:
             text = f"{text.rstrip()} Above 99.9% shows as 99.9, below 0.1% as 0.1: only an exact 100% or 0% shows so."
         config[name] = col(
-            kinds[name], labels.get(name, str(name)), help=text, digits=places, pinned=True if pin and i == 0 else None
+            kinds[name],
+            labels.get(name, str(name)),
+            help=text,
+            digits=places,
+            pinned=True if pin and i == 0 else None,
+            width=(widths or {}).get(name),
         )
     rows = len(data)
     height: int | str = "content" if rows <= max_rows else table_height(max_rows)

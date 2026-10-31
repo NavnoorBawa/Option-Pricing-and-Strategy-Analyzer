@@ -188,6 +188,9 @@ LINK_WORDS = {
     **dict.fromkeys(("pr_chain_win", "pr_chain_stride"), "chain window and stride"),
     **dict.fromkeys(("pr_greeks", "pr_bsm_ref"), "Greeks order"),
     "pricing_diag": "diagnostics",
+    "report": "the Risk tab's report",
+    **dict.fromkeys(("lad_axis", "lad_roll", "lad_order", "lad_metric"), "its views"),
+    **dict.fromkeys(("sc_grid", "sc_axes", "sc_volmode", "sc_view", "var_model", "vg_axis", "ex_method"), "its views"),
 }
 
 
@@ -221,21 +224,44 @@ NOT_DRAWN: tuple[str, ...] = ()
 def test_the_drawn_modules_are_the_apps():
     drawn = {path.stem for path in _drawn_modules()}
     assert {"streamlit_app", "app", "header", "inputs", "tab_strategy", "tab_surface", "exports"} <= drawn
-    assert "whatif" in drawn  # the what-if strip, drawn by the Strategy tab: its shifts are in the note
+    assert "whatif" in drawn  # the what-if strip, drawn by the Strategy and Risk tabs: its shifts are in the note
 
 
 def _bound_keys() -> set[str]:
-    """The keys of the widgets bound to the URL (``bind="query-params"``) in the modules the app imports."""
+    """The keys of the widgets bound to the URL (``bind="query-params"``) in the modules the app imports. A key that
+    is a parameter of a helper (the Risk tab's ``_segmented(where, label, options, key, ...)``) is read from each
+    call of the helper in its module."""
     keys = set()
     for path in _drawn_modules():
         if path.stem in NOT_DRAWN:
             continue
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            options = {k.arg: k.value for k in getattr(node, "keywords", ())} if isinstance(node, ast.Call) else {}
-            if isinstance(options.get("bind"), ast.Constant) and options["bind"].value == "query-params":
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for function in [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)] + [tree]:
+            for node in ast.walk(function):
+                options = {k.arg: k.value for k in getattr(node, "keywords", ())} if isinstance(node, ast.Call) else {}
+                if not (isinstance(options.get("bind"), ast.Constant) and options["bind"].value == "query-params"):
+                    continue
                 key = options["key"]
-                keys.add(key.value if isinstance(key, ast.Constant) else f"strategy_<{ast.unparse(key.args[0])}>")
+                if isinstance(key, ast.Constant):
+                    keys.add(key.value)
+                elif isinstance(key, ast.Name) and isinstance(function, ast.FunctionDef):
+                    keys |= _helper_keys(tree, function, key.id)
+                elif isinstance(key, ast.Call):
+                    keys.add(f"strategy_<{ast.unparse(key.args[0])}>")
     return keys
+
+
+def _helper_keys(tree: ast.Module, helper: ast.FunctionDef, parameter: str) -> set[str]:
+    """The constant values of ``helper``'s ``parameter`` at every call of ``helper`` in ``tree``."""
+    position = [arg.arg for arg in helper.args.args].index(parameter)
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == helper.name:
+            value = node.args[position] if len(node.args) > position else None
+            value = next((k.value for k in node.keywords if k.arg == parameter), value)
+            assert isinstance(value, ast.Constant), ast.unparse(node)  # a computed key would escape this test
+            found.add(value.value)
+    return found
 
 
 def test_the_share_note_names_everything_the_link_holds():

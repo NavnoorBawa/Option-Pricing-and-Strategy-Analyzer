@@ -301,7 +301,7 @@ def test_card_row_draws_bordered_metrics_in_their_groups():
 ROWS = {
     "pricing_tiles": [["Call", "Put"], ["Straddle", "Vol"], ["Forward", "Time"]],
     "strategy_tiles": [["Net premium", "Package"], ["Max profit", "Max loss"], ["Breakevens", "P(profit)"]],
-    "var_cards": [["VaR 99.0%", "Expected Shortfall 99.0%"], ["Spot-only VaR 99.0%", "Spot-only ES 99.0%"]],
+    "risk_tiles": [["$Δ", "Γ P&L 1%"], ["Vega ($/vp)", "Θ ($/day)"], ["Worst grid", "Worst stress"]],
     "surface_tiles": [["ATMF 30D", "25Δ RR 30D"], ["25Δ BF 30D", "TERM 30→365D"], ["FIT vs ½‑spr (vp)", "ARB"]],
     "iv_tiles": [["IV bid", "IV ask"], ["IV", "Surface"], ["Vega", "Bounds"]],
 }
@@ -344,7 +344,7 @@ def test_the_rows_of_pairs_stay_two_across_on_a_phone(states):
                 layout = (2, None)
             assert layout[0] == 2, (state, row)
             checked.add(row)
-    assert checked == {"strategy_tiles", "var_cards", "surface_tiles"}
+    assert checked == {"strategy_tiles", "risk_tiles", "surface_tiles"}
 
 
 @pytest.mark.parametrize("row", ["pricing_tiles", "iv_tiles"])
@@ -425,7 +425,9 @@ def test_the_card_width_model_covers_every_card_row_in_plex_sans(states):
         label_px = wrapped(metric.label, label) + components._HELP_ICON_PX
         value_width = text(metric.value, medium, value_px)
         # A delta sits in a pill, with its padding on either side.
-        pill = wrapped(metric.proto.delta, delta) + components._DELTA_PADDING_PX if metric.proto.delta else 0.0
+        # (a dollar sign escaped for Markdown shows without its backslash)
+        shown = metric.proto.delta.replace("\\$", "$")
+        pill = wrapped(shown, delta) + components._DELTA_PADDING_PX if shown else 0.0
         return max(value_width, label_px, pill) + components._CARD_CHROME_PX
 
     for at in states.values():

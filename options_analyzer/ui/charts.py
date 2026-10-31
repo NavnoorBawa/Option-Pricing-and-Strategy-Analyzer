@@ -430,12 +430,15 @@ def histogram_chart(
     pdf=None,
     value_text=lambda v: f"{v:,.2f}",
     palette: dict[str, str] | None = None,
+    probability: bool = False,
 ):
     """Histogram from pre-binned counts (keeps the payload small for large samples).
 
     The axis spans the 0.05 % to 99.95 % quantiles and every marker line. Outcomes beyond it are left out of the
     bars rather than piled into the end bins, and a note above the chart says how many there are and how far they go.
-    Densities are relative to the whole sample, so the bars integrate to the share of outcomes shown.
+    Densities are relative to the whole sample, so the bars integrate to the share of outcomes shown. With
+    ``probability`` each bar is instead the share of all outcomes in its bin, in percent (y-axis ``Probability
+    (%)``), which reads without knowing the bin width (the VaR report; a density curve ``pdf`` is then not drawn).
     """
     colors = palette or desk_theme.palette()
     values = np.asarray(values, dtype=float)
@@ -450,6 +453,8 @@ def histogram_chart(
     counts, edges = np.histogram(values[(values >= lo) & (values <= hi)], bins=bins, range=(lo, hi))
     centres = 0.5 * (edges[:-1] + edges[1:])
     density = counts / (values.size * np.diff(edges))
+    if probability:
+        density, pdf = 100.0 * counts / values.size, None
     below, above = int(np.sum(values < lo)), int(np.sum(values > hi))
     outside = []
     if below:
@@ -463,7 +468,9 @@ def histogram_chart(
             marker_color=colors["muted"],
             opacity=0.75,
             name="Simulated",
-            hovertemplate="%{x:,.2f}<br>density %{y:.4g}<extra></extra>",
+            hovertemplate="%{x:,.2f}<br>"
+            + ("probability %{y:.3g}%" if probability else "density %{y:.4g}")
+            + "<extra></extra>",
         )
     )
     if pdf is not None:
@@ -475,7 +482,7 @@ def histogram_chart(
     for rank, (x, label, color) in enumerate(sorted(lines, key=lambda line: line[0])):
         position = "top" if len(lines) == 1 else ("top left" if rank == 0 else "top right")
         _vline(fig, x, label, colors, dash="dash", position=position, color=color)
-    fig = apply_layout(fig, None, x_title, "Density", palette=colors)
+    fig = apply_layout(fig, None, x_title, "Probability (%)" if probability else "Density", palette=colors)
     fig.update_layout(bargap=0.02, hovermode="closest")
     if outside:
         # A small note above the marker labels, where it cannot cover the bars or the lines: one short line per

@@ -16,12 +16,15 @@ is the highest close of each quarter, so its shock is the ratio of two spikes, a
 calm 15% goes to 41%, not to the Fed's 72%. Those implied-vol shocks are one-month shocks, damped for longer
 tenors by $(T/\text{1M})^{-0.25}$ by default, since long-dated volatility moves much less than one-month
 volatility in a crisis; hypothetical IV shocks and the heatmap apply literally to every leg.
-The spot × date grid, the time-decay curves and the position-Greek profiles move the spot in standard
-deviations $\sigma\sqrt{T}$ of the log price at the front expiry, so their range follows the volatility and
-the time left. Under the time-decay curves the one-day decay by repricing stands beside theta / 365 (see
-Conventions), and the theta profile draws it dashed beside theta / 365 at each date: the position's value a calendar
-day after the date minus its value on the date, at every spot of the axis. Within a few days of expiry the two can
-part a long way in either direction.
+The Risk tab's desk grid moves spot by −10 % to +10 % and every leg's vol by −10 to +10 vol points (or, by
+choice, by a share of each leg's vol, or of one-month vol damped by tenor), at a trading date chosen in sessions;
+its spot × date grid has the trading dates from the valuation date to the front expiry. The illustrative
+portfolio-margin grid follows FINRA Rule 4210(g): ten equidistant spot moves over the product class's range
+(−8 % to +6 % for a high-capitalisation broad-based index such as SPX, ±10 % for another broad-based index, ±15 % for
+an equity or a narrow-based index, 4210(g)(2)(F)), vols unchanged, and the greater of the largest loss and the
+minimum of \$0.375 times the multiplier a contract (4210(g)(7)(B)). It has no offsets between product groups and
+no house add-ons: it is not a broker's requirement. The ladder's Θ is ∂V/∂t ÷ 365 at fixed vols; where it misstates
+a day's decay by more than 10 % (within days of expiry) the Θ tile gives the day's decay by repricing instead.
 
 ### Value-at-Risk and Expected Shortfall
 Full revaluation on simulated spot and implied-vol paths:
@@ -50,7 +53,7 @@ $|\Delta| S \sigma \sqrt{h/252}\, z_\alpha$, with Normal returns, is shown for c
 statistics. It leaves out the position's gamma, its time decay over the horizon, its vega (with implied-vol
 moves on) and the fatter tails of Student-t returns, or of GARCH returns beyond one day.
 
-The table also gives the delta-gamma-theta VaR and ES, the analytic comparator: exact for the P&L of today's
+The report also gives the delta-gamma-theta VaR and ES, the analytic comparator: exact for the P&L of today's
 position Greeks to second order in the spot move $x$ and first order in time,
 ${\theta h/252 + \Delta x + \tfrac12\Gamma x^2}$, with $\theta$ per year and $x$ Normal with mean zero and standard
 deviation ${s = S\sigma\sqrt{h/252}}$. Completing the square, this is
@@ -60,7 +63,8 @@ for long gamma and the upper tail for short gamma; ES integrates the same distri
 ${3 \times 10^{-13}}$ of the P&L's size in tests against 50-digit mpmath. At ${\Gamma = 0}$ it is the delta-normal
 VaR minus the time decay ${\theta h/252}$, and it moves there continuously as ${\Gamma \to 0}$. Its gap to the full
 revaluation shows the spot risk beyond gamma, how the time decay and gamma change as expiry nears, the legs that
-expire within the horizon, the vega and the fatter tails. On the 45-day straddle above with implied vol frozen, the
+expire within the horizon, the vega and the fatter tails. The VaR report's Non-linearity tile takes it against
+the spot-only VaR, implied vol frozen in both, so that it leaves the vega out. On the 45-day straddle above with implied vol frozen, the
 one-day 99 % VaR is \$2,882 delta-gamma-theta and \$2,833 by full revaluation (\$1,016 delta-normal). On ten
 strategy templates, at least one of each kind (30 days, spot 100, volatility 20 %, 400,000 paths), the one-day gap
 is at most 3.2 %; on a put ratio backspread it is 10 %, since its gamma grows as the spot falls towards its two long
@@ -70,7 +74,7 @@ its worst outcome, where ${\theta h/252}$ says \$221, and the 99 % VaR is \$372 
 delta-gamma-theta.
 
 ### Backtesting
-The backtests are in the library (`options_analyzer/backtest.py`); the Risk tab does not run them yet. A VaR model
+The backtests are in the library (`options_analyzer/backtest.py`); the Risk tab does not run them. A VaR model
 is judged by its exceptions, the days whose loss exceeds the VaR. Kupiec's (1995) likelihood ratio tests their rate,
 with the exact binomial p-value beside the chi-square one; Christoffersen's (1998) Markov test asks whether they come
 in clusters; and the Basel traffic light of MAR32 counts them: in 250 days at 99 %, 0 to 4 exceptions are green
@@ -101,7 +105,7 @@ last 500 days with Hull and White's (1998) volatility scaling 17 (green); over t
 to 25.
 
 ### P&L explain
-The library explains the P&L of a market move in two ways; the Risk tab does not show them yet. The P&L is the
+The library explains the P&L of a market move in two ways, both in the Risk tab's Explain report. The P&L is the
 full revaluation: each leg's value at the new spot, implied vols and rate after the time elapsed, minus its value
 today. The Greek waterfall splits it into the terms of a Taylor expansion around today's market, with today's
 Greeks, the spot move $\delta S$, each leg's vol shift $\delta\sigma$, the rate shift $\delta r$ and the time

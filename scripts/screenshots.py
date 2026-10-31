@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TABS = {
     "pricing": ("Pricing", "sensitivity_chart"),
     "strategy": ("Strategy", "payoff_chart"),
-    "risk": ("Risk", "var_hist"),
+    "risk": ("Risk", "ladder_chart"),
     "surface": ("Surface", "surf_iv"),
     "iv": ("IV", "iv_curve"),
 }

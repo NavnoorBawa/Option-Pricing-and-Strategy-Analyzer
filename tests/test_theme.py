@@ -824,7 +824,7 @@ _RUNNING = "document.querySelector('[data-test-script-state]')?.getAttribute('da
 TAB_READY = {
     "Pricing": ".st-key-pricing_tiles",
     "Strategy": ".st-key-strategy_tiles",
-    "Risk": ".st-key-var_cards",
+    "Risk": ".st-key-risk_tiles",
     "Surface": ".st-key-surface_tiles",
     "IV": ".st-key-iv_tiles",
     "Methodology": ".st-key-methodology",
@@ -886,7 +886,7 @@ _CARD_VALUES = """() => {
 CARD_ROW_TABS = {
     "pricing_tiles": "Pricing",
     "strategy_tiles": "Strategy",
-    "var_cards": "Risk",
+    "risk_tiles": "Risk",
     "surface_tiles": "Surface",
     "iv_tiles": "IV",
 }
@@ -971,7 +971,7 @@ def test_card_rows_line_up(chromium, app_url, width, query):
     # out of its card's content box. Every value is at the theme's full size but the Strategy tiles' on the
     # narrowest phones (their package market and breakevens set every tile's width: 20.0 px at 360 px, 22.3 at 390,
     # tests/test_app_components.py), and on a line of three cards no label takes more than two lines. The rows of
-    # two pairs (the VaR row among them: implied vol moving, and frozen) go 2 + 2, the six tiles 2 + 2 + 2.
+    # two pairs go 2 + 2, the Strategy and Risk tabs' six tiles 2 + 2 + 2.
     # (The subgrid and stretch rules of ui/components.py depend on Streamlit's DOM: the bordered stMetric box, the
     # padded box inside it and the element container around it.)
     page = _open(chromium, f"{app_url}/?asof={ASOF}{query}", "light", width)
@@ -1002,9 +1002,13 @@ def test_card_rows_line_up(chromium, app_url, width, query):
                 # set it at the card's right edge then: 46 to 54 px after "Call ITM probability" at 360-375 px).
                 if card["iconGap"] is not None:
                     assert 0 <= card["iconGap"] <= 8 and card["iconOnLastLine"], (key, card)
-        assert [len(line) for line in _lines(rows["var_cards"])] == [2, 2]
         assert [len(line) for line in _lines(rows["strategy_tiles"])] == [2, 2, 2]
-        if width < 1440:  # the Surface tiles: three pairs, a pair per line at these widths (six across at 1,440)
+        # The Risk tab's six tiles in three pairs wrap by whole pairs: 2 + 2 + 2 on a phone (and, measured, at 1,024 px
+        # with the sidebar open), one line of six on a 1,440 px window (tests/test_risk_e2e.py).
+        tile_lines = [len(line) for line in _lines(rows["risk_tiles"])]
+        assert sum(tile_lines) == 6 and all(n % 2 == 0 for n in tile_lines), tile_lines
+        if width < 1440:  # the Risk and Surface tiles: three pairs, a pair per line at these widths
+            assert tile_lines == [2, 2, 2]
             assert [len(line) for line in _lines(rows["surface_tiles"])] == [2, 2, 2]
     finally:
         page.close()
@@ -1052,7 +1056,7 @@ def test_the_pricing_tiles_deltas_are_never_cut_off(chromium, app_url, width):
 
 
 #: A chart that each tab draws (the key given to charts.show), and the number of charts it draws, at the default URL.
-TAB_CHART = {"Pricing": ("pricing_profile", 1), "Strategy": ("payoff_chart", 1), "Risk": ("var_hist", 6),
+TAB_CHART = {"Pricing": ("pricing_profile", 1), "Strategy": ("payoff_chart", 1), "Risk": ("ladder_chart", 1),
              "Surface": ("chart_smile", 1), "IV": ("iv_price", 1), "Methodology": (None, 0)}  # fmt: skip
 
 
@@ -1086,12 +1090,12 @@ def test_a_click_on_a_tab_runs_that_tab_and_puts_it_in_the_link(chromium, app_ur
         _tab(page, "Risk")
         assert _query(page) == {"preset": ["Textbook"], "contracts": ["3"], "tab": ["Risk"]}
         analysed = "Long 1 × 100 Call, Short 1 × 110 Call · 3 × 100 multiplier"
-        assert analysed in page.get_by_text("Analysing").inner_text()
+        assert analysed in page.locator(".st-key-risk_position").inner_text()
         link = _open(chromium, page.url, "light", 1440)
         try:
-            link.locator(".st-key-var_hist [data-testid=stPlotlyChart]").wait_for(state="visible", timeout=60_000)
+            link.locator(".st-key-ladder_chart [data-testid=stPlotlyChart]").wait_for(state="visible", timeout=60_000)
             assert link.locator("[role=tab][aria-selected=true]").inner_text().strip() == "Risk"
-            assert analysed in link.get_by_text("Analysing").inner_text()
+            assert analysed in link.locator(".st-key-risk_position").inner_text()
         finally:
             link.close()
     finally:
@@ -1108,10 +1112,10 @@ def test_a_hand_typed_link_opens_the_tab_and_template_it_names(chromium, app_url
     plain.close()
     page = _open(chromium, f"{app_url}/?tab=risk&strategy=Iron+Condor&preset=Textbook", "light", 1440)
     try:
-        page.locator(".st-key-var_hist [data-testid=stPlotlyChart]").wait_for(state="visible", timeout=120_000)
+        page.locator(".st-key-ladder_chart [data-testid=stPlotlyChart]").wait_for(state="visible", timeout=120_000)
         assert page.locator("[role=tab][aria-selected=true]").inner_text().strip() == "Risk"
         condor = "Iron Condor — Long 1 × 80 Put, Short 1 × 90 Put, Short 1 × 110 Call, Long 1 × 120 Call"
-        assert condor in page.get_by_text("Analysing").inner_text()
+        assert condor in page.locator(".st-key-risk_position").inner_text()
         assert _query(page) == {"tab": ["Risk"], "preset": ["Textbook"], "strategy": ["Range-bound · Iron Condor"]}
         assert page.evaluate("history.length") == entries + 1
         assert not page.locator("[data-testid=stAlertContentWarning]").count()
@@ -1157,7 +1161,7 @@ def test_a_leg_edit_is_kept_when_another_tab_is_clicked_before_enter(chromium, a
         )
         _tab(page, tab)
         if tab == "Risk":
-            assert "Long 3 × 100 Call, Short 1 × 110 Call" in page.get_by_text("Analysing").inner_text()
+            assert "Long 3 × 100 Call, Short 1 × 110 Call" in page.locator(".st-key-risk_position").inner_text()
         _tab(page, "Strategy")
         assert _net_premium(page) == "$2,531"  # 3 x $10.4506 - $6.0401, for 100 shares
     finally:
@@ -1465,7 +1469,7 @@ def test_the_share_link_reopens_this_view(chromium, app_url):
         other = chromium.new_page(viewport={"width": 1440, "height": 900})
         try:
             other.goto(link)
-            other.wait_for_selector("[role=tabpanel] .st-key-var_cards", timeout=120_000)
+            other.wait_for_selector("[role=tabpanel] .st-key-risk_tiles", timeout=120_000)
             ticker = other.locator(".st-key-desk_identity p").inner_text()
             assert "S 101.00 · K 100.00 · " in ticker.replace("\xa0", " ")
         finally:
