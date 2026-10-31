@@ -348,7 +348,7 @@ def payoff_figure(
             col=1,
         )
         _hline(fig, 2, dict(color=colors["rule"], width=charts.REFERENCE_WIDTH))
-        fig.update_yaxes(title_text=title, row=2, col=1, nticks=3)
+        fig.update_yaxes(title_text=title, row=2, col=1, nticks=3, tickformat=",.0f")
     height = PNL_HEIGHT + (STRIP_HEIGHT if strip is not None else 0)
     charts.style(fig, colors, height)
     # Headroom above the curves for the two lines of labels at the plot's top (strikes; then the note, S and F).

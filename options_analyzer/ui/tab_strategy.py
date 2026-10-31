@@ -443,13 +443,14 @@ def controls(inputs: Inputs) -> None:
     name = _name(label)
     uses_width = name != CUSTOM and strat.TEMPLATES[name].uses_width
     if index:
-        by = bar.segmented_control(
+        # A menu rather than a segmented control: in a row of menus its label and box line up with theirs (a segmented
+        # control is 6 px shorter, so its label sat 6 px lower in the bottom-aligned row).
+        by = bar.selectbox(
             "Strikes by",
             [BY_DELTA, BY_WIDTH],
-            default=BY_DELTA,
-            required=True,
             key="strategy_strikes_by",
             bind="query-params",
+            width=100,
             disabled=not uses_width,
             help="Δ: the short strikes are the listed strikes whose own delta, at their own surface vol, is nearest "
             "the target; wings sit the set number of points beyond them (structures with legs at the money centre "
@@ -1596,6 +1597,7 @@ def _blotter(ctx, inputs, choice, state, frame, editor_key, book, profile) -> No
             column_order=columns,
             column_config=_editor_config(index, published),
             row_height=32,
+            placeholder="",  # a blank cell follows the surface, the mid or the sidebar (its help says which)
         )
         state.update(edited=lg.frame(edited.to_dict("records")), edits=copy.deepcopy(st.session_state.get(editor_key)))
         st.button(

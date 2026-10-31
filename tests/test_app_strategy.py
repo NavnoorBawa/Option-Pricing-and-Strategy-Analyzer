@@ -542,7 +542,7 @@ def test_the_builder_sets_the_shorts_wings_and_expiry_and_the_link_keeps_them():
     again = _index(strategy_expiry="2026-11-20 AM", strategy_short_delta=25, strategy_wing_pts=50)
     assert _legs(again) == _legs(at)
     # Strikes by width: ATMF ± n × the width, snapped to listed strikes.
-    at.segmented_control(key="strategy_strikes_by").set_value("Width").run()
+    at.selectbox(key="strategy_strikes_by").set_value("Width").run()
     at.number_input(key="strategy_width_pct").set_value(2.0).run()
     _ok(at)
     assert len({leg[2] for leg in _legs(at)}) == 4
