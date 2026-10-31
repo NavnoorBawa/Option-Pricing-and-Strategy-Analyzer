@@ -65,6 +65,7 @@ The numbers a desk would have caught first (docs/improvement-guide.md section 2)
 | Monte Carlo 95 % interval with about 10 / 30 / 100 paths on the scarce side | Shown; covered 87.8 % / 92.2 % / 94.0 % | Withheld with the reason below 300 such paths |
 | Synthetic SPX chain (spot 5,000) read with the Treasury rate and no dividend yield | Sidebar carry for every expiry: forwards 142 bp off; 49 quotes dropped as outside the no-arbitrage bounds; 62 calendar and 49 butterfly arbitrage points in the fit | Parity forwards and the arbitrage-free SVI fit: forwards within 0.22 bp, at-the-money vols within 0.0064 vol point, no quote dropped, no arbitrage, every fitted vol inside its bid/ask |
 | 200 random noisy arbitrage-free surfaces, arbitrage left after the fit | Not constrained | None; no expiry's RMSE more than 8.6 % above its unconstrained fit |
+| Local vol at listed monthly expiries, noise-free SSVI quotes, largest error | 2.1 vol points at the front (secants between expiries) | 0.10 vol point (dw/dT from the smiles' scaling), with a per-maturity error estimate |
 | Tree decay against the closed form (501 steps, σ 20 %, strikes 80–120, 2 days to 10 years) | Not shown | Leisen–Reimer within 4.0e-6; Cox–Ross–Rubinstein within 1.5 % (interpolated trees; the same steps were off by 8.5 %) |
 
 ## Free-resources ledger

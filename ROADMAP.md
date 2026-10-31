@@ -59,6 +59,11 @@ an independent adversarial check before it merged:
   (item 4).
 - Monte Carlo intervals withheld below 300 paths on the scarce side of the strike or 5,000 independent samples, with
   the coverage study as binomial tests (item 5; the reliability part of PR-6).
+- Local volatility's dw/dT from how each smile scales with its at-the-money variance, with a bracketed three-slice
+  end formula and a per-maturity truncation-error estimate (item 6): on noise-free SSVI quotes at listed monthly
+  expiries the largest local-vol error falls from 2.1 to 0.10 vol point (weekly front 3.4 to 0.45, quarterly 1.6 to
+  0.03). The last expiry is still worse than secants on 8 of 52 random four-expiry grids and, by 0.05 vol point, on
+  the synthetic index chain; the Methodology states it.
 
 ## Remaining
 

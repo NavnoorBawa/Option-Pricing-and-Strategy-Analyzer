@@ -82,7 +82,9 @@ built from.
 - Surfaces from quotes as a desk builds them: each expiry's forward and discount factor from put–call parity (a
   weighted fit of C − P = DF·(F − K) near the money, outliers trimmed), prices inverted with Black-76 at them, and an
   SVI smile per expiry fitted to the bid/ask with spread weights and held free of butterfly and calendar arbitrage,
-  its wings within Lee's moment bound; then local volatility with Gatheral's formula. On the synthetic SPX chain the
+  its wings within Lee's moment bound; then local volatility with Gatheral's formula, its time derivative taken from
+  how each smile scales with its at-the-money variance (0.1 vol point from the truth on noise-free quotes at listed
+  monthly expiries, where secants between expiries were 2 points off) and its truncation error reported. On the synthetic SPX chain the
   forwards come back within 0.22 bp and the at-the-money vols within 0.0064 vol point, every fitted vol inside its
   bid/ask. Arbitrage in the quotes themselves is reported, and an expiry that cannot be fitted without it says so.
 - Parametric SSVI surfaces as a worked example.
