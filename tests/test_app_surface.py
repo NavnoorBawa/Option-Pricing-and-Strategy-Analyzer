@@ -387,6 +387,22 @@ def test_ssvi_atm_vols_follow_the_sidebar_volatility(app):
 # --- Uploads ----------------------------------------------------------------------------------------------------------
 
 
+def test_the_empty_upload_state_lists_the_layouts_and_offers_the_synthetic_chain(new_app):
+    """UI spec 3.4's empty state: the uploader, the accepted layouts one line each, a Use synthetic button and tiles
+    that read –."""
+    at = new_app(preset=None, asof=ASOF, tab="Surface").run()
+    at.segmented_control(key="surface_source").set_value(tab_surface.QUOTES).run()
+    _ok(at)
+    text = next(m.value for m in at.markdown if m.value.startswith(":small[Upload a chain:"))
+    assert text.count("\n- ") == len(tab_surface.LAYOUTS) + 1 == 4
+    assert at.file_uploader(key="quotes_file") is not None
+    assert {m.label: m.value for m in at.metric if m.label in ("ATMF 30D", "ARB")} == {"ATMF 30D": "–", "ARB": "–"}
+    at.button(key="surface_use_synthetic").click().run()
+    _ok(at)
+    assert at.segmented_control(key="surface_source").value == tab_surface.CHAIN
+    assert _metric(at, "ATMF 30D").value == "15.38%"
+
+
 def test_an_uploaded_chain_is_screened_quote_by_quote_and_not_published(new_app):
     """A chain in the app's long layout (read_chain), at another level: parity gives its spot and forwards, the screen
     reconciles, and the other tabs keep the synthetic chain."""

@@ -76,15 +76,16 @@ FIT_LABEL = "FIT vs ½‑spr (vp)"
 #: The tiles' constant maturities, in calendar days.
 TILE_DAYS, TERM_DAYS = 30, 365
 VOL_LIMITS = (0.5, 500.0)
-#: The chain layouts an upload is read in (``market_data.read_chain``), one line each for the empty state.
+#: The chain layouts an upload is read in (``market_data.read_chain``), one line each for the empty state (UI spec
+#: 3.4; run together as one paragraph they took three lines of 1,000 px that no one could scan).
 LAYOUTS = (
-    "the app's long layout: symbol or root, expiry, type, strike, bid, ask (settlement and vendor_iv optional);",
-    "a yfinance export of option_chain() calls and puts, stacked, with contractSymbol, bid, ask;",
-    "Cboe's delayed-quotes download, calls left and puts right of the strike;",
+    "The app's long layout: symbol or root, expiry, type, strike, bid, ask (settlement and vendor_iv optional).",
+    "A yfinance export of option_chain() calls and puts, stacked, with contractSymbol, bid, ask.",
+    "Cboe's delayed-quotes download: calls left and puts right of the strike.",
 )
 #: Or the older table of quotes: one row per strike and expiry with an implied vol or prices.
 QUOTES_LAYOUT = (
-    "or a table with Strike, Days (or Maturity in years) and ImpliedVol, or prices (Price, or Bid and Ask) with a "
+    "A table of quotes: Strike, Days (or Maturity in years) and ImpliedVol, or prices (Price, or Bid and Ask) with a "
     "call/put Type."
 )
 #: The footer: what the fit is, in one line.
@@ -709,7 +710,8 @@ def _data_panel(inputs: Inputs) -> Shown | None:
         kept = st.session_state.get("quotes_upload")
         upload = _uploader(panel, compact=kept is not None)
         if upload is None:
-            panel.markdown(":small[Upload a chain: " + " ".join(LAYOUTS) + " " + QUOTES_LAYOUT + "]")
+            lines = "\n".join(f"- :small[{line}]" for line in (*LAYOUTS, QUOTES_LAYOUT))
+            panel.markdown(f":small[Upload a chain: a CSV file in one of these layouts.]\n{lines}")
             if inputs.context is not None:
                 panel.button("Use synthetic", key="surface_use_synthetic", on_click=_use_synthetic)
             return None
