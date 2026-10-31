@@ -47,6 +47,7 @@ from .format import (
     money,
     money_short,
     number,
+    pct,
     right_aligned,
     session_label,
     signed,
@@ -83,6 +84,8 @@ VAR_MODELS: dict[str, tuple[str, bool]] = {
 #: tests/test_backtest.py's acceptance 7, seed 0): a 45-day at-the-money short straddle struck again at every close,
 #: 2,020 days at 99% (20.2 exceptions expected), 5,000 paths a day. Exceptions and Basel zone, with implied-vol moves
 #: at the default dynamics and with implied vol frozen. Synthetic-history statistics: the report tags them SYN HIST.
+#: The GARCH parameters' input format: three decimals (α 0.090, β 0.900).
+GARCH_FORMAT = "%.3f"
 SYN_BACKTEST_DAYS, SYN_BACKTEST_EXPECTED = 2_020, 20.2
 SYN_BACKTEST = {True: (31, "amber"), False: (50, "red")}
 
@@ -213,10 +216,20 @@ def grid_cell_text(value: float, bound: float) -> str:
     return "0" if text.strip("0.,") == "" else text
 
 
+def plain(value: float, most: int = 4) -> str:
+    """``value`` with the fewest decimals that write it, at most ``most``, grouped: a contract multiplier, a VIX close
+    or a model parameter as typed.
+
+    >>> plain(100.0), plain(26.4), plain(0.5), plain(2020.0)
+    ('100', '26.4', '0.5', '2,020')
+    """
+    return number(value, next((d for d in range(most + 1) if abs(value - round(value, d)) < 1e-9), most))
+
+
 def level_label(value: float) -> str:
     """A spot level on a grid axis: whole points from 1,000 (``5,655``, ``5,426`` for 5,426.22) and when whole, else
     two decimals (``97.50``)."""
-    return f"{value:,.0f}" if abs(value) >= 1000 or abs(value - round(value)) < 1e-9 else f"{value:,.2f}"
+    return number(value, 0 if abs(value) >= 1000 or abs(value - round(value)) < 1e-9 else 2)
 
 
 def spot_label(spot: float, change: float) -> str:
@@ -370,6 +383,7 @@ class Tiles:
     implied_move: float
     worst_grid: float
     worst_grid_at: str
+    worst_grid_ties: int
     worst_stress: float
     worst_stress_name: str
 
@@ -386,7 +400,7 @@ def tiles(book: Book) -> Tiles:
     implied = whatif.leg_vol(book.atm_vol(tau), tau, book.shifts) / math.sqrt(365.0)
     days = next_session_days(book.scenario_time())
     grid = desk_grid(book)
-    i, j = np.unravel_index(int(np.argmin(grid)), grid.shape)
+    i, j, ties = charts_risk.worst_cell(grid)  # as the Scenarios heatmap outlines it
     stress = worst_stress(book)
     return Tiles(
         dollar_delta=pr.dollar_delta,
@@ -404,6 +418,7 @@ def tiles(book: Book) -> Tiles:
         implied_move=implied,
         worst_grid=float(grid[i, j]),
         worst_grid_at=f"{shock_label(DESK_SPOT[j] / 100)} · {vol_label(DESK_VOL['vp'][i], 'vp')}",
+        worst_grid_ties=ties,
         worst_stress=float(stress["P&L"]),
         worst_stress_name=str(stress["Scenario"]),
     )
@@ -423,12 +438,12 @@ def _tile_cards(book: Book, t: Tiles) -> list[Card]:
         units_line = futures_equiv(t.delta, carry_factor=factor)
         units_help = (
             f" In index futures: {units_line}, {futures_equiv(t.delta, carry_factor=factor, contract='MES')}, at "
-            f"the {date_text(expiry)} contract's forward over spot, {factor:.5f} ($50 and $5 a point)."
+            f"the {date_text(expiry)} contract's forward over spot, {number(factor, 5)} ($50 and $5 a point)."
         )
     else:
         units_line = f"{signed(t.delta, 0 if abs(t.delta) >= 100 else 2)} sh"
         units_help = ""
-    be = MISSING if t.breakeven_move is None else f"{t.breakeven_move:.2%}"
+    be = MISSING if t.breakeven_move is None else pct(t.breakeven_move)
     ns = whatif.scenario_time(book.scenario_time(), 1)
     return [
         _card(
@@ -457,8 +472,8 @@ def _tile_cards(book: Book, t: Tiles) -> list[Card]:
             dollars(t.theta),
             f"∂V/∂t ÷ 365 at fixed vols: {exact(t.theta)} a calendar day. BE: the breakeven daily move that "
             f"½Γ pays for, 1% × √(|Θ| ÷ |Γ P&L 1%|) = {be}, against the implied daily move σ ATMF ÷ √365 = "
-            f"{t.implied_move:.2%} ({MISSING} when Θ and Γ have one sign). To the next session ({date_text(ns.date())} "
-            f"{ns:%H:%M}) by full revaluation: {exact(t.next_session)}; over one calendar day: "
+            f"{pct(t.implied_move)} ({MISSING} when Θ and Γ have one sign). To the next session "
+            f"({date_text(ns.date())} {ns:%H:%M}) by full revaluation: {exact(t.next_session)}; over one calendar day: "
             f"{exact(t.one_day)}.",
             # "BE", not the spec's "BE move": with it the six tiles need 1,162 px and wrap 3 + 3 in the 1,038 px main
             # column of a 1,440 px window with the sidebar open; with "BE" they need 964 px (components._card_width).
@@ -466,25 +481,31 @@ def _tile_cards(book: Book, t: Tiles) -> list[Card]:
             # the day's decay by repricing instead.
             f"{decay_label(t.expiring)} {dollars(t.one_day)}"
             if decay_leads(t.theta, t.one_day, t.expiring)
-            else f"BE {be} vs {t.implied_move:.2%}"
+            else f"BE {be} vs {pct(t.implied_move)}"
             if t.breakeven_move is not None
             # Θ and Γ of one sign (a long-dated spread whose carry outweighs its decay): no move pays for the day, and
             # "BE – vs 1.05%" read as a missing number.
-            else f"{t.implied_move:.2%} implied move",
+            else f"{pct(t.implied_move)} implied move",
         ),
         _card(
             "Worst grid",
             dollars(t.worst_grid),
             f"The worst cell of today's desk grid (9 spot moves × 7 vol shocks in vp, now): "
-            f"{exact(t.worst_grid)}. Today's market, whatever the what-if: the grid is where a scenario is "
-            "picked (Scenarios report).",
+            f"{exact(t.worst_grid)}"
+            + (
+                f", one of {t.worst_grid_ties} cells equal to the dollar: the one with the smallest spot move"
+                if t.worst_grid_ties > 1
+                else ""
+            )
+            + ". Today's market, whatever the what-if: the grid is where a scenario is picked (Scenarios report).",
             t.worst_grid_at,
         ),
         _card(
             "Worst stress",
             dollars(t.worst_stress),
             f"The worst of {len(ALL_STRESSES)} named stresses at the what-if state, instantaneous, one-month vol "
-            f"shocks damped by tenor: {t.worst_stress_name}, {exact(t.worst_stress)} (Stress report).",
+            f"shocks damped by tenor: {t.worst_stress_name}, {exact(t.worst_stress)} (Stress report). A stress "
+            "revalues today with its rate shock, so it can pass the max loss at expiry.",
             t.worst_stress_name.split(" (")[0],
         ),
     ]
@@ -519,7 +540,9 @@ def position_line(book: Book, inputs: Inputs, max_loss: float) -> str:
     """The context line (UI spec 3.3 item 1): the position, its legs' expiries, its size and its maximum loss at the
     front expiry; with a scenario, the what-if P&L against today."""
     loss = "Unlimited" if math.isinf(max_loss) else dollars(-max_loss) if max_loss > 0 else "none"
-    parts = [book.position.describe(), expiry_text(book, inputs), md(f"max loss {loss}")]
+    # "at expiry": a stress revalues today, with its rate shock, and can lose more (the iron condor's GFC stress,
+    # −$4,550 with r cut below zero, against a max loss of −$4,548 at expiry and today's rates).
+    parts = [book.position.describe(), expiry_text(book, inputs), md(f"max loss at expiry {loss}")]
     if book.shifts.active:
         today = float(strat.position_value(book.position.strategy, book.position.market))
         now = float(strat.position_value(book.strategy, book.market))
@@ -619,10 +642,13 @@ def ladder_frame(book: Book, axis: str = "%", roll: str = "Today", second: bool 
         roll_days=roll_days,
         multiplier=book.units,
     )
+    # The zero row is "now" only without a roll; rolled, it is the decay to that date (−$65 to Mon 26-Oct-26 on the
+    # default call spread at ASOF), so it names the date.
+    zero = "0 · now" if not roll_days else f"0 · {date_text((book.scenario_time() + timedelta(days=roll_days)).date())}"
     moves = []
     for shock, change in zip(frame["shock"], frame["spot_change"], strict=True):
         text = f"{signed(shock, 1 if shock % 1 else 0)}σ · {signed(100 * change, 2)}%" if sigma else shock_label(change)
-        moves.append("0 · now" if not shock else text)
+        moves.append(zero if not shock else text)
     table_frame = pd.DataFrame(
         {
             "Spot": frame["spot"],
@@ -653,7 +679,8 @@ LADDER_KINDS = {
 }
 LADDER_HELP = {
     "Spot": "Spot after the move.",
-    "Move": "The spot move: percent, or daily standard deviations σ·√(1/365) at the leg vol. 0 · now: no move.",
+    "Move": "The spot move: percent, or daily standard deviations σ·√(1/365) at the leg vol. 0 · now: no move; "
+    "rolled, 0 · the date rolled to.",
     "P&L": "Full revaluation against the value now (at the what-if state), after the roll.",
     "$Δ": "Δ × S at the moved spot ($).",
     "Γ P&L 1%": "½Γ(0.01·S)² at the moved spot ($).",
@@ -799,7 +826,7 @@ def _scenarios(book: Book) -> None:
         st.markdown(
             md(
                 f"Requirement (illustrative, not a broker's): {money(result.requirement, 0)}, the greater of {loss} "
-                f"and the minimum of $0.375 × {book.position.multiplier:g} a contract, {money(result.minimum, 2)} "
+                f"and the minimum of $0.375 × {plain(book.position.multiplier)} a contract, {money(result.minimum, 2)} "
                 f"(FINRA 4210(g)(7)(B))."
             )
         )
@@ -827,7 +854,9 @@ def _scenarios(book: Book) -> None:
             session_label(at, whatif.session_dates(book.as_of.date(), last)[at]),
             0,
             last,
-            0,
+            # No default (the minimum, T+0): with one, resetting the key above logged that the widget "was created
+            # with a default value but also had its value set via the Session State API".
+            None,
             format="T+%d",
             key="sc_date",
             persist_state="session",
@@ -857,6 +886,7 @@ def _scenarios(book: Book) -> None:
                 y_title,
                 text=grid_cell_text,
                 customdata=custom,
+                centre=None if axes_name == GRID_AXES[0] else (0, len(spots) // 2),  # Spot × Date: the earliest
                 current=current,
             ),
             key=key,
@@ -902,7 +932,7 @@ def stress_frame(
     records = []
     for sc, row in zip(chosen, rows, strict=True):
         source = (
-            f"{sc.vol_index} {sc.vol_start:g}→{sc.vol_end:g}"
+            f"{sc.vol_index} {plain(sc.vol_start)}→{plain(sc.vol_end)}"
             if sc.vol_index
             else ("custom" if sc is custom else "hypothetical")
         )
@@ -917,18 +947,19 @@ def stress_frame(
                 "P&L": row["P&L"],
             }
         )
-    frame = pd.DataFrame(records, columns=["Scenario", "Source", "Spot", "1M vol", "Rate", "Days", "P&L"])
+    # P&L second and Source last: on a 390 px phone the first three columns show, and P&L sat seventh, off-screen.
+    frame = pd.DataFrame(records, columns=["Scenario", "P&L", "Spot", "1M vol", "Rate", "Days", "Source"])
     return frame.sort_values("P&L", kind="stable").reset_index(drop=True)
 
 
 STRESS_KINDS = {
     "Scenario": "text",
-    "Source": "text",
+    "P&L": "pnl",
     "Spot": "share",
     "1M vol": "vol_change",
     "Rate": "bp",
     "Days": "days",
-    "P&L": "pnl",
+    "Source": "text",
 }
 
 
@@ -989,8 +1020,8 @@ def _stress(book: Book) -> None:
         key="stress_damp",
         persist_state="session",
         help="Historical and Fed shocks move one-month (VIX-like) vol; a leg of tenor τ longer than a month moves by "
-        f"the shock × (1M/τ) to the power {scenarios.DEFAULT_VOL_TENOR_DECAY:g}. Hypothetical shocks apply to every "
-        "leg as written.",
+        f"the shock × (1M/τ) to the power {plain(scenarios.DEFAULT_VOL_TENOR_DECAY)}. Hypothetical shocks apply to "
+        "every leg as written.",
     )
 
 
@@ -1026,16 +1057,16 @@ def _var(book: Book) -> None:
     with row.popover("Advanced"):
         horizon = st.number_input("Horizon (trading days)", 1, 60, 1, 1, key="var_horizon", persist_state="session")
         paths = st.select_slider(
-            "Simulations", PATH_CHOICES, value=100_000, format_func=lambda n: f"{n:,}", key="var_paths",
+            "Simulations", PATH_CHOICES, value=100_000, format_func=lambda n: number(n, 0), key="var_paths",
             persist_state="session",
         )  # fmt: skip
         seed = st.number_input("Random seed", 0, 2**32 - 1, 7, 1, key="var_seed", persist_state="session")
         dof = st.slider("Student-t ν", 3, 30, 5, key="var_dof", persist_state="session", help="Lower: fatter tails.")
         alpha = st.number_input(
-            "GARCH α", 0.0, 0.5, 0.09, 0.01, format="%.3f", key="garch_alpha", persist_state="session"
+            "GARCH α", 0.0, 0.5, 0.09, 0.01, format=GARCH_FORMAT, key="garch_alpha", persist_state="session"
         )
         beta = st.number_input(
-            "GARCH β", 0.0, 0.999, 0.90, 0.01, format="%.3f", key="garch_beta", persist_state="session"
+            "GARCH β", 0.0, 0.999, 0.90, 0.01, format=GARCH_FORMAT, key="garch_beta", persist_state="session"
         )
     try:
         config = risk.VaRConfig(
@@ -1066,7 +1097,17 @@ def _var(book: Book) -> None:
     var, es = risk.tail_measures(result.pnl, VAR_CONFIDENCE)[0], risk.tail_measures(result.pnl, ES_CONFIDENCE)[1]
     spot_var, spot_es = spot_only.var, risk.tail_measures(spot_only.pnl, ES_CONFIDENCE)[1]
     greeks = strat.position_greeks(book.strategy, book.market)
-    dg = result.delta_gamma
+    # The expansion in today's Greeks says nothing past a leg's expiry: a 3-day 100/110 textbook call spread at a 5D
+    # horizon read "DGT VaR −$91.46" beside a full VaR of −$39.80, the whole debit, which is all it can lose. When a
+    # leg settles within the horizon the comparator, its gap and the delta-normal VaR read – and their help says why.
+    settles = result.settled_legs > 0
+    no_expansion = (
+        f"; – here: {result.settled_legs} leg(s) settle within the {int(horizon)}-day horizon, past which an "
+        "expansion in today's Greeks does not reach"
+        if settles
+        else ""
+    )
+    dg = None if settles else result.delta_gamma
     dg_es = None
     if dg is not None:
         dg_es = risk.delta_gamma_var(
@@ -1076,7 +1117,7 @@ def _var(book: Book) -> None:
             int(horizon),
             ES_CONFIDENCE,
         ).expected_shortfall
-    basis = f"{model} Monte Carlo, {int(paths):,} paths, seed {int(seed)}"
+    basis = f"{model} Monte Carlo, {number(int(paths), 0)} paths, seed {int(seed)}"
     vol_text = "spot and implied vol moving" if with_vol else "implied vol frozen"
     ci = 2 if abs(var) < 1000 else 0  # the interval to the cent on a small position (−$54.30: −$54.08 to −$54.55)
     # The cards compare amounts a few dollars apart: on the textbook contract the VaR read −$54 beside a spot-only
@@ -1126,7 +1167,7 @@ def _var(book: Book) -> None:
             MISSING if dg is None else -dg.var,
             "Exact VaR of Δ·x + ½Γ·x² + Θ·h for a Normal spot move at the leg vol, implied vol frozen (the analytic "
             f"comparator): {MISSING if dg is None else exact(-dg.var)}; its ES 97.5%: "
-            f"{MISSING if dg_es is None else exact(-dg_es)}.",
+            f"{MISSING if dg_es is None else exact(-dg_es)}{no_expansion}.",
             cents=cents,
         ),
         _var_card(
@@ -1134,8 +1175,8 @@ def _var(book: Book) -> None:
             MISSING if gap is None else gap,
             f"{comparator}, both as P&L and both with implied vol frozen: negative when the full revaluation loses "
             "more than the second-order expansion (spot beyond gamma, decay as expiry nears, legs that expire within "
-            "the horizon, the model's fatter tails).",
-            f"spot only {MINUS} DGT" if with_vol else None,
+            f"the horizon, the model's fatter tails){no_expansion}.",
+            f"spot only {MINUS} DGT" if with_vol and gap is not None else None,
         ),
     ]
     # Pairs, VaR beside its ES: the full simulation, its spot-only twin (with implied vol moving), then the analytic
@@ -1146,14 +1187,15 @@ def _var(book: Book) -> None:
     pairs = ("var_cards_full", "var_cards_spot", "var_cards_comparator")
     card_row("var_cards", pairs if with_vol else pairs[::2], cards)
     left, right = st.columns([1, 2], gap="medium")
+    decimals = 2 if cents else 0  # the cards' precision: "−$55" beside a DGT VaR of −$55.50 read as a gap
     stats = pd.DataFrame(
         [
-            ("Mean P&L", money(result.mean, 0, True)),
-            ("Std dev", money(result.std, 0)),
+            ("Mean P&L", money(result.mean, decimals, True)),
+            ("Std dev", money(result.std, decimals)),
             ("Skewness", MISSING if np.isnan(result.skewness) else number(result.skewness, 2)),
             ("Excess kurtosis", MISSING if np.isnan(result.excess_kurtosis) else number(result.excess_kurtosis, 2)),
-            ("Worst path", money(result.worst, 0, True)),
-            ("Delta-normal VaR 99%", money(-result.delta_normal_var, 0, True)),
+            ("Worst path", money(result.worst, decimals, True)),
+            ("Delta-normal VaR 99%", MISSING if settles else money(-result.delta_normal_var, decimals, True)),
         ],
         columns=["Statistic", "Value"],
     )
@@ -1175,20 +1217,21 @@ def _var(book: Book) -> None:
         fig, key="var_hist", alt=f"Histogram of the simulated P&L ($) over {h} with the VaR and ES", container=right
     )
     settled = f" {result.settled_legs} leg(s) settle before the horizon." if result.settled_legs else ""
-    st.caption(f"{basis}; vol of vol {100 * config.vol_of_vol:g}%, correlation {signed(corr)}.{settled}")
+    st.caption(f"{basis}; vol of vol {plain(100 * config.vol_of_vol)}%, correlation {signed(corr)}.{settled}")
     # No statistic above comes from a history: the models simulate from the leg vol. The one backtest quoted, of the
     # Normal model on the RK-4 synthetic history, is a synthetic-history statistic and says so (spec 3.3, VaR).
     default_dynamics = config.vol_of_vol == INDEX_VOL_OF_VOL and math.isclose(corr, INDEX_SPOT_VOL_CORRELATION)
-    if model == "Normal" and (default_dynamics or not with_vol):
+    # The quoted backtest is of the 1-day VaR 99%: at a longer horizon the same model is not the one backtested.
+    if model == "Normal" and int(horizon) == 1 and (default_dynamics or not with_vol):
         exceptions, zone = SYN_BACKTEST[with_vol]
         st.caption(
-            f"SYN HIST · This model on {SYN_BACKTEST_DAYS:,} synthetic days of a short straddle: {exceptions} "
-            f"exceptions at 99% vs {SYN_BACKTEST_EXPECTED:g} expected, {zone} (Methodology, Risk)"
+            f"SYN HIST · This model on {number(SYN_BACKTEST_DAYS, 0)} synthetic days of a short straddle: {exceptions} "
+            f"exceptions at 99% vs {plain(SYN_BACKTEST_EXPECTED)} expected, {zone} (Methodology, Risk)"
         )
     else:
         st.caption(
-            "SYN HIST · Not backtested with this model and vol dynamics; the Normal model's backtest is in "
-            "Methodology, Risk, Backtesting"
+            "SYN HIST · Not backtested with this model, horizon and vol dynamics; the Normal model's 1-day backtest "
+            "is in Methodology, Risk, Backtesting"
         )
 
 
@@ -1248,6 +1291,8 @@ def _vega(book: Book) -> None:
     )
     cells = frame.set_index("Expiry")
     shown = cells.loc[[i for i in cells.index if i != "Total" and (cells.loc[i].abs() > 1e-9).any()]]
+    # The table keeps the buckets the heatmap draws and the total: a one-expiry position listed nine rows of zeros.
+    frame = frame[frame["Expiry"].isin([*shown.index, "Total"])].reset_index(drop=True)
     shown = shown.drop(columns="Total")
     if not shown.empty:
         charts.show(
@@ -1266,7 +1311,7 @@ def _vega(book: Book) -> None:
             alt="Vega ($ per vol point) by expiry bucket and strike bucket",
         )
     kinds = {"Expiry": "text"} | dict.fromkeys(frame.columns[1:], "vega")
-    helps = {"Expiry": "Expiry bucket by calendar days to expiry (right-closed)."} | {
+    helps = {"Expiry": "Expiry bucket by calendar days to expiry (right-closed); empty buckets are left out."} | {
         c: f"Vega ($/vp) of the legs in the {c} strike bucket." for c in frame.columns[1:]
     }
     helps["Total"] = "Vega ($/vp) of the expiry bucket."
@@ -1324,10 +1369,12 @@ def _explain(book: Book) -> None:
     method = _segmented(row, "Method", ("Taylor", "Shapley"), "ex_method", "Greek waterfall, or an exact split.")
     move = explain_target(book, target)
     if move is None:
-        # The what-if with every shift at zero has no move to explain: the report explains the next session instead
-        # of opening empty, and says so.
-        move = explain_target(book, NEXT_SESSION)
-        st.caption("No what-if shift is set: this explains the move to the next session's close, nothing else moving.")
+        # The what-if with every shift at zero has no move to explain. The next session explained nothing either:
+        # every term $0.00 but Θ, and nothing unexplained by construction. The worst stress (the tile's) moves spot,
+        # vol and rate at once, so the report opens on an attribution, and says so.
+        worst = worst_stress(book)["Scenario"]
+        move = explain_target(book, worst)
+        st.caption(f"No what-if shift is set: this explains the worst stress, {worst}, as the Worst stress tile does.")
     args = (book.position.strategy, book.position.market)
     taylor = attribution.taylor_explain(*args, multiplier=book.units, **move)
     shapley = attribution.shapley_explain(*args, multiplier=book.units, **move)
@@ -1354,7 +1401,7 @@ def _explain(book: Book) -> None:
             key="tbl_explain",
         )
     # attribution's quality: |unexplained| over the P&L, floored at a tenth of the terms' gross (0 is a perfect fit).
-    share = MISSING if not math.isfinite(taylor.quality) else f"{taylor.quality:.1%} of the P&L"
+    share = MISSING if not math.isfinite(taylor.quality) else f"{pct(taylor.quality, 1)} of the P&L"
     st.caption(
         md(
             f"Taylor leaves {dollars(taylor.unexplained)} unexplained ({share}); Shapley splits "
@@ -1417,7 +1464,7 @@ def render(position: Position | None, inputs: Inputs) -> None:
     vols = "the contract's surface vol" if inputs.context is not None else "the sidebar vol"
     st.caption(
         f"Full revaluation · BSM European legs at {vol(position.market.volatility)} ({vols}) · sticky strike · "
-        f"{len(position.strategy.legs)} legs · {position.contracts} × {position.multiplier:g}"
+        f"{len(position.strategy.legs)} legs · {position.contracts} × {plain(position.multiplier)}"
     )
     if inputs.model.kind != "bsm":  # a tree, Monte Carlo or the American engine prices the cards above
         st.caption("Every number on this tab is BSM on European legs, whatever the sidebar pricing model.")

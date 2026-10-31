@@ -215,9 +215,15 @@ def test_the_worst_grid_and_worst_stress_tiles(index):
         for x in tab_risk.DESK_SPOT
         for dv in tab_risk.DESK_VOL["vp"]
     }
-    (x, dv), worst = min(grid.items(), key=lambda item: item[1])
+    worst = min(grid.values())
     assert tiles["Worst grid"].value == tab_risk.dollars(worst) == "−$4,096"
+    # Of the cells equal to it to the dollar (−10% and −7.5% at −10 vp), the one nearest the no-move cell: the
+    # smallest spot move that reaches the loss, not the first in row order.
+    ties = [cell for cell, value in grid.items() if round(value) == round(worst)]
+    x, dv = min(ties, key=lambda cell: (abs(cell[0]), abs(cell[1])))
+    assert len(ties) == 2 and (x, dv) == (-7.5, -10.0)
     assert tiles["Worst grid"].delta == f"{tab_risk.shock_label(x / 100)} · {tab_risk.vol_label(dv, 'vp')}"
+    assert "one of 2 cells equal to the dollar" in tiles["Worst grid"].help
     stresses = {}
     for sc in tab_risk.ALL_STRESSES:
         damp = min(1.0, (index.t / (30 / 365)) ** -0.25) if sc.one_month_vol_shock else 1.0
@@ -237,7 +243,7 @@ def test_the_position_line_names_legs_expiry_size_and_max_loss(index):
     premium = _book(index.s, index.t, index.r, index.q, index.vol)
     assert line == (
         "**Bull Call Spread** — Long 1 × 5,815 Call, Short 1 × 5,915 Call · 1 × 100 multiplier · "
-        f"20‑Nov‑26 AM (27d 17h) · max loss −\\${premium:,.0f}"
+        f"20‑Nov‑26 AM (27d 17h) · max loss at expiry −\\${premium:,.0f}"
     )
     textbook = next(m.value for m in _risk(preset="Textbook").markdown if "max loss" in m.value)
     assert "· 365d ·" in textbook  # the textbook market counts days, not dates
@@ -266,8 +272,11 @@ def test_the_ladder_zero_row_equals_the_tiles_and_rolls_to_the_next_session(inde
     assert zero["P&L"] == 0
     for column, label in (("$Δ", "$Δ"), ("Γ P&L 1%", "Γ P&L 1%"), ("Vega", "Vega ($/vp)"), ("Θ", "Θ ($/day)")):
         assert f"{zero[column]:,.0f}" == tiles[label].value.replace("$", "").lstrip("+").replace("−", "-"), column
+    assert zero["Move"] == "0 · now"
     rolled = _frame(_risk(lad_roll="Next session"), "Move")
     zero = rolled[rolled["Move"].str.startswith("0")].iloc[0]
+    assert zero["Move"] == "0 · 26-Oct-26"  # Friday 16:00 to Monday 16:00: "now" read as no decay
+    assert _frame(_risk(lad_roll="+1w"), "Move")["Move"].str.fullmatch("0 · 30-Oct-26").any()
     decay = _book(index.s, index.t - 3 / 365, index.r, index.q, index.vol) - _book(
         index.s, index.t, index.r, index.q, index.vol
     )
@@ -336,16 +345,25 @@ def test_the_stress_table_is_sorted_worst_first_with_readable_labels():
     assert table["P&L"].is_monotonic_increasing
     assert len(table) == len(tab_risk.ALL_STRESSES)
     assert "IV damped" not in table.columns and "IV shock damped" not in table.columns
-    assert set(table.columns) == {"Scenario", "Source", "Spot", "1M vol", "Rate", "Days", "P&L"}
-    bars = _chart(at, "stress_chart")["data"][0]
+    # P&L second, Source last: a phone shows the first three columns, and P&L sat seventh, off-screen.
+    assert list(table.columns) == ["Scenario", "P&L", "Spot", "1M vol", "Rate", "Days", "Source"]
+    chart = _chart(at, "stress_chart")
+    bars = chart["data"][0]
     assert list(bars["y"]) == table["Scenario"].tolist()
     # Each amount in the column right of the plot, in the bars' order, signed with U+2212, whole dollars from $100:
     # on the bars they were clipped or ran over the scenario names on a phone (tests/test_risk_e2e.py measures it).
-    notes = _chart(at, "stress_chart")["layout"]["annotations"]
+    notes = chart["layout"]["annotations"]
+    amounts = [n for n in notes if n["xanchor"] == "right"]
     pnl = table["P&L"].to_numpy(float)
-    assert [n["y"] for n in notes] == table["Scenario"].tolist()
-    assert [n["text"] for n in notes] == [signed(v, 0 if abs(v) >= 100 else 2, "$") for v in pnl]
-    assert all(n["xref"] == "paper" and n["x"] == 1.0 and n["xanchor"] == "right" for n in notes)
+    assert [n["y"] for n in amounts] == table["Scenario"].tolist()
+    assert [n["text"] for n in amounts] == [signed(v, 0 if abs(v) >= 100 else 2, "$") for v in pnl]
+    assert all(n["xref"] == "paper" and n["x"] == 1.0 for n in amounts)
+    # Each name above its bar at the plot's left edge, not as a tick label left of the plot: on a phone the tick
+    # labels took 150 px and left the bars about 70.
+    names = [n for n in notes if n["xanchor"] == "left"]
+    assert [(n["y"], n["text"]) for n in names] == [(name, name) for name in table["Scenario"]]
+    assert all(n["x"] == 0.0 and n["yshift"] > 0 for n in names)
+    assert chart["layout"]["yaxis"]["showticklabels"] is False
     assert "text" not in bars
 
 
@@ -444,6 +462,46 @@ def _array(value) -> np.ndarray:
     return np.asarray(value, dtype=float)
 
 
+def test_legs_that_settle_within_the_horizon_are_counted_and_leave_no_expansion():
+    # A 1-day textbook call spread settles on day 1, the horizon itself: the caption counts its two legs (ported
+    # from the earlier Risk tab's test). Two days out (1.38 trading days) it outlives the horizon.
+    at = _risk(report="VaR", preset="Textbook", days=1)
+    basis = next(c.value for c in at.caption if "Monte Carlo" in c.value)
+    assert basis.endswith(" 2 leg(s) settle before the horizon.")
+    assert not any("settle before" in c.value for c in _risk(report="VaR", preset="Textbook", days=2).caption)
+    # A 3-day spread at a 5-day horizon: the expansion in today's Greeks is evaluated past expiry, where it read
+    # "DGT VaR −$91.46" beside a full VaR of −$39.80 (the whole debit). The comparator, its gap and the
+    # delta-normal VaR read – and say why.
+    at = _risk(report="VaR", preset="Textbook", days=3)
+    at.number_input(key="var_horizon").set_value(5).run(timeout=240)
+    cards = {m.label: m for m in _ok(at).metric}
+    assert cards["DGT VaR 99% 5D"].value == "–" and cards["Non-linearity"].value == "–"
+    assert "2 leg(s) settle within the 5-day horizon" in cards["DGT VaR 99% 5D"].help
+    stats = next(t.value for t in at.table if "Statistic" in t.value.columns).set_index("Statistic")["Value"]
+    assert stats["Delta-normal VaR 99%"] == "–" and cards["VaR 99% 5D · MC"].value == stats["Worst path"]
+    assert cards["Non-linearity"].delta is None or cards["Non-linearity"].delta == ""
+
+
+def test_the_quoted_backtest_is_the_one_day_var_only():
+    # The Methodology's backtest is of the 1-day VaR 99%: at five days the same model is not the one backtested
+    # (it read "This model on 2,020 synthetic days: 31 exceptions" beside a 5D VaR).
+    at = _risk(report="VaR", preset="Textbook")
+    assert "This model on 2,020 synthetic days" in next(c.value for c in at.caption if "SYN HIST" in c.value)
+    at.number_input(key="var_horizon").set_value(5).run(timeout=240)
+    assert "Not backtested with this model, horizon" in next(c.value for c in _ok(at).caption if "SYN HIST" in c.value)
+
+
+def test_the_ladder_chart_has_a_tick_on_the_loss_side():
+    # Plotly's own step was 5,000 for P&L from −$4,096 to +$5,871: no tick below zero, no loss readable.
+    at = _risk()
+    ladder = _frame(at, "Move")
+    yaxis = _chart(at, "ladder_chart")["layout"]["yaxis"]
+    ticks = yaxis["tickvals"]
+    assert ladder["P&L"].min() < 0 and min(ticks) < 0 < max(ticks)
+    assert min(ticks) >= ladder["P&L"].min() and max(ticks) <= ladder["P&L"].max()
+    assert yaxis["tickformat"] == ",.0f"
+
+
 def test_small_var_cards_are_to_the_cent_and_add_up_on_screen():
     # The textbook contract's VaR is about $55: whole dollars read −$54 beside a spot-only −$55 and "+$0.58 vs spot
     # only". Below $1,000 the six cards are to the cent and each gap is the difference of two amounts shown.
@@ -488,7 +546,8 @@ def test_the_vega_report_buckets_add_up_to_the_vega_tile():
     table = _frame(at, "Expiry")
     total = table[table["Expiry"] == "Total"]["Total"].iloc[0]
     assert f"{total:+,.0f}" == _tiles(at)["Vega ($/vp)"].value.replace("$", "")
-    assert table["Expiry"].tolist()[:3] == ["≤ 7d", "7–14d", "14–30d"]
+    # Only the buckets the heatmap draws, and the total: the 20-Nov legs listed nine rows of zeros around them.
+    assert table["Expiry"].tolist() == ["14–30d", "Total"]
     assert list(table.columns) == ["Expiry", "10Δp", "25Δp", "ATM", "25Δc", "10Δc", "Total"]
     # The 20-Nov legs (27.7 days) sit in 14-30d: the long 5,815 at the money, the short 5,915 in 25Δc.
     row = table[table["Expiry"] == "14–30d"].iloc[0]
@@ -507,19 +566,26 @@ def test_the_explain_report_explains_the_what_if_move(index):
     assert terms.sum() == pytest.approx(full, abs=len(terms) * 0.5)  # each row rounded to the dollar
     shapley = _frame(_risk(report="Explain", ws=-2, wv=3, wd=5, ex_method="Shapley"), "Term")
     assert shapley["Term"].tolist() == ["Spot", "Vol", "Time", "Rate", "Full revaluation"]
-    # No shift set: the what-if has nothing to explain, so the report explains the next session (Friday 16:00 to
-    # Monday 16:00, three calendar days, nothing else moving) and says so.
+    # With a total of $1,000 or more the waterfall's labels are in whole dollars, as the table is.
+    labels = [label for label in _chart(at, "explain_waterfall")["data"][0]["text"] if label]
+    assert abs(full) >= 1000 and all(re.fullmatch(r"[+−]\$[\d,]+", label) for label in labels), labels
+    # No shift set: the what-if has nothing to explain, and the next session explained nothing either (every term
+    # $0.00 but Θ). The report explains the worst stress, the tile's, and says so.
     quiet = _risk(report="Explain")
-    assert any(c.value.startswith("No what-if shift is set") for c in quiet.caption)
-    decay = _book(index.s, index.t - 3 / 365, index.r, index.q, index.vol) - _book(
-        index.s, index.t, index.r, index.q, index.vol
+    today = _book(index.s, index.t, index.r, index.q, index.vol)
+    stresses = {}
+    for sc in tab_risk.ALL_STRESSES:
+        damp = min(1.0, (index.t / (30 / 365)) ** -0.25) if sc.one_month_vol_shock else 1.0
+        vol = index.vol * (1 + (sc.vol_multiplier - 1) * damp)
+        stresses[sc.name] = (
+            _book(index.s * (1 + sc.spot_change), index.t, index.r + sc.rate_change, index.q, vol) - today
+        )
+    name, loss = min(stresses.items(), key=lambda item: item[1])
+    assert f"No what-if shift is set: this explains the worst stress, {name}," in " ".join(
+        c.value for c in quiet.caption
     )
     full = _frame(quiet, "Term").set_index("Term").loc["Full revaluation", "P&L"]
-    assert full == pytest.approx(decay, abs=0.005)  # the column's cents
-    # Only time moves, so every other term is zero and carries no label; the time decay by repricing is exact.
-    labels = _chart(quiet, "explain_waterfall")["data"][0]["text"]
-    assert decay < 0 and [label for label in labels if label] == [f"−${-decay:.2f}"] * 2  # Θ and the total
-    assert any("unexplained (0.0% of the P&L)" in c.value for c in quiet.caption)
+    assert full == pytest.approx(loss, abs=0.5)  # the column's whole dollars
 
 
 @pytest.mark.parametrize("report", tab_risk.REPORTS)
