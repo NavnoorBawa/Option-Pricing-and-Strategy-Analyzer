@@ -1344,3 +1344,5 @@ def render(position: Position | None, inputs: Inputs) -> None:
         f"Full revaluation · BSM European legs at {vol(position.market.volatility)} ({vols}) · sticky strike · "
         f"{len(position.strategy.legs)} legs · {position.contracts} × {position.multiplier:g}"
     )
+    if inputs.model.kind != "bsm":  # a tree, Monte Carlo or the American engine prices the cards above
+        st.caption("Every number on this tab is BSM on European legs, whatever the sidebar pricing model.")
