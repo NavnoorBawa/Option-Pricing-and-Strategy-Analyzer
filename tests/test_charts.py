@@ -126,7 +126,8 @@ def test_legends_under_the_plot_sit_at_the_bottom_of_the_figure():
 def test_plotly_config():
     config = charts.PLOTLY_CONFIG
     assert config["displaylogo"] is False
-    assert config["displayModeBar"] == "hover"
+    # Plotly's default "hover" (UI spec 2.7 item 10): not repeated; the stylesheet hides the toolbar on touch screens.
+    assert "displayModeBar" not in config
     assert {"lasso2d", "select2d", "autoScale2d"} <= set(config["modeBarButtonsToRemove"])
     assert config["toImageButtonOptions"]["format"] == "svg"
 
@@ -135,6 +136,12 @@ def test_show_draws_with_the_desk_config(monkeypatch):
     calls = []
 
     class Container:
+        def __init__(self, parent=None, **options):
+            self.parent, self.options = parent, options
+
+        def container(self, **options):
+            return Container(self, **options)
+
         def plotly_chart(self, fig, **kwargs):
             calls.append((self, fig, kwargs))
             return "element"
@@ -146,7 +153,10 @@ def test_show_draws_with_the_desk_config(monkeypatch):
     column = Container()
     charts.show(fig, key="heatmap_call", alt="Call value heatmap", container=column, width=420, theme=None)
     (where1, fig1, kw1), (where2, _, kw2) = calls
-    assert where1 is default and fig1 is fig and where2 is column
+    assert where1.parent is default and fig1 is fig and where2.parent is column
+    # Each chart in its own keyed container (the stylesheet's touch-screen hook), as wide as a chart of fixed width.
+    assert where1.options == {"key": "chart_payoff_chart", "width": "stretch"}
+    assert where2.options == {"key": "chart_heatmap_call", "width": 420}
     assert kw1["key"] == "payoff_chart" and kw1["theme"] == "streamlit"
     assert kw1["alt"] == "Position P&L against the underlying price" and kw2["alt"] == "Call value heatmap"
     assert kw1["config"]["displaylogo"] is False
@@ -207,7 +217,8 @@ def test_builders_use_only_the_tokens_of_their_palette(palette, other):
         assert _colours(fig) <= allowed, (name, _colours(fig) - allowed)
     payoff = _builders(palette)["payoff"]
     fills = [t.fillcolor for t in payoff.data if t.fill == "tozeroy"]
-    assert fills == [charts.translucent(palette["profit"], 0.18), charts.translucent(palette["loss"], 0.18)]
+    assert theme.FILL_OPACITY == 0.10  # UI spec 2.7 item 5: at 0.18 the loss fill dominated the chart
+    assert fills == [charts.translucent(palette["profit"], 0.10), charts.translucent(palette["loss"], 0.10)]
     assert not {other["profit"], other["loss"]} & _colours(payoff)
 
 

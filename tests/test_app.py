@@ -134,7 +134,7 @@ def test_every_chart_has_the_desk_config_and_a_description(new_app):
         for chart in charts:
             key = chart.proto.id.rsplit("-", 1)[-1]
             config = json.loads(chart.proto.config)
-            assert config["displaylogo"] is False and config["displayModeBar"] == "hover", key
+            assert config["displaylogo"] is False and "displayModeBar" not in config, key
             assert config["toImageButtonOptions"] == {"format": "svg", "filename": f"options-analyzer-{key}"}, key
             assert chart.proto.theme == "streamlit", key
             assert len(chart.proto.alt) >= 20 and not chart.proto.alt[0].islower(), (key, chart.proto.alt)

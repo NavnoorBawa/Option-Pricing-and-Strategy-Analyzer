@@ -14,7 +14,7 @@ import streamlit as st
 
 from .. import black_scholes as bs
 from .. import strategies as strat
-from . import cache, charts
+from . import cache, charts, exports
 from .components import Card, card_row, current_key, link_match
 from .format import (
     DECAY_SWITCH,
@@ -25,6 +25,7 @@ from .format import (
     money_short,
     number,
     number_short,
+    probability_text,  # moved to the number standard; the card's basis tag waits for the tab's redesign
     shown_decimals,
     signed,
 )
@@ -591,7 +592,7 @@ def render(inputs: Inputs) -> None:
     _valuation_note(inputs, position.strategy)
     risk_neutral = st.session_state["risk_neutral"]
     drift = inputs.rate if risk_neutral else st.session_state["drift"] / 100.0
-    _analysis(position, drift, st.session_state["carry"])
+    _analysis(position, drift, st.session_state["carry"], exports.provenance(inputs, model="BSM · European legs"))
 
 
 def _is_sidebar_contract(leg: strat.Leg, inputs: Inputs) -> bool:
@@ -685,19 +686,6 @@ def price_decimals(value: float, most: int = 8) -> int:
         if abs(round(value, decimals) - value) <= 1e-9 * max(1.0, abs(value)):
             return decimals
     return most
-
-
-def probability_text(p: float, sure: bool = False, never: bool = False) -> str:
-    """Probability of profit with one decimal, never rounded to a certainty the payoff does not have.
-
-    ``sure`` says the position cannot lose and ``never`` that it cannot profit. Otherwise a probability that
-    rounds (or saturates in floating point) to 100 % or 0 % is shown as ``>99.9%`` or ``<0.1%``.
-    """
-    if p >= 0.9995 and not sure:
-        return ">99.9%"
-    if p <= 0.0005 and not never:
-        return "<0.1%"
-    return f"{p:.1%}"
 
 
 def premium_label(cost: float) -> str:
@@ -843,7 +831,7 @@ def payoff_range(spot: float, strikes, median: float, sigma_t: float) -> tuple[f
     return max(lo, 0.0), min(hi, 3.0 * high)
 
 
-def _analysis(position: Position, drift: float, carry: bool) -> None:
+def _analysis(position: Position, drift: float, carry: bool, provenance: exports.Provenance) -> None:
     strategy, market, units = position.strategy, position.market, position.units
     metrics = strat.analyze(strategy, market, drift, carry)
     front_days = metrics.horizon * 365
@@ -993,8 +981,8 @@ def _analysis(position: Position, drift: float, carry: bool) -> None:
     profile = pd.DataFrame({"Underlying price": spots} | {name: values for values, name, _, _ in curves})
     st.download_button(
         "Download P&L profile (CSV)",
-        profile.to_csv(index=False).encode(),
-        f"{strategy.name.lower().replace(' ', '_')}_pnl.csv",
+        exports.builder(exports.csv, profile, provenance),
+        provenance.file_name(f"{strategy.name.lower().replace(' ', '_')}_pnl", "csv"),
         "text/csv",
         on_click="ignore",
         icon=":material/download:",

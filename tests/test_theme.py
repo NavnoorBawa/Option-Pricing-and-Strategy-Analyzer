@@ -189,8 +189,8 @@ def test_desk_theme_settings():
     assert CONFIG["client"]["toolbarMode"] == "viewer"  # no Deploy button
     assert CONFIG["server"]["enableStaticServing"] is True
     expected = {
-        "dark": ("#E8A33D", "#0B0F16", "#141A24", "#E6EAF2", "#232C3A", "#0E131B"),
-        "light": ("#9E5F00", "#FCFCFD", "#F1F4F8", "#0E1726", "#D5DBE3", "#F5F7FA"),
+        "dark": ("#6DA6EE", "#0B0F16", "#141A24", "#E6EAF2", "#232C3A", "#0E131B"),
+        "light": ("#2061B1", "#FCFCFD", "#F1F4F8", "#0E1726", "#D5DBE3", "#F5F7FA"),
     }
     for kind, (primary, background, secondary, text, border, sidebar) in expected.items():
         cfg = _mode(kind)
@@ -226,8 +226,72 @@ def test_every_option_is_known_to_the_installed_streamlit():
     assert "paddingTop" not in THEME and "paddingBottom" not in THEME  # Streamlit 1.66 and later only
 
 
+def test_the_primary_colour_is_the_link_colour_and_amber_is_user_state():
+    # UI spec 2.6, UI-22: with primaryColor = yellowColor every selected pill, slider and tab underline was amber, so
+    # amber could not mean "the user changed this". The primary colour is now the link blue of each mode; amber
+    # (yellowColor) is left to the OVERRIDE, FIT and MARKS chips and the what-if scenario.
+    for kind in theme.MODES:
+        cfg = _mode(kind)
+        assert cfg["primaryColor"] == cfg["linkColor"] == theme.PRIMARY[kind], kind
+        assert cfg["yellowColor"] == theme.AMBER[kind] != cfg["primaryColor"], kind
+        backgrounds = (cfg["backgroundColor"], cfg["secondaryBackgroundColor"], *cfg["sidebar"].values())
+        assert min(contrast(cfg["primaryColor"], bg) for bg in backgrounds) >= 4.5, kind
+        assert delta_e(cfg["primaryColor"], cfg["yellowColor"]) > 20, kind  # blue and amber never read alike
+    # The contrast figures of the spec (2.6), from this file's own validator.
+    assert contrast("#6DA6EE", "#0B0F16") == pytest.approx(7.62, abs=0.005)
+    assert contrast("#2061B1", "#FCFCFD") == pytest.approx(6.01, abs=0.005)
+
+
+def test_input_borders_have_three_to_one_contrast():
+    # WCAG 1.4.11: an input's boundary needs 3:1 against what is next to it. The theme's borderColor, which every
+    # card and table also draws, is 1.36:1 in both modes; the desk stylesheet gives inputs #5B6577, which is 3.27:1
+    # on the dark background (3.17:1 on the dark sidebar) and 5.73:1 on the light one.
+    assert theme.INPUT_BORDER == "#5B6577"
+    for kind in theme.MODES:
+        cfg = _mode(kind)
+        assert contrast(cfg["borderColor"], cfg["backgroundColor"]) == pytest.approx(1.36, abs=0.005)
+        for page in (cfg["backgroundColor"], cfg["sidebar"]["backgroundColor"]):
+            assert contrast(theme.INPUT_BORDER, page) >= 3, (kind, page)
+    assert contrast("#5B6577", "#0B0F16") == pytest.approx(3.27, abs=0.005)
+    assert contrast("#5B6577", "#FCFCFD") == pytest.approx(5.73, abs=0.005)
+    [(prelude, body)] = [rule for rule in _desk_rules() if theme.INPUT_BORDER in rule[1]]
+    assert body == f"border-color: {theme.INPUT_BORDER};"
+    for testid in ("stNumberInputContainer", "stDateTimeInputField", "stSelectbox", "stMultiSelect"):
+        assert testid in prelude, testid
+    assert prelude.endswith(":not(:focus-within, :has(input:disabled))")  # focus: the primary; disabled: hairline
+
+
+def test_user_state_draws_an_amber_rule():
+    # UI spec 2.3 and 3.2: the typed vol over the surface's and a what-if scenario, each with an amber left rule in
+    # the amber of its mode; nothing else in the stylesheet is amber.
+    rule = _declarations(".st-key-vol_override, .st-key-whatif:has(.st-key-whatif_scenario)")
+    assert rule["border-left"] == f"3px solid light-dark({theme.AMBER['light']}, {theme.AMBER['dark']})"
+    amber = [prelude for prelude, body in _desk_rules() if any(c in body for c in theme.AMBER.values())]
+    assert amber == [".st-key-vol_override, .st-key-whatif:has(.st-key-whatif_scenario)"]
+
+
+def test_a_slow_rerun_fades_the_open_tab_only():
+    # UI spec 2.10: no cue under 300 ms, then the tab body at 45% until replaced; the header and sidebar never fade.
+    tab = _declarations(".st-key-tab [data-testid='stElementContainer'][data-stale='true']")
+    assert tab == {"opacity": "0.45", "transition": "opacity 0s 300ms"}
+    assert _declarations("[data-testid='stElementContainer'][data-stale='true']") == {
+        "opacity": "1",
+        "transition": "none",
+    }
+
+
+def test_chart_toolbars_are_hidden_on_touch_screens():
+    # UI spec 2.7 item 10: the config no longer names displayModeBar (its "hover" is Plotly's default, which a touch
+    # screen turns into "always"); the stylesheet hides the toolbars inside each chart's chart_<key> container.
+    css = re.sub(r"/\*.*?\*/", "", theme.STYLESHEET.read_text(encoding="utf-8"), flags=re.DOTALL)
+    [block] = re.findall(r"@media \(hover: none\) \{(.*?)\n\}", css, flags=re.DOTALL)
+    [(prelude, body)] = _css_rules(block)
+    assert prelude == "[class*='st-key-chart_'] :is(.modebar-container, [data-testid='stElementToolbar'])"
+    assert body == "display: none;"
+
+
 def test_no_primary_buttons():
-    # Streamlit writes white text on the primary colour, only 2.16:1 on the amber of the dark theme.
+    # Streamlit writes white text on the primary colour, only 2.52:1 on the link blue of the dark theme.
     pattern = re.compile(r"""type\s*=\s*["']primary["']""")
     offenders = [p.name for p in (ROOT / "options_analyzer").rglob("*.py") if pattern.search(p.read_text("utf-8"))]
     assert not offenders
@@ -247,7 +311,7 @@ def test_text_on_the_primary_colour_is_legible():
     assert theme.ON_PRIMARY["dark"] == _mode("dark")["backgroundColor"]
     assert theme.ON_PRIMARY["light"] == "#FFFFFF"  # Streamlit's own colour, kept where it is legible
     # The desk stylesheet's rule: the selectors of ON_PRIMARY_SELECTORS, the colours of ON_PRIMARY.
-    [(selectors, declarations)] = [rule for rule in _desk_rules() if "light-dark(" in rule[1]]
+    [(selectors, declarations)] = [rule for rule in _desk_rules() if rule[1].startswith("color: light-dark(")]
     assert _selectors(selectors) == list(theme.ON_PRIMARY_SELECTORS)
     assert declarations == f"color: light-dark({theme.ON_PRIMARY['light']}, {theme.ON_PRIMARY['dark']});"
     # Every widget the app uses that Streamlit fills with the primary colour and writes white on is covered.
@@ -274,16 +338,26 @@ def test_apply_stylesheet_sends_the_desk_stylesheet(monkeypatch):
 DESK_TESTIDS = {
     "stApp", "stAppViewContainer", "stMain", "stSidebar", "stMainBlockContainer", "stVerticalBlock", "stTabPanel",
     "stMetric", "stMetricLabel", "stMetricValue", "stMarkdownContainer", "stTooltipIcon", "stMultiSelect",
-    "stNumberInput", "stNumberInputStepUp", "stNumberInputStepDown",
+    "stNumberInput", "stNumberInputStepUp", "stNumberInputStepDown", "stNumberInputContainer", "stDateTimeInputField",
+    "stDateInputField", "stTextInputRootElement", "stSelectbox", "stElementContainer", "stElementToolbar",
 }  # fmt: skip
 #: Attributes other than data-testid: a multiselect's chips have no test id of their own, and the Methodology's
 #: anchors are elements with an id.
 DESK_ATTRIBUTES = {"data-tag", "id"}
-#: Classes other than .st-key-KEY: KaTeX's box of a display formula (KaTeX's documented class, not Streamlit's).
-DESK_CLASSES = {"katex-display"}
+#: Attributes a selector may match a value of: Streamlit's stale mark of an element (both 1.65 and 1.66 render
+#: ``data-stale``), the role of a select's control box (the box a select draws its border on has no test id), and a
+#: key-class prefix (every chart's ``chart_<key>`` container).
+DESK_VALUED_ATTRIBUTES = {
+    "data-stale": {"'true'"},
+    "role": {"'group'"},
+    "class*": {"'st-key-chart_'"},
+}
+#: Classes other than .st-key-KEY: KaTeX's box of a display formula (KaTeX's documented class, not Streamlit's) and
+#: Plotly's toolbar (plotly.js's documented ``modebar-container``).
+DESK_CLASSES = {"katex-display", "modebar-container"}
 #: HTML elements, pseudo-classes and pseudo-elements a selector may name after its hook.
-DESK_ELEMENTS = {"p", "strong", "code", "button", "div", "h3", "kbd", "a", "details"}
-DESK_PSEUDO_CLASSES = {"is", "has", "hover", "focus", "enabled", "details-content"}
+DESK_ELEMENTS = {"p", "strong", "code", "button", "div", "h3", "kbd", "a", "details", "input"}
+DESK_PSEUDO_CLASSES = {"is", "has", "hover", "focus", "enabled", "details-content", "not", "focus-within", "disabled"}
 
 
 def _css_rules(css: str) -> list[tuple[str, str]]:
@@ -333,8 +407,10 @@ def test_the_desk_stylesheet_selects_only_stable_hooks():
         for name, *value in attributes:
             if name == "data-testid":
                 assert value and value[0].strip("'\"") in DESK_TESTIDS, selector
+            elif value:
+                assert value[0] in DESK_VALUED_ATTRIBUTES.get(name, ()), selector
             else:
-                assert name in DESK_ATTRIBUTES and not value, selector
+                assert name in DESK_ATTRIBUTES, selector
         assert classes or any(name == "data-testid" for name, *_ in attributes), f"{selector} has no hook"
         assert "#" not in selector, selector
         assert set(re.findall(r":+([\w-]+)", selector)) <= DESK_PSEUDO_CLASSES, selector
