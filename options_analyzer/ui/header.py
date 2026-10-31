@@ -50,8 +50,9 @@ BRAND = "Options Analytics"
 #: tests/test_app_header.py checks against the parameters the app writes.
 SHARE_NOTE = (
     "The link holds the market (the preset, and its valuation time or typed inputs), the contract, the pricing model "
-    "and its settings, the open tab, and the Strategy tab's template, strike width, contracts, shares per contract "
-    "and commission. Edited legs, uploaded quotes and the other settings of a tab stay in this session."
+    "and its settings, the open tab, the Strategy tab's template, strike width, contracts, shares per contract "
+    "and commission, and, shared from the Pricing tab, its view (profile, chain window and stride, Greeks order, "
+    "diagnostics). Edited legs, uploaded quotes and the other settings of a tab stay in this session."
 )
 #: The keyboard shortcut of the Methodology button (Streamlit shows Option for Alt on a Mac).
 METHODOLOGY_SHORTCUT = "Alt+Shift+M"
@@ -341,7 +342,7 @@ def render(inputs: Inputs, *, on_methodology: Callable[[], None]) -> DeltaGenera
             help=f"σ {pct(inputs.volatility, 2)} typed over the surface's {pct(inputs.surface_vol, 2)} "
             f"({gap:+.2f} vp).".replace("-", MINUS),
         )
-    model = f"Pricing model of the price cards: {inputs.model.label}."
+    model = f"Pricing model of the Pricing and IV tabs: {inputs.model.label}."
     actions.badge(model_badge(inputs.model), color="gray", help=model)
     share = actions.popover("Share", icon=":material/link:", key="desk_share", help="Link to this view")
     actions.button(

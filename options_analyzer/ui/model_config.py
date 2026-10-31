@@ -1,8 +1,14 @@
-"""Pricing-model configuration: the sidebar's model choice and the settings of each model.
+"""Pricing-model configuration: the sidebar's engine choice and the settings of each engine.
 
-:class:`ModelConfig` is what the price cards and the model diagnostics run on, and :func:`model_sidebar` draws its
-widgets. The market inputs (spot, strike, expiry, volatility, rates) are in :mod:`.inputs`, whose ``sidebar()``
-calls :func:`model_sidebar`.
+The sidebar offers two engines (UI spec 2.3 group 6, Appendix B decision 8): European exercise by the closed form
+(Black-Scholes-Merton) and American exercise by the Andersen-Lake-Offengenden engine. The binomial trees and Monte
+Carlo are diagnostics of those numbers, not global engines: they live in the Pricing tab's Engine diagnostics
+(:mod:`.tab_pricing`), which builds their :class:`ModelConfig` from its own settings. Under the tree a ±10-strike chain
+took 0.7 to 2.0 s and a 121-point profile 3.9 to 11.7 s, and Monte Carlo yields only delta (UI spec 2.0).
+
+:class:`ModelConfig` is what the Pricing and IV tabs run on, and :func:`model_sidebar` draws its widgets. The market
+inputs (spot, strike, expiry, volatility, rates) are in :mod:`.inputs`, whose ``sidebar()`` calls
+:func:`model_sidebar`.
 """
 
 from __future__ import annotations
@@ -15,26 +21,45 @@ from ..american import SCHEMES
 from ..binomial import METHODS
 from .format import md
 
-#: The models of the sidebar, by kind, with their labels. A link names a model by its label (``?model=Monte+Carlo``),
-#: or by one of :data:`MODEL_ALIASES`.
+#: Every engine of the app, by kind, with its name. The sidebar offers :data:`SIDEBAR_MODELS`; the other two run in
+#: the Pricing tab's Engine diagnostics, and a link that names them (version 2's ``?model=Binomial+tree``) opens
+#: those diagnostics instead (``app._read_link``).
 MODELS = {
-    "bsm": "Black-Scholes-Merton",
+    "bsm": "European (BSM)",
     "binomial": "Binomial tree",
     "monte_carlo": "Monte Carlo",
     "alo": "American (ALO)",
 }
-#: Other names a link may give a model: the short names of the header's badge. A link's model is matched without case
-#: or punctuation (``?model=alo``, ``?model=monte-carlo``), as its tab is.
-MODEL_ALIASES = {"ALO": MODELS["alo"], "BSM": MODELS["bsm"], "MC": MODELS["monte_carlo"], "Tree": MODELS["binomial"]}
+#: The engines of the sidebar's control, in its order.
+SIDEBAR_MODELS = ("bsm", "alo")
+#: Other names a link may give an engine: the short names of the header's badge, and version 2's label of the closed
+#: form. A link's engine is matched without case or punctuation (``?model=alo``, ``?model=monte-carlo``), as its tab
+#: is.
+MODEL_ALIASES = {
+    "ALO": MODELS["alo"],
+    "BSM": MODELS["bsm"],
+    "Black-Scholes-Merton": MODELS["bsm"],
+    "European": MODELS["bsm"],
+    "American": MODELS["alo"],
+    "MC": MODELS["monte_carlo"],
+    "Tree": MODELS["binomial"],
+    "Binomial": MODELS["binomial"],
+}
 #: The schemes of the American engine (``american.SCHEMES``), with their sidebar labels, which a link gives too.
 ALO_SCHEMES = {name: name.capitalize() for name in SCHEMES}
+#: Why the index offers no American engine: the help of the disabled control.
+EUROPEAN_ONLY = (
+    "SPX options are European-exercise (Cboe), so the synthetic index is priced by the closed form only. The "
+    "American engine prices the Textbook market. Trees and Monte Carlo are in the Pricing tab's Engine diagnostics."
+)
 
 PATH_CHOICES = (10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000)
 
 
 @dataclass(frozen=True)
 class ModelConfig:
-    """The pricing model of the price cards and the model diagnostics.
+    """An engine and its settings: the sidebar's (closed form or American engine) for the Pricing and IV tabs, or a
+    diagnostics engine (a binomial tree, Monte Carlo) of the Pricing tab's Engine diagnostics.
 
     ``kind`` is a key of :data:`MODELS`. A binomial tree uses ``tree_method`` (a key of ``binomial.METHODS``),
     ``steps`` and ``american``; Monte Carlo uses ``n_paths``, ``seed`` and the two variance reductions; the American
@@ -60,7 +85,7 @@ class ModelConfig:
 
     @property
     def is_american(self) -> bool:
-        """Whether the price cards value American exercise: the American engine, or a tree with American exercise."""
+        """Whether the engine values American exercise: the American engine, or a tree with American exercise."""
         return self.kind == "alo" or (self.kind == "binomial" and self.american)
 
     @property
@@ -77,23 +102,21 @@ class ModelConfig:
 
 
 def model_sidebar(*, european_only: bool = False) -> ModelConfig:
-    """Draw the sidebar's "Pricing model" section and return the chosen model.
+    """Draw the sidebar's "Pricing model" section and return the chosen engine.
 
-    The model radio and the settings of the chosen model (lattice, steps and exercise for a tree; paths, seed and
-    variance reductions for Monte Carlo; the scheme of the American engine) are bound to the URL's query
-    parameters, so a shared link reopens the same model.
+    One segmented control, ``European (BSM)`` or ``American (ALO)``, and the American engine's scheme while it is
+    chosen, all bound to the URL's query parameters, so a shared link reopens the same engine.
 
     Parameters
     ----------
     european_only : bool
-        The contract is European-exercise (the synthetic index: SPX options are): the American engine is not
-        offered and a tree values European exercise.
+        The contract is European-exercise (the synthetic index: SPX options are). The control is shown at European
+        and disabled, with help that says why.
 
     Returns
     -------
     ModelConfig
-        The selected model with its settings; the defaults of :class:`ModelConfig` for the settings the model
-        does not use.
+        The selected engine with its settings; the defaults of :class:`ModelConfig` for the settings it does not use.
 
     Examples
     --------
@@ -104,91 +127,39 @@ def model_sidebar(*, european_only: bool = False) -> ModelConfig:
     """
     sb = st.sidebar
     sb.header("Pricing model")
-    kinds = [kind for kind in MODELS if not (european_only and kind == "alo")]
-    if st.session_state.get("model") not in (None, *kinds):
-        st.session_state["model"] = kinds[0]  # the American engine, from the textbook market
-    kind = sb.radio(
-        "Model",
-        kinds,
+    state = st.session_state
+    if state.get("model") not in (None, *SIDEBAR_MODELS) or (european_only and state.get("model") == "alo"):
+        state["model"] = "bsm"  # the American engine, from the textbook market, or an engine of an older session
+    kind = sb.segmented_control(
+        "Engine",
+        SIDEBAR_MODELS,
+        default="bsm",
+        required=True,
         format_func=MODELS.get,
         key="model",
         bind="query-params",
+        disabled=european_only,
         label_visibility="collapsed",
+        help=EUROPEAN_ONLY
+        if european_only
+        else "European (BSM): the closed form, exact for European exercise. American (ALO): early exercise by the "
+        "Andersen-Lake-Offengenden engine. Trees and Monte Carlo are in the Pricing tab's Engine diagnostics.",
     )
+    if kind != "alo":
+        return ModelConfig(kind="bsm")
     default = ModelConfig()
-    config = ModelConfig(kind=kind)
-    if kind == "binomial":
-        method = sb.radio(
-            "Lattice",
-            list(METHODS),
-            index=list(METHODS).index(default.tree_method),
-            format_func=METHODS.get,
-            key="tree",
-            bind="query-params",
-            horizontal=True,
-            help="Leisen-Reimer converges smoothly and much faster; CRR is the classic tree.",
-        )
-        steps = sb.slider("Steps", 10, 2000, default.steps, step=1, key="steps", bind="query-params")
-        if european_only:
-            sb.caption("European exercise: SPX options are European-style.")
-            style = "European"
-        else:
-            style = sb.segmented_control(
-                "Exercise",
-                ["European", "American"],
-                default="European",
-                key="style",
-                required=True,
-                bind="query-params",
-            )
-        config = ModelConfig(kind=kind, tree_method=method, steps=int(steps), american=style == "American")
-    elif kind == "monte_carlo":
-        n_paths = sb.select_slider(
-            "Paths",
-            PATH_CHOICES,
-            value=default.n_paths,
-            format_func=lambda n: f"{n:,}",
-            key="paths",
-            bind="query-params",
-        )
-        seed = sb.number_input(
-            "Random seed",
-            min_value=0,
-            max_value=2**32 - 1,
-            value=default.seed,
-            step=1,
-            key="seed",
-            bind="query-params",
-            help="Fixed seed = reproducible prices that do not jitter between reruns.",
-        )
-        antithetic = sb.toggle("Antithetic variates", value=default.antithetic, key="antithetic", bind="query-params")
-        control = sb.toggle(
-            "Control variate (discounted spot)",
-            value=default.control_variate,
-            key="control_variate",
-            bind="query-params",
-        )
-        config = ModelConfig(
-            kind=kind, n_paths=int(n_paths), seed=int(seed), antithetic=antithetic, control_variate=control
-        )
-    elif kind == "alo":
-        scheme = sb.segmented_control(
-            "Scheme",
-            list(ALO_SCHEMES),
-            default=default.scheme,
-            format_func=ALO_SCHEMES.get,
-            key="scheme",
-            required=True,
-            bind="query-params",
-            help=md(
-                "How finely the engine solves the exercise boundary: fast (8 nodes), accurate (15, the default) or "
-                "high (33). Largest error on the 4,495-put validation grid (strike $100) against QuantLib's engine: "
-                "fast $0.0007, accurate $0.000005, high $0.00000005."
-            ),
-        )
-        sb.caption(
-            "American exercise: the engine solves for the early-exercise boundary by spectral collocation "
-            "(Andersen, Lake and Offengenden 2016)."
-        )
-        config = ModelConfig(kind=kind, scheme=scheme)
-    return config
+    scheme = sb.segmented_control(
+        "Scheme",
+        list(ALO_SCHEMES),
+        default=default.scheme,
+        format_func=ALO_SCHEMES.get,
+        key="scheme",
+        required=True,
+        bind="query-params",
+        help=md(
+            "How finely the engine solves the exercise boundary: fast (8 nodes), accurate (15, the default) or "
+            "high (33). Largest error on the 4,495-put validation grid (strike $100) against QuantLib's engine: "
+            "fast $0.0007, accurate $0.000005, high $0.00000005."
+        ),
+    )
+    return ModelConfig(kind="alo", scheme=scheme)

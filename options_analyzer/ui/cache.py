@@ -7,6 +7,8 @@ seeds), so ``st.cache_data`` can safely memoise results across reruns.
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import streamlit as st
 
@@ -50,10 +52,11 @@ def alo_iv(price, S, K, T, r, q, option_type, scheme) -> float:
 
 
 @st.cache_data(show_spinner=False, max_entries=16)
-def alo_curve(S, K, T, r, q, option_type, max_vol, scheme) -> tuple[np.ndarray, np.ndarray]:
-    """The engine's value at the 41 volatilities of the tree's curve (:func:`american_curve`): a smooth curve
-    needs no more, and where the engine falls back to the tree each point costs two trees (about 0.1 s)."""
-    vols = np.linspace(0.005, max_vol, 41)
+def alo_curve(S, K, T, r, q, option_type, low, high, scheme) -> tuple[np.ndarray, np.ndarray]:
+    """The engine's value at 41 vols from ``low`` to ``high``, as the tree's curve (:func:`american_curve`): a
+    smooth curve needs no more, and where the engine falls back to the tree each point costs two trees (about
+    0.1 s)."""
+    vols = np.linspace(low, high, 41)
 
     def value(vol: float) -> float:
         try:
@@ -111,15 +114,37 @@ def mc_results(S, K, T, r, sigma, q, n_paths, seed, antithetic, control_variate)
     return monte_carlo.price_european(S, K, T, r, sigma, q, ("call", "put"), n_paths, seed, antithetic, control_variate)
 
 
-@st.cache_data(show_spinner=False, max_entries=16)
-def mc_paths(S, T, r, sigma, q, n_paths, seed, antithetic, n_show) -> tuple[np.ndarray, np.ndarray]:
-    steps = int(np.clip(round(T * 252), 20, 500))
-    return monte_carlo.scenario_paths(S, T, r, sigma, q, n_paths, seed, antithetic, n_show, steps)
+#: The smallest sample of the Monte Carlo convergence view (Engine diagnostics), and the factor between samples: a
+#: quarter of the paths each step down doubles the interval, so the 1/sqrt(N) guide's slope reads at a glance.
+MC_CONVERGENCE_FROM, MC_CONVERGENCE_STEP = 1_000, 4
+
+
+def mc_convergence_paths(n_paths: int) -> list[int]:
+    """The samples of the Monte Carlo convergence view: ``n_paths``, then a quarter of it each step down to
+    :data:`MC_CONVERGENCE_FROM`, each even (antithetic pairs), in ascending order.
+
+    >>> mc_convergence_paths(100_000)
+    [1562, 6250, 25000, 100000]
+    """
+    paths, n = [], int(n_paths)
+    while n >= MC_CONVERGENCE_FROM:
+        paths.append(n - n % 2)
+        n //= MC_CONVERGENCE_STEP
+    return sorted(paths)
 
 
 @st.cache_data(show_spinner=False, max_entries=16)
-def mc_terminal(S, T, r, sigma, q, n_paths, seed, antithetic) -> np.ndarray:
-    return monte_carlo.terminal_prices(S, T, r, sigma, q, min(n_paths, 200_000), seed, antithetic)
+def mc_convergence(S, K, T, r, sigma, q, n_paths, seed, antithetic, control_variate) -> tuple[list[int], dict]:
+    """The 95% interval's width (2 x 1.96 standard errors, $) of the call and the put at each of
+    :func:`mc_convergence_paths`, on the same seed and settings: ``(paths, {kind: widths})``. The samples below
+    ``n_paths`` add a third of its time (1/4 + 1/16 + ...)."""
+    paths = mc_convergence_paths(n_paths)
+    widths: dict[str, list[float]] = {"call": [], "put": []}
+    for n in paths:
+        results = monte_carlo.price_european(S, K, T, r, sigma, q, KINDS, n, seed, antithetic, control_variate)
+        for kind, width in widths.items():
+            width.append(2 * 1.96 * float(results[kind].std_error))
+    return paths, widths
 
 
 @st.cache_data(show_spinner=False, max_entries=24)
@@ -171,10 +196,13 @@ def american_iv(price, S, K, T, r, q, option_type, steps=DEFAULT_TREE[0], method
 
 @st.cache_data(show_spinner=False, max_entries=16)
 def american_curve(
-    S, K, T, r, q, option_type, max_vol, steps=DEFAULT_TREE[0], method=DEFAULT_TREE[1]
+    S, K, T, r, q, option_type, low, high, steps=DEFAULT_TREE[0], method=DEFAULT_TREE[1]
 ) -> tuple[np.ndarray, np.ndarray]:
+    """The tree's value at 41 vols from ``low`` to ``high``, starting no lower than the lowest vol the tree can
+    represent (``implied_vol.lowest_tree_volatility``)."""
     lowest = implied_vol.lowest_tree_volatility(T, r, q, steps, method)
-    vols = np.linspace(max(0.005, lowest), max(max_vol, 2 * lowest), 41)
+    start = max(low, lowest)
+    vols = np.linspace(start, max(high, start + 0.01), 41)
 
     def value(vol: float) -> float:
         try:
@@ -183,3 +211,39 @@ def american_curve(
             return np.nan
 
     return vols, np.array([value(v) for v in vols])
+
+
+# --- The Pricing tab's Engine diagnostics: each engine on the call and the put, with its time ------------------------
+# The time is measured once, when the result is computed (later runs read the cache), on the server: a guide to the
+# engines' relative cost, not a benchmark (benchmarks/ holds those).
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def tree_timed(S, K, T, r, sigma, q, steps, american, method) -> tuple[dict, float]:
+    """``binomial.price`` of the call and the put on one tree, and the milliseconds the two took."""
+    start = time.perf_counter()
+    values = {kind: binomial.price(S, K, T, r, sigma, q, kind, steps, american, method) for kind in KINDS}
+    return values, (time.perf_counter() - start) * 1e3
+
+
+@st.cache_data(show_spinner=False, max_entries=32)
+def mc_timed(S, K, T, r, sigma, q, n_paths, seed, antithetic, control_variate) -> tuple[dict, float]:
+    """``monte_carlo.price_european`` of the call and the put (one sample), and the milliseconds it took."""
+    start = time.perf_counter()
+    results = monte_carlo.price_european(S, K, T, r, sigma, q, KINDS, n_paths, seed, antithetic, control_variate)
+    return results, (time.perf_counter() - start) * 1e3
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def alo_timed(S, K, T, r, sigma, q, scheme) -> tuple[dict, float]:
+    """``american.price`` of the call and the put with one scheme, and the milliseconds the two took."""
+    start = time.perf_counter()
+    values = {kind: float(american.price(S, K, T, r, sigma, q, option_type=kind, scheme=scheme)) for kind in KINDS}
+    return values, (time.perf_counter() - start) * 1e3
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def alo_values(S, K, T, r, sigma, q, option_type, scheme) -> np.ndarray:
+    """``american.price`` over arrays (spots, strikes, vols or expiries, broadcast together): the engine solves one
+    boundary per distinct (K, T, r, σ, q), so 121 spots on one boundary take about 4 ms."""
+    return np.asarray(american.price(S, K, T, r, sigma, q, option_type=option_type, scheme=scheme), dtype=float)

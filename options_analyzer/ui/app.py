@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 from datetime import datetime
 
+import numpy as np
 import streamlit as st
 
 from .. import __version__, clock
@@ -12,7 +14,8 @@ from . import header, tab_iv, tab_methodology, tab_pricing, tab_risk, tab_strate
 from . import market as mk
 from .components import link_match
 from .format import md_code
-from .inputs import ASOF_RANGE, market_notes, sidebar
+from .format import strike as strike_text
+from .inputs import ASOF_RANGE, Inputs, market_notes, sidebar
 from .model_config import ALO_SCHEMES, MODEL_ALIASES, MODELS, ModelConfig
 
 REPO_URL = "https://github.com/NavnoorBawa/Option-Pricing-and-Strategy-Analyzer"
@@ -36,6 +39,9 @@ PRESET_ALIASES = {"index": mk.INDEX, "synthetic": mk.INDEX, "spx": mk.INDEX}
 #: Parameters that only the textbook market has: a link with any of them and no preset (a link from version 2)
 #: opens the textbook market, so that it reproduces the numbers it was made with.
 TEXTBOOK_PARAMS = ("spot", "days", "rate", "div")
+#: The settings of version 2's tree and Monte Carlo models, which a link to them carried (``?model=Monte+Carlo&paths=
+#: 250%2C000``): the Engine diagnostics set their own, so the link reader drops them with the model.
+LEGACY_ENGINE_PARAMS = ("tree", "steps", "style", "paths", "seed", "antithetic", "control_variate")
 #: Session-state keys: the link was read (on the session's first run), and its notes, shown once.
 _LINK_READ, _LINK_NOTES = "link_read", "link_notes"
 #: Session-state key: the header's Methodology button was clicked, so this run opens the Methodology drawer.
@@ -115,6 +121,27 @@ def _read_link() -> None:
                 notes.append(
                     f"This link asks for a {what} named {_shown(value)}, which does not exist, so {default} is used."
                 )
+    # A version-2 link to a tree or to Monte Carlo (UI spec 2.4): those engines are diagnostics now, so the link opens
+    # the closed form with the Pricing tab's Engine diagnostics open. Their settings are dropped with the model.
+    legacy = params.get("model", [None])[-1]
+    if legacy in (MODELS["binomial"], MODELS["monte_carlo"]):
+        for key in (*LEGACY_ENGINE_PARAMS, "model"):
+            params.pop(key, None)
+        engine = {MODELS["binomial"]: "a binomial tree", MODELS["monte_carlo"]: "Monte Carlo"}[legacy]
+        if "tab" not in params:
+            # The link opens the Pricing tab: the expander is bound to the URL, so the new link holds it open and a
+            # link shared from this view opens it again.
+            params[tab_pricing.DIAGNOSTICS] = ["true"]
+            where = " (open below)"
+        else:
+            # Another tab: Streamlit drops the parameter of a widget it does not draw, so the session holds it open
+            # until the Pricing tab draws it.
+            state[tab_pricing.DIAGNOSTICS] = True
+            where = ", open there"
+        notes.append(
+            f"This link asks for {engine}, which now runs in the Pricing tab's Engine diagnostics{where}; the "
+            f"sidebar prices with {MODELS['bsm']}."
+        )
     # The market: a preset by its label or a short name (?preset=textbook), a version-2 link's typed inputs, and
     # the valuation time in any ISO form.
     if "preset" in params:
@@ -166,14 +193,39 @@ def _read_link() -> None:
         st.rerun()
 
 
+def beyond_reach(inputs: Inputs) -> str:
+    """Why nothing can be priced when the index's strike lies beyond the reach of the surface at its expiry: the
+    smile gives no vol there (``ArbitrageFreeSurface.implied_vol_at`` reads NaN beyond its quotes and its
+    extrapolation), so no engine can price it. The message names the strikes it does reach, found on the strike
+    grid up to the strike input's limit (about 4,600 reads, 0.1 s, on this error path only)."""
+    context = inputs.context
+    step = context.strike_step
+    grid = np.arange(step, 4 * context.spot + step / 2, step)
+    reached = [
+        k
+        for k in grid
+        if math.isfinite(context.surface.implied_vol_at(k / context.spot, inputs.maturity, extrapolate=True))
+    ]
+    where = (
+        f"at this expiry its smile reaches the strikes {strike_text(reached[0], step)} to "
+        f"{strike_text(reached[-1], step)}"
+        if reached
+        else "the surface reaches no strike at this expiry"
+    )
+    return (
+        f"The surface gives no vol at the strike {strike_text(inputs.strike, step)}: {where}, so nothing can be "
+        "priced. Choose a strike in that range in the sidebar, or ATMF."
+    )
+
+
 def _open_methodology() -> None:
     """Ask the next run to open the Methodology drawer (the header's Methodology button)."""
     st.session_state[_DRAWER] = True
 
 
 def run() -> None:
-    """One script run of the app: the page settings, stylesheet and logo, the sidebar, the header strip, the price
-    cards and the open tab."""
+    """One script run of the app: the page settings, stylesheet and logo, the sidebar, the header strip and the open
+    tab. The shell draws no price cards (UI-1): the Pricing tab owns its headline tiles."""
     st.set_page_config(
         page_title="Options Analytics",
         # Streamlit links a Material icon favicon from fonts.gstatic.com: the app's only request to another host.
@@ -193,8 +245,15 @@ def run() -> None:
     header.logo()
     _read_link()
     inputs = sidebar()
+    if not math.isfinite(inputs.volatility):
+        # A strike beyond the surface's reach at the focus expiry (typed in the sidebar, or from a link): the tabs
+        # cannot price it, so the page says why and stops, rather than fail inside the formulas.
+        header.render(inputs, on_methodology=_open_methodology)
+        st.error(beyond_reach(inputs), icon=":material/error:")
+        st.stop()
 
-    # The prices come first, so that the header's badge names the model of the values on screen.
+    # The engine's prices come first (cached; under the closed form two formulas), so that if the American engine
+    # cannot value the contract the header's badge names the engine of the values on screen.
     fallback = None
     try:
         prices = tab_pricing.compute_prices(inputs)
@@ -210,7 +269,6 @@ def run() -> None:
         st.info(note, icon=":material/event:")
     if fallback:
         st.warning(fallback, icon=":material/warning:")
-    tab_pricing.render_price_cards(inputs, prices)
 
     # Only the open tab runs: opening a tab reruns the app, and the closed tabs stay empty (their widgets keep their
     # values with persist_state). The exception is the Strategy tab's controls (template, strike width, position

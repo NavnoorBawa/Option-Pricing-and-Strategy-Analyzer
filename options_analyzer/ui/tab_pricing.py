@@ -1,28 +1,110 @@
-"""Pricing tab and the headline price cards."""
+"""The Pricing tab in the desk layout (UI spec 3.1; roadmap PR-7, UI-1 and UI-7).
+
+It prices the sidebar's contract, call and put, with the sidebar's engine, and shows, top to bottom:
+
+1. a context line: the contract, its last trading day and its settlement (and the what-if note while a shift is set);
+2. six headline tiles (UI-1: the shell draws no price cards any more): CALL, PUT, STRADDLE, VOL, FORWARD (with the
+   forward implied by this strike's quoted pair) and TIME;
+3. the contract table: the chain's bid, ask and mid with their implied vols, the theo, Mid vs fit in vol points with
+   an ``in band`` flag (the edge convention of UI spec 2.5), and the Greeks in desk units;
+4. the profile: a value or Greek against spot, vol or time, its controls and chart in one fragment;
+5. the chain ladder (UI-7): calls and puts mirrored about the strike, over a delta or risk-neutral window, in its own
+   fragment; a click on a row prices that strike (:func:`on_chain_select`);
+6. the Greeks table to third order, with P(ITM) from the smile (the published surface's risk-neutral CDF);
+7. Engine diagnostics, computed only while open: the trees and Monte Carlo against the reference engine, with each
+   simulated price's interval and its reliability flag, the trees' convergence and their own Greeks and one-day
+   decay, and the American engine's exercise boundary;
+8. a footer line naming the engine and the conventions.
+
+Under the textbook market there are no quotes: the market slots of the tiles read ``–`` with the reason in their
+help, the tables leave out their market columns, and P(ITM) is N(d₂) at the flat vol (``flat vol``).
+"""
 
 from __future__ import annotations
 
+import functools
 import math
 from dataclasses import dataclass
+from datetime import date, timedelta
 
 import numpy as np
 import pandas as pd
 import streamlit as st
-from scipy.special import ndtr
+from scipy.special import ndtr, ndtri
 
+from .. import american, binomial, clock
 from .. import black_scholes as bs
 from ..american import AmericanPrice
 from ..monte_carlo import RELIABLE_PATHS, RELIABLE_SAMPLES, MonteCarloResult
 from ..strategies import ONE_DAY
-from . import cache, charts
-from .components import card_row
-from .format import DECAY_SWITCH, MINUS, decay_label, decay_leads, md, money, pct
+from ..vol_surface.published import Expiry, PublishedSurface, Quote
+from . import cache, charts, charts_pricing, surface_state, whatif
+from . import market as mk
+from .components import card_row, cents_places, current_key, table
+from .format import (
+    MINUS,
+    MISSING,
+    NB_HYPHEN,
+    ROW_HEIGHT,
+    bp,
+    decay_label,
+    decay_leads,
+    level,
+    md,
+    money,
+    number,
+    pct,
+    premium,
+    probability_text,
+    signed,
+    signed_sci,
+    strike,
+    time_left,
+    vol,
+    vol_change,
+)
+from .format import date as short_date
+from .format import moneyness as fmt_moneyness
 from .inputs import Inputs
+from .model_config import PATH_CHOICES, ModelConfig
 
-#: Monte Carlo scenarios drawn on the sample-paths chart.
-SAMPLE_PATHS = 60
-#: The confidence interval of a simulated price, in no-break spaces: it never splits over two lines (on a phone "SE"
-#: stood alone on the second line of the caption under the price cards).
+#: Session-state key of the Engine diagnostics expander (open or closed), bound to the URL. A version-2 link to a
+#: tree or to Monte Carlo opens it (``app._read_link``).
+DIAGNOSTICS = "pricing_diag"
+#: Session-state key: the chain ladder moved the strike, so its fragment reruns the whole app (the sidebar, tiles and
+#: tables read the new strike only in a full run).
+_CHAIN_MOVED = "pricing_chain_moved"
+#: Session-state key: why a click on the chain ladder did not move the strike (a row beyond the surface's reach).
+_CHAIN_NOTE = "pricing_chain_note"
+#: Session-state key of the header's Methodology button (``app.DRAWER``): the footer's button sets it too.
+DRAWER = "methodology_drawer"
+#: The headline tiles' row and its three pairs: 6 across on a desktop, 4 + 2 on a laptop with the sidebar open and
+#: 2 + 2 + 2 on a phone. (Groups of three, UI spec 2.9's 3 + 3, cannot hold three cards on a 390 px phone: their
+#: values and deltas, "5,813.91" over "pair −0.29 bp", need about 130 px a card, so the groups went 2 + 1 twice, four
+#: lines of tiles above the contract table.)
+TILES = ("pricing_tiles", ("pricing_tiles_price", "pricing_tiles_vol", "pricing_tiles_market"))
+#: The profile's controls (UI spec 3.1 item 4).
+METRICS = ("Value", "Δ", "Γ", "Vega", "Θ")
+AXES = ("Spot", "Vol", "Time")
+RANGES = ("±5%", "±10%", "±20%", "RN 95%", "Auto")
+#: Points of a profile curve: against spot 121 (the spot axis must resolve gamma's peak a few days out), against vol
+#: or time 41 (under the American engine each point solves its own boundary).
+SPOT_POINTS, OTHER_POINTS = 121, 41
+#: The chain ladder's window and stride (UI spec 3.1 item 5), and the rows that "Auto" keeps it to before the
+#: Pricing strike's row is added: 14, so that the default ladder fits the 15 rows a table shows before it scrolls
+#: (UI spec 2.8) with the strike's row in view. (The spec's 30 gave 28 rows at 25 points, 5,425 to 6,075: the
+#: strike's row was the 17th, below the fold of a 15-row frame, which Streamlit cannot scroll to. A 50-point stride
+#: gives 14 rows over the same window; a finer stride or "All" scrolls inside the table.)
+WINDOWS = ("10Δ–10Δ", "25Δ–25Δ", "RN 95%", "All")
+STRIDES = ("Auto", 5, 10, 25, 50, 100)
+CHAIN_ROWS = 14
+#: Orders of the Greeks table.
+ORDERS = ("1st", "+2nd", "+3rd")
+#: The fixed trees of Engine diagnostics: (lattice, steps).
+DIAGNOSTIC_TREES = (("lr", 501), ("lr", 2001), ("crr", 2001))
+#: What the CALL and PUT tiles compare the American engine with: an American Leisen-Reimer tree of this many steps.
+TREE_CHECK_STEPS = 2001
+#: The confidence interval of a simulated price, in no-break spaces: it never splits over two lines.
 _CI_FORMULA = "95% interval = price ± 1.96 SE".replace(" ", "\xa0")
 #: What a heavy-tailed Monte Carlo sample does instead of the usual estimator (see ``monte_carlo``).
 HEAVY_TAIL_NOTE = (
@@ -52,79 +134,62 @@ ALO_METHODS = {
     "exact": "Closed form",
     "intrinsic": "Intrinsic value",
 }
-#: The engine's Greeks, as the Greeks table shows them (names of ``black_scholes.GREEKS``).
+#: The engine's Greeks (names of ``black_scholes.GREEKS``): the American engine gives first order only.
 ALO_GREEKS = ("delta", "gamma", "theta", "vega", "rho", "epsilon")
+_WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+# --- The engine's prices ----------------------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class Prices:
+    """The sidebar engine's values of the call and the put ($ per share), with a note on each (the tiles' help).
+    Under the American engine also its results (``american.price_details``) and Greeks (``american.greeks``)."""
+
     call: float
     put: float
     call_note: str = ""
     put_note: str = ""
-    tree: dict | None = None
-    mc: dict | None = None
-    #: Values on the same tree with European exercise (American tree only).
-    european_tree: dict | None = None
-    #: The American engine's results (``american.price_details``) and Greeks (``american.greeks``), by option type.
     alo: dict | None = None
     alo_greeks: dict | None = None
 
 
 def compute_prices(inputs: Inputs) -> Prices:
-    """Model prices for the headline cards. Raises ``ValueError`` on invalid tree inputs."""
-    S, K, T, r, sigma, q = (
-        inputs.spot,
-        inputs.strike,
-        inputs.expiry,
-        inputs.rate,
-        inputs.volatility,
-        inputs.dividend_yield,
-    )
-    model = inputs.model
-    bs_call = bs.price(S, K, T, r, sigma, q, "call")
-    bs_put = bs.price(S, K, T, r, sigma, q, "put")
-    if model.kind == "binomial":
-        tree = cache.tree_results(S, K, T, r, sigma, q, model.steps, model.american, model.tree_method)
-        # The early-exercise premium is measured on the same lattice, so the tree's discretisation error cancels.
-        european = (
-            cache.tree_prices(S, K, T, r, sigma, q, model.steps, False, model.tree_method) if model.american else None
-        )
-        notes = {}
-        for kind, ref in (("call", bs_call), ("put", bs_put)):
-            if model.american:
-                premium = tree[kind].price - european[kind]
-                notes[kind] = f"Early-exercise premium {money(premium, 4, signed=True)} (same tree, European exercise)"
-            else:
-                notes[kind] = f"Tree error vs BSM {money(tree[kind].price - ref, 6, signed=True)}"
-        return Prices(
-            tree["call"].price, tree["put"].price, notes["call"], notes["put"], tree=tree, european_tree=european
-        )
-    if model.kind == "monte_carlo":
-        mc = cache.mc_results(S, K, T, r, sigma, q, model.n_paths, model.seed, model.antithetic, model.control_variate)
-        notes = {kind: (f"{HEAVY_TAIL_NOTE}. " if res.heavy_tailed else "") + _mc_note(res) for kind, res in mc.items()}
-        return Prices(mc["call"].price, mc["put"].price, notes["call"], notes["put"], mc=mc)
-    if model.kind == "alo":
-        details, greeks = cache.alo_results(S, K, T, r, sigma, q, model.scheme)
+    """The sidebar engine's values of the call and the put: the closed form, or the American engine.
+
+    Raises ``ValueError`` where the American engine cannot value the contract (``app.run`` then falls back to the
+    closed form and says so)."""
+    S, K, T, r, sigma, q = _args(inputs)
+    if inputs.model.kind == "alo":
+        details, greeks = cache.alo_results(S, K, T, r, sigma, q, inputs.model.scheme)
         notes = {kind: _alo_note(kind, res) for kind, res in details.items()}
         return Prices(
-            details["call"].value,
-            details["put"].value,
-            notes["call"],
-            notes["put"],
-            alo=details,
-            alo_greeks=greeks,
+            details["call"].value, details["put"].value, notes["call"], notes["put"], alo=details, alo_greeks=greeks
         )
-    return Prices(bs_call, bs_put, "Closed-form European value", "Closed-form European value")
+    note = "European exercise" + (", Black-76 on the expiry's parity forward" if inputs.context is not None else "")
+    return Prices(bs.price(S, K, T, r, sigma, q, "call"), bs.price(S, K, T, r, sigma, q, "put"), note, note)
+
+
+def _args(inputs: Inputs) -> tuple[float, float, float, float, float, float]:
+    """``(S, K, T, r, σ, q)`` of the sidebar's contract."""
+    return inputs.spot, inputs.strike, inputs.expiry, inputs.rate, inputs.volatility, inputs.dividend_yield
+
+
+def _alo(inputs: Inputs) -> bool:
+    return inputs.model.kind == "alo"
+
+
+def engine_name(inputs: Inputs) -> str:
+    """``ALO`` or ``BSM``: the short name the tables' headers give the sidebar engine."""
+    return "ALO" if _alo(inputs) else "BSM"
 
 
 def mc_interval(res: MonteCarloResult, dollars: bool = True, short: bool = False) -> str:
     """The 95% interval of a simulated price, ``$10.4237 – $10.4582, 95%`` (``10.4237 – 10.4582`` without
     ``dollars``, for a table of plain amounts), or, when the result is not reliable, why it is not shown:
-    ``Interval unreliable: 12 of 100,000 paths finish in the money`` in the diagnostics table and the card's tooltip,
-    and ``short`` on the card itself, ``Interval unreliable: 12 ITM paths`` (the long form made the card 387 px wide,
-    so at 1440 px with the sidebar open the four price cards went 2 + 2 instead of 4 across, which leaves 249 px a
-    card; the short form is at most 232 px)."""
+    ``Interval unreliable: 12 of 100,000 paths finish in the money`` in the diagnostics table, and ``short``,
+    ``Interval unreliable: 12 ITM paths``, where room is tight."""
     if res.reliable:
         low, high = (money(bound, 4).replace("-", MINUS) for bound in res.ci95)
         return f"{low} – {high}, 95%" if dollars else f"{low} – {high}".replace("$", "")
@@ -133,23 +198,23 @@ def mc_interval(res: MonteCarloResult, dollars: bool = True, short: bool = False
 
 
 def _withheld(res: MonteCarloResult) -> tuple[str, str, str]:
-    """Why an unreliable result's interval is not shown (``MonteCarloResult.reliable``): the card's line, the full
+    """Why an unreliable result's interval is not shown (``MonteCarloResult.reliable``): the short line, the full
     sentence and the reason, with the coverage measured below the threshold (``monte_carlo.RELIABLE_PATHS`` and
     ``RELIABLE_SAMPLES``)."""
     if res.n_samples < RELIABLE_SAMPLES:  # never in the app: its fewest paths, 10,000, are 5,000 antithetic pairs
         needed = RELIABLE_SAMPLES * (2 if res.antithetic else 1)
         return (
             "Interval unreliable: too few paths",
-            f"Interval unreliable: {res.n_paths:,} paths, fewer than {needed:,}",
-            f"with fewer than {RELIABLE_SAMPLES:,} independent samples ({needed:,} paths"
+            f"Interval unreliable: {number(res.n_paths, 0)} paths, fewer than {number(needed, 0)}",
+            f"with fewer than {number(RELIABLE_SAMPLES, 0)} independent samples ({number(needed, 0)} paths"
             + (" in antithetic pairs" if res.antithetic else "")
             + ") the standard error is itself too uncertain, and the interval covers the value in less than 95% of "
             "runs (93 to 94% with 500 antithetic pairs and the control variate)",
         )
     count, side = _scarce_side(res)
     return (
-        f"Interval unreliable: {count:,} {'ITM' if side == 'in' else 'OTM'} paths",
-        f"Interval unreliable: {count:,} of {res.n_paths:,} paths finish {side} the money",
+        f"Interval unreliable: {number(count, 0)} {'ITM' if side == 'in' else 'OTM'} paths",
+        f"Interval unreliable: {number(count, 0)} of {number(res.n_paths, 0)} paths finish {side} the money",
         f"with fewer than {RELIABLE_PATHS} paths finishing {side} the money it covers the value in less than 95% of "
         "runs (88% with 10 such paths, 92% with 30, 94% with 100)",
     )
@@ -166,7 +231,7 @@ def _scarce_side(res: MonteCarloResult) -> tuple[int, str]:
 
 
 def _mc_note(res: MonteCarloResult) -> str:
-    """The tooltip of a Monte Carlo price card: its standard error, and why its interval is not shown if it is not."""
+    """A simulated price's standard error, and why its interval is not shown if it is not."""
     if not np.isfinite(res.std_error):
         return "Every simulated price finished on one side of the strike: the error cannot be estimated"
     if res.reliable:
@@ -179,8 +244,8 @@ def _mc_note(res: MonteCarloResult) -> str:
 
 
 def _alo_note(kind: str, res: AmericanPrice) -> str:
-    """The tooltip of a price card under the American engine: its early-exercise premium, or why it has none, or
-    why the engine fell back to the tree."""
+    """The help of a price tile under the American engine: its early-exercise premium, or why it has none, or why
+    the engine fell back to the tree."""
     if res.fallback:
         return f"Valued on Leisen-Reimer trees, not by the engine: {FALLBACK_REASONS[res.fallback_reason]}"
     if res.method == "european":
@@ -198,7 +263,8 @@ def alo_fallbacks(prices: Prices) -> list[str]:
             detail = ""
             if res.fallback_reason == "not converged":
                 detail = (
-                    f" (its last step still moved the logarithm of the boundary by {res.last_step:.2g}, where at most "
+                    " (its last step still moved the logarithm of the boundary by "
+                    f"{signed_sci(res.last_step).lstrip('+')}, where at most "
                     "0.01 passes)"
                 )
             notes.append(
@@ -206,139 +272,6 @@ def alo_fallbacks(prices: Prices) -> list[str]:
                 f"American engine: {FALLBACK_REASONS[res.fallback_reason]}{detail}."
             )
     return notes
-
-
-def _model_card(inputs: Inputs, prices: Prices) -> tuple[str, str, str, str]:
-    """``(label, value, caption, help)`` of the fourth headline card: what the sidebar model adds or how far it
-    is from the exact answer. (Put-call parity would read zero for every European model by construction.) The
-    caption under the cards gives the call's and the put's figures where the card shows the larger of the two; it
-    is empty for the closed form, whose card holds the call's figure and its tooltip the put's."""
-    S, K, T, r, sigma, q = (
-        inputs.spot,
-        inputs.strike,
-        inputs.expiry,
-        inputs.rate,
-        inputs.volatility,
-        inputs.dividend_yield,
-    )
-    model = inputs.model
-    if model.kind == "binomial" and model.american:
-        premium = {kind: prices.tree[kind].price - prices.european_tree[kind] for kind in ("call", "put")}
-        larger = max(premium, key=lambda kind: abs(premium[kind]))
-        return (
-            "Exercise premium",
-            money(premium[larger], 4),
-            f"Early-exercise premium: call {money(premium['call'], 4, signed=True)}, "
-            f"put {money(premium['put'], 4, signed=True)} (against the same tree with European exercise)",
-            "American value minus the value on the same tree with European exercise (the larger of the call's and "
-            "the put's is shown). Measured on one lattice, so the tree's discretisation error cancels.",
-        )
-    if model.kind == "alo":
-        premium = {kind: prices.alo[kind].premium for kind in ("call", "put")}
-        larger = max(premium, key=lambda kind: abs(premium[kind]))
-        never = "".join(
-            f" The {kind} equals its Black-Scholes-Merton value: {NEVER_EARLY[kind]}."
-            for kind, res in prices.alo.items()
-            if res.method == "european"
-        )
-        return (
-            "Exercise premium",
-            money(premium[larger], 4),
-            f"Early-exercise premium: call {money(premium['call'], 4, signed=True)}, "
-            f"put {money(premium['put'], 4, signed=True)} (over the closed-form European value).{never}",
-            "American value minus the closed-form Black-Scholes-Merton value of the same option with European "
-            "exercise (the larger of the call's and the put's is shown): what the right to exercise early is worth.",
-        )
-    if model.kind == "binomial":
-        error = {kind: prices.tree[kind].price - bs.price(S, K, T, r, sigma, q, kind) for kind in ("call", "put")}
-        return (
-            "Tree error vs BSM",
-            money(max(abs(e) for e in error.values()), 6),
-            f"Error against the closed-form value: call {money(error['call'], 6, signed=True)}, "
-            f"put {money(error['put'], 6, signed=True)}",
-            "Tree value minus the closed-form Black-Scholes-Merton value, the exact answer for European exercise "
-            "(the larger of the call's and the put's is shown). It shrinks as the number of steps grows.",
-        )
-    if model.kind == "monte_carlo":
-        se = {kind: prices.mc[kind].std_error for kind in ("call", "put")}
-        finite = [v for v in se.values() if np.isfinite(v)]
-        heavy = any(res.heavy_tailed for res in prices.mc.values())
-        return (
-            "Std. error",
-            money(max(finite), 4) if finite else "–",
-            f"Standard error: call {money(se['call'], 4)}, put {money(se['put'], 4)}"
-            # The interval's formula only where a card shows an interval: where both withhold it, it invited the user
-            # to work out by hand what the app had just declined to show.
-            + (f"; {_CI_FORMULA}" if any(res.reliable for res in prices.mc.values()) else "")
-            + (f". {HEAVY_TAIL_NOTE}." if heavy else ""),
-            "Standard error of the simulated prices, after any variance reduction in use (the header's badge names "
-            "it: AV for antithetic variates, CV for a control variate). The larger of the call's and the put's is "
-            "shown; it falls as one over the square root of the number of paths.",
-        )
-    vst = sigma * np.sqrt(T)
-    if vst > 0:
-        itm = float(ndtr((np.log(S / K) + (r - q - 0.5 * sigma**2) * T) / vst))
-    else:
-        itm = float(np.sign(S * np.exp((r - q) * T) - K) + 1.0) / 2.0  # certain, or 1/2 exactly at the strike
-    return (
-        "Call ITM probability",
-        pct(itm, 2),
-        "",
-        "Probability that the call finishes in the money under the pricing (risk-neutral) measure, N(d₂); the "
-        f"put's is 1 − N(d₂) = {pct(1.0 - itm, 2)}. It uses the risk-free drift, so it is not a real-world forecast.",
-    )
-
-
-#: Keys of the headline price-card row and of its two pairs.
-PRICE_CARDS = ("price_cards", ("price_cards_prices", "price_cards_model"))
-
-
-def render_price_cards(inputs: Inputs, prices: Prices) -> None:
-    S, T, r, q = inputs.spot, inputs.expiry, inputs.rate, inputs.dividend_yield
-    forward = S * np.exp((r - q) * T)
-    label, value, caption, help_text = _model_card(inputs, prices)
-    # An index option is quoted in cents (SPX ticks are $0.05 and $0.10); the textbook values keep four decimals.
-    decimals = 2 if inputs.context is not None else 4
-    if inputs.context is not None:
-        forward_help = (
-            "The expiry's forward from put-call parity on its quotes (C − P = DF·(F − K), fitted near the money), "
-            f"with discount factor {np.exp(-r * T):.6f}; the rate and dividend yield the models use are implied by "
-            "the two."
-        )
-    else:
-        forward_help = f"F = S·e^((r−q)T). Discount factor e^(−rT) = {np.exp(-r * T):.6f}."
-    # The per-option notes are in the tooltips so the cards stay short on narrow screens.
-    cards = [
-        ("Call value", money(prices.call, decimals), {"help": md(prices.call_note)}),
-        ("Put value", money(prices.put, decimals), {"help": md(prices.put_note)}),
-        ("Forward price", money(forward, decimals), {"help": forward_help}),
-        (label, value, {"help": md(help_text)}),
-    ]
-    if prices.mc:
-        # A simulated price carries its 95% interval, or why it is not shown, on the card's small grey line.
-        for (_, _, options), kind in zip(cards, ("call", "put"), strict=False):
-            options.update(delta=md(mc_interval(prices.mc[kind], short=True)), delta_color="off", delta_arrow="off")
-    card_row(*PRICE_CARDS, cards)
-    # The header's badge names the model, so the caption only adds what the cards do not show.
-    if caption:
-        st.caption(md(caption))
-    for note in alo_fallbacks(prices):
-        st.warning(note, icon=":material/warning:")
-
-
-def _european_note(inputs: Inputs) -> str:
-    """Caption for views that always use Black-Scholes-Merton, whatever the sidebar model."""
-    model = inputs.model
-    if model.kind == "bsm":
-        return ""
-    early = " Early exercise is ignored here." if model.is_american else ""
-    used = "the price cards and the model diagnostics"
-    if model.kind == "alo":  # the engine's Greeks replace the analytical ones
-        used = "the price cards, the Greeks and the model diagnostics"
-    return (
-        f"Closed-form Black-Scholes-Merton values for European exercise, not the sidebar's {model.label} "
-        f"(used for {used}).{early}"
-    )
 
 
 # --- One-day decay --------------------------------------------------------------------------------------------
@@ -403,24 +336,10 @@ def later_trees(steps: int, expiry: float, method: str) -> tuple[tuple[int, floa
 
 
 def greeks_decay(inputs: Inputs, prices: Prices) -> dict[str, float]:
-    """One-day decay of the call and the put ($ per share) by the model of the Greeks table: the American engine
-    under that model, Black-Scholes-Merton otherwise.
-
-    Under a binomial tree or Monte Carlo the Greeks table is Black-Scholes-Merton's, so its decay is too, for
-    European exercise: the tree's own, with the tree's exercise style, is in the tree's Greeks (:func:`tree_decay`),
-    and the Greeks caption says that an American tree's is there (:func:`_decay_note`). Monte Carlo estimates the
-    Black-Scholes-Merton value, whose decay the closed form gives exactly, where the difference of two simulations
-    would add sampling error.
-    """
-    S, K, T, r, sigma, q = (
-        inputs.spot,
-        inputs.strike,
-        inputs.expiry,
-        inputs.rate,
-        inputs.volatility,
-        inputs.dividend_yield,
-    )
-    if inputs.model.kind != "alo":
+    """One-day decay of the call and the put ($ per share) by the sidebar engine: the American engine's value one
+    calendar day later minus its value now under that engine, the closed form's otherwise."""
+    S, K, T, r, sigma, q = _args(inputs)
+    if not _alo(inputs):
         return {kind: float(closed_form_decay(S, K, T, r, sigma, q, kind)) for kind in cache.KINDS}
     decay = {}
     for kind, res in prices.alo.items():
@@ -432,110 +351,960 @@ def greeks_decay(inputs: Inputs, prices: Prices) -> dict[str, float]:
     return decay
 
 
-def tree_decay(inputs: Inputs, prices: Prices) -> tuple[dict[str, float], tuple[tuple[int, float], ...]]:
-    """One-day decay of the call and the put ($ per share) on the sidebar's tree, and the shorter trees it used.
+def tree_decay(
+    inputs: Inputs, model: ModelConfig, tree: dict
+) -> tuple[dict[str, float], tuple[tuple[int, float], ...]]:
+    """One-day decay of the call and the put ($ per share) on a diagnostics tree (``model``, whose results are
+    ``tree``), and the shorter trees it used.
 
     The value on trees one calendar day shorter (:func:`later_trees`, weighted) minus the value on the tree now,
     with the tree's exercise style; with a day or less to expiry, the intrinsic value minus the value now (and no
     trees). Where the lower of two Cox-Ross-Rubinstein counts has no arbitrage-free lattice, the upper one alone.
     """
-    model = inputs.model
-    S, K, T, r, sigma, q = (
-        inputs.spot,
-        inputs.strike,
-        inputs.expiry,
-        inputs.rate,
-        inputs.volatility,
-        inputs.dividend_yield,
-    )
+    S, K, T, r, sigma, q = _args(inputs)
     if to_expiry(T):
         later = {kind: max(bs.option_sign(kind) * (S - K), 0.0) for kind in cache.KINDS}
-        return {kind: later[kind] - prices.tree[kind].price for kind in cache.KINDS}, ()
+        return {kind: later[kind] - tree[kind].price for kind in cache.KINDS}, ()
 
     def value(steps: int) -> dict[str, float]:
         return cache.tree_prices(S, K, T - ONE_DAY, r, sigma, q, steps, model.american, model.tree_method)
 
-    trees = later_trees(prices.tree["call"].steps, T, model.tree_method)
+    trees = later_trees(tree["call"].steps, T, model.tree_method)
     try:
         values = [(value(steps), weight) for steps, weight in trees]
     except ValueError:  # the lower count's longer time step has no arbitrage-free lattice
         trees = ((trees[-1][0], 1.0),)
         values = [(value(trees[0][0]), 1.0)]
     decay = {
-        kind: math.fsum(weight * later[kind] for later, weight in values) - prices.tree[kind].price
-        for kind in cache.KINDS
+        kind: math.fsum(weight * later[kind] for later, weight in values) - tree[kind].price for kind in cache.KINDS
     }
     return decay, trees
 
 
-def _decay_row(decay: dict[str, float], expiring: bool) -> dict:
-    """The one-day decay as a row of the Greeks table."""
+# --- The contract's market --------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Contract:
+    """The contract's market: under the index preset the published surface, the expiry's key in it, its forward,
+    discount factor and strike interval, the chain's quotes of the call and the put (None when not listed) and the
+    surface's vol at the strike (the fit, ``fit_vol``). Under the textbook market only the forward (S·e^{(r−q)T}),
+    the discount factor e^{−rT} and a strike increment of a cent."""
+
+    surface: PublishedSurface | None
+    expiry: Expiry | None
+    forward: float
+    discount: float
+    step: float
+    quotes: dict[str, Quote | None]
+    fit_vol: float | None
+
+    @property
+    def listed(self) -> bool:
+        """Whether the market has quotes (the index preset)."""
+        return self.surface is not None
+
+
+def contract(inputs: Inputs) -> Contract:
+    """The sidebar contract's market (see :class:`Contract`)."""
+    published = surface_state.current(inputs)
+    if published is None or inputs.expiry_date is None or inputs.settlement is None:
+        T = inputs.expiry
+        return Contract(None, None, inputs.forward, math.exp(-inputs.rate * T), 0.01, {"call": None, "put": None}, None)
+    key = Expiry(inputs.expiry_date, inputs.settlement)
+    quotes: dict[str, Quote | None] = {}
+    for kind in cache.KINDS:
+        try:
+            quotes[kind] = published.quote(key, inputs.strike, kind)
+        except KeyError:  # a typed strike that is not listed at this expiry
+            quotes[kind] = None
+    assert inputs.context is not None
+    return Contract(
+        published,
+        key,
+        published.forward(key),
+        published.discount_factor(key),
+        inputs.context.strike_step,
+        quotes,
+        inputs.surface_vol,
+    )
+
+
+def _day(day: date) -> str:
+    """``Thu 19‑Nov`` (non-breaking hyphen)."""
+    return f"{_WEEKDAYS[day.weekday()]} {short_date(day)[:6]}".replace("-", NB_HYPHEN)
+
+
+def last_trade(expiry: date, settlement: str) -> str:
+    """When the contract last trades, and how it settles: an AM monthly stops trading on the business day before
+    its expiry and settles at the special opening quotation (SOQ); a PM weekly trades to the close on its expiry
+    day, 16:00 ET or 13:00 on an early close, and settles at the close (Cboe SPX and SPXW specifications).
+
+    >>> last_trade(date(2026, 11, 20), "AM"), last_trade(date(2026, 11, 25), "PM")
+    ('last trade Thu 19‑Nov · settles at the SOQ', 'last trade Wed 25‑Nov 16:00 ET · settles at the close')
+    >>> last_trade(date(2026, 11, 27), "PM")  # the day after Thanksgiving closes early
+    'last trade Fri 27‑Nov 13:00 ET · settles at the close'
+    """
+    if settlement == "AM":
+        return f"last trade {_day(clock.previous_trading_day(expiry - timedelta(days=1)))} · settles at the SOQ"
+    day = clock.previous_trading_day(expiry)
+    return f"last trade {_day(day)} {clock.market_close(day):%H:%M} ET · settles at the close"
+
+
+def context_line(inputs: Inputs) -> str:
+    """The Pricing and IV tabs' first line: the contract, and the what-if note while a shift is set (those tabs show
+    the market: the shifts apply on Strategy and Risk only, UI spec 2.0).
+
+    ``SPX 20‑Nov‑26 AM 5,815 · last trade Thu 19‑Nov · settles at the SOQ`` under the index;
+    ``Textbook contract · K 100.00 · 365 days · flat vol, no quotes`` under the textbook market."""
+    if inputs.expiry_date is not None and inputs.settlement is not None and inputs.context is not None:
+        day = short_date(inputs.expiry_date).replace("-", NB_HYPHEN)
+        text = (
+            f"{mk.INDEX_ROOT} {day} {inputs.settlement} {strike(inputs.strike, inputs.context.strike_step)} · "
+            f"{last_trade(inputs.expiry_date, inputs.settlement)}"
+        )
+    else:
+        days = f"{number(inputs.days, 0 if float(inputs.days).is_integer() else 1)} days"
+        text = f"Textbook contract · K {level(inputs.strike)} · {days} · flat vol, no quotes"
+    note = whatif.note(whatif.current())
+    return f"{text} · {note}" if note else text
+
+
+# --- Greeks in desk units ---------------------------------------------------------------------------------------
+
+
+def engine_greeks(inputs: Inputs, prices: Prices) -> dict[str, dict[str, float]]:
+    """The sidebar engine's Greeks of the call and the put in raw model units (``black_scholes.greeks``): the
+    closed form's to third order, or the American engine's first order (``american.greeks``)."""
+    if _alo(inputs):
+        return {kind: {name: float(prices.alo_greeks[kind][name]) for name in ALO_GREEKS} for kind in cache.KINDS}
+    return {kind: {k: float(v) for k, v in bs.greeks(*_args(inputs), kind).items()} for kind in cache.KINDS}
+
+
+def desk_units(greeks: dict[str, float], spot: float, rate: float, dividend_yield: float, T: float) -> dict:
+    """First-order Greeks in desk units, per share (UI spec 2.5): Δ (spot), Δ fwd = ∂V/∂F = Δ·e^{−(r−q)T}, Γ 1% =
+    ΓS/100 (the change in Δ for a 1% move), vega $ per vol point, Θ $ per calendar day, ρ and ε $ per 1%."""
     return {
-        "Greek": decay_label(expiring),
-        "Call": decay["call"],
-        "Put": decay["put"],
-        "Unit": "until expiry, by repricing" if expiring else "over the next calendar day, by repricing",
-        "Definition": "V(expiry) − V" if expiring else "V(T − 1 day) − V(T)",
-        "Order": 1,
+        "delta": greeks["delta"],
+        "delta_fwd": greeks["delta"] * math.exp(-(rate - dividend_yield) * T),
+        "gamma": greeks["gamma"] * spot / 100.0,
+        "vega": greeks["vega"] / 100.0,
+        "theta": greeks["theta"] / 365.0,
+        "rho": greeks["rho"] / 100.0,
+        "epsilon": greeks["epsilon"] / 100.0,
     }
 
 
-def _with_decay(rows: list[dict], theta: dict[str, float], decay: dict[str, float], expiring: bool) -> list[dict]:
-    """``rows`` with the one-day decay next to the theta row: before it when it leads (:func:`decay_leads`) for the
-    call or the put, after it otherwise. ``theta`` is theta / 365 of each option."""
-    leads = any(decay_leads(theta[kind], decay[kind], expiring) for kind in cache.KINDS)
-    at = next(i for i, row in enumerate(rows) if row["Greek"].startswith("Theta")) + (0 if leads else 1)
-    return [*rows[:at], _decay_row(decay, expiring), *rows[at:]]
+def _sig(x: float, digits: int = 3) -> str:
+    """``x`` signed, with ``digits`` significant digits (U+2212; scientific notation below 1e−6)."""
+    if not np.isfinite(x):
+        return MISSING
+    if x == 0:
+        return "0"
+    if abs(x) < 1e-6:
+        return signed_sci(x, digits)
+    return signed(x, max(0, digits - 1 - math.floor(math.log10(abs(x)))))
 
 
-def _greeks_table(inputs: Inputs, higher_order: bool, decay: dict[str, float]) -> pd.DataFrame:
-    args = (inputs.spot, inputs.strike, inputs.expiry, inputs.rate, inputs.volatility, inputs.dividend_yield)
-    call = bs.greeks(*args, "call")
-    put = bs.greeks(*args, "put")
+# --- The tiles ------------------------------------------------------------------------------------------------
+
+
+def pair_forward(contract: Contract, K: float) -> float:
+    """The forward implied by one strike's quoted pair, K + (C_mid − P_mid) / DF (put-call parity); NaN when either
+    side has no two-sided quote."""
+    call, put = contract.quotes["call"], contract.quotes["put"]
+    if call is None or put is None or not (call.bid > 0 and put.bid > 0):
+        return math.nan
+    return K + (call.mid - put.mid) / contract.discount
+
+
+def _tiles(inputs: Inputs, prices: Prices, market: Contract) -> None:
+    S, K, T, r, sigma, q = _args(inputs)
+    alo = _alo(inputs)
+    off = {"delta_color": "off", "delta_arrow": "off"}
+    checks = {"call": "", "put": ""}
+    if alo:
+        # The engine against an independent lattice: an American Leisen-Reimer tree of 2,001 steps (cached).
+        try:
+            tree = cache.tree_prices(S, K, T, r, sigma, q, TREE_CHECK_STEPS, True, "lr")
+            lattice = f"ALO vs LR {number(TREE_CHECK_STEPS, 0)}"
+            checks = {k: f" {lattice}: {signed_sci(prices.alo[k].value - tree[k])}." for k in tree}
+        except ValueError:
+            pass
+    engine = inputs.model.label
+    price_tiles = []
+    for kind, value, note in (("call", prices.call, prices.call_note), ("put", prices.put, prices.put_note)):
+        price_tiles.append(
+            (
+                kind.capitalize(),
+                premium(value),
+                {
+                    "delta": f"{pct(value / S, 2)} of S",
+                    **off,
+                    "help": md(f"{engine}: {premium(value, 6)} per share. {note}.{checks[kind]}"),
+                },
+            )
+        )
+    straddle = prices.call + prices.put
+    tiles = [
+        *price_tiles,
+        (
+            "Straddle",
+            premium(straddle),
+            {
+                "delta": f"±{pct(straddle / S, 2)}",
+                **off,
+                "help": md(
+                    f"Call + put = {premium(straddle, 6)}. As a share of spot, the move to expiry at which the long "
+                    "straddle breaks even."
+                ),
+            },
+        ),
+    ]
+    # Vol: the surface's or a typed override (index), or the textbook's one vol.
+    if market.listed and inputs.surface_vol is not None:
+        moneyness = f"K/F {fmt_moneyness(K, market.forward)}"
+        if inputs.vol_overridden:
+            source = f"override {vol_change(sigma - inputs.surface_vol)}"
+            help_text = f"Typed over the surface's {vol(inputs.surface_vol)} at {moneyness}."
+        else:
+            source = "surface"
+            help_text = f"The published surface's vol at {moneyness} (arbitrage-free SVI fitted to the chain)."
+    else:
+        source, help_text = "flat", "Typed in the sidebar: one vol for every strike (the textbook market has no smile)."
+    # Labelled Vol, not σ: the tiles' labels are set in capitals (desk.css), and a capital sigma reads as a sum.
+    tiles.append(("Vol", vol(sigma), {"delta": source, **off, "help": help_text}))
+    # Forward: the parity forward of the expiry, and the forward this strike's own pair implies, as a market check.
+    implied = pair_forward(market, K)
+    if market.listed:
+        gap = (implied - market.forward) / market.forward
+        pair = f"pair {bp(gap)}"
+        forward_help = (
+            "The expiry's forward from put-call parity across its quotes "
+            f"(DF {number(market.discount, 5)}). This strike's pair implies K + (C mid − P mid)/DF = {level(implied)}."
+            if np.isfinite(implied)
+            else "The expiry's forward from put-call parity across its quotes. "
+            + (
+                "This strike is not listed at this expiry, so no pair of its own implies a forward."
+                if market.quotes["call"] is None
+                else "This strike's call or put has no bid, so its pair implies no forward."
+            )
+        )
+    else:
+        pair = f"pair {MISSING}"
+        forward_help = (
+            f"F = S·e^((r−q)T), discount factor e^(−rT) = {number(market.discount, 6)}. No pair-implied forward: the "
+            "textbook market has no quotes."
+        )
+    tiles.append(("Forward", level(market.forward), {"delta": pair, **off, "help": md(forward_help)}))
+    # Time: to the settlement (index) or days / 365 (textbook).
+    if inputs.expiry_date is not None and inputs.context is not None:
+        expiry_day = inputs.context.as_of.date() == inputs.expiry_date
+        settles = clock.settlement_time(inputs.expiry_date, inputs.settlement or "PM")
+        tiles.append(
+            (
+                "Time",
+                time_left(T * 525_600, expiry_day=expiry_day),
+                {
+                    "delta": f"{inputs.settlement} settle",
+                    **off,
+                    "help": f"T = {number(T, 6)} years to the settlement at {_day(settles.date())} {settles:%H:%M} ET "
+                    "(minutes / 525,600).",
+                },
+            )
+        )
+    else:
+        tiles.append(
+            (
+                "Time",
+                time_left(inputs.days * 1440),
+                {"delta": "calendar days", **off, "help": f"T = days / 365 = {number(T, 6)} years."},
+            )
+        )
+    card_row(*TILES, tiles)
+    for note in alo_fallbacks(prices):
+        st.warning(note, icon=":material/warning:")
+
+
+# --- The contract table -----------------------------------------------------------------------------------------
+
+
+def contract_frame(inputs: Inputs, prices: Prices, market: Contract) -> tuple[pd.DataFrame, dict, dict, dict]:
+    """The contract table's data, kinds, help and headers (UI spec 3.1 item 3): one row per option.
+
+    Market columns (under the index preset): bid, ask, mid, theo, the implied vols of the bid and the ask, and Mid vs
+    fit (σ_mid − σ_fit, vp) with ``in band`` when the fit lies inside [σ_bid, σ_ask]; with an override, Buy edge
+    (σ_theo − σ_ask) and Sell edge (σ_bid − σ_theo) instead, ``in band`` when both are at most zero. Then the
+    engine's Greeks in desk units and, under the American engine, the early-exercise premium."""
+    S, _, T, r, sigma, q = _args(inputs)
+    greeks = engine_greeks(inputs, prices)
+    engine = engine_name(inputs)
     rows = []
-    for name, info in bs.GREEKS.items():
-        if info.order > 1 and not higher_order:
+    for kind, theo in (("call", prices.call), ("put", prices.put)):
+        row: dict[str, object] = {"Type": kind.capitalize()}
+        if market.listed:
+            quote = market.quotes[kind]
+            bid, ask, mid, iv_bid, iv_ask, iv_mid = (np.nan,) * 6 if quote is None else quote
+            if quote is not None and not bid > 0:  # an offer only: no bid, so no mid either
+                bid, mid = np.nan, np.nan
+            row |= {"Bid": bid, "Ask": ask, "Mid": mid, "Theo": theo, "IV bid": iv_bid * 100, "IV ask": iv_ask * 100}
+            if inputs.vol_overridden:
+                buy, sell = (sigma - iv_ask) * 100, (iv_bid - sigma) * 100
+                row |= {"Buy edge": buy, "Sell edge": sell, "Band": _band(buy, sell)}
+            else:
+                fit = market.fit_vol if market.fit_vol is not None else sigma
+                row |= {"Mid vs fit": (iv_mid - fit) * 100, "Band": _band((fit - iv_ask) * 100, (iv_bid - fit) * 100)}
+        else:
+            row["Theo"] = theo
+        units = desk_units(greeks[kind], S, r, q, T)
+        row |= {"Δ": units["delta"], "Γ 1%": units["gamma"], "Vega": units["vega"], "Θ": units["theta"]}
+        row["ρ"] = units["rho"]
+        if prices.alo is not None:
+            row["Early-ex"] = prices.alo[kind].premium
+        rows.append(row)
+    frame = pd.DataFrame(rows)
+    unlisted = "Not a listed contract in the source." if market.listed and market.quotes["call"] is None else ""
+    kinds = {
+        "Type": "text", "Bid": "premium", "Ask": "premium", "Mid": "premium", "Theo": "premium", "IV bid": "vol",
+        "IV ask": "vol", "Mid vs fit": "vol_change", "Buy edge": "vol_change", "Sell edge": "vol_change",
+        "Band": "text", "Δ": "delta", "Γ 1%": "gamma", "Vega": "vega_share", "Θ": "theta_share", "ρ": "rho_share",
+        "Early-ex": "premium",
+    }  # fmt: skip
+    market_help = f"The synthetic chain's quote, $ per share. {unlisted}".strip()
+    help_text = {
+        "Type": "The option.",
+        "Bid": market_help,
+        "Ask": market_help,
+        "Mid": f"Half way between bid and ask; none for a one-sided quote. {unlisted}".strip(),
+        "Theo": f"The {engine} value at the vol used ({vol(sigma)}), $ per share.",
+        "IV bid": f"Black-76 implied vol of the bid at the expiry's parity forward. {unlisted}".strip(),
+        "IV ask": f"Black-76 implied vol of the ask at the expiry's parity forward. {unlisted}".strip(),
+        "Mid vs fit": "σ mid − σ fit, vol points: positive means the market is rich against the fit. A residual, "
+        "not an edge: the fit is made from these mids.",
+        "Buy edge": "σ theo − σ ask, vol points: positive means buying at the ask is cheap against your vol.",
+        "Sell edge": "σ bid − σ theo, vol points: positive means selling at the bid is rich against your vol.",
+        "Band": "in band: the theo vol lies inside [σ bid, σ ask], so neither side is an edge. outside: it does not.",
+        "Δ": f"{engine} delta, spot convention: per 1 point of S.",
+        "Γ 1%": "Change in delta for a 1% move in spot: Γ·S/100.",
+        "Vega": "$ per share per vol point.",
+        "Θ": "$ per share per calendar day of elapsed time, ∂V/∂t ÷ 365 at fixed vol; the one-day decay by "
+        "repricing is in the Greeks table.",
+        "ρ": "$ per share per 1% rise in the rate, spot and dividend yield held.",
+        "Early-ex": "American value minus the closed-form European value, $ per share.",
+    }
+    labels = {"Θ": "Θ", "ρ": "ρ", "Early-ex": "Early-ex ($)", "Mid vs fit": "Mid vs fit"}
+    return frame, {c: kinds[c] for c in frame}, {c: help_text[c] for c in frame}, labels
+
+
+def _band(buy: float, sell: float) -> str:
+    """``in band`` when both edges are at most zero, ``outside`` when either is positive, ``–`` without a market."""
+    if not (np.isfinite(buy) and np.isfinite(sell)):
+        return MISSING
+    return "in band" if buy <= 0 and sell <= 0 else "outside"
+
+
+# --- The profile ------------------------------------------------------------------------------------------------
+
+
+def _rn_range(inputs: Inputs, market: Contract, level_: float = 0.95) -> tuple[float, float]:
+    """The central risk-neutral range of S_T: from the published surface's smile (index), or lognormal at the flat
+    vol (textbook)."""
+    if market.surface is not None and market.expiry is not None:
+        return market.surface.rn_range(market.expiry, level_)
+    _, _, T, _, sigma, _ = _args(inputs)
+    z = ndtri(0.5 + level_ / 2.0) * sigma * math.sqrt(T)
+    centre = market.forward * math.exp(-0.5 * sigma * sigma * T)
+    return centre * math.exp(-z), centre * math.exp(z)
+
+
+def spot_grid(inputs: Inputs, market: Contract, choice: str) -> np.ndarray:
+    """The spot axis of the profile for a Range choice: ±5, ±10 or ±20% of S, the 95% risk-neutral range (from the
+    smile; lognormal under the textbook market), or Auto (half the lower of S and K to one and a half times the
+    higher, version 2's axis)."""
+    S, K = inputs.spot, inputs.strike
+    if choice == "RN 95%":
+        lo, hi = _rn_range(inputs, market)
+    elif choice == "Auto":
+        lo, hi = 0.5 * min(S, K), 1.5 * max(S, K)
+    else:
+        half = float(choice.strip("±%")) / 100.0
+        lo, hi = S * (1 - half), S * (1 + half)
+    return np.linspace(lo, hi, SPOT_POINTS)
+
+
+def _bsm_metric(metric: str, S, K, T, r, sigma, q, kind: str) -> np.ndarray:
+    """A profile metric of the closed form, per share, in desk units (Γ as Γ 1%)."""
+    if metric == "Value":
+        return np.asarray(bs.price(S, K, T, r, sigma, q, kind), dtype=float)
+    g = bs.greeks(S, K, T, r, sigma, q, kind)
+    if metric == "Δ":
+        return np.asarray(g["delta"], dtype=float)
+    if metric == "Γ":
+        return np.asarray(g["gamma"], dtype=float) * np.asarray(S, dtype=float) / 100.0
+    if metric == "Vega":
+        return np.asarray(g["vega"], dtype=float) / 100.0
+    return np.asarray(g["theta"], dtype=float) / 365.0
+
+
+def _alo_metric(metric: str, S, K, T, r, sigma, q, kind: str, scheme: str) -> np.ndarray:
+    """A profile metric of the American engine, per share, in desk units: the value, and the Greeks by central
+    differences of the value with the bumps of ``american.GREEK_BUMPS`` (spot and expiry by ±0.01%, the vol by
+    ±0.01 vol point), the scheme held fixed, as ``american.greeks`` takes them. Arrays broadcast; the engine solves one
+    boundary per distinct (K, T, r, σ, q)."""
+    S, T, sigma = np.broadcast_arrays(*(np.asarray(v, dtype=float) for v in (S, T, sigma)))
+
+    def value(s=S, t=T, v=sigma) -> np.ndarray:
+        return cache.alo_values(s, K, t, r, v, q, kind, scheme)
+
+    if metric == "Value":
+        return value()
+    if metric in ("Δ", "Γ"):
+        h = american.GREEK_BUMPS["spot"] * S
+        up, down = value(s=S + h), value(s=S - h)
+        if metric == "Δ":
+            return (up - down) / (2 * h)
+        return (up - 2 * value() + down) / (h * h) * S / 100.0
+    if metric == "Vega":
+        h = american.GREEK_BUMPS["volatility"]
+        return (value(v=sigma + h) - value(v=np.maximum(sigma - h, 1e-8))) / (2 * h) / 100.0
+    h = american.GREEK_BUMPS["expiry"] * T
+    return -(value(t=T + h) - value(t=T - h)) / (2 * h) / 365.0
+
+
+def _alo_decay(S, K, T, r, sigma, q, kind: str, scheme: str) -> np.ndarray:
+    """The American engine's one-day decay over arrays: the value one calendar day later minus the value now (the
+    intrinsic value at expiry within a day)."""
+    S, T, sigma = np.broadcast_arrays(*(np.asarray(v, dtype=float) for v in (S, T, sigma)))
+    now = cache.alo_values(S, K, T, r, sigma, q, kind, scheme)
+    later = cache.alo_values(S, K, np.maximum(T - ONE_DAY, 1e-12), r, sigma, q, kind, scheme)
+    intrinsic = np.maximum(bs.option_sign(kind) * (S - K), 0.0)
+    return np.where(T <= ONE_DAY, intrinsic, later) - now
+
+
+def profile_lines(inputs: Inputs, metric: str, axis: str, x: np.ndarray) -> list[charts_pricing.Line]:
+    """The profile's curves: the engine's call and put (solid); under the American engine the closed form as ``BSM
+    ref`` (dotted); and beside theta the one-day decay (dashed), as Milestone 1 put it beside theta / 365."""
+    S, K, T, r, sigma, q = _args(inputs)
+    if axis == "Spot":
+        args = (x, K, T, r, sigma, q)
+    elif axis == "Vol":
+        args = (S, K, T, r, x / 100.0, q)
+    else:
+        args = (S, K, x / 365.0, r, sigma, q)
+    alo = _alo(inputs)
+    lines = []
+    for kind in cache.KINDS:
+        name = kind.capitalize()
+        if alo:
+            s_, k_, t_, r_, v_, q_ = args
+            lines.append(
+                charts_pricing.Line(name, _alo_metric(metric, s_, k_, t_, r_, v_, q_, kind, inputs.model.scheme), kind)
+            )
+        else:
+            lines.append(charts_pricing.Line(name, _bsm_metric(metric, *args, kind), kind))
+    if alo:
+        for kind in cache.KINDS:
+            lines.append(
+                charts_pricing.Line(f"{kind.capitalize()} BSM ref", _bsm_metric(metric, *args, kind), kind, "ref")
+            )
+    if metric == "Θ":
+        decay = decay_label(axis != "Time" and to_expiry(T))
+        for kind in cache.KINDS:
+            if alo:
+                s_, k_, t_, r_, v_, q_ = args
+                y = _alo_decay(s_, k_, t_, r_, v_, q_, kind, inputs.model.scheme)
+            else:
+                y = closed_form_decay(*args, kind)
+            lines.append(charts_pricing.Line(f"{kind.capitalize()} {decay.lower()}", y, kind, "decay"))
+    return lines
+
+
+_Y_TITLES = {
+    "Value": "Value ($ per share)",
+    "Δ": "Delta (spot)",
+    "Γ": "Γ 1% (Δ per 1% move)",
+    "Vega": "Vega ($ per vol point)",
+    "Θ": "Θ and 1-day decay ($ per day)",
+}
+
+
+@st.fragment
+def _profile(inputs: Inputs, market: Contract) -> None:
+    """The profile's controls and chart (UI spec 3.1 item 4), in the fragment ``pricing_profile``: a control
+    reruns this fragment only."""
+    row = st.container(horizontal=True, key="pricing_profile_controls", vertical_alignment="bottom", gap="medium")
+    metric = row.segmented_control(
+        "Metric", METRICS, default="Value", required=True, key="pr_metric", bind="query-params", persist_state="session"
+    )
+    axis = row.segmented_control(
+        "Against", AXES, default="Spot", required=True, key="pr_x", bind="query-params", persist_state="session"
+    )
+    choice = row.segmented_control(
+        "Range",
+        RANGES,
+        default="±10%",
+        required=True,
+        key="pr_range",
+        bind="query-params",
+        persist_state="session",
+        disabled=axis != "Spot",
+        help="The spot axis: a share of spot, the 95% risk-neutral range to expiry (from the smile; lognormal at the "
+        "flat vol in the textbook market), or half the lower of S and K to one and a half times the higher.",
+    )
+    S, K, _, _, sigma, _ = _args(inputs)
+    if axis == "Spot":
+        x = spot_grid(inputs, market, choice)
+        x_title, current = "Spot", (S, f"S {level(S)}")
+        references = [(K, f"K {strike(K, market.step)}", "strike")]
+        if market.listed:
+            references.append((market.forward, "F", "forward"))
+    elif axis == "Vol":
+        x = np.linspace(1.0, max(60.0, 2.5 * sigma * 100), OTHER_POINTS)
+        x_title, current, references = "Vol (%)", (sigma * 100, f"σ {vol(sigma)}"), []
+    else:
+        x = np.linspace(min(1.0, inputs.days / 2), max(inputs.days * 1.5, 30.0), OTHER_POINTS)
+        x_title, current, references = "Days to expiry", (inputs.days, f"{number(inputs.days, 1)}d"), []
+    lines = profile_lines(inputs, metric, axis, x)
+    fig = charts_pricing.profile_chart(
+        x, lines, x_title=x_title, y_title=_Y_TITLES[metric], current=current, references=references
+    )
+    engine = engine_name(inputs)
+    charts.show(
+        fig,
+        key="pricing_profile",
+        alt=f"{engine} {metric} of the call and the put against {x_title.lower()}, at fixed vol (sticky strike)",
+    )
+
+
+# --- The chain ladder (UI-7) ------------------------------------------------------------------------------------
+
+
+def on_chain_select(
+    key: str, strikes: tuple[float, ...], priced: tuple[bool, ...] | None = None, step: float = 0.01
+) -> None:
+    """The chain ladder's ``on_select`` callback: price the clicked row's strike (UI spec 2.8, a selection is a
+    click action). It writes the sidebar's ``strike`` (its keyboard route) and asks the chain's fragment to rerun
+    the whole app, since the sidebar, the tiles and the tables read the strike only in a full run. A row beyond the
+    surface's reach (``priced`` False: the "All" window lists such strikes with their quotes) has no vol to price
+    it, so the strike stays and the ladder says why.
+
+    Parameters
+    ----------
+    key : str
+        The table's widget key, whose state holds the selection (``{"selection": {"rows": [i], ...}}``).
+    strikes : tuple of float
+        The strike of each row, in the table's order.
+    priced : tuple of bool, optional
+        Whether each row has a vol to price it; every row when omitted.
+    step : float, default 0.01
+        The strike interval, for the note's strike.
+    """
+    state = st.session_state
+    selection = state.get(key) or {}
+    rows = (selection.get("selection") or {}).get("rows") or []
+    if not rows:
+        return
+    row = int(rows[0])
+    chosen = float(strikes[row])
+    if priced is not None and not priced[row]:
+        state[_CHAIN_NOTE] = (
+            f"{strike(chosen, step)} lies beyond the surface's reach at this expiry: "
+            "it has quotes but no vol to price it, so the strike stays."
+        )
+        return
+    if chosen != state.get("strike"):
+        state["strike"] = chosen
+        state[_CHAIN_MOVED] = True
+
+
+def _snap(values: np.ndarray, lo: float, hi: float) -> tuple[float, float]:
+    """``(lo, hi)`` widened to the listed values that bracket them (the window's ends are listed strikes)."""
+    below = values[values <= lo + 1e-9]
+    above = values[values >= hi - 1e-9]
+    return (float(below[-1]) if below.size else float(values[0]), float(above[0]) if above.size else float(values[-1]))
+
+
+def chain_strikes(listed: np.ndarray, lo: float, hi: float, stride: int | str, current: float) -> np.ndarray:
+    """The ladder's strikes: the listed ones in [lo, hi] on the stride's grid, and the Pricing strike.
+
+    ``stride`` ``"Auto"`` is the smallest of 5, 10, 25, 50 and 100 points that gives at most :data:`CHAIN_ROWS` rows
+    (before the Pricing strike is added); 100 when none does.
+
+    The default window, 5,425 to 6,075: 50 points (13 strikes) and 5,815.
+
+    >>> chain_strikes(np.arange(5400.0, 6101.0, 5.0), 5425.0, 6075.0, "Auto", 5815.0).size
+    14
+    """
+    inside = listed[(listed >= lo - 1e-9) & (listed <= hi + 1e-9)]
+    steps = [s for s in STRIDES if s != "Auto"]
+    if stride == "Auto":
+        stride = next((s for s in steps if np.count_nonzero(np.isclose(inside % s, 0)) <= CHAIN_ROWS), steps[-1])
+    on_grid = inside[np.isclose(np.mod(inside, float(stride)), 0) | np.isclose(np.mod(inside, float(stride)), stride)]
+    return np.unique(np.r_[on_grid, current])
+
+
+def _textbook_strikes(inputs: Inputs, market: Contract, window: str) -> tuple[np.ndarray, float, float]:
+    """A strike grid for the textbook market, which lists none: steps of 1, 2 or 5 times a power of ten, the
+    finest that keeps the 10Δ to 10Δ window within :data:`CHAIN_ROWS` rows, and the window's ends."""
+    lo, hi = _window(inputs, market, window)
+    width = max(hi - lo, 1e-6)
+    raw = width / CHAIN_ROWS
+    power = 10.0 ** math.floor(math.log10(raw))
+    step = next(m * power for m in (1, 2, 5, 10) if m * power >= raw)
+    grid = np.arange(math.floor(lo / step) * step, hi + step / 2, step)
+    return grid[grid > 0], lo, hi
+
+
+def _flat_delta_strike(inputs: Inputs, delta: float, kind: str) -> float:
+    """The strike whose closed-form spot delta at the flat vol is ``delta`` (textbook market)."""
+    S, _, T, r, sigma, q = _args(inputs)
+    carry = math.exp(-q * T)
+    d1 = ndtri(delta / carry) if kind == "call" else -ndtri(-delta / carry)
+    return S * math.exp((r - q + 0.5 * sigma * sigma) * T - d1 * sigma * math.sqrt(T))
+
+
+def _window(inputs: Inputs, market: Contract, window: str) -> tuple[float, float]:
+    """The ladder's strike range: 10Δ put to 10Δ call (the default), 25Δ to 25Δ, the 95% risk-neutral range, or
+    every strike. Under the index the delta strikes are the listed ones at their own surface vols (RK-9a)."""
+    if window == "RN 95%":
+        return _rn_range(inputs, market)
+    target = 0.25 if window.startswith("25") else 0.10
+    if market.surface is not None and market.expiry is not None:
+        if window == "All":
+            listed = market.surface.strikes(market.expiry)
+            return float(listed[0]), float(listed[-1])
+        return (
+            market.surface.delta_strike(market.expiry, -target, "put"),
+            market.surface.delta_strike(market.expiry, target, "call"),
+        )
+    if window == "All":
+        return 0.5 * inputs.spot, 1.5 * inputs.spot
+    return _flat_delta_strike(inputs, -target, "put"), _flat_delta_strike(inputs, target, "call")
+
+
+def chain_vols(inputs: Inputs, market: Contract, strikes: np.ndarray) -> np.ndarray:
+    """The vol of each of the ladder's strikes: the published surface's (NaN beyond its reach) or the flat vol."""
+    if market.surface is not None and market.expiry is not None:
+        return np.array([market.surface.vol(k, market.expiry).vol for k in strikes], dtype=float)
+    return np.full(strikes.shape, inputs.volatility)
+
+
+def chain_frame(inputs: Inputs, market: Contract, strikes: np.ndarray, vols: np.ndarray | None = None) -> pd.DataFrame:
+    """The ladder's rows: calls (bid, ask, theo, mid IV, Δ), the strike and a mark on the Pricing strike's row, then
+    puts mirrored. Theo is the engine's value at each strike's surface vol (index) or at the flat vol (textbook);
+    without quotes (textbook) the bid, ask and IV columns are left out. ``vols``: :func:`chain_vols`, if read
+    already."""
+    S, K, T, r, _sigma, q = _args(inputs)
+    vols = chain_vols(inputs, market, strikes) if vols is None else vols
+    # Beyond the surface's reach the vol is NaN (on the default 20-Nov expiry the nine listed strikes 4,150 to 4,550,
+    # which only the "All" window shows): those rows keep their quotes and read "–" for theo and delta.
+    priced = np.isfinite(vols)
+    sides = {}
+    for kind in cache.KINDS:
+        theo, delta = np.full(strikes.shape, np.nan), np.full(strikes.shape, np.nan)
+        k, v = strikes[priced], vols[priced]
+        if not priced.any():
+            pass
+        elif _alo(inputs):
+            theo[priced] = cache.alo_values(S, k, T, r, v, q, kind, inputs.model.scheme)
+            delta[priced] = _alo_metric("Δ", S, k, T, r, v, q, kind, inputs.model.scheme)
+        else:
+            theo[priced] = np.asarray(bs.price(S, k, T, r, v, q, kind), dtype=float)
+            delta[priced] = np.asarray(bs.greeks(S, k, T, r, v, q, kind)["delta"], dtype=float)
+        side = {"Theo": theo, "Δ": delta}
+        if market.listed:
+            quotes = []
+            for k in strikes:
+                try:
+                    quotes.append(market.surface.quote(market.expiry, float(k), kind))
+                except KeyError:
+                    quotes.append(Quote(*(np.nan,) * 6))
+            side |= {
+                "Bid": np.array([qt.bid if qt.bid > 0 else np.nan for qt in quotes]),
+                "Ask": np.array([qt.ask for qt in quotes]),
+                "IV": np.array([qt.iv_mid for qt in quotes]) * 100,
+            }
+        sides[kind] = side
+    order = ("Bid", "Ask", "Theo", "IV", "Δ") if market.listed else ("Theo", "Δ")
+    data = {f"C {name}": sides["call"][name] for name in order}
+    data["Strike"] = strikes
+    # The Pricing strike's row: an arrow at its strike (UI spec 3.1 item 5 draws a left-pointing triangle, U+25C2,
+    # which IBM Plex Sans lacks).
+    data["Mark"] = ["←" if abs(k - K) < 1e-9 else "" for k in strikes]
+    # Mirrored the OMON way: the puts read outwards from the strike, Δ · IV · Theo · Bid · Ask.
+    mirror = ("Δ", "IV", "Theo", "Bid", "Ask") if market.listed else ("Δ", "Theo")
+    data |= {f"P {name}": sides["put"][name] for name in mirror}
+    return pd.DataFrame(data)
+
+
+_CHAIN_KINDS = {"Bid": "premium", "Ask": "premium", "Theo": "premium", "IV": "vol", "Δ": "delta"}
+
+
+@st.fragment
+def _chain(inputs: Inputs, market: Contract) -> None:
+    """The chain ladder (UI-7), in the fragment ``pricing_chain``: its window and stride rerun this fragment only;
+    a row click reruns the app at the new strike."""
+    if st.session_state.pop(_CHAIN_MOVED, False):
+        st.rerun()  # the click's callback moved the strike: the whole app reads it
+    row = st.container(horizontal=True, key="pricing_chain_controls", vertical_alignment="bottom", gap="medium")
+    window = row.segmented_control(
+        "Window",
+        WINDOWS,
+        default=WINDOWS[0],
+        required=True,
+        key="pr_chain_win",
+        bind="query-params",
+        persist_state="session",
+        help="Strikes from the 10-delta put to the 10-delta call (each strike's delta at its own vol), 25 to 25, "
+        "the 95% risk-neutral range to expiry, or every listed strike.",
+    )
+    stride = row.selectbox(
+        "Stride",
+        STRIDES,
+        key="pr_chain_stride",
+        bind="query-params",
+        persist_state="session",
+        format_func=lambda s: s if s == "Auto" else f"{s} pts",
+        width=120,
+        help=f"Points between rows. Auto: the finest of 5, 10, 25, 50 and 100 that keeps at most {CHAIN_ROWS} rows.",
+    )
+    if market.listed:
+        listed = market.surface.strikes(market.expiry)
+        lo, hi = _snap(listed, *_window(inputs, market, window))
+        strikes = chain_strikes(listed, lo, hi, stride, inputs.strike)
+        step = market.step
+    else:
+        grid, lo, hi = _textbook_strikes(inputs, market, window)
+        step = float(grid[1] - grid[0]) if grid.size > 1 else market.step
+        if stride != "Auto":  # a fixed stride in points, as typed
+            step = float(stride)
+            grid = np.arange(math.ceil(lo / step) * step, hi + 1e-9, step)
+        strikes = np.unique(np.r_[grid, inputs.strike])
+    vols = chain_vols(inputs, market, strikes)
+    frame = chain_frame(inputs, market, strikes, vols)
+    engine = engine_name(inputs)
+    kinds, help_text, labels = {}, {}, {}
+    for column in frame.columns:
+        if column in ("Strike", "Mark"):
             continue
-        rows.append(
-            {
-                "Greek": f"{info.label} {info.symbol}".strip(),
-                "Call": call[name] * info.scale,
-                "Put": put[name] * info.scale,
-                "Unit": info.unit,
-                "Definition": info.description,
-                "Order": info.order,
-            }
-        )
-    theta = {"call": call["theta"] / 365.0, "put": put["theta"] / 365.0}
-    return pd.DataFrame(_with_decay(rows, theta, decay, to_expiry(inputs.expiry)))
+        side, name = column.split(" ", 1)
+        option = "call" if side == "C" else "put"
+        kinds[column] = _CHAIN_KINDS[name]
+        # Each side's headers name it ("Call bid" to "Put ask"): the two halves share their column names.
+        labels[column] = f"{option.capitalize()} {name if name in ('IV', 'Δ') else name.lower()}"
+        help_text[column] = {
+            "Bid": f"The chain's {option} bid, $ per share.",
+            "Ask": f"The chain's {option} ask, $ per share.",
+            "Theo": f"{engine} {option} value at the strike's "
+            + (
+                "surface vol, $ per share. – beyond the surface's reach." if market.listed else "flat vol, $ per share."
+            ),
+            "IV": f"Black-76 implied vol of the {option} mid. – for an offer only.",
+            "Δ": f"{engine} {option} delta at the strike's "
+            + ("surface vol. – beyond the surface's reach." if market.listed else "flat vol."),
+        }[name]
+    kinds |= {"Strike": "strike", "Mark": "text"}
+    help_text |= {"Strike": "The strike. Click a row to price it.", "Mark": "← marks the Pricing strike."}
+    labels |= {"Mark": " "}
+    key = current_key("tbl_pricing_chain_", f"tbl_pricing_chain_{inputs.strike!r}")
+    table(
+        frame,
+        kinds,
+        help_text,
+        labels=labels,
+        key=key,
+        pin=False,  # a pinned column would be drawn first, and the ladder is mirrored about its strike
+        selection_mode="single-row",
+        on_select=functools.partial(
+            on_chain_select,
+            key=key,
+            strikes=tuple(float(k) for k in strikes),
+            priced=tuple(bool(v) for v in np.isfinite(vols)),
+            step=step,
+        ),
+    )
+    if note := st.session_state.pop(_CHAIN_NOTE, None):
+        st.warning(note, icon=":material/block:")
+    span = f"{strike(float(strikes[0]), step)}–{strike(float(strikes[-1]), step)}"
+    st.caption(
+        f"{len(strikes)} strikes, {span}. Click a row to price its strike; the sidebar's strike is the keyboard route."
+    )
 
 
-def _alo_greeks_table(inputs: Inputs, prices: Prices, decay: dict[str, float]) -> pd.DataFrame:
-    """The American engine's Greeks (``american.greeks``) in the layout and units of
-    :func:`_greeks_table`."""
+# --- The Greeks table -------------------------------------------------------------------------------------------
+
+#: Rows of the Greeks table after the first order: (order, name in black_scholes.GREEKS, label).
+_HIGHER = (
+    (2, "vanna", "Vanna"),
+    (2, "vomma", "Volga"),
+    (2, "charm", "Charm"),
+    (2, "veta", "Veta"),
+    (3, "speed", "Speed"),
+    (3, "zomma", "Zomma"),
+    (3, "color", "Color"),
+    (3, "ultima", "Ultima"),
+)
+
+
+def p_itm(inputs: Inputs, market: Contract) -> tuple[dict[str, float], dict[str, float], str]:
+    """P(ITM) of the call and the put at expiry: from the smile, P(S_T > K) = 1 − CDF(K) and P(S_T < K) = CDF(K) with
+    the published surface's Breeden-Litzenberger CDF (``RN smile``), or N(±d₂) at the flat vol under the textbook
+    market (``flat vol``); and N(±d₂) at the contract's vol for comparison, and the basis."""
+    _, K, T, _, sigma, _ = _args(inputs)
+    root = sigma * math.sqrt(T)
+    if root > 0:
+        d2 = (math.log(market.forward / K) - 0.5 * root * root) / root
+        flat = {"call": float(ndtr(d2)), "put": float(ndtr(-d2))}
+    else:
+        itm = float(market.forward > K) if market.forward != K else 0.5
+        flat = {"call": itm, "put": 1.0 - itm}
+    if market.surface is not None and market.expiry is not None:
+        below = float(market.surface.cdf(K, market.expiry))
+        return {"call": 1.0 - below, "put": below}, flat, "RN smile"
+    return flat, flat, "flat vol"
+
+
+def _money_greek(value: float, places: int) -> str:
+    """A Greek in $ per share in the Greeks table: signed to ``places`` decimals, and an exact zero as ``0``."""
+    return "0" if value == 0 else signed(value, places)
+
+
+def greeks_frame(
+    inputs: Inputs, prices: Prices, market: Contract, *, order: int, bsm_ref: bool
+) -> tuple[pd.DataFrame, str]:
+    """The Greeks table (UI spec 3.1 item 6) as text, per share in desk units, and its caption.
+
+    Rows: Δ, Δ fwd, Γ 1%, vega, Θ, the one-day decay (before Θ when it leads: :func:`.format.decay_leads`), ρ, ε;
+    from ``order`` 2 vanna, volga, charm and veta; from 3 speed, zomma, color and ultima; then P(ITM). Columns: the
+    engine's call and put, and the closed form's beside them under the American engine with ``bsm_ref``. The
+    American engine gives first-order Greeks only: its higher-order cells read ``–``."""
+    S, K, T, r, sigma, q = _args(inputs)
+    engine = engine_name(inputs)
+    alo = _alo(inputs)
+    raw = engine_greeks(inputs, prices)
+    bsm = {kind: bs.greeks(*_args(inputs), kind) for kind in cache.KINDS}
+    columns = [(f"Call ({engine})", raw, "call"), (f"Put ({engine})", raw, "put")]
+    if alo and bsm_ref:
+        columns += [("Call BSM ref", bsm, "call"), ("Put BSM ref", bsm, "put")]
+    decay = greeks_decay(inputs, prices)
+    expiring = to_expiry(T)
+    first = (
+        ("delta", "Δ", "spot, per 1 point of S", lambda u: signed(u["delta"], 3)),
+        ("delta_fwd", "Δ fwd", "∂V/∂F, per 1 point of F", lambda u: signed(u["delta_fwd"], 3)),
+        ("gamma", "Γ 1%", "Δ per 1% move in S", lambda u: _sig(u["gamma"])),
+        ("vega", "Vega", "$ per vol point", None),
+        ("theta", "Θ", "$ per calendar day", None),
+        ("rho", "ρ", "$ per 1% rate", None),
+        ("epsilon", "ε", "$ per 1% dividend yield", None),
+    )
+    units = {
+        header: desk_units({k: float(v) for k, v in source[kind].items()}, S, r, q, T)
+        for header, source, kind in columns
+    }
     rows = []
-    for name in ALO_GREEKS:
-        info = bs.GREEKS[name]
-        rows.append(
-            {
-                "Greek": f"{info.label} {info.symbol}".strip(),
-                "Call": prices.alo_greeks["call"][name] * info.scale,
-                "Put": prices.alo_greeks["put"][name] * info.scale,
-                "Unit": info.unit,
-                "Definition": info.description,
-                "Order": info.order,
-            }
+    for name, label, unit, text in first:
+        row = {"Greek": label, "Unit": unit}
+        if text is None:
+            # Money per share: cents, or two significant digits of the row's largest value below 10 cents (the
+            # textbook put's Θ of -0.0045 read 0.00), one precision across the row; an exact zero (an option
+            # exercised at once) reads 0, as Γ's does, not 0.00000 beside a call's -0.00068.
+            places = cents_places(max((abs(u[name]) for u in units.values() if np.isfinite(u[name])), default=0.0))
+            row |= {header: _money_greek(u[name], places) for header, u in units.items()}
+        else:
+            row |= {header: text(u) for header, u in units.items()}
+        rows.append(row)
+    # The one-day decay by repricing, beside theta: first when it leads (Milestone 1's rule).
+    theta = {kind: raw[kind]["theta"] / 365.0 for kind in cache.KINDS}
+    leads = any(decay_leads(theta[kind], decay[kind], expiring) for kind in cache.KINDS)
+    decay_row = {"Greek": decay_label(expiring), "Unit": "$, repriced" + (" at expiry" if expiring else " a day on")}
+    decays = {
+        header: decay[kind] if source is raw else float(closed_form_decay(S, K, T, r, sigma, q, kind))
+        for header, source, kind in columns
+    }
+    places = cents_places(max((abs(v) for v in decays.values() if np.isfinite(v)), default=0.0))
+    decay_row |= {header: _money_greek(value, places) for header, value in decays.items()}
+    at = next(i for i, row in enumerate(rows) if row["Greek"] == "Θ") + (0 if leads else 1)
+    rows.insert(at, decay_row)
+    for row_order, name, label in _HIGHER:
+        if row_order > order:
+            continue
+        row = {"Greek": label, "Unit": bs.GREEKS[name].unit}
+        for header, source, kind in columns:
+            value = source[kind].get(name) if source is bsm or not alo else None
+            row[header] = MISSING if value is None else _sig(float(value) * bs.GREEKS[name].scale)
+        rows.append(row)
+    rn, flat, basis = p_itm(inputs, market)
+    row = {"Greek": "P(ITM)", "Unit": f"at expiry, {basis}"}
+    for header, _, kind in columns:
+        row[header] = probability_text(rn[kind])
+    rows.append(row)
+    parts = []
+    if basis == "RN smile":
+        parts.append(
+            f"P(ITM) from the smile (Breeden-Litzenberger); N(d₂) at flat vol: {probability_text(flat['call'])} call, "
+            f"{probability_text(flat['put'])} put."
         )
-    theta = {kind: prices.alo_greeks[kind]["theta"] / 365.0 for kind in cache.KINDS}
-    return pd.DataFrame(_with_decay(rows, theta, decay, to_expiry(inputs.expiry)))
+    if alo and order > 1:
+        parts.append("ALO gives first-order Greeks; BSM ref shows the higher orders.")
+    # The values next to their Greek and the unit last: on a 390 px phone the unit column took the room of the values.
+    frame = pd.DataFrame(rows)
+    return frame[["Greek", *(c for c in frame.columns if c not in ("Greek", "Unit")), "Unit"]], " ".join(parts)
 
 
-#: How the Greeks table under the American engine is computed (american.GREEK_BUMPS).
+def _greeks(inputs: Inputs, prices: Prices, market: Contract) -> None:
+    row = st.container(horizontal=True, key="pricing_greeks_controls", vertical_alignment="bottom", gap="medium")
+    order = row.segmented_control(
+        "Order",
+        ORDERS,
+        default="1st",
+        required=True,
+        key="pr_greeks",
+        bind="query-params",
+        persist_state="session",
+        help="First-order Greeks, then also vanna, volga, charm and veta, then also speed, zomma, color and ultima.",
+    )
+    bsm_ref = False
+    if _alo(inputs):
+        bsm_ref = row.toggle(
+            "BSM ref",
+            value=False,
+            key="pr_bsm_ref",
+            bind="query-params",
+            persist_state="session",
+            help="Show the closed-form European Greeks beside the American engine's.",
+        )
+    frame, caption = greeks_frame(inputs, prices, market, order=ORDERS.index(order) + 1, bsm_ref=bsm_ref)
+    engine = f"{inputs.model.label}, per share."
+    if _alo(inputs):
+        engine = alo_greeks_note(inputs, prices)
+        if any(prices.alo_greeks[k].basis != "differences" or prices.alo_greeks[k].one_sided for k in cache.KINDS):
+            caption = f"{caption} Some ALO Greeks are exact or one-sided here: see the column's help.".strip()
+    config = {
+        # 120 px holds "Decay to expiry", which the automatic width cut to "1-day de".
+        "Greek": st.column_config.TextColumn("Greek", help="The sensitivity.", pinned=True, width=120),
+        "Unit": st.column_config.TextColumn("Unit", help="What one unit of the figure is, per share.", width="medium"),
+    }
+    for column in frame.columns[1:-1]:
+        source = "Closed-form European (Black-Scholes-Merton), per share." if "BSM ref" in column else engine
+        config[column] = st.column_config.TextColumn(column, help=md(source), alignment="right")
+    st.dataframe(
+        frame,
+        key="tbl_pricing_greeks",
+        width="content",  # stretched over 1,000 px, its value columns read far from their labels
+        hide_index=True,
+        row_height=ROW_HEIGHT,
+        height="content",
+        column_config=config,
+    )
+    if caption:
+        st.caption(caption)
+
+
+#: How the American engine's Greeks are computed (american.GREEK_BUMPS).
 ALO_GREEKS_NOTE = (
-    "American Greeks of the sidebar engine, in the units shown (theta per calendar day of elapsed time): central "
-    "finite differences of its value with the spot and the time to expiry moved by ±0.01%, the volatility by "
-    "±0.01\xa0vol pt and the rate and dividend yield by ±1\xa0bp, the scheme and the boundary equation held fixed. "
-    "Second- and third-order Greeks are shown for Black-Scholes-Merton only."
+    "American Greeks of the sidebar engine, per share in the units shown: central differences of its value with the "
+    "spot and the time to expiry moved by ±0.01%, the vol by ±0.01 vol point and the rate and dividend yield by ±1 "
+    "bp, the scheme and the boundary equation held fixed."
 )
 #: At a rate and dividend yield of zero both options are European, at the edge of early exercise (american.greeks).
 ALO_ZERO_CARRY_NOTE = (
@@ -543,7 +1312,7 @@ ALO_ZERO_CARRY_NOTE = (
     "dividend yield for the call, a higher rate or a lower dividend yield for the put), so rho and dividend rho are "
     "one-sided here: the slopes on the side where it does not."
 )
-#: The Greeks as the caption names them.
+#: The Greeks as the note names them.
 _GREEK_WORDS = {"epsilon": "dividend rho"}
 
 
@@ -551,11 +1320,12 @@ def _join(words: list[str]) -> str:
     return " and ".join(words) if len(words) < 3 else ", ".join(words[:-1]) + " and " + words[-1]
 
 
-def _alo_greeks_note(inputs: Inputs, prices: Prices) -> str:
-    """The caption of the Greeks table under the American engine: how they are computed, and for which option
-    each exception holds (``AmericanGreeks.basis`` and ``one_sided``, and the fallback to the tree)."""
+def alo_greeks_note(inputs: Inputs, prices: Prices) -> str:
+    """How the American engine's Greeks are computed, and for which option each exception holds
+    (``AmericanGreeks.basis`` and ``one_sided``, and the fallback to the tree): the help of the Greeks table's
+    engine columns."""
     greeks, details = prices.alo_greeks, prices.alo
-    notes = [ALO_GREEKS_NOTE, _decay_note(inputs)]
+    notes = [ALO_GREEKS_NOTE]
     closed = [kind for kind in cache.KINDS if greeks[kind].basis == "closed form"]
     if len(closed) == 2:
         notes.append(
@@ -586,412 +1356,188 @@ def _alo_greeks_note(inputs: Inputs, prices: Prices) -> str:
     return " ".join(notes)
 
 
-def _sensitivity(inputs: Inputs) -> None:
-    quantities = {
-        "Value": ("value", 1.0, "Option value ($)"),
-        "Delta": ("delta", 1.0, "Delta"),
-        "Gamma": ("gamma", 1.0, "Gamma"),
-        # Theta / 365 with the 1-day decay beside it (dashed); the decay alone, repriced one calendar day later
-        # (closed_form_decay), against the days to expiry shows where theta / 365 stops being the cost of a day.
-        "Theta / day": ("theta", 1 / 365, "Theta / 365 and 1-day decay ($)"),
-        "1-day decay": ("decay", 1.0, "1-day decay ($)"),
-        "Vega / vol pt": ("vega", 0.01, "Vega ($ per vol point)"),
-        "Rho / 1%": ("rho", 0.01, "Rho ($ per 1% rate)"),
-    }
-    axes = {"Spot price": "spot", "Volatility": "vol", "Days to expiry": "days"}
-    c1, c2 = st.columns(2)
-    quantity = c1.selectbox("Quantity", list(quantities), key="sens_quantity", persist_state="session")
-    axis = c2.selectbox("Against", list(axes), key="sens_axis", persist_state="session")
-    name, scale, y_title = quantities[quantity]
-
-    S, K, T, r, sigma, q = (
-        inputs.spot,
-        inputs.strike,
-        inputs.expiry,
-        inputs.rate,
-        inputs.volatility,
-        inputs.dividend_yield,
-    )
-    kind = axes[axis]
-    if kind == "spot":
-        lo, hi = 0.5 * min(S, K), 1.5 * max(S, K)
-        x = np.linspace(lo, hi, 301)
-        args, current, strike_x, x_title = (x, K, T, r, sigma, q), S, K, "Spot price"
-    elif kind == "vol":
-        x = np.linspace(0.01, max(1.0, 2.5 * sigma), 301)
-        args, current, strike_x, x_title = (S, K, T, r, x, q), sigma * 100, None, "Volatility (%)"
-    else:
-        x = np.linspace(min(1.0, inputs.days / 2), max(inputs.days * 1.5, 30), 301)
-        args, current, strike_x, x_title = (S, K, x / 365.0, r, sigma, q), inputs.days, None, "Days to expiry"
-
-    def curve(option_type):
-        if name == "value":
-            return bs.price(*args, option_type)
-        if name == "decay":
-            return closed_form_decay(*args, option_type)
-        return bs.greeks(*args, option_type)[name] * scale
-
-    # Against spot or volatility every point has the sidebar's expiry, so within a day of it the decay is the decay
-    # to expiry; against the days left only the first point (1 day) is, and "1-day decay" covers it.
-    decay = decay_label(kind != "days" and to_expiry(T))
-    dashed = None
-    if name == "decay":
-        y_title = f"{decay} ($)"
-    elif name == "theta":
-        # The repriced day beside the rate, dashed: they part within a few days of expiry.
-        y_title = f"Theta / 365 and {decay.lower()} ($)"
-        dashed = ("Theta / 365", decay, closed_form_decay(*args, "call"), closed_form_decay(*args, "put"))
-    x_plot = x * 100 if kind == "vol" else x
-    fig = charts.sensitivity_chart(
-        x_plot, curve("call"), curve("put"), x_title, y_title, current, strike_x, dashed=dashed
-    )
-    charts.show(fig, key="sensitivity_chart", alt=f"Call and put {y_title.lower()} against {x_title.lower()}")
-    if note := _european_note(inputs):
-        st.caption(note)
+# --- Engine diagnostics -----------------------------------------------------------------------------------------
 
 
-def _heatmaps(inputs: Inputs) -> None:
-    c1, c2 = st.columns(2)
-    spot_span = c1.slider("Spot range (±%)", 5, 50, 20, 5, key="hm_spot", persist_state="session") / 100
-    vol_span = c2.slider("Volatility range (±%)", 10, 90, 50, 10, key="hm_vol", persist_state="session") / 100
-    spots = inputs.spot * np.linspace(1 - spot_span, 1 + spot_span, 9)
-    vols = np.maximum(inputs.volatility * np.linspace(1 - vol_span, 1 + vol_span, 9), 1e-4)
-    grid_s, grid_v = np.meshgrid(spots, vols)
-    args = (inputs.strike, inputs.expiry, inputs.rate)
-    # One above the other at full width: side by side, each cell was too narrow for its value (5 to 9 px text).
-    for kind in ("call", "put"):
-        values = bs.price(grid_s, args[0], args[1], args[2], grid_v, inputs.dividend_yield, kind)
-        charts.show(
-            charts.price_heatmap(spots, vols, values, f"{kind.capitalize()} value ($)"),
-            key=f"heatmap_{kind}",
-            alt=f"Heatmap of the {kind} value ($) over spot price and volatility",
+def _diagnostic_settings(inputs: Inputs) -> tuple[ModelConfig, ModelConfig]:
+    """The diagnostics' own tree and Monte Carlo settings, in a popover: ``(tree, monte_carlo)``."""
+    default = ModelConfig()
+    with st.popover("Settings", icon=":material/tune:", key="pricing_diag_settings"):
+        method = st.segmented_control(
+            "Lattice",
+            list(binomial.METHODS),
+            default=default.tree_method,
+            required=True,
+            format_func=binomial.METHODS.get,
+            key="diag_tree",
+            persist_state="session",
         )
-    if note := _european_note(inputs):
-        st.caption(note)
+        steps = st.slider("Steps", 10, 2000, default.steps, step=1, key="diag_steps", persist_state="session")
+        n_paths = st.select_slider(
+            "Monte Carlo paths",
+            PATH_CHOICES,
+            value=default.n_paths,
+            format_func=lambda n: number(n, 0),
+            key="diag_paths",
+            persist_state="session",
+        )
+        seed = st.number_input("Seed", 0, 2**32 - 1, default.seed, step=1, key="diag_seed", persist_state="session")
+        antithetic = st.toggle("Antithetic variates", default.antithetic, key="diag_av", persist_state="session")
+        control = st.toggle(
+            "Control variate (discounted spot)", default.control_variate, key="diag_cv", persist_state="session"
+        )
+    american_ = _alo(inputs)
+    tree = ModelConfig(kind="binomial", tree_method=method, steps=int(steps), american=american_)
+    mc = ModelConfig(
+        kind="monte_carlo", n_paths=int(n_paths), seed=int(seed), antithetic=antithetic, control_variate=control
+    )
+    return tree, mc
 
 
-def _chain(inputs: Inputs) -> None:
-    """Black-Scholes-Merton values and key Greeks across strikes at the sidebar expiry and volatility."""
-    S, T, r, sigma, q = inputs.spot, inputs.expiry, inputs.rate, inputs.volatility, inputs.dividend_yield
-    strikes = np.unique(np.round(inputs.strike * np.linspace(0.8, 1.2, 9), 2))
-    call = bs.greeks(S, strikes, T, r, sigma, q, "call")
-    put = bs.greeks(S, strikes, T, r, sigma, q, "put")
-    decay = decay_label(to_expiry(T))
-    chain = pd.DataFrame(
+def engine_rows(inputs: Inputs, tree: ModelConfig, mc: ModelConfig) -> tuple[pd.DataFrame, str]:
+    """The engine comparison (UI spec 3.1 item 7): each engine's call and put, their difference from the reference
+    and the milliseconds they took. The reference is the closed form for European exercise and the American engine
+    at its high scheme for American (it is within 4e−10 of QuantLib's QdFp, ``docs/methods/american_alo.md``)."""
+    S, K, T, r, sigma, q = _args(inputs)
+    american_ = _alo(inputs)
+    rows = []
+    bsm_values = {kind: float(bs.price(S, K, T, r, sigma, q, kind)) for kind in cache.KINDS}
+    if american_:
+        for scheme in ("fast", "accurate", "high"):
+            values, ms = cache.alo_timed(S, K, T, r, sigma, q, scheme)
+            rows.append({"Engine": f"ALO {scheme}", **values, "ms": ms, "interval": MISSING})
+        reference, ref_name = rows[-1], "ALO high"
+    style = "American" if american_ else "European"
+    trees = list(DIAGNOSTIC_TREES)
+    if (tree.tree_method, tree.steps) not in trees:
+        trees.append((tree.tree_method, tree.steps))
+    for method, steps in trees:
+        try:
+            values, ms = cache.tree_timed(S, K, T, r, sigma, q, steps, american_, method)
+        except ValueError:  # CRR has no arbitrage-free lattice at this step count
+            values, ms = dict.fromkeys(cache.KINDS, np.nan), np.nan
+        name = "LR" if method == "lr" else "CRR"
+        rows.append({"Engine": f"{name} {number(steps, 0)} · {style}", **values, "ms": ms, "interval": MISSING})
+    bsm_row = {"Engine": "BSM · European", **bsm_values, "ms": np.nan, "interval": MISSING}
+    if american_:
+        rows.append(bsm_row)
+    else:
+        rows.insert(0, bsm_row)
+        reference, ref_name = bsm_row, "BSM"
+    results, ms = cache.mc_timed(S, K, T, r, sigma, q, mc.n_paths, mc.seed, mc.antithetic, mc.control_variate)
+    flags = [mc_interval(results[kind], dollars=False) for kind in cache.KINDS]
+    rows.append(
         {
-            "Call value": bs.price(S, strikes, T, r, sigma, q, "call"),
-            "Call delta": call["delta"],
-            "Call theta / day": call["theta"] / 365,
-            f"Call {decay.lower()}": closed_form_decay(S, strikes, T, r, sigma, q, "call"),
-            "Strike": strikes,
-            "Put value": bs.price(S, strikes, T, r, sigma, q, "put"),
-            "Put delta": put["delta"],
-            "Put theta / day": put["theta"] / 365,
-            f"Put {decay.lower()}": closed_form_decay(S, strikes, T, r, sigma, q, "put"),
-            "Gamma": call["gamma"],
-            "Vega / vol pt": call["vega"] / 100,
+            "Engine": f"MC {number(mc.n_paths, 0)} · European",
+            **{kind: results[kind].price for kind in cache.KINDS},
+            "ms": ms,
+            "interval": f"call {flags[0]}; put {flags[1]}",
         }
     )
-    st.dataframe(
-        chain,
-        hide_index=True,
-        column_config={
-            "Strike": st.column_config.NumberColumn(format="%.2f"),
-            "Call value": st.column_config.NumberColumn(format="%.4f"),
-            "Put value": st.column_config.NumberColumn(format="%.4f"),
-            "Call delta": st.column_config.NumberColumn(format="%.3f"),
-            "Put delta": st.column_config.NumberColumn(format="%.3f"),
-            "Call theta / day": st.column_config.NumberColumn(format="%.4f"),
-            "Put theta / day": st.column_config.NumberColumn(format="%.4f"),
-            f"Call {decay.lower()}": st.column_config.NumberColumn(format="%.4f"),
-            f"Put {decay.lower()}": st.column_config.NumberColumn(format="%.4f"),
-            "Gamma": st.column_config.NumberColumn(format="%.5f"),
-            "Vega / vol pt": st.column_config.NumberColumn(format="%.4f"),
-        },
+    frame = pd.DataFrame(rows)
+    frame["Call − ref"] = [signed_sci(v) for v in frame["call"] - reference["call"]]
+    frame["Put − ref"] = [signed_sci(v) for v in frame["put"] - reference["put"]]
+    frame = frame.rename(columns={"call": "Call", "put": "Put", "interval": "MC 95% interval"})
+    return frame[["Engine", "Call", "Put", "Call − ref", "Put − ref", "MC 95% interval", "ms"]], ref_name
+
+
+def _convergence(inputs: Inputs, tree: ModelConfig, ref_name: str, reference: dict[str, float]) -> None:
+    """|tree − reference| against the steps, log-log, for both lattices and both options. A lattice whose call and
+    put errors are one (European exercise: the tree keeps put-call parity, so they differ by a constant) draws one
+    line, ``LR call and put``: the put's line hid the call's."""
+    S, K, T, r, sigma, q = _args(inputs)
+    series, _ = cache.tree_convergence(S, K, T, r, sigma, q, tree.steps, tree.american)
+    lines = {}
+    for name in series["call"]:
+        short = "LR" if name.startswith("Leisen") else "CRR"
+        dash = "solid" if short == "LR" else "dot"
+        errors = {}
+        for kind in cache.KINDS:
+            steps, values = series[kind][name]
+            errors[kind] = np.asarray(values, dtype=float) - reference[kind]
+        # Equal to a part in 1e6 of the error, or to 1e-9 (a tenth of the engine table's last digit).
+        if np.allclose(errors["call"], errors["put"], rtol=1e-6, atol=1e-9, equal_nan=True):
+            lines[f"{short} call and put"] = (steps, errors["call"], "call", dash)
+        else:
+            lines |= {f"{short} {kind}": (steps, errors[kind], kind, dash) for kind in cache.KINDS}
+    charts.show(
+        charts_pricing.error_chart(lines, reference=ref_name, guides=(("CRR", 1), ("LR", 2))),
+        key="pricing_convergence",
+        alt=f"Absolute error of the trees against {ref_name} by number of steps, log-log",
     )
     st.caption(
-        "Strikes from 80% to 120% of the sidebar strike, flat volatility (no smile), same expiry. Theta / day is "
-        f"theta / 365; the {decay.lower()} reprices each option "
-        + ("at expiry (its intrinsic value). " if to_expiry(T) else "with one calendar day less to expiry. ")
-        + _european_note(inputs)
+        f"Up to the settings' {number(tree.steps, 0)} steps. CRR converges at first order, oscillating with the "
+        "strike's place among the nodes; LR at second."
     )
 
 
-def _tree_repricing(steps: int, expiry: float, method: str, trees: tuple[tuple[int, float], ...]) -> str:
-    """How the tree table's decay reprices, from the shorter trees it used (``trees``, from :func:`tree_decay`).
+def _mc_convergence(inputs: Inputs, mc: ModelConfig) -> None:
+    """Monte Carlo's 95% interval width against the paths, with a 1/√N guide (UI spec 3.1 item 7), on the settings'
+    seed and variance reduction, from 1,000 paths to the settings' paths."""
+    S, K, T, r, sigma, q = _args(inputs)
+    paths, widths = cache.mc_convergence(S, K, T, r, sigma, q, mc.n_paths, mc.seed, mc.antithetic, mc.control_variate)
+    charts.show(
+        charts_pricing.interval_chart(paths, widths),
+        key="pricing_mc_convergence",
+        alt="Width of the Monte Carlo 95% interval of the call and the put by number of paths, log-log",
+    )
+    st.caption(
+        f"Monte Carlo, European, seed {mc.seed}: the interval narrows as 1/√N, by half for four times the paths "
+        "(shown even where it is withheld)."
+    )
 
-    It says "this tree's time step" only where the shorter trees keep it: two trees interpolated to it, or one
-    whose time step equals it to 1e-9; otherwise it says how much shorter the one tree's time step is, and why.
-    """
-    if not trees:
-        return "the intrinsic value at expiry minus the tree value"
-    if method != "crr":
-        return (
-            "the value on a tree one day shorter with the same steps minus the value now (Leisen-Reimer's error is "
-            "smooth in the expiry, so the two trees' errors cancel)"
+
+def _tree_greeks(inputs: Inputs, tree: ModelConfig) -> None:
+    """The settings tree's own Greeks, with its one-day decay (Milestone 1): on the lattice, so they include early
+    exercise under the American engine."""
+    S, K, T, r, sigma, q = _args(inputs)
+    try:
+        results = cache.tree_results(S, K, T, r, sigma, q, tree.steps, tree.american, tree.tree_method)
+        decay, trees = tree_decay(inputs, tree, results)
+    except ValueError:  # a CRR lattice that is not arbitrage-free at these steps
+        st.warning(
+            f"{tree.label}: the lattice is not arbitrage-free at these inputs; raise the steps or use Leisen-Reimer."
         )
-    exact = steps * (expiry - ONE_DAY) / expiry  # the steps of a tree one day shorter with this tree's time step
-    kept = "(at the same time step the final nodes stay in place, so the trees' oscillating errors largely cancel)"
-    if len(trees) == 2:
-        (lower, _), (upper, _) = trees
-        return (
-            f"the value one day later, interpolated between trees with {lower:,} and {upper:,} steps to this tree's "
-            f"time step ({exact:,.2f} steps), minus the value now {kept}"
-        )
-    ((later, _),) = trees
-    shorter = 1.0 - exact / later  # how much shorter its time step is than this tree's, as a fraction
-    if abs(shorter) < 1e-9:
-        return (
-            f"the value on a tree one day shorter with {later:,} steps, this tree's time step, minus the value now "
-            + kept
-        )
-    why = (
-        "the next count down has no arbitrage-free lattice here"
-        if len(later_trees(steps, expiry, method)) == 2
-        else "no smaller count keeps it"
-    )
-    return (
-        f"the value on a tree one day shorter with {later:,} steps, a time step {shorter:.2%} shorter than this "
-        f"tree's ({why}), minus the value now"
-    )
-
-
-def _tree_diagnostics(inputs: Inputs, prices: Prices) -> None:
-    S, K, T, r, sigma, q = (
-        inputs.spot,
-        inputs.strike,
-        inputs.expiry,
-        inputs.rate,
-        inputs.volatility,
-        inputs.dividend_yield,
-    )
-    model = inputs.model
-    st.markdown("**Tree Greeks** (on the lattice, so they include the early-exercise feature)")
-    decay, trees = tree_decay(inputs, prices)
+        return
     expiring = to_expiry(T)
     label = decay_label(expiring)
-    # The headline rule of the Greeks table, on the tree's own theta: the decay column comes first when it leads.
-    leads = any(decay_leads(res.theta / 365, decay[kind], expiring) for kind, res in prices.tree.items())
+    leads = any(decay_leads(res.theta / 365, decay[kind], expiring) for kind, res in results.items())
     rows = []
-    for kind, res in prices.tree.items():
-        time = {"Theta / day": res.theta / 365, label: decay[kind]}
+    for kind, res in results.items():
+        time_columns = {"Θ": res.theta / 365, label: decay[kind]}
         rows.append(
-            {"Option": kind.capitalize(), "Value": res.price, "Delta": res.delta, "Gamma": res.gamma}
-            | (dict(reversed(time.items())) if leads else time)
-            | {"Vega / vol pt": res.vega / 100, "Rho / 1%": res.rho / 100, "Div. rho / 1%": res.epsilon / 100}
+            {"Option": kind.capitalize(), "Value": res.price, "Δ": res.delta, "Γ 1%": res.gamma * S / 100}
+            | (dict(reversed(time_columns.items())) if leads else time_columns)
+            | {"Vega": res.vega / 100, "ρ": res.rho / 100}
         )
-    steps_used = prices.tree["call"].steps
-    st.dataframe(
-        pd.DataFrame(rows),
-        hide_index=True,
-        column_config={
-            "Value": st.column_config.NumberColumn(format="%.4f"),
-            "Delta": st.column_config.NumberColumn(format="%.4f"),
-            "Gamma": st.column_config.NumberColumn(format="%.5f"),
-            "Theta / day": st.column_config.NumberColumn(format="%.4f"),
-            label: st.column_config.NumberColumn(format="%.4f"),
-            "Vega / vol pt": st.column_config.NumberColumn(format="%.4f"),
-            "Rho / 1%": st.column_config.NumberColumn(format="%.4f"),
-            "Div. rho / 1%": st.column_config.NumberColumn(format="%.4f"),
-        },
-    )
-    first = (
-        f" The {label.lower()} comes first: "
-        + (
-            "the option expires within the day."
-            if expiring
-            else f"it differs from theta / 365 by more than {DECAY_SWITCH:.0%} of the larger, for the call or the put."
-        )
-        if leads
-        else ""
-    )
-    st.caption(
-        f"Dollars per share on a {steps_used:,}-step tree. Delta and gamma come from its first two time steps, "
-        "theta from the second step (CRR) or from repricing with the expiry moved (Leisen-Reimer). Theta / day is "
-        f"theta / 365; the {label.lower()} is {_tree_repricing(steps_used, T, model.tree_method, trees)}.{first} "
-        "Vega, rho and dividend rho (per 1% move in the dividend yield) reprice on a tree with the same steps, with "
-        "the volatility moved ±0.5 vol pt and the rates ±25 bp."
-    )
-
-    st.markdown("**Convergence with the number of steps**")
-    series, references = cache.tree_convergence(S, K, T, r, sigma, q, model.steps, model.american)
-    reference_label = "Converged" if model.american else "Black-Scholes-Merton"
-    reference = "converged American value" if model.american else "Black-Scholes-Merton value"
-    for col, kind in zip(st.columns(2), ("call", "put"), strict=True):
-        charts.show(
-            charts.convergence_chart(series[kind], references[kind], reference_label, kind.capitalize()),
-            key=f"tree_convergence_{kind}",
-            alt=f"{kind.capitalize()} value on each lattice against the number of tree steps, with the {reference}",
-            container=col,
-        )
-    st.caption(
-        f"Step counts from 10 to the sidebar's {model.steps:,}. CRR oscillates between odd and even step counts; "
-        "Leisen-Reimer converges smoothly, "
-        + (
-            "at first order with early exercise. The converged value extrapolates Leisen-Reimer trees with 2,001 "
-            "and 4,003 steps (Richardson), kept within the no-arbitrage bounds of an American option."
-            if model.american
-            else "at roughly O(1/n²), to the closed-form value."
-        )
-    )
-    if model.american:
-        boundaries = {}
-        for kind, res in prices.tree.items():
-            if res.exercise_boundary is not None and len(res.exercise_boundary[0]):
-                boundaries[f"{kind.capitalize()} boundary"] = (
-                    res.exercise_boundary[0] * 365,
-                    res.exercise_boundary[1],
-                )
-        st.markdown("**Early-exercise boundary**")
-        if boundaries:
-            charts.show(
-                charts.exercise_boundary_chart(boundaries, K),
-                key="exercise_boundary",
-                alt="Early-exercise boundary: the critical spot price against days from today, with the strike",
-            )
-            st.caption(
-                "Exercising immediately is optimal when the spot is beyond the boundary: below it for a put, "
-                "above it for a call. With a non-negative rate and no dividends an American call is never "
-                "exercised early. The critical price at each step is interpolated between the last exercised "
-                "node and the next one, and consecutive steps are averaged (their nodes interleave)."
-            )
-        else:
-            st.info(
-                "Early exercise is never optimal for these inputs, or the spot is already in the exercise region "
-                "at every step the tree resolves (e.g. a deep in-the-money put worth its intrinsic value)."
-            )
+    frame = pd.DataFrame(rows)
+    kinds = {"Option": "text", "Value": "premium_diag", "Δ": "delta", "Γ 1%": "gamma", "Θ": "theta_share",
+             label: "theta_share", "Vega": "vega_share", "ρ": "rho_share"}  # fmt: skip
+    repricing = {
+        (): "the intrinsic value at expiry minus the tree value",
+    }.get(trees, "the value on " + " and ".join(number(n, 0) for n, _ in trees) + "-step trees a day shorter minus now")
+    help_text = {
+        "Option": "The option.",
+        "Value": "The tree's value, $ per share.",
+        "Δ": "From the tree's first two time steps.",
+        "Γ 1%": "Change in delta for a 1% move, from the tree's first two time steps.",
+        "Θ": "From the second time step (CRR) or by repricing with the expiry moved (LR), ÷ 365.",
+        label: f"{label}: {repricing}.",
+        "Vega": "Repriced on a tree with the same steps, vol ±0.5 vol point.",
+        "ρ": "Repriced on a tree with the same steps, rate ±25 bp.",
+    }
+    labels = {label: f"{label} ($)"}
+    st.markdown(f"**{tree.label}**")
+    table(frame, kinds, help_text, labels=labels, key="tbl_pricing_tree_greeks")
 
 
-def _monte_carlo_diagnostics(inputs: Inputs, prices: Prices) -> None:
-    S, K, T, r, sigma, q = (
-        inputs.spot,
-        inputs.strike,
-        inputs.expiry,
-        inputs.rate,
-        inputs.volatility,
-        inputs.dividend_yield,
-    )
-    model = inputs.model
-    times, paths = cache.mc_paths(S, T, r, sigma, q, model.n_paths, model.seed, model.antithetic, SAMPLE_PATHS)
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown(f"**Sample paths** ({len(paths)} of the {model.n_paths:,} scenarios behind the price)")
-        charts.show(
-            charts.paths_chart(times * 365, paths, K, S * np.exp((r - q) * times), "Risk-neutral mean (forward)"),
-            key="mc_paths",
-            alt=f"{len(paths)} simulated price paths and their risk-neutral mean (the forward) against days from "
-            "today, with the strike",
-        )
-        st.caption(
-            "The price samples each scenario's price at expiry exactly; its path from today is filled in with a "
-            "Brownian bridge. The purple line is the forward S·e^((r−q)t), the expected price of a scenario at each "
-            "date under the pricing measure; the average of the simulated scenarios differs from it by sampling noise."
-        )
-    with c2:
-        st.markdown("**Terminal price distribution**")
-        s_t = cache.mc_terminal(S, T, r, sigma, q, model.n_paths, model.seed, model.antithetic)
-        grid = np.linspace(np.percentile(s_t, 0.05), np.percentile(s_t, 99.95), 400)
-        mu = np.log(S) + (r - q - 0.5 * sigma**2) * T
-        sd = sigma * np.sqrt(T)
-        pdf = np.exp(-0.5 * ((np.log(grid) - mu) / sd) ** 2) / (grid * sd * np.sqrt(2 * np.pi))
-        charts.show(
-            charts.histogram_chart(s_t, "Underlying price at expiry", [(K, "strike", charts.NEUTRAL)], pdf=(grid, pdf)),
-            key="mc_terminal",
-            alt="Histogram of the simulated underlying prices at expiry, with the log-normal density and the strike",
-        )
-    rows = [
-        {
-            "Option": kind.capitalize(),
-            "Monte Carlo": res.price,
-            "Std. error": res.std_error,
-            "95% interval": mc_interval(res, dollars=False),
-            "BSM": bs.price(S, K, T, r, sigma, q, kind),
-            "Error / SE": (res.price - bs.price(S, K, T, r, sigma, q, kind)) / res.std_error
-            if res.std_error > 0
-            else np.nan,
-            "In the money": res.itm_fraction,
-        }
-        for kind, res in prices.mc.items()
-    ]
-    st.dataframe(
-        pd.DataFrame(rows),
-        hide_index=True,
-        placeholder="",  # undefined values are left blank, as the caption says (Streamlit would write "None")
-        column_config={c: st.column_config.NumberColumn(format="%.4f") for c in ("Monte Carlo", "Std. error", "BSM")}
-        | {
-            "Error / SE": st.column_config.NumberColumn(format="%.2f"),
-            "In the money": st.column_config.NumberColumn(format="percent"),
-        },
-    )
-    st.caption(
-        "Dollars per share. Terminal prices are sampled exactly from the log-normal distribution (no time-stepping "
-        "bias). |Error / SE| below about 2 is consistent with an unbiased estimator. The 95% interval is the price "
-        f"± 1.96 SE; it is not shown when fewer than {RELIABLE_PATHS} paths finish on the side of the strike that "
-        "the error rests on (the Methodology says which), where it covers the value in less than 95% of runs (88% "
-        "with 10 such paths, 92% with 30, 94% with 100). The standard error is left blank "
-        "when the sample cannot estimate it: every price finished out of the money, or every one in the money "
-        "with the control variate on. At very large σ√T (hundreds of percent of volatility over years) the mean of "
-        "the price at expiry rests on scenarios too rare to draw: when the simulated discounted prices miss their "
-        "known mean S·e^(−qT) by more than 5 standard errors, the put, whose payoff is at most its strike, is "
-        "averaged directly (no control variate) and the call follows from put-call parity. Without the control "
-        "variate the call's own average fails much sooner: from σ√T = 2 its 95% interval misses the value more "
-        "often than 1 run in 20 (about 1 in 5 at σ√T = 3), so from σ√T = 2 on the call follows from the put by "
-        "parity as well. Every estimate is kept within the no-arbitrage bounds of a European option."
-        + (
-            " This sample is heavy-tailed: the prices above come from the put's direct average and parity."
-            if any(res.heavy_tailed for res in prices.mc.values())
-            else ""
-        )
-    )
-
-
-def _alo_diagnostics(inputs: Inputs, prices: Prices) -> None:
-    """The American engine: how it valued each option, and the early-exercise boundary it solved."""
+def _alo_boundary(inputs: Inputs, prices: Prices) -> None:
+    """The American engine's results and its early-exercise boundary (x-axis from day 0)."""
     K, T, r, sigma, q = inputs.strike, inputs.expiry, inputs.rate, inputs.volatility, inputs.dividend_yield
-    model = inputs.model
-    st.markdown("**Engine results**")
-
-    def solved(value: float, res: AmericanPrice) -> float | None:
-        return value if res.method == "alo" and np.isfinite(value) else None
-
-    rows = [
-        {
-            "Option": kind.capitalize(),
-            "American": res.value,
-            "European": res.european,
-            "Premium": res.premium,
-            "Critical spot": solved(res.critical_spot, res),
-            "Method": ALO_METHODS.get(res.method, res.method),
-            "Scheme used": res.scheme if res.method == "alo" else None,
-            "Last step": solved(res.last_step, res),
-        }
-        for kind, res in prices.alo.items()
-    ]
-    st.dataframe(
-        pd.DataFrame(rows),
-        hide_index=True,
-        placeholder="–",
-        column_config={
-            "American": st.column_config.NumberColumn(format="%.4f"),
-            "European": st.column_config.NumberColumn(format="%.4f"),
-            "Premium": st.column_config.NumberColumn(format="%.4f"),
-            "Critical spot": st.column_config.NumberColumn(format="%.4f"),
-            "Last step": st.column_config.NumberColumn(format="%.1e"),
-        },
-    )
-    st.caption(
-        "Dollars per share. The premium is the American value minus the closed-form European value. Today the put "
-        "is exercised at or below its critical spot, the call at or above it. A stiff option (a long expiry, or "
-        "high rates or dividends at low volatility) is solved with a finer scheme than the one chosen. The last "
-        "step, the engine's convergence check, is the largest change of the logarithm of the boundary in its final "
-        "iteration; above 0.01 the option goes to the tree. A dash: not applicable to how the option was valued."
-    )
-
-    st.markdown("**Early-exercise boundary**")
     boundaries, missing = {}, []
     for kind, res in prices.alo.items():
         if res.method == "alo":
-            tau, spots = cache.alo_boundary(K, T, r, sigma, q, kind, model.scheme)
+            tau, spots = cache.alo_boundary(K, T, r, sigma, q, kind, inputs.model.scheme)
             boundaries[f"{kind.capitalize()} boundary"] = ((T - tau[::-1]) * 365, spots[::-1])
         elif res.method == "european":
             missing.append(f"No {kind} boundary: {NEVER_EARLY[kind]}.")
@@ -999,118 +1545,133 @@ def _alo_diagnostics(inputs: Inputs, prices: Prices) -> None:
             missing.append(f"No {kind} boundary: {FALLBACK_REASONS[res.fallback_reason]}.")
         else:
             missing.append(f"No {kind} boundary: the {kind} is valued in closed form here.")
+    rows = [
+        {
+            "Option": kind.capitalize(),
+            "American": res.value,
+            "European": res.european,
+            "Premium": res.premium,
+            "Critical spot": res.critical_spot if res.method == "alo" and np.isfinite(res.critical_spot) else np.nan,
+            "Method": ALO_METHODS.get(res.method, res.method),
+        }
+        for kind, res in prices.alo.items()
+    ]
+    table(
+        pd.DataFrame(rows),
+        {
+            "Option": "text",
+            "American": "premium_diag",
+            "European": "premium_diag",
+            "Premium": "premium_diag",
+            "Critical spot": "level",
+            "Method": "text",
+        },
+        {
+            "Option": "The option.",
+            "American": "The engine's value, $ per share.",
+            "European": "The closed-form European value, $ per share.",
+            "Premium": "American minus European: the right to exercise early.",
+            "Critical spot": "Exercise at once at or below it (put), at or above it (call). – where none applies.",
+            "Method": "How the engine valued the option.",
+        },
+        key="tbl_pricing_alo",
+    )
     if boundaries:
+        fig = charts.exercise_boundary_chart(boundaries, K)
+        fig.update_xaxes(range=[0.0, T * 365])
         charts.show(
-            charts.exercise_boundary_chart(boundaries, K),
-            key="exercise_boundary",
-            alt="Early-exercise boundary of the American engine: the critical spot price against days from today, "
-            "with the strike",
+            fig,
+            key="pricing_boundary",
+            alt="Early-exercise boundary of the American engine: the critical spot against days from today",
         )
-        ripple = (
-            " The fast scheme's 8 nodes can make the curve ripple between them, by up to about 1% of its value (2% at "
-            "volatilities near 150%); the accurate and high schemes draw it smoothly."
-            if model.scheme == "fast"
-            else ""
-        )
-        st.caption(
-            "Exercising at once is optimal when the spot is beyond the boundary: at or below it for a put, at or "
-            "above it for a call. At expiry it ends at K·min(1, r/q) for a put and K·max(1, r/q) for a call. The "
-            f"engine's boundary at 101 dates, closest together near expiry, where it moves fastest.{ripple} "
-            + " ".join(missing)
-        )
-    else:
-        st.info(" ".join(missing))
+    for line in missing:
+        st.caption(line)
 
 
-def _model_diagnostics(inputs: Inputs, prices: Prices) -> None:
-    if inputs.model.kind == "binomial":
-        _tree_diagnostics(inputs, prices)
-    elif inputs.model.kind == "monte_carlo":
-        _monte_carlo_diagnostics(inputs, prices)
-    elif inputs.model.kind == "alo":
-        _alo_diagnostics(inputs, prices)
-    else:
-        st.info(
-            "Black-Scholes-Merton is exact for European options under its assumptions. Switch the sidebar model to a "
-            "binomial tree, Monte Carlo or the American engine to see convergence diagnostics, early exercise and "
-            "simulated paths."
-        )
-
-
-def _decay_note(inputs: Inputs) -> str:
-    """The sentences of the Greeks table's caption on its one-day decay row.
-
-    Under an American binomial tree the table, decay included, is the European option's (Black-Scholes-Merton), so
-    the note says plainly that it is not the decay of the American value in the price cards, which the tree's own
-    Greeks give (:func:`tree_decay`): a 7-day put struck at 110 on 100 is exercised at once on the tree, so its
-    value does not change in a day, while the European put gains 1.5 cents.
-    """
-    model = inputs.model
-    expiring = to_expiry(inputs.expiry)
-    value = "the engine's value" if model.kind == "alo" else "the value"
-    later = "the intrinsic value at expiry" if expiring else f"{value} with one calendar day less to expiry"
-    by = {
-        "binomial": " by Black-Scholes-Merton for European exercise"
-        + ("" if model.american else ", the value the tree converges to (the tree's own is in its Greeks below)"),
-        "monte_carlo": " by Black-Scholes-Merton, whose value the simulation estimates",
-    }.get(model.kind, "")
-    first = (
-        "it is listed first, as the option expires within the day"
-        if expiring
-        else f"it is listed first when it differs from the theta row (theta / 365) by more than {DECAY_SWITCH:.0%} "
-        "of the larger, for the call or the put"
+def _diagnostics(inputs: Inputs, prices: Prices) -> None:
+    """The contents of Engine diagnostics (computed only while it is open)."""
+    tree, mc = _diagnostic_settings(inputs)
+    frame, ref_name = engine_rows(inputs, tree, mc)
+    reference = frame.loc[frame["Engine"].str.startswith("ALO high" if ref_name == "ALO high" else "BSM")].iloc[0]
+    table(
+        frame,
+        {
+            "Engine": "text",
+            "Call": "premium_diag",
+            "Put": "premium_diag",
+            "Call − ref": "difference",
+            "Put − ref": "difference",
+            "MC 95% interval": "text",
+            "ms": "level",
+        },
+        {
+            "Engine": "The engine, its steps or paths, and the exercise it values.",
+            "Call": "$ per share.",
+            "Put": "$ per share.",
+            "Call − ref": f"The call minus {ref_name}'s, $ per share.",
+            "Put − ref": f"The put minus {ref_name}'s, $ per share.",
+            "MC 95% interval": f"Price ± 1.96 SE; withheld as unreliable below {RELIABLE_PATHS} paths on the scarce "
+            "side of the strike.",
+            "ms": "Server time of the first computation; later runs read a cache.",
+        },
+        labels={"ms": "Time (ms)"},
+        key="tbl_pricing_engines",
     )
-    american = (
-        " It is not the decay of the American value in the price cards, which the tree's Greeks give."
-        if model.kind == "binomial" and model.american
-        else ""
-    )
-    return f"{decay_label(expiring)}: {later} minus {value} now{by}, all else equal; {first}.{american}"
+    st.caption(f"Reference: {ref_name}. Monte Carlo values European exercise only.")
+    _convergence(inputs, tree, ref_name, {"call": float(reference["Call"]), "put": float(reference["Put"])})
+    _mc_convergence(inputs, mc)
+    _tree_greeks(inputs, tree)
+    if prices.alo is not None:
+        _alo_boundary(inputs, prices)
+
+
+# --- The tab ----------------------------------------------------------------------------------------------------
+
+
+def _open_methodology() -> None:
+    st.session_state[DRAWER] = True
+
+
+def footer_text(inputs: Inputs, market: Contract) -> str:
+    """The footer line: the engine, the time basis, the vol's source and the unit."""
+    engine = "ALO · American" if _alo(inputs) else "BSM · European"
+    if inputs.expiry_date is not None and inputs.settlement is not None:
+        settles = clock.settlement_time(inputs.expiry_date, inputs.settlement)
+        time_basis = f"T to {_day(settles.date())} {settles:%H:%M} ET = minutes/525,600"
+    else:
+        time_basis = "T = days/365"
+    if market.listed:
+        at = fmt_moneyness(inputs.strike, market.forward)
+        source = "typed σ" if inputs.vol_overridden else f"σ from the surface at K/F {at}"
+    else:
+        source = "flat σ"
+    return f"{engine} · {time_basis} · {source} · per share"
 
 
 def render(inputs: Inputs, prices: Prices) -> None:
-    st.subheader("Greeks")
-    decay = greeks_decay(inputs, prices)
-    if inputs.model.kind == "alo":
-        table = _alo_greeks_table(inputs, prices, decay)
-        note = _alo_greeks_note(inputs, prices)
-    else:
-        higher = st.toggle(
-            "Show second- and third-order Greeks", value=False, key="higher_greeks", persist_state="session"
-        )
-        table = _greeks_table(inputs, higher, decay)
-        note = (
-            "Analytical Black-Scholes-Merton Greeks for European exercise, in the units shown "
-            "(theta and the other time Greeks per calendar day of elapsed time). "
-            + _decay_note(inputs)
-            + (
-                " Tree Greeks for the American option, including vega and rho, are under *Model diagnostics* below."
-                if inputs.model.american and inputs.model.kind == "binomial"
-                else ""
-            )
-        )
-    st.dataframe(
-        table.drop(columns="Order"),
-        hide_index=True,
-        column_config={
-            # A fixed width: the grid sizes columns from the first rows it draws (and drops the longest name as an
-            # outlier), which cut "Epsilon (dividend rho) ε" and, after the toggle, "Vomma (volga)" on phones.
-            "Greek": st.column_config.TextColumn(width="medium"),
-            "Call": st.column_config.NumberColumn(format="%.6f"),
-            "Put": st.column_config.NumberColumn(format="%.6f"),
-        },
-    )
-    st.caption(note)
-
-    st.subheader("Sensitivity explorer")
-    _sensitivity(inputs)
-
-    with st.expander("Price heatmaps (spot × volatility)"):
-        _heatmaps(inputs)
-
-    with st.expander("Theoretical option chain"):
-        _chain(inputs)
-
-    st.subheader("Model diagnostics")
-    st.caption(inputs.model.label)
-    _model_diagnostics(inputs, prices)
+    """The Pricing tab (see the module docstring)."""
+    market = contract(inputs)
+    # The context line names the tiles under it: the two sit half the usual gap apart (7 px, not 14), which keeps the
+    # tiles' top within UI spec 3.1's 180 px at 1440 x 900 under the two-line header (179 px, from 186).
+    with st.container(key="pricing_headline", gap="xsmall"):
+        st.caption(context_line(inputs))
+        _tiles(inputs, prices, market)
+    frame, kinds, help_text, labels = contract_frame(inputs, prices, market)
+    table(frame, kinds, help_text, labels=labels, key="tbl_pricing_contract")
+    # The profile and the Greeks table side by side where there is room (desk.css, Pricing tab), stacked otherwise.
+    with st.container(key="pricing_views"), st.container(key="pricing_views_row"):
+        with st.container(key="pricing_views_profile"):
+            _profile(inputs, market)
+        with st.container(key="pricing_views_greeks"):
+            _greeks(inputs, prices, market)
+    st.subheader("Chain")
+    _chain(inputs, market)
+    # Bound to the URL, so that a link from this view opens it again; the key is DIAGNOSTICS, written out for the
+    # link test's reader (tests/test_app_header.py reads the keys of the widgets bound to the URL).
+    diagnostics = st.expander("Engine diagnostics", key="pricing_diag", on_change="rerun", bind="query-params")
+    if diagnostics.open:
+        with diagnostics, st.spinner("Pricing on the trees and by simulation…"):
+            _diagnostics(inputs, prices)
+    foot = st.container(horizontal=True, key="pricing_footer", vertical_alignment="center", gap="small")
+    foot.caption(footer_text(inputs, market))
+    foot.button("Methodology", key="pricing_methodology", type="tertiary", on_click=_open_methodology)

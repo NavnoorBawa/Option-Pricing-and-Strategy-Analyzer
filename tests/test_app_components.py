@@ -61,8 +61,8 @@ def _styles(at: AppTest | list[AppTest]) -> list[str]:
     return [h.proto.body for page in _apps(at) for h in page.get("html")]
 
 
-#: The tabs with card rows (only the open tab runs; the price cards sit above the tabs, on every page).
-CARD_TABS = ("Strategy", "Risk", "Surface", "IV")
+#: The tabs with card rows (only the open tab runs; the Pricing tab owns its headline tiles, UI-1).
+CARD_TABS = ("Pricing", "Strategy", "Risk", "Surface", "IV")
 
 
 def _app_states(new_app) -> dict[str, list[AppTest]]:
@@ -289,13 +289,13 @@ def test_card_row_draws_bordered_metrics_in_their_groups():
 #: Every card row of the app with the labels of each group, at the default URL (with market quotes for the
 #: surface cards).
 ROWS = {
-    "price_cards": [["Call value", "Put value"], ["Forward price", "Call ITM probability"]],
+    "pricing_tiles": [["Call", "Put"], ["Straddle", "Vol"], ["Forward", "Time"]],
     "strategy_cards": [["Net premium", "Max profit"], ["Max loss", "Probability of profit"]],
     "greek_cards": [["Delta (shares)", "Gamma"], ["Theta / day", "Vega / vol pt"]],
     "expectation_cards": [["Expected P&L at expiry", "P&L standard deviation", "Drift used"]],
     "var_cards": [["VaR 99.0%", "Expected Shortfall 99.0%"], ["Spot-only VaR 99.0%", "Spot-only ES 99.0%"]],
     "surface_cards": [["Grid", "Calendar arbitrage"], ["Butterfly arbitrage", "Local vol defined"]],
-    "iv_cards": [["Implied volatility", "Model check"], ["Vega at IV", "Time value"]],
+    "iv_tiles": [["IV bid", "IV ask"], ["IV", "Surface"], ["Vega", "Bounds"]],
 }
 
 
@@ -324,18 +324,25 @@ def test_every_metric_of_every_tab_is_in_a_card_row(states):
 
 def test_the_four_card_rows_stay_two_by_two_on_a_phone(states):
     # On a 360 px phone each pair of a four-card row fits the row side by side (the cards do not stack). At the input
-    # limits this holds for the strategy cards, whose amounts are shortened to at most nine characters; the price
-    # and implied-volatility cards show every digit of a seven-digit price (a forward of "$10,001,368.9567") and
-    # stack there.
+    # limits this holds for the strategy cards, whose amounts are shortened to at most nine characters.
     checked = set()
     for state, at in states.items():
         for row, groups in _card_rows(at).items():
-            if len(groups) != 2 or (state == "limits" and row in ("price_cards", "iv_cards")):
+            if len(groups) != 2 or len(groups[0]) != 2:
                 continue
             style = next(s for s in _styles(at) if f".st-key-{row} {{ container:" in s)
             assert _layout(style, PHONE_ROW)[0] == 2, (state, row)
             checked.add(row)
-    assert checked == {"price_cards", "strategy_cards", "greek_cards", "var_cards", "surface_cards", "iv_cards"}
+    assert checked == {"strategy_cards", "greek_cards", "var_cards", "surface_cards"}
+
+
+@pytest.mark.parametrize("row", ["pricing_tiles", "iv_tiles"])
+def test_the_six_tile_rows_go_pair_by_pair_on_a_phone(states, row):
+    # UI spec 2.9: at most six tiles a row. In three pairs they wrap 2 + 2 + 2 on 360 to 440 px phones, each pair side
+    # by side at the theme's full value size (no container query applies), where two groups of three went 2 + 1 twice.
+    style = next(s for s in _styles(states["default"]) if f".st-key-{row} {{ container:" in s)
+    for phone in (360, 390, 440):
+        assert _layout(style, phone - 2 * 14) in (None, (2, 22.75)), phone
 
 
 @pytest.mark.parametrize(

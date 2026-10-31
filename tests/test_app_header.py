@@ -114,26 +114,11 @@ def test_the_ticker_updates_after_a_spot_change(app):
 @pytest.mark.parametrize(
     ("query", "badge", "model"),
     [
+        ({}, "BSM · closed form", "Black-Scholes-Merton (closed form)"),
         (
-            {"model": "Binomial tree", "steps": 2000, "style": "American"},
-            "LR tree · 2,000 steps · American",
-            "Leisen-Reimer tree · 2000 steps · American",
-        ),
-        (
-            {"model": "Binomial tree", "tree": "Cox-Ross-Rubinstein"},
-            "CRR tree · 501 steps · European",
-            "Cox-Ross-Rubinstein tree · 501 steps · European",
-        ),
-        # A simulation names the variance reductions that its standard error includes; the tooltip spells them out.
-        (
-            {"model": "Monte Carlo", "paths": "1,000,000"},
-            "MC · 1,000,000 paths · AV+CV",
-            "Monte Carlo · 1,000,000 paths · antithetic + control variate",
-        ),
-        (
-            {"model": "Monte Carlo", "antithetic": "false"},
-            "MC · 100,000 paths · CV",
-            "Monte Carlo · 100,000 paths · control variate",
+            {"model": "American (ALO)", "scheme": "High"},
+            "ALO · high · American",
+            "Andersen-Lake-Offengenden engine · high scheme · American",
         ),
     ],
 )
@@ -142,20 +127,22 @@ def test_the_badge_names_the_pricing_model(new_app, query, badge, model):
     _ok(at)
     assert _badge(at) == badge
     [element] = _block(at, "desk_actions").markdown
-    assert element.proto.help == f"Pricing model of the price cards: {model}."
+    assert element.proto.help == f"Pricing model of the Pricing and IV tabs: {model}."
 
 
-def test_the_badge_names_the_model_of_the_values_on_screen(app):
-    # A 10-step CRR tree at 30% rates and 0.5% volatility is not arbitrage-free: the cards fall back to
-    # Black-Scholes-Merton, and so does the badge.
-    for key, value in (("model", "binomial"), ("tree", "crr")):
-        app.sidebar.radio(key=key).set_value(value).run()
-    app.sidebar.number_input(key="vol").set_value(0.5).run()
-    app.sidebar.number_input(key="rate").set_value(30.0).run()
-    app.sidebar.slider(key="steps").set_value(10).run()
-    assert not app.exception
-    assert any("Showing Black-Scholes-Merton values instead" in w.value for w in app.warning)
-    assert _badge(app) == "BSM · closed form"
+def test_the_badge_names_the_model_of_the_values_on_screen(new_app, monkeypatch):
+    # Where the American engine cannot value the contract the tab falls back to Black-Scholes-Merton, and so does
+    # the badge. (The engine hands its hard cases to trees; a failure is simulated here.)
+    from options_analyzer.ui import cache
+
+    def refuse(*args, **kwargs):
+        raise ValueError("no arbitrage-free lattice exists for these inputs.")
+
+    monkeypatch.setattr(cache, "alo_results", refuse)
+    at = new_app(model="American (ALO)").run()
+    assert not at.exception
+    assert any("Showing Black-Scholes-Merton values instead" in w.value for w in at.warning)
+    assert _badge(at) == "BSM · closed form"
 
 
 def test_the_share_popover_holds_the_link_to_this_view(new_app):
@@ -180,7 +167,6 @@ LINK_WORDS = {
     **dict.fromkeys(("spot", "days", "rate", "div"), "typed inputs"),
     **dict.fromkeys(("strike", "vol", "vol_src"), "the contract"),
     "model": "the pricing model",
-    **dict.fromkeys(("tree", "steps", "style", "paths", "seed", "antithetic", "control_variate"), "its settings"),
     "scheme": "its settings",
     "tab": "the open tab",
     "strategy_category": "template",
@@ -189,6 +175,10 @@ LINK_WORDS = {
     "contracts": "contracts",
     "multiplier": "shares per contract",
     "commission": "commission",
+    **dict.fromkeys(("pr_metric", "pr_x", "pr_range"), "profile"),
+    **dict.fromkeys(("pr_chain_win", "pr_chain_stride"), "chain window and stride"),
+    **dict.fromkeys(("pr_greeks", "pr_bsm_ref"), "Greeks order"),
+    "pricing_diag": "diagnostics",
 }
 
 
@@ -214,16 +204,26 @@ def _drawn_modules() -> set[Path]:
     return {path for path in seen if path.parent == UI}
 
 
+#: Modules the app imports without drawing their URL-bound widgets: the Pricing and IV tabs end their context line
+#: with the what-if note (``whatif.note``), but the strip itself is drawn by Strategy and Risk from their own stage:
+#: add its keys to the note then.
+NOT_DRAWN = ("whatif",)
+
+
 def test_the_drawn_modules_are_the_apps():
     drawn = {path.stem for path in _drawn_modules()}
     assert {"streamlit_app", "app", "header", "inputs", "tab_strategy", "tab_surface", "exports"} <= drawn
-    assert "whatif" not in drawn  # drawn by Strategy and Risk from their own stage: add its keys to the note then
+    from options_analyzer.ui import tab_strategy
+
+    assert "whatif" not in {Path(m.__file__).stem for m in vars(tab_strategy).values() if hasattr(m, "__file__")}
 
 
 def _bound_keys() -> set[str]:
     """The keys of the widgets bound to the URL (``bind="query-params"``) in the modules the app imports."""
     keys = set()
     for path in _drawn_modules():
+        if path.stem in NOT_DRAWN:
+            continue
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             options = {k.arg: k.value for k in getattr(node, "keywords", ())} if isinstance(node, ast.Call) else {}
             if isinstance(options.get("bind"), ast.Constant) and options["bind"].value == "query-params":
@@ -293,49 +293,6 @@ def test_the_page_settings(new_app, monkeypatch):
     )
 
 
-def _after_price_cards(at: AppTest):
-    """The element right after the price cards on the page (their caption, if any, or the tabs)."""
-    children = list(at.main.children.values())
-    cards = next(i for i, child in enumerate(children) if _key(child) == "price_cards")
-    return children[cards + 1]
-
-
-def test_the_price_cards_have_no_caption_at_the_closed_form(app):
-    # Under the cards, "Black-Scholes-Merton (closed form) · risk-neutral probability of finishing in the money:
-    # call N(d2) = 55.96%, put 44.04%" repeated the badge's model and the fourth card, and took two lines on a phone
-    # (47 px). The put's probability, its only other figure, is in the fourth card's tooltip.
-    assert getattr(_after_price_cards(app), "type", None) == "tab_container"
-    itm = _block(app, "price_cards_model").metric[1]
-    assert itm.label == "Call ITM probability" and itm.value == "55.96%"
-    assert "the put's is 1 − N(d₂) = 44.04%." in itm.proto.help
-
-
-@pytest.mark.parametrize(
-    ("query", "caption"),
-    [
-        ({"model": "Binomial tree"}, r"Error against the closed-form value: call [+-]\$0\.\d{6}, put [+-]\$0\.\d{6}$"),
-        ({"model": "Binomial tree", "style": "American"}, r"Early-exercise premium: call \$0\.0000, put \+\$0\.\d{4} "),
-        # The interval's formula never splits over two lines (no-break spaces): on a phone "SE" stood alone.
-        (
-            {"model": "Monte Carlo"},
-            r"Standard error: call \$0\.\d{4}, put \$0\.\d{4}; 95%\xa0interval\xa0=\xa0price\xa0±\xa01\.96\xa0SE$",
-        ),
-        # Where both cards withhold the interval (about 85 of 100,000 paths in the money), so does the caption.
-        ({"model": "Monte Carlo", "strike": 120, "days": 30}, r"Standard error: call \$0\.\d{4}, put \$0\.\d{4}$"),
-    ],
-)
-def test_the_price_cards_caption_gives_the_call_and_the_put(new_app, query, caption):
-    # Where the fourth card shows the larger of the call's and the put's figures, the caption gives both, without
-    # the model's name (the badge has it): one line on a desktop.
-    at = new_app(**query).run()
-    _ok(at)
-    after = _after_price_cards(at)
-    assert after.type == "caption"
-    text = after.value.replace("\\$", "$")  # Markdown escapes the dollar signs
-    assert re.match(caption, text), text
-    assert not any(name in text for name in ("Leisen-Reimer", "Monte Carlo", "steps", "paths"))
-
-
 # --- No emoji -------------------------------------------------------------------------------------------------------
 
 #: Code points drawn as emoji: pictographs, the dingbats and miscellaneous symbols, and the emoji presentation
@@ -382,8 +339,10 @@ def test_no_emoji_in_the_ui(new_app, monkeypatch):
     real = st.set_page_config
     monkeypatch.setattr(st, "set_page_config", lambda **kwargs: calls.append(kwargs) or real(**kwargs))
     seen = 0
-    for query in ({}, {"model": "Binomial tree", "style": "American"}, {"model": "Monte Carlo"}):
-        at = new_app(**query).run()
+    for query in ({}, {"model": "American (ALO)"}, {"preset": None, "asof": "2026-10-23T16:00"}):
+        at = new_app(**query)
+        at.session_state["pricing_diag"] = True  # Engine diagnostics open
+        at.run()
         _ok(at)
         for tab in TABS:
             _open(at, tab)

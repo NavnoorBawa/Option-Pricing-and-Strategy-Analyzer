@@ -245,6 +245,25 @@
   }
 }
 
+/* --- Pricing tab (ui/tab_pricing.py) ----------------------------------------------------------------------------- */
+
+/* The profile and the Greeks table side by side from a main column of 960 px (1440 px with the sidebar open: 1,037
+   px), the table at its content's width and the chart in the rest (about 550 px); stacked on a narrower one (a
+   laptop at 1,280 px with the sidebar open, tablets, phones). Side by side they take one screen instead of two: the
+   page at 1440 x 900 is 1,733 px high with the diagnostics closed, within UI spec 3.1's 1,800. */
+.st-key-pricing_views {
+  container: pricing-views / inline-size;
+}
+
+@container pricing-views (width >= 960px) {
+  .st-key-pricing_views_row {
+    display: grid !important;
+    grid-template-columns: minmax(520px, 1fr) minmax(0, max-content);
+    column-gap: 1.5rem;
+    align-items: start;
+  }
+}
+
 /* --- Surface tab --------------------------------------------------------------------------------------------- */
 
 /* The name of the kept quotes file is a code span in a caption, which Streamlit draws at 0.75em (9.2 px against
