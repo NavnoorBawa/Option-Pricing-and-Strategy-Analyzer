@@ -204,6 +204,14 @@ def _cards_style(
         f"@container {name} (width < {(k + 1) * (three_up if k >= 2 else compact) + k * gap}px) {{ {per_line(k)}}}"
         for k in range(per_group - 1, 0, -1)
     ]
+    if len(group_keys) >= 3:
+        # Three groups or more wrap on a grid of equal columns: as a flex row, six tiles in three pairs went 4 + 2 on
+        # a laptop with the sidebar open, the last pair stretched to twice its cards' width (303.75 px against
+        # 144.875 at 1,024 px). A group alone on a line now keeps the width of the groups above it.
+        rules.append(
+            f"{row} {{ display: grid !important; "
+            f"grid-template-columns: repeat(auto-fit, minmax(min(100%, {group}px), 1fr)); }}"
+        )
     return f"<style>{' '.join(rules)}</style>"
 
 

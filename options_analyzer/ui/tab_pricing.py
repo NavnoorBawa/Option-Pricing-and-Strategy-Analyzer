@@ -161,7 +161,7 @@ def compute_prices(inputs: Inputs) -> Prices:
         return Prices(
             details["call"].value, details["put"].value, notes["call"], notes["put"], alo=details, alo_greeks=greeks
         )
-    note = "Closed-form European value (Black-Scholes-Merton)"
+    note = "European exercise" + (", Black-76 on the expiry's parity forward" if inputs.context is not None else "")
     return Prices(bs.price(S, K, T, r, sigma, q, "call"), bs.price(S, K, T, r, sigma, q, "put"), note, note)
 
 
@@ -574,7 +574,12 @@ def _tiles(inputs: Inputs, prices: Prices, market: Contract) -> None:
             "The expiry's forward from put-call parity across its quotes "
             f"(DF {number(market.discount, 5)}). This strike's pair implies K + (C mid − P mid)/DF = {level(implied)}."
             if np.isfinite(implied)
-            else "The expiry's forward from put-call parity across its quotes. This strike has no two-sided pair."
+            else "The expiry's forward from put-call parity across its quotes. "
+            + (
+                "This strike is not listed at this expiry, so no pair of its own implies a forward."
+                if market.quotes["call"] is None
+                else "This strike's call or put has no bid, so its pair implies no forward."
+            )
         )
     else:
         pair = f"pair {MISSING}"
@@ -1179,13 +1184,21 @@ def greeks_frame(
         )
     if alo and order > 1:
         parts.append("ALO gives first-order Greeks; BSM ref shows the higher orders.")
-    return pd.DataFrame(rows), " ".join(parts)
+    # The values next to their Greek and the unit last: on a 390 px phone the unit column took the room of the values.
+    frame = pd.DataFrame(rows)
+    return frame[["Greek", *(c for c in frame.columns if c not in ("Greek", "Unit")), "Unit"]], " ".join(parts)
 
 
 def _greeks(inputs: Inputs, prices: Prices, market: Contract) -> None:
     row = st.container(horizontal=True, key="pricing_greeks_controls", vertical_alignment="bottom", gap="medium")
     order = row.segmented_control(
-        "Greeks", ORDERS, default="1st", required=True, key="pr_greeks", persist_state="session"
+        "Order",
+        ORDERS,
+        default="1st",
+        required=True,
+        key="pr_greeks",
+        persist_state="session",
+        help="First-order Greeks, then also vanna, volga, charm and veta, then also speed, zomma, color and ultima.",
     )
     bsm_ref = False
     if _alo(inputs):
@@ -1203,15 +1216,17 @@ def _greeks(inputs: Inputs, prices: Prices, market: Contract) -> None:
         if any(prices.alo_greeks[k].basis != "differences" or prices.alo_greeks[k].one_sided for k in cache.KINDS):
             caption = f"{caption} Some ALO Greeks are exact or one-sided here: see the column's help.".strip()
     config = {
-        "Greek": st.column_config.TextColumn("Greek", help="The sensitivity.", pinned=True),
-        "Unit": st.column_config.TextColumn("Unit", help="What one unit of the figure is, per share."),
+        # 120 px holds "Decay to expiry", which the automatic width cut to "1-day de".
+        "Greek": st.column_config.TextColumn("Greek", help="The sensitivity.", pinned=True, width=120),
+        "Unit": st.column_config.TextColumn("Unit", help="What one unit of the figure is, per share.", width="medium"),
     }
-    for column in frame.columns[2:]:
+    for column in frame.columns[1:-1]:
         source = "Closed-form European (Black-Scholes-Merton), per share." if "BSM ref" in column else engine
         config[column] = st.column_config.TextColumn(column, help=md(source), alignment="right")
     st.dataframe(
         frame,
         key="tbl_pricing_greeks",
+        width="content",  # stretched over 1,000 px, its value columns read far from their labels
         hide_index=True,
         row_height=ROW_HEIGHT,
         height="content",

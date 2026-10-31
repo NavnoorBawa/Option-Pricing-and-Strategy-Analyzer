@@ -1031,9 +1031,10 @@ _TILE_DELTAS = """() => [...document.querySelectorAll('.st-key-pricing_tiles [da
 @pytest.mark.slow
 @pytest.mark.parametrize("width", [1440, 1024, 390])
 def test_the_pricing_tiles_deltas_are_never_cut_off(chromium, app_url, width):
-    # The six tiles' deltas ("pair −0.29 bp", "±3.39%", "AM settle") are modelled at most 2 px wider than their
-    # max-content width, never narrower, so none ends in an ellipsis; on a desktop with the sidebar open the six
-    # stay on one line (UI spec 2.9: at most six tiles a row).
+    # The six tiles' deltas ("pair −0.29 bp", "±3.39%", "AM settle") are modelled never narrower than their
+    # max-content width, so none ends in an ellipsis, and at most 3 px wider (the model takes "±", which its table of
+    # Plex widths lacks, at the widest character: 2.3 px over on "±3.39%"); on a desktop with the sidebar open the
+    # six stay on one line (UI spec 2.9: at most six tiles a row).
     from options_analyzer.ui import components
 
     for query in ("?asof=2026-10-23T16:00", "?preset=Textbook&model=American+%28ALO%29"):
@@ -1044,7 +1045,7 @@ def test_the_pricing_tiles_deltas_are_never_cut_off(chromium, app_url, width):
             for card in cards:
                 assert not card["cut"], (query, card)
                 model = components._card_width(card["label"].capitalize(), card["value"], delta=card["delta"])
-                assert card["natural"] <= model <= card["natural"] + 2, (query, card, model)
+                assert card["natural"] <= model <= card["natural"] + 3, (query, card, model)
             if width == 1440:
                 assert len({card["top"] for card in cards}) == 1, (query, cards)
         finally:
@@ -1377,8 +1378,8 @@ def test_the_desk_shell_on_a_phone(chromium, app_url, inputs):
                 "[...document.querySelectorAll('.st-key-desk_actions button')].map(b => b.getBoundingClientRect())"
             )
             assert all(b["width"] < 60 for b in buttons), (width, buttons)
-            for name in ("Share", "Methodology"):  # still named for screen readers
-                assert page.get_by_role("button", name=name).count() == 1, name
+            for name in ("Share", "Methodology"):  # still named for screen readers (the Pricing footer has its own)
+                assert page.locator(".st-key-desk_actions").get_by_role("button", name=name).count() == 1, name
             lines = page.evaluate(_IDENTITY_LINES)
             assert len(lines) <= (2 if inputs == "default" and width == 390 else 3), (width, lines)
             # Balanced lines: no item alone on the last one, unless the ticker has two (the index's time and level).
