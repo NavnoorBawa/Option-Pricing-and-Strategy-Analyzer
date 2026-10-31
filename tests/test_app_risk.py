@@ -50,6 +50,8 @@ UNITS = 100.0
 WEEK, WEEKEND = 7 / 365, 3 / 365
 #: One month, the reference tenor of the 1M-scaled vol shocks, and their damping exponent.
 ONE_MONTH, DECAY = 30 / 365, 0.25
+#: The no-break space that keeps a leg's quantity with its strike in the position line.
+NBSP = "\u00a0"
 
 
 def _ok(at: AppTest) -> AppTest:
@@ -340,7 +342,9 @@ def test_ties_in_the_worst_grid_go_to_the_smallest_spot_move(index):
     assert tile.value == tab_risk.dollars(worst)
     assert tile.delta == f"{tab_risk.shock_label(x / 100)} · {tab_risk.vol_label(dv, 'vp')}" == "−5% · −10 vp"
     assert "one of 4 cells equal to the dollar" in tile.help
-    assert _line(at).startswith("**Bull Call Spread** — +1 5,815C / −1 5,915C · 1 × 100 · 20‑Nov‑26 AM (27d 17h) · ")
+    assert _line(at).startswith(
+        f"**Bull Call Spread** — +1{NBSP}5,815C / −1{NBSP}5,915C · 1 × 100 · 20‑Nov‑26 AM (27d 17h) · "
+    )
 
 
 def test_the_position_line_names_legs_expiry_size_and_max_loss(index):
@@ -350,9 +354,10 @@ def test_the_position_line_names_legs_expiry_size_and_max_loss(index):
     credit = index.credit()
     loss = UNITS * (max(5400.0 - 5300.0, 6250.0 - 6150.0) - credit)
     assert round(credit, 2) == 22.35
-    # One expiry for the four legs: named once, with its settlement and the time left (55.73 days, floored).
+    # One expiry for the four legs: named once, with its settlement and the time left (55.73 days, floored). Each
+    # leg's quantity keeps to its strike (a no-break space), so a phone breaks the line between legs.
     assert _line(at) == (
-        "**Iron Condor** — +1 5,300P / −1 5,400P / −1 6,150C / +1 6,250C · 1 × 100 · "
+        f"**Iron Condor** — +1{NBSP}5,300P / −1{NBSP}5,400P / −1{NBSP}6,150C / +1{NBSP}6,250C · 1 × 100 · "
         f"18‑Dec‑26 AM ({math.floor(index.t * 365)}d) · max loss at expiry −\\${loss:,.0f}"
     )
     assert "−\\$7,765" in _line(at)
@@ -368,7 +373,7 @@ def test_a_position_on_two_expiries_names_each_leg_and_expiry_with_its_settlemen
     line = _line(_risk(strategy="Long Call Calendar"))
     back = index.published.maturity(Expiry(date(2027, 2, 19), "AM"))
     assert line.startswith(
-        f"**Long Call Calendar** — −1 {k:,.0f}C 18‑Dec‑26 AM / +1 {k:,.0f}C 19‑Feb‑27 AM · 1 × 100 · "
+        f"**Long Call Calendar** — −1{NBSP}{k:,.0f}C 18‑Dec‑26 AM / +1{NBSP}{k:,.0f}C 19‑Feb‑27 AM · 1 × 100 · "
         f"18‑Dec‑26 AM ({math.floor(index.t * 365)}d), 19‑Feb‑27 AM ({math.floor(back * 365)}d) · max loss at expiry "
     )
     assert k == 5830
@@ -761,13 +766,16 @@ def test_the_quoted_backtest_is_the_one_day_var_only():
 
 
 def test_the_ladder_chart_has_a_tick_on_the_loss_side():
-    # Plotly's own step was 5,000 for P&L from −$4,096 to +$5,871: no tick below zero, no loss readable.
+    # Plotly's own step was 5,000 for P&L from −$4,096 to +$5,871: no tick below zero, no loss readable. The condor's
+    # ladder runs from −$7,646 (+20%) to +$120 (−1%): ticks down from 0 in the loss, none above it, which the data
+    # reach by less than a tenth of the range (charts_risk.signed_ticks).
     at = _risk()
     ladder = _frame(at, "Move")
     yaxis = _chart(at, "ladder_chart")["layout"]["yaxis"]
     ticks = yaxis["tickvals"]
-    assert ladder["P&L"].min() < 0 and min(ticks) < 0 <= max(ticks)
-    assert min(ticks) >= ladder["P&L"].min() and max(ticks) <= max(ladder["P&L"].max(), 0.0)
+    low, high = ladder["P&L"].min(), ladder["P&L"].max()
+    assert (low, high) == (-7646, 120) and high < 0.1 * (high - low)
+    assert min(ticks) < 0 == max(ticks) and min(ticks) >= low and len(ticks) >= 3
     assert yaxis["tickformat"] == ",.0f"
 
 

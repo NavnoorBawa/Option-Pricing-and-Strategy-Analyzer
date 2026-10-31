@@ -135,11 +135,12 @@ class Position:
 
 def _leg_short(p: lg.PricedLeg, expiry: bool = True) -> str:
     """``+1 5,300P 18‑Dec‑26 AM`` (``+1 102.5C 365d`` in the textbook market, ``+100 shares``); ``+1 5,300P`` without
-    the ``expiry``."""
+    the ``expiry``. The quantity and the strike are joined by a no-break space: a phone broke the Risk tab's line
+    between them (``… / +1`` above ``6,250C · 1 × 100``)."""
     qty = signed(p.quantity, 0) if p.quantity else "0"
     if p.kind == "stock":
         return f"{qty} share{'s' if abs(p.quantity) != 1 else ''}"
-    return f"{qty} {strike(p.strike, math.nan)}{p.kind[0].upper()}" + (f" {p.label}" if expiry else "")
+    return f"{qty} {strike(p.strike, math.nan)}{p.kind[0].upper()}" + (f" {p.label}" if expiry else "")
 
 
 # --- Templates and the builder's values --------------------------------------------------------------------------
