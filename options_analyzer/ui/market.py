@@ -3,11 +3,13 @@
 Two presets, which the sidebar's Market menu offers (``?preset=`` in a link):
 
 * **Synthetic index**, the default: an SPX-like chain priced by :func:`options_analyzer.market_data.sample_chain`
-  at the valuation time (labelled synthetic everywhere), read like an uploaded chain: each expiry's forward and
-  discount factor from put-call parity, and the arbitrage-free, spread-weighted SVI surface fitted to the quotes
-  (:func:`options_analyzer.vol_surface.fit_market_surface`). That fitted surface is *published*: the Pricing
-  contract's vol, the forward and the carry of its expiry all come from it. The sidebar picks a listed expiry and
-  strike; the spot is the chain's.
+  at the valuation time (labelled synthetic everywhere), read like an uploaded chain, quote by quote
+  (:func:`options_analyzer.vol_surface.diagnostics.fit_chain`): each expiry's forward and discount factor from
+  put-call parity, the Surface tab's quote screen, and the arbitrage-free, spread-weighted SVI surface fitted to the
+  quotes it keeps. That fitted surface is *published*: the Pricing contract's vol, the forward and the carry of its
+  expiry all come from it. The fit settings (``vol_surface.diagnostics.FitSettings``: the screen, the forwards and
+  the calibration) are the Surface tab's, and the header shows a FIT chip while one is not at its default. The
+  sidebar picks a fitted expiry and a strike; the spot is the chain's.
 * **Textbook**: S = K = 100, one year, σ 20%, r 5%, q 0, the inputs of version 2, typed in the sidebar (spot,
   strike, days, volatility, rate, dividend yield), with no chain.
 
@@ -29,7 +31,8 @@ import streamlit as st
 from .. import clock
 from .. import vol_surface as vs
 from ..market_data import SyntheticChain, sample_chain, to_quotes
-from ..market_data.synthetic import SYNTHETIC_LABEL, strike_interval
+from ..market_data.synthetic import BOX_SPREAD, SYNTHETIC_LABEL, strike_interval
+from ..vol_surface.diagnostics import DEFAULT_SETTINGS, ChainFit, FitSettings, fit_chain
 
 #: The presets, by the label the sidebar shows and a link holds (``?preset=Textbook``).
 INDEX, TEXTBOOK = "Synthetic index", "Textbook"
@@ -40,6 +43,11 @@ INDEX_ROOT = "SPX"
 INDEX_SPOT = 5800.0
 INDEX_RATE = 0.04
 INDEX_YIELD = 0.013
+#: The fallback carry an expiry's forward is measured against (the Surface tab's carry gap): the Treasury rate plus
+#: the box spread the options finance at, and the yield. The fit itself falls back to the Treasury rate, as it always
+#: has: no expiry of the default chain needs the fallback, but the rate seeds each parity fit's first guess, and a
+#: different seed moves the 2028 forward by 0.25 bp.
+INDEX_CARRY = (INDEX_RATE + BOX_SPREAD, INDEX_YIELD)
 #: How every view of the synthetic chain is labelled (``synthetic.SYNTHETIC_LABEL``).
 SYNTHETIC_NOTE = f"{SYNTHETIC_LABEL}."
 #: The expiry the index preset opens on: the listed one nearest this many calendar days.
@@ -52,10 +60,11 @@ ASOF_STEP = timedelta(minutes=5)
 class MarketContext:
     """The index market at one valuation time: the synthetic chain, its fitted surface and one row per expiry.
 
-    ``expiries`` holds, for each listed expiry in date order: ``expiry`` (date), ``root``, ``settlement`` (AM or
-    PM), ``settles_at``, ``maturity`` (years, minutes / 525,600), ``forward`` and ``discount_factor`` (from put-call
-    parity, as fitted), ``atm_vol`` (the surface's vol at the forward), and ``surface_index`` (the row of the
-    surface's maturities).
+    ``expiries`` holds, for each fitted expiry in date order (every listed one unless the fit settings leave some
+    out): ``expiry`` (date), ``root``, ``settlement`` (AM or PM), ``settles_at``, ``maturity`` (years, minutes /
+    525,600), ``forward`` and ``discount_factor`` (from put-call parity, as fitted), ``atm_vol`` (the surface's vol
+    at the forward), and ``surface_index`` (the row of the surface's maturities). ``fit`` is the chain read quote by
+    quote, with its ``settings``.
     """
 
     as_of: datetime
@@ -64,6 +73,8 @@ class MarketContext:
     surface: vs.VolSurface
     expiries: pd.DataFrame
     messages: tuple[str, ...]
+    fit: ChainFit | None = None
+    settings: FitSettings = DEFAULT_SETTINGS
 
     @property
     def spot(self) -> float:
@@ -107,28 +118,31 @@ def snap(moment: datetime) -> datetime:
 
 
 @st.cache_resource(show_spinner=False, max_entries=8)
-def index_market(as_of: datetime) -> MarketContext:
-    """The synthetic index chain at ``as_of`` (New York wall time), read and fitted like an uploaded chain.
+def index_market(as_of: datetime, settings: FitSettings = DEFAULT_SETTINGS) -> MarketContext:
+    """The synthetic index chain at ``as_of`` (New York wall time), read and fitted like an uploaded chain with the
+    fit ``settings`` (the Surface tab's: :func:`.surface_state.settings`).
 
-    Cached per valuation time for the server process, so every visitor at the default time shares one fit.
+    Cached per valuation time and settings for the server process, so every visitor at the default time shares one
+    fit (about a second).
     """
     chain = sample_chain(INDEX_SPOT, INDEX_RATE, INDEX_YIELD, as_of=as_of)
-    quotes = to_quotes(chain.quotes, as_of=as_of)
-    clean, messages, forwards = vs.parse_quotes(quotes, INDEX_SPOT, INDEX_RATE, INDEX_YIELD, return_forwards=True)
-    surface = vs.fit_market_surface(clean, INDEX_SPOT, INDEX_RATE, INDEX_YIELD, forwards=forwards)
-    expiries = chain.expiries[["expiry", "root", "settlement", "settles_at", "maturity"]].copy()
-    expiries["expiry"] = pd.to_datetime(expiries["expiry"]).dt.date
-    index = [int(np.argmin(np.abs(surface.maturities - T))) for T in expiries["maturity"]]
-    log_forward = surface.log_forward
-    assert log_forward is not None and surface.discount_factor is not None  # a market surface
-    expiries["surface_index"] = index
-    expiries["forward"] = np.exp(log_forward[index])
-    expiries["discount_factor"] = surface.discount_factor[index]
+    fit = fit_chain(
+        chain.quotes, as_of=as_of, spot=INDEX_SPOT, rate=INDEX_RATE, dividend_yield=INDEX_YIELD, settings=settings
+    )
+    surface = fit.surface
+    fitted = fit.expiries[fit.expiries["slice"] >= 0]
+    listed = chain.expiries.assign(expiry=pd.to_datetime(chain.expiries["expiry"]).dt.date)
+    expiries = fitted[["expiry", "settlement"]].merge(listed, on=["expiry", "settlement"], how="left")
+    expiries = expiries[["expiry", "root", "settlement", "settles_at", "maturity"]].copy()
+    expiries["surface_index"] = fitted["slice"].to_numpy(int)
+    expiries["forward"] = fitted["forward"].to_numpy(float)
+    expiries["discount_factor"] = fitted["discount_factor"].to_numpy(float)
     expiries["atm_vol"] = [
         surface.implied_vol_at(F / INDEX_SPOT, T, extrapolate=True)
         for F, T in zip(expiries["forward"], expiries["maturity"], strict=True)
     ]
-    return MarketContext(as_of, chain, quotes, surface, expiries.reset_index(drop=True), tuple(messages))
+    quotes = to_quotes(chain.quotes, as_of=as_of)
+    return MarketContext(as_of, chain, quotes, surface, expiries.reset_index(drop=True), fit.messages, fit, settings)
 
 
 def expiry_label(row: pd.Series, *, as_of: datetime | None = None) -> str:

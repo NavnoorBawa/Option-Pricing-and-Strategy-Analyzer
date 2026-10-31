@@ -21,6 +21,7 @@ import streamlit as st
 from .. import clock
 from ..strategies import Market
 from . import market as mk
+from . import surface_state
 from .format import date as short_date
 from .format import level, pct
 from .model_config import ModelConfig, model_sidebar  # code that imports ModelConfig from here keeps working
@@ -91,7 +92,7 @@ def _apply_preset() -> None:
     if state.get("preset") == mk.TEXTBOOK:
         state.update(TEXTBOOK)
         return
-    context = mk.index_market(_asof_value())
+    context = mk.index_market(_asof_value(), surface_state.settings())
     state["strike"] = context.atm_strike(context.default_expiry())
     state.pop("expiry", None)
     state["vol_src"] = SURFACE
@@ -179,7 +180,7 @@ def _index_market(sb, model: ModelConfig | None = None) -> Inputs:
     )
     right.button("Now", key="asof_now", on_click=_set_now, width="stretch", help="The current time, New York.")
     with st.spinner("Pricing the synthetic chain and fitting its surface…"):
-        context = mk.index_market(asof)
+        context = mk.index_market(asof, surface_state.settings())  # the Surface tab's fit settings
     sb.caption(f"{mk.session_note(asof).capitalize()} · {asof:%a %d %b %Y, %H:%M} ET")
 
     sb.subheader("Contract")

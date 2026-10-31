@@ -10,7 +10,8 @@ One row above the price cards, ``st.container(horizontal=True, key="desk_header"
 
 Under the synthetic index the ticker is market-level (:func:`index_ticker`: valuation time and index level), a
 SYNTHETIC badge (and an OVERRIDE one while the vol is typed) leads the action group, and the contract is the strip's
-last row (:func:`contract_line`).
+last row (:func:`contract_line`). An amber FIT badge shows while a fit setting of the Surface tab is not at its
+default (:func:`.surface_state.settings`).
 
 How the row wraps is set in ``static/desk.css``. The ticker wraps between its items, never inside one, in lines
 of balanced length. Where the ticker's two lines fit beside the brand, they start one under the other (a hanging
@@ -36,6 +37,7 @@ from streamlit.errors import StreamlitAPIException
 from ..binomial import METHODS
 from ..market_data.synthetic import SYNTHETIC_LABEL
 from . import market as mk
+from . import surface_state
 from .format import MINUS, expiry, level, pct
 from .format import date as short_date
 from .inputs import Inputs
@@ -340,6 +342,19 @@ def render(inputs: Inputs, *, on_methodology: Callable[[], None]) -> DeltaGenera
             color="yellow",  # amber: user state (UI spec 2.6); orange is the put colour
             help=f"σ {pct(inputs.volatility, 2)} typed over the surface's {pct(inputs.surface_vol, 2)} "
             f"({gap:+.2f} vp).".replace("-", MINUS),
+        )
+    fit_changes = surface_state.settings().changes()
+    if fit_changes:  # a fit setting away from its default (the Surface tab's Filters popover): user state
+        where = (
+            "the published surface every tab prices from"
+            if inputs.context is not None
+            else "uploaded quotes on the Surface tab"
+        )
+        actions.badge(
+            "FIT",
+            color="yellow",
+            help=f"Fit settings changed from the default ({'; '.join(fit_changes)}), applied to {where}. Reset them "
+            "in the Surface tab's Filters.",
         )
     model = f"Pricing model of the price cards: {inputs.model.label}."
     actions.badge(model_badge(inputs.model), color="gray", help=model)
