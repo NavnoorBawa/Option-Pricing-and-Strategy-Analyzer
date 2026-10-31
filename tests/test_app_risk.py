@@ -341,6 +341,15 @@ def test_the_spot_by_date_grid_uses_trading_dates():
     ]
 
 
+def test_a_long_dated_spot_by_date_grid_keeps_a_few_rows_with_their_years():
+    # The textbook's 365-day option is about 250 sessions away: rows 50 sessions apart, then the last five, the dates
+    # with their years since the grid crosses one (it drew 55 rows 5 sessions apart, overprinted).
+    heat = _chart(_risk(report="Scenarios", sc_axes="Spot × Date", preset="Textbook"), "sc_heatmap_False")["data"][0]
+    assert 6 <= len(heat["y"]) <= 11
+    assert re.fullmatch(r"T\+0 · \w{3} \d\d‑\w{3}‑\d\d", heat["y"][0]), heat["y"][0]
+    assert heat["y"][1].startswith("T+50 ·")
+
+
 def test_the_finra_grid_and_its_illustrative_requirement(index):
     at = _risk(report="Scenarios", sc_grid="Portfolio margin")
     heat = _chart(at, "sc_heatmap_margin")["data"][0]

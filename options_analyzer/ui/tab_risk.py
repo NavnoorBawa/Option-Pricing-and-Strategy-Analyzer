@@ -677,6 +677,23 @@ def _ladder(book: Book) -> None:
         )
 
 
+#: Steps (sessions) of the Spot × Date grid's rows before the last week: the first that leaves at most 5 rows.
+_DATE_STEPS = (5, 10, 20, 25, 50, 100, 250, 500, 1000, 2500)
+
+
+def date_rows(last: int) -> list[int]:
+    """The sessions of the Spot × Date grid's rows for a front expiry ``last`` sessions away: today, at most five
+    rows a round number of sessions apart, then each of the last five sessions, at most 11 rows whatever the
+    horizon (a 365-day textbook option drew 55 rows of 5 sessions, their values overprinted).
+
+    >>> date_rows(20), date_rows(248), date_rows(3)
+    ([0, 5, 10, 15, 16, 17, 18, 19, 20], [0, 50, 100, 150, 200, 244, 245, 246, 247, 248], [0, 1, 2, 3])
+    """
+    head = max(last - 4, 1)
+    step = next((s for s in _DATE_STEPS if (head - 1) // s <= 5), _DATE_STEPS[-1])
+    return sorted({0, *range(step, head, step), *range(head, last + 1)})
+
+
 def _grid_axes(book: Book, axes: str, mode: str, sessions: int) -> tuple[GridAxes, list[str], list[float]]:
     """A grid's axes: the cells' meaning, the row labels and the rows' calendar days (Spot × Date)."""
     strip_mode = GRID_VOL_MODES[mode][0]
@@ -685,12 +702,14 @@ def _grid_axes(book: Book, axes: str, mode: str, sessions: int) -> tuple[GridAxe
         labels = [vol_label(v, mode) for v in DESK_VOL[mode]]
         return GridAxes(DESK_SPOT, rows, strip_mode), labels, []
     last = max(1, whatif.sessions_to(book.as_of.date(), book.front.date()))
-    picks = sorted({0, *range(5, last - 4, 5), *range(max(last - 4, 1), last + 1)})
+    picks = date_rows(last)
     days = whatif.session_dates(book.as_of.date(), last)
+    same_year = days[last].year == book.as_of.year  # else the labels keep their year: Fri 30-Oct-26, Wed 27-Oct-27
     labels = []
     for n in picks:
         day = days[n]
-        label = session_label(n, day).replace(f"{NB_HYPHEN}{day:%y}", "")
+        label = session_label(n, day)
+        label = label.replace(f"{NB_HYPHEN}{day:%y}", "") if same_year else label
         labels.append(label + (" exp" if n == last and book.front.date() == day else ""))
     elapsed = [clock.year_fraction(book.as_of, whatif.scenario_time(book.as_of, n)) * 365.0 for n in picks]
     return GridAxes(DESK_SPOT, tuple((0.0, n) for n in picks), "absolute"), labels, elapsed
