@@ -4,7 +4,7 @@ import re
 import numpy as np
 import pandas as pd
 import pytest
-from hypothesis import given, settings
+from hypothesis import assume, example, given, settings
 from hypothesis import strategies as st
 
 from options_analyzer import black_scholes as bs
@@ -229,8 +229,9 @@ def test_noise_free_quotes_recover_the_surface_including_end_maturities_and_grid
     # first and the last maturity, and 0.12% at the outermost strikes.
     assert lv_err[1:-1].max() < 5e-5  # centred through the neighbours (measured 0.0014%)
     assert lv_err[0].max() < 5e-5  # one-sided through the first three maturities (measured 0.0014%)
-    assert lv_err[-1].max() < 1e-3  # from the last two maturities (measured 0.032%)
-    assert lv_err[:, [0, -1]].max() < 1e-3  # outermost strikes: analytic SVI derivatives (measured 0.032%)
+    # From the last two maturities, theta' from the last three (measured 0.011%; 0.032% with theta' from two)
+    assert lv_err[-1].max() < 3.5e-4
+    assert lv_err[:, [0, -1]].max() < 3.5e-4  # outermost strikes: analytic SVI derivatives (measured 0.011%)
     assert fitted.calendar_violations == 0 and fitted.butterfly_violations == 0
     assert np.all(fitted.fit_rmse < 1e-9)
 
@@ -247,7 +248,7 @@ def test_local_vol_on_the_listed_expiries_is_within_half_a_vol_point():
     # to 3e-11, local vol was off by up to 2.12 vol points at 30 days with secants in T between the expiries (median
     # 0.45 there); by expiry 2.12, 0.42, 0.63, 0.33, 0.14, 0.11, 0.15 and 0.61 vol points at most. With the smile's
     # scaling in the ATM total variance read off each slice (local_vol._time_derivative): 0.095, 0.030, 0.026,
-    # 0.008, 0.024, 0.043, 0.052 and 0.056 (median 0.038 at 30 days).
+    # 0.008, 0.024, 0.043, 0.052 and 0.052 (median 0.038 at 30 days).
     params, r, q = vs.SSVIParams(), 0.03, 0.01
     fitted = vs.fit_market_surface(ssvi_quotes(params, r, q, SAMPLE_DAYS, M), 100, r, q)
     _, iv_err = relative_local_vol_error(fitted, params, r, q)
@@ -257,7 +258,7 @@ def test_local_vol_on_the_listed_expiries_is_within_half_a_vol_point():
     assert error.max() < 0.005  # the bound asked for: half a vol point (measured 0.095 vol point)
     assert np.median(error[0]) < 0.001  # measured 0.038 vol point (0.45 with secants)
     # The estimated truncation error tracks the actual error: 0.116, 0.035, 0.020, 0.021, 0.032, 0.048, 0.050 and
-    # 0.046 vol points, 0.78 to 1.34 times it where it exceeds 0.01 vol point (at 182 days it is 0.008).
+    # 0.055 vol points, 0.78 to 1.34 times it where it exceeds 0.01 vol point (at 182 days it is 0.008).
     assert fitted.local_vol_error.shape == fitted.maturities.shape
     assert _tracks(fitted.local_vol_error, error.max(axis=1))
 
@@ -270,7 +271,7 @@ def test_local_vol_on_the_listed_expiries_is_within_half_a_vol_point():
         ((7, 14, 21, 28, 60, 91, 182, 365), 0.015),
         # Every two weeks from 14 days to 364: 2.70 vol points at 14 days and 0.58 at 28 before; now 0.069 and 0.023.
         (tuple(range(14, 365, 14)), 0.002),
-        # Quarterly to two years: 1.56 vol points at 91 days and 0.28 at two years before; now 0.026 and 0.030.
+        # Quarterly to two years: 1.55 vol points at 91 days and 0.28 at two years before; now 0.026 and 0.016.
         ((91, 182, 273, 365, 456, 547, 638, 730), 0.001),
     ],
     ids=["weekly-front", "two-weekly", "quarterly"],
@@ -278,13 +279,39 @@ def test_local_vol_on_the_listed_expiries_is_within_half_a_vol_point():
 def test_local_vol_on_other_expiry_grids(days, bound):
     # Noise-free SSVI quotes; each bound is about three times the largest error measured. The estimated truncation
     # error is 0.57 to 2.0 times the actual error at every expiry of these grids where that exceeds 0.01 vol point
-    # (0.57 at the last weekly expiry, 2.0 at the second quarterly one), and at most 0.021 vol point elsewhere.
+    # (0.57 at the 182-day weekly-front expiry, 2.0 at the first quarterly one), and at most 0.021 vol point
+    # elsewhere (2.7 times the 0.008 at the second quarterly one).
     params, r, q = vs.SSVIParams(), 0.03, 0.01
     fitted = vs.fit_market_surface(ssvi_quotes(params, r, q, days, M), 100, r, q)
     assert np.isfinite(fitted.local_vol).all()
     error = np.abs(fitted.local_vol - vs.ssvi_surface(params, r, q, fitted.moneyness, fitted.maturities).local_vol)
     assert error.max() < bound
     assert _tracks(fitted.local_vol_error, error.max(axis=1))
+
+
+@pytest.mark.parametrize(
+    "days, bound",
+    [
+        # Weekly front, then 60, 91, 182 and 365 days: at the year, after a half-year gap, 1.37 vol points with
+        # secants in T and 2.15 with theta' from the last two slices (a power law between them); now 0.54.
+        ((7, 14, 21, 28, 60, 91, 182, 365), 0.008),
+        # The listed expiries: at two years 0.29 vol point with secants and 0.63 with theta' from the last two; now
+        # 0.071 (the largest error, 0.63 at 30 days, against 0.96 at 60 days with secants).
+        (SAMPLE_DAYS, 0.002),
+    ],
+    ids=["weekly-front", "listed"],
+)
+def test_the_last_expiry_of_a_steep_equity_skew(days, bound):
+    # An equity skew whose ATM vol rises from 16% to 47%: with theta' from the last two slices alone the last expiry
+    # was worse than with secants in T (the review of the scaled dw/dT); theta' from the last three, within the
+    # bracket of the secant and the power law (local_vol._end_theta_slope), is better than both. Bounds 1.5 and 3
+    # times the measured error, below either earlier scheme.
+    r, q = 0.03, 0.01
+    fitted = vs.fit_market_surface(ssvi_quotes(STEEP, r, q, days, M), 100, r, q)
+    assert np.isfinite(fitted.local_vol).all() and fitted.calendar_violations == 0
+    error = np.abs(fitted.local_vol - vs.ssvi_surface(STEEP, r, q, fitted.moneyness, fitted.maturities).local_vol)
+    assert error[-1].max() < bound
+    assert fitted.local_vol_error[-1] >= error[-1].max()  # the estimate covers it: measured 1.7 and 3.4 times it
 
 
 def test_inverted_term_structure_keeps_a_sound_last_maturity():
@@ -305,7 +332,7 @@ def test_inverted_term_structure_keeps_a_sound_last_maturity():
     assert lv_err[-1].max() < 0.06  # measured 3.0% (9.6% with the one-sided secant)
     dense = vs.fit_market_surface(ssvi_quotes(params, 0.0, 0.0, range(30, 731, 15), strikes), 100, 0.0, 0.0)
     lv_err, _ = relative_local_vol_error(dense, params, 0.0, 0.0)
-    assert lv_err[1:].max() < 0.005  # measured 0.25% (0.30% with secants)
+    assert lv_err[1:].max() < 0.005  # measured 0.17% (0.30% with secants; 0.25% with theta' from the last two)
     assert lv_err[0].max() < 0.01  # measured 0.36% (0.77% with secants)
 
 
@@ -316,17 +343,33 @@ def test_inverted_term_structure_keeps_a_sound_last_maturity():
     gaps=st.lists(st.integers(1, 240), min_size=1, max_size=7),
     rate=st.floats(-0.01, 0.08),
 )
+# A low vol and a last expiry a day after a long one: total variance changes by less than the quotes' precision
+# there, and the last maturity has no local vol (the dev and nightly profiles drew these; they failed when every
+# local vol was required).
+@example(vol=0.05, first=60, gaps=[240, 240, 1], rate=0.0)
+@example(vol=0.05, first=28, gaps=[128, 191, 169, 192, 231, 105, 1], rate=0.0588)
 def test_flat_quotes_give_their_flat_local_vol_at_any_expiries(vol, first, gaps, rate):
     # Total variance proportional to T at every y: ln(theta) is linear in ln(T), so its slope is exact, the smile
-    # keeps its (flat) shape and the rest of dw/dT is 0, as is the secants' error, wherever the expiries are.
+    # keeps its (flat) shape and the rest of dw/dT is 0, as is the secants' error, wherever the expiries are. Between
+    # two expiries total variance rises by vol^2 dT, measurable only beyond the quotes' precision, 2 vol T
+    # QUOTE_PRECISION at each (local_vol._secant_time_derivative); a maturity with no measurable rise to either
+    # neighbour has no local vol, and the note counts those points.
     days = first + np.cumsum([0, *gaps])
+    Ts = days / 365
+    rise = vol * np.diff(Ts) / (2 * vs.QUOTE_PRECISION * (Ts[1:] + Ts[:-1]))  # the rise over its precision
+    assume(np.all(np.abs(rise - 1) > 0.01))  # not within the fit's rounding of the threshold
+    blank = ~np.r_[False, rise > 1] & ~np.r_[rise > 1, False]
     quotes = pd.DataFrame(
         [{"strike": 100 * m, "maturity": d / 365, "iv": vol} for d in days for m in np.linspace(0.7, 1.3, 13)]
     )
     fitted = vs.fit_market_surface(quotes, 100, rate, 0.0)
-    assert np.isfinite(fitted.local_vol).all()
-    assert np.abs(fitted.local_vol - vol).max() < 1e-9
-    assert np.nanmax(fitted.local_vol_error, initial=0.0) < 1e-9  # NaN with fewer than three expiries
+    assert np.array_equal(np.isnan(fitted.local_vol).any(axis=1), blank)
+    assert np.isnan(fitted.local_vol[blank]).all() and np.isfinite(fitted.local_vol[~blank]).all()
+    assert np.abs(fitted.local_vol[~blank] - vol).max() < 1e-9
+    assert np.nanmax(fitted.local_vol_error, initial=0.0) < 1e-9  # NaN with fewer than three expiries, or blank
+    unresolved = f"Local vol is left blank at {blank.sum() * fitted.moneyness.size} grid point(s) where total variance"
+    assert any(note.startswith(unresolved) for note in fitted.notes) == blank.any()
+    assert fitted.calendar_violations == 0
 
 
 @settings(max_examples=15, deadline=None)
@@ -340,9 +383,9 @@ def test_flat_quotes_give_their_flat_local_vol_at_any_expiries(vol, first, gaps,
 )
 def test_arbitrage_free_ssvi_quotes_keep_a_positive_local_vol(short, long, reversion, rho, curvature, gamma):
     # Calendar-free slices keep dw/dT > 0: a scaled slope is used only where it is positive and within Hyman's
-    # monotone limit, else the secants decide. On 32 random surfaces like these on the listed expiries the largest
-    # local-vol error was 0.42 vol point on average and 1.4 at worst (0.95 and 2.6 with secants in T); over 120 more
-    # and the 64 corners of these ranges, 1.45 at worst.
+    # monotone limit, else the secants decide. On 50 random surfaces like these on the listed expiries (the seed-11
+    # ones of local_vol._time_derivative) the largest local-vol error was 0.25 vol point on average and 1.05 at
+    # worst (0.76 and 2.1 with secants in T); on the 64 corners of these ranges 0.39 and 1.25 (1.34 and 4.9).
     params = vs.SSVIParams(short, long, reversion, rho, curvature * 2 / (1 + abs(rho)), gamma)
     quotes = ssvi_quotes(params, 0.03, 0.0, SAMPLE_DAYS, np.linspace(0.8, 1.2, 17))
     fitted = vs.fit_market_surface(quotes, 100, 0.03, 0.0)
@@ -353,10 +396,10 @@ def test_arbitrage_free_ssvi_quotes_keep_a_positive_local_vol(short, long, rever
 
 
 def test_the_truncation_error_estimate_on_random_surfaces():
-    # Over 1,205 maturities of 60 random SSVI surfaces on the listed, weekly-front, quarterly and 30, 91, 365 and
-    # 730-day expiries (errors above 0.01 vol point) the estimate was a median 1.08 times the actual error, at least
-    # the error at 60% of them and twice it at 90%; at the first expiry of the listed and weekly grids a median
-    # 0.75 and 0.68 times it. Here a few of those surfaces on the listed expiries.
+    # Over 1,196 maturities of 60 random SSVI surfaces on the listed, weekly-front, quarterly and 30, 91, 365 and
+    # 730-day expiries (errors above 0.01 vol point) the estimate was a median 1.11 times the actual error, at least
+    # the error at 65% of them and twice it at 91%; at the first expiry of the listed and weekly grids a median
+    # 0.75 and 0.68 times it, at the last 1.18 and 1.41. Here a few of those surfaces on the listed expiries.
     rng = np.random.default_rng(11)
     ratios = []
     for _ in range(8):
@@ -376,8 +419,8 @@ def test_the_truncation_error_estimate_on_random_surfaces():
         assert np.isfinite(fitted.local_vol_error).all()
         ratios += list(fitted.local_vol_error[error > 1e-4] / error[error > 1e-4])
     ratios = np.array(ratios)
-    assert 0.7 < np.median(ratios) < 1.5  # measured 1.07 over these 57 maturities
-    assert np.mean(2 * ratios >= 1) > 0.8  # measured 0.88 (and the estimate at least the error at 60%)
+    assert 0.7 < np.median(ratios) < 1.5  # measured 1.12 over these 57 maturities
+    assert np.mean(2 * ratios >= 1) > 0.8  # measured 0.88 (and the estimate at least the error at 65%)
 
 
 def test_the_truncation_error_needs_a_larger_stencil_and_ssvi_has_none():
@@ -507,7 +550,7 @@ def test_identical_strikes_with_carry_keep_the_full_quoted_range(low, high, days
         assert np.isfinite(summary["Skew 90-110 (vol pts)"]).all() and np.isfinite(summary["Butterfly (vol pts)"]).all()
     lv_err, _ = relative_local_vol_error(fitted, params, r, 0.0)
     assert lv_err[1:-1].max() < 0.02  # measured 0.41%, 0.37% and 0.64% (1.00%, 1.00% and 1.03% with secants in T)
-    assert lv_err.max() < 0.05  # measured 0.45%, 0.45% and 1.7% at the ends (5.5%, 3.6% and 6.6% with secants)
+    assert lv_err.max() < 0.02  # measured 0.45%, 0.45% and 0.72% at the ends (5.5%, 3.6% and 6.6% with secants)
 
 
 def test_interior_calendar_arbitrage_is_flagged_and_left_undefined():
@@ -564,8 +607,9 @@ def test_a_steep_noisy_equity_surface_is_fitted_without_a_poor_fit_note():
     assert fitted.fit_rmse.max() < 0.003  # measured 0.14-0.21 vol points against 0.2 points of noise
     assert not any("SVI smile" in note for note in fitted.notes)
     assert np.nanmax(np.abs(fitted.implied_vol - true.implied_vol)) < 0.005  # measured 0.29 vol points
-    # Measured 1.04 vol points, at 91 days (0.78 with secants in T): one draw of the noise. Over 30 draws the RMS
-    # error by expiry is 0.27, 0.30, 0.42, 0.73 and 1.13 vol points (0.49, 0.42, 0.86, 0.77 and 2.50 with secants).
+    # Measured 1.04 vol points, at 91 days (0.78 with secants in T): one draw of the noise. Over 30 draws (seeds 0
+    # to 29 in place of 1071) the RMS error by expiry is 0.35, 0.38, 0.37, 0.48 and 1.01 vol points (0.47, 0.50,
+    # 0.86, 0.50 and 2.45 with secants; 1.25 at the last with theta' from the last two slices).
     assert np.nanmax(np.abs(fitted.local_vol - true.local_vol)[:-1]) < 0.015
 
 
@@ -604,8 +648,8 @@ def test_total_variance_flat_within_quote_precision_is_not_calendar_arbitrage():
     for fitted in (last, inside):
         true = vs.ssvi_surface(params, 0.0, 0.0, fitted.moneyness, fitted.maturities)
         error = np.abs(fitted.local_vol - true.local_vol)[4:6]  # the 365 and 366-day rows
-        # Measured 0.38 vol point: on both rows the scaled slope from the two slices before the day-long step
-        # (local_vol._stencils; 1.6 vol points with the 182-365 day secant alone).
+        # Measured 0.38 vol point at 365 days, from the 182 and 365-day slices (local_vol._stencils), and 0.07 at
+        # 366 days where it is defined, from the 366 and 730-day ones; 1.6 and 1.5 with the secants alone.
         assert np.nanmax(error) < 0.012
 
 

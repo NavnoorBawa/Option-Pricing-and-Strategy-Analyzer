@@ -148,14 +148,19 @@ def _end_theta_slope(nb: _Neighbours, i: int, log_secant: float, secant: float) 
     be used), given the slopes the two slices give: ``log_secant`` with ``theta`` a power of ``T`` between them,
     ``secant`` with it linear in ``T`` (the mean forward variance over the gap).
 
-    Where the forward variance ``theta'`` settles monotonically towards its long-run level, as it does at the long end,
-    the two bracket it: rising, the secant (a mean over the gap) is below it and the power law, whose elasticity
-    ``T theta' / theta`` falls back towards 1, above it; falling, the other way round. Within that bracket the
+    Where the forward variance ``theta'`` settles monotonically over the gap, its elasticity ``T theta' / theta``
+    moving monotonically towards 1, the two bracket it: rising, the secant (a mean over the gap) is below it and the
+    power law (the mean elasticity over the gap) above it; falling, the other way round. Within that bracket the
     parabola through ``ln theta`` against ``ln T`` at ``i - 2``, ``i - 1`` and ``i`` picks the slope, second order
-    where the term structure is smooth on the spacing of the expiries; outside it, that parabola is not trusted (an
-    ATM vol falling from 80% to 20% within months, sampled a year apart, puts it 29% below the true ``theta'``) and
-    the nearer end is used. Without a usable slice ``i - 2`` (quoted near the forward, ``theta`` rising from it to
-    ``i - 1`` by more than the quotes' precision) it is ``log_secant``.
+    where the term structure is smooth on the spacing of the expiries; outside it, that parabola is clipped to the
+    nearer end. The bracket is a guard, not a law: on 60 random SSVI surfaces it held the true ``theta'`` at the last
+    expiry on 44 of the listed expiries (30 days to two years), 45 of the quarterly ones and 40 of 30, 91, 365 and
+    730 days, but on only 17 of the weekly-front ones (7 to 28 days, then 60, 91, 182 and 365), whose last gap follows
+    a dense front. It is kept because the parabola is trusted less: with a forward ATM vol falling from 80% to 20%
+    with an e-folding time of four months, on expiries at 30, 91, 365 and 730 days, the parabola is 30% below the
+    true ``theta'`` at two years and the bracket's nearer end 5% below (:func:`_time_derivative` has the measured
+    errors). Without a usable slice ``i - 2`` (quoted near the forward, ``theta`` rising from it to ``i - 1`` by
+    more than the quotes' precision) it is ``log_secant``.
     """
     if i < 2 or not (nb.atm_covered[i - 2] and nb.theta[i - 2] > 0):
         return log_secant
@@ -249,19 +254,23 @@ def _time_derivative(nb: _Neighbours, *, checks: bool = False):
     would have is read off the slice itself, and only the rest (none for SSVI with ``gamma = 1/2`` while ``theta``
     is small, nor for a flat surface) is differentiated between slices (:func:`_scaled_slope`): one-sided through
     the first three maturities at the first, centred through the neighbours inside, and from the last two at the
-    last (:func:`_stencils`). Chosen by measurement with noise-free SSVI quotes on 25 strikes from 70% to 130% of
-    the spot (largest local-vol error in vol points; secants in ``T`` against this):
+    last (:func:`_stencils`), whose ``theta'`` comes from the last three within a bracket (:func:`_end_theta_slope`).
+    Chosen by measurement with noise-free SSVI quotes on 25 strikes from 70% to 130% of the spot (largest local-vol
+    error in vol points; secants in ``T`` against this):
 
     * listed expiries 30, 60, 91, 182, 273, 365, 547 and 730 days: 2.12 against 0.095 (the median at 30 days 0.45
-      against 0.038; at the last expiry 0.61 against 0.056);
+      against 0.038; at the last expiry 0.61 against 0.052);
     * weekly front 7, 14, 21, 28, 60, 91, 182 and 365 days: 3.37 against 0.45 (0.045 at 7 days; the 0.45 is at the
       year, after a half-year gap);
-    * every two weeks from 14 to 364 days: 2.70 against 0.069; quarterly to two years: 1.56 against 0.030;
-    * random arbitrage-free surfaces (ATM vols 10-60%, mean reversion 0.3-4, gamma 0.2-0.5; 32 to 34 per grid, on 17
-      strikes from 80% to 120%), mean of the largest errors on the listed, weekly-front and quarterly expiries: 0.95,
-      2.38 and 1.04 against 0.42, 0.87 and 0.26.
+    * every two weeks from 14 to 364 days: 2.70 against 0.069; quarterly to two years: 1.55 against 0.026;
+    * the equity skew of the tests (ATM vol rising from 16% to 47%, ``mean_reversion`` 4) on the weekly-front and the
+      listed expiries: 1.37 and 0.96 against 0.54 and 0.63 (at the last expiry 1.37 and 0.29 against 0.54 and 0.071);
+    * 60 random arbitrage-free surfaces (ATM vols 10-60%, mean reversion 0.3-4, gamma 0.2-0.5, on 17 strikes from 80%
+      to 120%; the 44 to 52 per grid whose SVI fit is exact), mean of the largest errors on the listed, weekly-front,
+      quarterly and 30, 91, 365 and 730-day expiries: 0.76, 1.86, 0.75 and 2.19 against 0.25, 0.70, 0.19 and 0.76.
 
-    The alternatives, on the listed and the weekly-front expiries and the random surfaces on the listed ones:
+    The alternatives, measured with ``theta'`` at the last maturity from the last two slices (where this scheme gave
+    0.095, 0.45 and 0.42), on the listed and the weekly-front expiries and on random surfaces on the listed ones:
     ``theta'`` from the parabola through ``theta`` in ``T`` instead of ``ln theta`` in ``ln T``, 0.27, 1.15 and 0.68;
     the rest differentiated in ``sqrt(theta)`` instead of ``T``, 0.13, 0.50 and 0.43; ``w`` interpolated in ``T`` at
     fixed standardised moneyness ``y / sqrt(theta)`` and converted back with the chain rule, 0.43, 1.51 and 0.77; a
@@ -271,11 +280,29 @@ def _time_derivative(nb: _Neighbours, *, checks: bool = False):
 
     The ends are chosen for noise. With the 0.2 vol-point noise of the sample quotes (40 seeds) the RMS local-vol
     error is 0.93 vol point at 30 days, 0.58 inside and 0.87 at two years (secants: 1.28, 0.56 and 0.89); on that
-    equity skew with the same noise (30 seeds), 0.27 to 1.13 by expiry (secants: 0.42 to 2.50). The three-slice
-    one-sided formula at the last maturity would cut its clean error on the weekly-front expiries from 0.45 to 0.13
-    vol point, but it raised the RMS there to 1.22 on the sample quotes and to 1.77 on the skew, and the clean error
-    on an inverted term structure (ATM vol from 80% to 20%, expiries at 30, 91, 365 and 730 days) from 0.74 to 3.9
-    vol points: total variance grows with ``T``, and so does its noise.
+    equity skew with the same noise (30 draws, at 14, 30, 60, 91 and 182 days), 0.35, 0.38, 0.37, 0.48 and 1.01
+    (secants: 0.47, 0.50, 0.86, 0.50 and 2.45). The three-slice one-sided formula at the last maturity would cut its
+    clean error on the weekly-front expiries from 0.45 to 0.14 vol point, but it raises the RMS there to 1.22 on the
+    sample quotes and to 1.14 on the skew, and the clean error on an inverted term structure (ATM vol from 80% to
+    20%, expiries at 30, 91, 365 and 730 days) from 0.74 to 3.9 vol points: total variance grows with ``T``, and so
+    does its noise. So the rest comes from the last two slices there, and ``theta'`` alone from a third, kept within
+    the bracket of the secant and the power law between the last two (:func:`_end_theta_slope`). With ``theta'`` from
+    the last two alone (the power law) the last expiry was worse than with secants on a third of clean surfaces: on
+    11 of 33 on the listed expiries and 12 of 33 on the quarterly ones (30 random, the synthetic index's SSVI, the
+    skew and the default; 17 strikes from 80% to 120%), by up to 3.3 times, and on the skew's weekly-front expiries
+    1.96 against 1.19 vol points. With the bracketed ``theta'`` it is worse on none of those 99 surfaces nor of the
+    146 random ones on those three grids (the skew's weekly front: 0.44), the noise does no more harm (an RMS of 0.87
+    on the sample quotes as before, and 1.01 on the skew against 1.25 with the power law), and the inverted term
+    structure keeps 0.74. The parabola unclipped would about halve the clean errors at the last expiry again, but it
+    gives 4.2 vol points on the inverted term structure and an RMS of 1.02 on the sample quotes. Where the last two
+    expiries are a year apart (30, 91, 365 and 730 days) the last expiry is still worse than with secants on 8 of 52
+    random surfaces, by up to 2.4 times (mean 0.55 against 1.20 vol points): the true ``theta'`` lies inside the
+    bracket there, but nearer the secant. And on the synthetic index chain (17 expiries to 690 days, prices on
+    ticks; 16 seeds of its noise) the last expiry is 0.60 vol point off on average, against 0.55 with secants and
+    0.53 with the power law (without the noise 0.29, 0.20 and 0.12): its fitted ``theta`` is 0.1-0.3% off, and the
+    parabola amplifies that more. Keeping the power law wherever the parabola differs from it by less than the
+    quotes' precision in ``theta`` could move it would give 0.53 there, but would give up the gains on the quarterly
+    expiries (worse than secants on 12 of 33 surfaces again).
 
     Calendar arbitrage, the 'unresolved' case and ``dw/dT > 0`` where the slices rise measurably are decided by the
     secant scheme (:func:`_secant_time_derivative`), as before: a scaled slope replaces its value only where that is
@@ -284,9 +311,10 @@ def _time_derivative(nb: _Neighbours, *, checks: bool = False):
     (:func:`_monotone_limit`). Where a row's three-slice stencil is NaN for those reasons the two-slice ones are
     tried (the slice before first, as at the last maturity), and only then are the secants left: with SSVI quotes
     rounded to 0.01 vol point at 30, 60, 91, 182, 365, 366 and 730 days, whose 365-366 day secant is within the
-    quotes' precision, the 365 and 366-day rows are 0.38 vol point off with the two-slice scaled slopes and 1.6 with
-    the secants. (Local vol still needs both neighbours of an inside maturity quoted near ``y``, and the next one
-    of the first: ``available``, as before.)
+    quotes' precision, the 365-day row is 0.38 vol point off with the scaled slope from the 182 and 365-day slices
+    and the 366-day row 0.07 with that from the 366 and 730-day slices (1.6 and 1.5 with the secants). (Local vol
+    still needs both neighbours of an inside maturity quoted near ``y``, and the next one of the first:
+    ``available``, as before.)
 
     Returns ``(w_t, calendar_bad, available, higher)``, the first three ``(n_T, n_y)``. With ``checks``, ``higher``
     holds up to two ``(n_T, n_y)`` arrays of ``dw/dT`` from the stencils one order higher than the one used at each
@@ -321,6 +349,16 @@ def _higher_order(higher: list, nb: _Neighbours, i: int, offsets: tuple[int, ...
     ``higher`` (none if empty) at row ``i``'s points ``where``, in turn (:func:`_time_derivative`)."""
     for check, (extended, theta_offsets) in zip(higher, _extended(offsets, i, len(nb.Ts)), strict=False):
         check[i] = np.where(where, _scaled_slope(nb, i, extended, theta_offsets=theta_offsets), check[i])
+
+
+def _implied_vol(y, w, quoted_y, Ts) -> tuple[np.ndarray, np.ndarray]:
+    """Implied vol ``sqrt(w / T)`` of the slices, whose total variance at forward log-moneyness ``y`` (rows:
+    maturities ``Ts``) is ``w``, where ``y`` is inside the maturity's quoted range ``quoted_y`` and ``w > 0``, NaN
+    elsewhere; and where ``y`` is inside that range. Shared by :func:`_market_values` and
+    ``VolSurface.implied_at_moneyness``, which must agree bit for bit."""
+    inside = (y >= quoted_y[:, :1] - 1e-9) & (y <= quoted_y[:, 1:] + 1e-9)
+    implied = np.where(inside & (w > 0), np.sqrt(np.maximum(w, 0.0) / np.asarray(Ts, dtype=float)[:, None]), np.nan)
+    return implied, inside
 
 
 @dataclass(frozen=True)
@@ -375,9 +413,8 @@ def _market_values(fits, Ts, quoted_y, log_fs, moneyness, *, truncation_error: b
         (lo - allow <= 0.0) & (hi + allow >= 0.0),
     )
 
-    inside = (y >= lo[:, None] - 1e-9) & (y <= hi[:, None] + 1e-9)
+    implied, inside = _implied_vol(y, own, quoted_y, Ts)
     defined = inside & (own > 0)
-    implied = np.where(defined, np.sqrt(np.maximum(own, 0.0) / Ts[:, None]), np.nan)
     w_t, calendar_bad, available, higher = _time_derivative(neighbours, checks=truncation_error)
     g = durrleman_g(y, np.where(defined, own, 1.0), w_y, w_yy)
     calendar_bad &= defined

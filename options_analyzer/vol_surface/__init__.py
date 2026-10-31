@@ -31,9 +31,13 @@ Two sources are supported:
   in ``y / sqrt(theta)``, ``theta`` the ATM total variance, would have, read
   off the slice itself with the slope of ``ln theta`` in ``ln T`` from the
   neighbouring maturities, and the rest from the parabola in ``T`` through
-  the neighbouring slices at the same ``y``. With noise-free SSVI quotes on
-  the listed expiries (30 days to 2 years) local vol is within 0.1 vol
-  point; secants between the maturities were 2.1 off at 30 days. Secants
+  the neighbouring slices at the same ``y`` (at the last maturity the line
+  through the last two, with ``theta'`` from the last three kept between
+  the secant and the power law through the last two). With noise-free SSVI
+  quotes on the listed expiries (30 days to 2 years) local vol is within
+  0.1 vol point; secants between the maturities were 2.1 off at 30 days.
+  The last expiry is a trade-off between truncation error and noise, which
+  ``local_vol._time_derivative`` measures. Secants
   still decide calendar arbitrage (a fall in ``w`` beyond the quotes'
   precision) and where ``dw/dT`` is unresolved (a change within it, where
   local vol is undefined), and stand in where the scaled slope cannot be
@@ -53,7 +57,10 @@ The package's modules, each importing only those before it:
   vols, the risk-neutral distribution from the smile, quotes with their vols and strikes by delta (SF-11).
 
 Every name the single module ``vol_surface.py`` had is importable from here, its imports included (roadmap item
-SF-2). Code that patches a constant or a helper must patch it in the module that uses it.
+SF-2). Code that patches a constant or a helper must patch it in the module that uses it. One private helper kept
+its name but not its arguments: ``_time_derivative`` now takes the slices (``local_vol._Neighbours``) and also
+returns the higher-order slopes of its error estimate; the secant scheme it was, with the old arguments and
+results, is ``_secant_time_derivative``.
 """
 
 # Every name below is re-exported (__all__ lists the public API), so none is an unused import.
@@ -74,7 +81,15 @@ from scipy.special import ndtr
 from .. import black_scholes as bs
 from ..implied_vol import ImpliedVolError, implied_volatility
 from .forwards import FORWARD_SOURCES, carry_gaps, implied_forwards
-from .local_vol import EXTRAPOLATION, _local_vol, _market_values, _MarketValues, _time_derivative, durrleman_g
+from .local_vol import (
+    EXTRAPOLATION,
+    _local_vol,
+    _market_values,
+    _MarketValues,
+    _secant_time_derivative,
+    _time_derivative,
+    durrleman_g,
+)
 from .published import Expiry, PublishedSurface  # importable here, but not in __all__: SF-2 froze the star-import names
 from .quotes import (
     _ALIAS_KEYS,

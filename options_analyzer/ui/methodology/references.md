@@ -75,6 +75,8 @@
 * Fritsch, F. N. and Butland, J. (1984). A method for constructing local monotone piecewise cubic interpolants.
   *SIAM Journal on Scientific and Statistical Computing* 5(2), 300–304.
   [doi:10.1137/0905021](https://doi.org/10.1137/0905021)
+* Hyman, J. M. (1983). Accurate monotonicity preserving cubic interpolation. *SIAM Journal on Scientific and
+  Statistical Computing* 4(4), 645–654. [doi:10.1137/0904045](https://doi.org/10.1137/0904045)
 
 ### Textbooks
 * Hull, J. C. (2021). *Options, Futures, and Other Derivatives*, 11th edition. Pearson. ISBN 978-0-13-693997-9.

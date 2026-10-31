@@ -554,7 +554,7 @@ def _smiles(surface: vs.VolSurface) -> None:
         return
     slices = [(labels[i], surface.implied_vol[i], surface.local_vol[i]) for i in picked]
     # Each smile read on beyond its quotes (SVI wings within Lee's bound, out to its reach), where the grid has room.
-    extended = surface.at_moneyness(surface.moneyness, extrapolate=True)[0]
+    extended = surface.implied_at_moneyness(surface.moneyness, extrapolate=True)
     wings = [_wing(surface.implied_vol[i], extended[i]) for i in picked]
     quotes = None
     if surface.quotes is not None:

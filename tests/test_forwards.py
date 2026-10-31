@@ -193,8 +193,8 @@ def test_acceptance_5_with_the_true_rate_and_yield_parity_changes_nothing():
     parity = _parsed(frame, dividend_yield=YIELD)
     rates = _parsed(frame, dividend_yield=YIELD, forward="rates")
     assert "forward" in parity[0] and "forward" not in rates[0]
-    # Measured: 5e-16 in the vols, 7e-16 in implied vol and 2.2e-12 in local vol on the grid (dw/dT from secants
-    # between maturities amplifies the rounding of w by about 1 / (T2 - T1)).
+    # Measured: 5e-16 in the vols, 7e-16 in implied vol and 2.3e-12 in local vol on the grid (dw/dT from the
+    # polynomials in T through neighbouring slices amplifies the rounding of w by about 1 / (T2 - T1)).
     assert parity[0]["iv"].to_numpy() == pytest.approx(rates[0]["iv"].to_numpy(), abs=1e-10)
     assert np.allclose(parity[3].implied_vol, rates[3].implied_vol, rtol=0, atol=1e-10, equal_nan=True)
     assert np.allclose(parity[3].local_vol, rates[3].local_vol, rtol=0, atol=1e-10, equal_nan=True)

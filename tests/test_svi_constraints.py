@@ -6,6 +6,7 @@ References: Gatheral and Jacquier's arbitrageable SVI slice (Example 3.1 of "Arb
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import numpy as np
@@ -303,6 +304,15 @@ def test_extrapolation_is_off_by_default_and_flagged_when_on():
     assert (surface.quoted_mask(levels) == np.isfinite(inside)).all()
     ssvi = vs.ssvi_surface(vs.SSVIParams(), 0.04, 0.0, np.linspace(0.8, 1.2, 9), np.array([0.25, 0.5]))
     assert np.isnan(ssvi.implied_vol_at(1.4, 0.25)) and ssvi.is_extrapolated(1.4, 0.25)
+    # The smile chart reads implied vol alone, without the local vol (and its dw/dT) of at_moneyness: bit for bit the
+    # same, for market quotes, SSVI and a surface known only on its grid, inside the quotes and beyond them.
+    grid_only = dataclasses.replace(surface, svi=(), quoted_y=None)
+    dense = np.linspace(0.45, 1.6, 47)
+    for each in (surface, ssvi, grid_only):
+        for extrapolate in (False, True):
+            alone = each.implied_at_moneyness(dense, extrapolate=extrapolate)
+            assert np.array_equal(alone, each.at_moneyness(dense, extrapolate=extrapolate)[0], equal_nan=True)
+            assert np.isfinite(alone).any() and np.isnan(alone).any()
 
 
 # --- The arbitrage-free search: gradients, starts and what it does when it fails -------------------------------------
