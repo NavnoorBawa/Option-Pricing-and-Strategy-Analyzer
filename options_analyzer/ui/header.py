@@ -337,7 +337,7 @@ def render(inputs: Inputs, *, on_methodology: Callable[[], None]) -> DeltaGenera
         gap = (inputs.volatility - inputs.surface_vol) * 100
         actions.badge(
             "OVERRIDE",
-            color="orange",
+            color="yellow",  # amber: user state (UI spec 2.6); orange is the put colour
             help=f"σ {pct(inputs.volatility, 2)} typed over the surface's {pct(inputs.surface_vol, 2)} "
             f"({gap:+.2f} vp).".replace("-", MINUS),
         )

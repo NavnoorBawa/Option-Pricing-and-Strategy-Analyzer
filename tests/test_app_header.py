@@ -192,10 +192,38 @@ LINK_WORDS = {
 }
 
 
+def _drawn_modules() -> set[Path]:
+    """The ui modules the app imports, from main.py through every relative or package import: a shared module no
+    page imports yet (the what-if strip, until Strategy and Risk draw it) puts nothing in the link."""
+    seen, todo = set(), [UI.parents[1] / "main.py"]
+    while todo:
+        path = todo.pop()
+        if path in seen or not path.exists():
+            continue
+        seen.add(path)
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.ImportFrom):
+                inside = node.level == 1 or (node.module or "").startswith("options_analyzer.ui")
+                if not inside:
+                    continue
+                stem = (node.module or "").removeprefix("options_analyzer.ui").lstrip(".")
+                if stem:
+                    todo.append(UI / f"{stem.split('.')[0]}.py")
+                else:  # from . import a, b
+                    todo += [UI / f"{alias.name}.py" for alias in node.names]
+    return {path for path in seen if path.parent == UI}
+
+
+def test_the_drawn_modules_are_the_apps():
+    drawn = {path.stem for path in _drawn_modules()}
+    assert {"streamlit_app", "app", "header", "inputs", "tab_strategy", "tab_surface", "exports"} <= drawn
+    assert "whatif" not in drawn  # drawn by Strategy and Risk from their own stage: add its keys to the note then
+
+
 def _bound_keys() -> set[str]:
-    """The keys of the widgets bound to the URL (``bind="query-params"``) in the app's source."""
+    """The keys of the widgets bound to the URL (``bind="query-params"``) in the modules the app imports."""
     keys = set()
-    for path in UI.glob("*.py"):
+    for path in _drawn_modules():
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             options = {k.arg: k.value for k in getattr(node, "keywords", ())} if isinstance(node, ast.Call) else {}
             if isinstance(options.get("bind"), ast.Constant) and options["bind"].value == "query-params":

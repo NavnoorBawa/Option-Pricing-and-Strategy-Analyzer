@@ -70,12 +70,25 @@ SEMANTIC = {
     },
 }
 
-#: Opacity of the profit and loss areas under a P&L curve.
-FILL_OPACITY = 0.18
+#: Opacity of the profit and loss areas under the expiry P&L curve (UI spec 2.7 item 5): at 0.18 the loss fill
+#: dominated the payoff chart and hid the dated curves drawn over it.
+FILL_OPACITY = 0.10
 
-#: Text and icons on a fill of the primary colour, in each mode. Streamlit draws them in white, which is 5.13:1 on
-#: the light theme's dark amber but only 2.16:1 on the dark theme's amber, so dark mode takes its background colour
-#: instead (8.90:1). The rule is in the desk stylesheet (:data:`STYLESHEET`).
+#: The primary colour (widget chrome: selected pills and segments, sliders, focus rings, the tab underline) is the
+#: link blue of each mode, so that amber (``yellowColor``) means user state only (UI spec 2.6, UI-22). An override,
+#: a fit setting and the what-if scenario are amber; nothing a user merely selects is.
+PRIMARY = {"dark": "#6DA6EE", "light": "#2061B1"}
+#: User state (the OVERRIDE, FIT and MARKS chips, the what-if strip's SCENARIO label and left rule): amber.
+AMBER = {"dark": "#E8A33D", "light": "#9E5F00"}
+#: The boundary of a text, number, date or select input (WCAG 1.4.11 asks 3:1 against the page): 3.27:1 on the
+#: dark background and 5.73:1 on the light one, where the theme's hairline ``borderColor`` (kept for cards and
+#: tables) is 1.36:1 in both modes. Streamlit has no theme option for input borders alone, so the desk stylesheet
+#: sets it.
+INPUT_BORDER = "#5B6577"
+
+#: Text and icons on a fill of the primary colour, in each mode. Streamlit draws them in white, which is 6.17:1 on
+#: the light theme's blue but only 2.52:1 on the dark theme's lighter blue, so dark mode takes its background colour
+#: instead (7.62:1). The rule is in the desk stylesheet (:data:`STYLESHEET`).
 ON_PRIMARY = {"dark": SEMANTIC["dark"]["surface"], "light": "#FFFFFF"}
 
 #: Where Streamlit (1.65 and 1.66) writes white on the primary colour in the widgets the app uses: the chips of a

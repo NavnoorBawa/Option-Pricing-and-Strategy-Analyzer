@@ -68,10 +68,12 @@ showWidgetBorder = true
 showSidebarBorder = true
 linkUnderline = false
 
-# Dark (the default). Amber primary: the loss red is no longer the widget colour. Do not use primary buttons
-# (st.button(type="primary")): Streamlit puts white text on the primary colour, only 2.16:1 on this amber.
+# Dark (the default). The primary colour, which Streamlit gives every selected or focused widget, is the link blue
+# (7.62:1 on the background), so that amber (yellowColor) means user state only: overrides, fit settings and the
+# what-if scenario (UI spec 2.6, UI-22). Do not use primary buttons (st.button(type="primary")): Streamlit puts
+# white text on the primary colour, only 2.52:1 on this blue.
 [theme.dark]
-primaryColor = "#E8A33D"
+primaryColor = "#6DA6EE"
 backgroundColor = "#0B0F16"
 secondaryBackgroundColor = "#141A24"
 textColor = "#E6EAF2"
@@ -98,9 +100,10 @@ chartSequentialColors = ["#13243A", "#1C385C", "#244E81", "#2C64A8", "#357BD0", 
 backgroundColor = "#0E131B"
 secondaryBackgroundColor = "#161D28"
 
-# Light (daylight and print). The amber primary is darker than the dark mode's so that text in it keeps 4.5:1.
+# Light (daylight and print). The link blue again (6.01:1 on the background); the amber of user state is darker than
+# the dark mode's so that text in it keeps 4.5:1.
 [theme.light]
-primaryColor = "#9E5F00"
+primaryColor = "#2061B1"
 backgroundColor = "#FCFCFD"
 secondaryBackgroundColor = "#F1F4F8"
 textColor = "#0E1726"

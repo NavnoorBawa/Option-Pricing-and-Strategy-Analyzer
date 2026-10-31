@@ -18,7 +18,10 @@ import ast
 import contextlib
 import functools
 import http.client
+import importlib.util
+import io
 import ipaddress
+import itertools
 import json
 import os
 import re
@@ -28,6 +31,7 @@ import sys
 import textwrap
 import time
 import urllib.request
+import zipfile
 from collections.abc import Callable
 from datetime import date
 from pathlib import Path
@@ -405,3 +409,151 @@ def test_the_policy_names_every_source_and_the_public_demo_rule():
         *FORBIDDEN_HOSTS,
     ):
         assert needle in text, needle
+
+
+# --- Exports carry their provenance (UI spec 2.13, UI-28) -----------------------------------------------------------
+
+#: A file name that carries its source and its time: ``spx_chain_SYNTHETIC_20261023T1600.csv``.
+EXPORT_NAME = re.compile(r"[a-z0-9_]+_(SYNTHETIC|UPLOAD|TEXTBOOK|PARAMETRIC)_\d{8}T\d{4}\.(csv|xlsx|json)")
+
+
+def test_every_download_button_builds_its_file_through_the_exports_module():
+    """The static half: no ``st.download_button`` in the package hands out bytes it built itself, so that no export
+    can leave without its provenance lines; and each passes a builder, so that no file is built until it is clicked
+    (spec 2.13: ``data`` a callable)."""
+    offences = []
+    for path in sorted((PACKAGE / "ui").glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "download_button":
+                data = node.args[1] if len(node.args) > 1 else next(k.value for k in node.keywords if k.arg == "data")
+                name = (
+                    node.args[2] if len(node.args) > 2 else next(k.value for k in node.keywords if k.arg == "file_name")
+                )
+                built = ast.unparse(data)
+                if not built.startswith("exports.builder(exports.") and not re.match(r"exports\.builder\(_\w+,", built):
+                    offences.append(f"{path.name}:{node.lineno} data={built}")
+                if ".file_name(" not in ast.unparse(name):
+                    offences.append(f"{path.name}:{node.lineno} file_name={ast.unparse(name)}")
+    assert offences == []
+
+
+def _content(data: Any) -> bytes:
+    data = data() if callable(data) else data
+    return data.encode("utf-8") if isinstance(data, str) else bytes(data)
+
+
+def _provenance_of(file_name: str, content: bytes) -> dict[str, str]:
+    """The provenance fields an export carries: a CSV's leading comment lines, an XLSX's Provenance sheet (read from
+    the file itself: pd.read_excel needs openpyxl, which the app does not depend on), a JSON's provenance object."""
+    if file_name.endswith(".csv"):
+        lines = content.decode("utf-8").splitlines()
+        comments = [line[2:] for line in itertools.takewhile(lambda line: line.startswith("# "), lines)]
+        assert len(comments) == 4, comments  # the spec's four lines
+        fields = {}
+        for line in comments:
+            for part in line.split("; "):
+                key, _, value = part.partition(": ")
+                fields[key] = value
+        return fields
+    if file_name.endswith(".xlsx"):
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            book = archive.read("xl/workbook.xml").decode()
+            strings = re.findall(r"<si>.*?<t[^>]*>([^<]*)</t>.*?</si>", archive.read("xl/sharedStrings.xml").decode())
+            sheet = archive.read("xl/worksheets/sheet1.xml").decode()  # the first sheet
+        assert re.findall(r'<sheet name="([^"]+)"', book)[0] == "Provenance"
+        # Each cell's text by its reference: shared strings (t="s") by index, inline strings as they are.
+        cells = {}
+        for attributes, body in re.findall(r"<c ([^>]*?)(?:/>|>(.*?)</c>)", sheet):
+            ref = re.search(r'r="([A-Z]+\d+)"', attributes).group(1)
+            kind = re.search(r't="(\w+)"', attributes)
+            text = re.search(r"<(?:v|t)[^>]*>([^<]*)</(?:v|t)>", body)
+            value = text.group(1) if text else ""
+            cells[ref] = strings[int(value)] if kind and kind.group(1) == "s" else value
+        assert (cells["A1"], cells["B1"]) == ("Field", "Value")
+        rows = {int(ref[1:]) for ref in cells if ref.startswith("A")} - {1}
+        return {cells[f"A{row}"]: cells[f"B{row}"] for row in sorted(rows)}
+    return json.loads(content)["provenance"]
+
+
+def _exports(monkeypatch, at, *steps) -> list[tuple[str, bytes]]:
+    """Every file the app offers for download in the runs of ``at`` (and of each step after it), built as a click
+    would build it."""
+    import streamlit as st
+    from streamlit.elements.widgets import button
+
+    offered = []
+    original = button.ButtonMixin.download_button
+
+    def recording(self, label, data, file_name=None, *args, **kwargs):
+        offered.append((file_name, data))
+        return original(self, label, data, file_name, *args, **kwargs)
+
+    # Columns look the method up on the class; st.download_button is bound to the main container at import.
+    monkeypatch.setattr(button.ButtonMixin, "download_button", recording)
+    monkeypatch.setattr(st, "download_button", functools.partial(recording, st._main))
+    at.run()
+    assert not at.exception, at.exception
+    for step in steps:
+        step(at)
+        assert not at.exception, at.exception
+    return [(name, _content(data)) for name, data in dict(offered).items()]
+
+
+@pytest.mark.parametrize(
+    ("query", "tag"),
+    [({"preset": None, "asof": "2026-10-23T16:00"}, "SYNTHETIC"), ({}, "TEXTBOOK")],
+    ids=["index", "textbook"],
+)
+def test_no_export_lacks_its_source(monkeypatch, new_app, query, tag):
+    """The run-time half (DT-6): every file the Surface and Strategy tabs offer, under each surface source, names its
+    source on its first line (a CSV) or in its Provenance sheet or object, with the valuation time, the model, the
+    app's version and the seed, and its file name carries the source and the time."""
+
+    def source(name):
+        return lambda at: at.button_group(key="surface_source").set_value(name).run()
+
+    from options_analyzer.ui import tab_surface
+
+    surface = _exports(
+        monkeypatch, new_app(tab="Surface", **query), source(tab_surface.QUOTES), source(tab_surface.SSVI)
+    )
+    strategy = _exports(monkeypatch, new_app(tab="Strategy", **query))
+    files = surface + strategy
+    names = {name for name, _ in files}
+    assert {n.split("_SYNTHETIC")[0].split("_TEXTBOOK")[0] for n in names if "PARAMETRIC" not in n} >= {
+        "sample_option_quotes",
+        "sample_option_prices",
+        "bull_call_spread_pnl",
+    }
+    assert any("PARAMETRIC" in n for n in names) and any(n.endswith(".xlsx") for n in names) == bool(
+        importlib.util.find_spec("xlsxwriter") or importlib.util.find_spec("openpyxl")
+    )
+    if tag == "SYNTHETIC":
+        assert "spx_chain_SYNTHETIC_20261023T1600.csv" in names
+    for name, content in files:
+        assert EXPORT_NAME.fullmatch(name), name
+        if name.endswith(".csv"):
+            assert content.startswith(b"# source: "), name
+        fields = _provenance_of(name, content)
+        assert fields["source"].split(" ")[0] in {"SYNTHETIC", "TEXTBOOK", "PARAMETRIC"}, (name, fields)
+        assert "not market data" in fields["source"], (name, fields)
+        assert {"as_of", "model", "app", "seed"} <= set(fields), (name, fields)
+        assert fields["app"].startswith("v"), (name, fields)
+        if tag == "SYNTHETIC":
+            assert fields["as_of"] == "2026-10-23T16:00-04:00 (cash close)", (name, fields)
+        if "SYNTHETIC" in name:
+            assert fields["seed"] == "0", (name, fields)
+
+
+def test_an_export_reads_back_into_the_app(new_app):
+    """A downloaded sample, provenance lines and all, is a valid upload (the uploader skips the leading comments)."""
+    from options_analyzer import vol_surface
+    from options_analyzer.ui import exports, tab_surface
+
+    at = new_app(tab="Surface").run()
+    at.button_group(key="surface_source").set_value(tab_surface.QUOTES).run()
+    prov = exports.Provenance(exports.SYNTHETIC, exports.SYNTHETIC_SOURCE, None, "Black-76", seed=0)
+    data = exports.csv(vol_surface.sample_quotes(100.0, 0.05, 0.0), prov)
+    at.file_uploader(key="quotes_file").upload("sample.csv", data, "text/csv").run()
+    assert not at.exception and not at.error, [e.value for e in at.error]
+    assert any(m.label == "Grid" for m in at.metric)

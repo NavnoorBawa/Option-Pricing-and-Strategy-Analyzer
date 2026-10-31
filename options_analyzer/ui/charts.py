@@ -57,11 +57,12 @@ pio.templates["desk"] = go.layout.Template(
 TEMPLATE = "streamlit+desk" if "streamlit" in pio.templates else "desk"
 
 #: Plotly config for :func:`show`: no Plotly logo, no selection tools (the charts have no selection events) or
-#: autoscale (double-click resets the zoom), the toolbar only while the pointer is over the chart (on a phone it
-#: covered the top of the plot), and downloads as SVG, which stays sharp at any size.
+#: autoscale (double-click resets the zoom), and downloads as SVG, which stays sharp at any size. The toolbar keeps
+#: Plotly's default, ``displayModeBar: "hover"`` (shown while the pointer is over the chart), which the config no
+#: longer repeats: on a touch screen Plotly turns "hover" into "always" (plotly.js plot_api), so there the desk
+#: stylesheet hides it instead (``@media (hover: none)``, through the ``chart_<key>`` container of :func:`show`).
 PLOTLY_CONFIG = {
     "displaylogo": False,
-    "displayModeBar": "hover",
     "modeBarButtonsToRemove": ["lasso2d", "select2d", "autoScale2d"],
     "toImageButtonOptions": {"format": "svg", "filename": "options-analyzer-chart"},
 }
@@ -132,7 +133,11 @@ def show(
     if not alt.strip():
         raise ValueError(f"chart {key!r} needs a description (alt) for screen readers")
     config = PLOTLY_CONFIG | {"toImageButtonOptions": {"format": "svg", "filename": f"options-analyzer-{key}"}}
-    return (container or st).plotly_chart(fig, key=key, config=config, theme=theme, alt=alt, **kwargs)
+    # Each chart sits in its own keyed container, the hook of the desk stylesheet's touch-screen rule (UI spec 2.7
+    # item 10). A chart of fixed width gets a container of that width, so that a row of them keeps its layout.
+    width = kwargs.get("width")
+    box = (container or st).container(key=f"chart_{key}", width=width if isinstance(width, int) else "stretch")
+    return box.plotly_chart(fig, key=key, config=config, theme=theme, alt=alt, **kwargs)
 
 
 def style(fig: go.Figure, palette: dict[str, str] | None = None, height: int | None = None) -> go.Figure:
