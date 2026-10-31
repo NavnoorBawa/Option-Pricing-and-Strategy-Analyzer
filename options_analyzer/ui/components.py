@@ -485,6 +485,7 @@ def col(
     digits: int | None = None,
     pinned: bool | None = None,
     width: Any = None,
+    **editable: Any,
 ) -> Any:
     """The ``st.column_config`` of one column, from the column registry (:data:`COLUMN_KINDS`).
 
@@ -506,6 +507,9 @@ def col(
         Keep the column in view while the table scrolls sideways (:func:`table` pins the first column).
     width : optional
         ``st.column_config``'s width (``"small"``, ``"medium"``, ``"large"`` or px).
+    **editable
+        For a column that ``st.data_editor`` lets the user edit, ``NumberColumn``'s ``min_value``, ``max_value``,
+        ``step``, ``required`` and ``default`` (number kinds only).
 
     Returns
     -------
@@ -525,6 +529,9 @@ def col(
     '%,.0f'
     >>> col("pnl", "P&L ($)", help="At expiry.", digits=0)["type_config"]["format"]
     '%,.0f'
+    >>> editable = col("quantity", "Qty", help="Signed.", step=1, required=True)
+    >>> editable["type_config"]["format"], editable["type_config"]["step"], editable["required"]
+    ('%+d', 1, True)
     """
     if kind not in COLUMN_KINDS:
         raise ValueError(f"unknown column kind {kind!r}; the kinds are {', '.join(COLUMN_KINDS)}")
@@ -541,7 +548,21 @@ def col(
         return st.column_config.DateColumn(header, format="DD-MMM-YY", **common)
     assert spec.format is not None
     places = digits if digits is not None else (spec.digits if spec.digits is not None else _AUTO_DEFAULT[spec.auto])
-    return st.column_config.NumberColumn(header, format=spec.format.format(d=places), **common)
+    return st.column_config.NumberColumn(header, format=spec.format.format(d=places), **common, **editable)
+
+
+def input_format(kind: str, digits: int | None = None) -> str:
+    """The printf format of ``st.number_input`` for a quantity of the registry's ``kind``: its precision (or
+    ``digits``), without the thousands separator, which a number input does not take.
+
+    >>> input_format("premium"), input_format("vol"), input_format("moneyness", 2), input_format("count")
+    ('%.2f', '%.2f', '%.2f', '%d')
+    """
+    spec = COLUMN_KINDS[kind]
+    if spec.format is None:
+        raise ValueError(f"column kind {kind!r} is not a number")
+    places = digits if digits is not None else (spec.digits if spec.digits is not None else _AUTO_DEFAULT[spec.auto])
+    return spec.format.replace(",", "").format(d=places)
 
 
 def cents_places(largest: float) -> int:

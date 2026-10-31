@@ -420,7 +420,7 @@ def test_every_kind_of_missing_value_reads_as_the_en_dash():
     assert fmt.strike(5815.0, math.nan) == "5,815" and fmt.strike(582.5, None) == "582.5"
 
 
-# --- the lint the tabs will pass once they adopt the standard --------------------------------------------------------
+# --- the lint: the tabs adopted the standard (DK-4) -------------------------------------------------------------------
 
 #: Hand formatting in a tab, any of:
 #:
@@ -444,8 +444,9 @@ HAND_FORMAT = re.compile(
 )
 
 
-@pytest.mark.xfail(strict=True, reason="tabs adopt the number standard (DK-4)")
 def test_no_tab_formats_numbers_by_hand():
+    # Every tab writes its numbers through ui/format.py and its columns and inputs through the column registry
+    # (components.col, components.input_format): DK-4.
     offenders = {}
     for path in sorted((ROOT / "options_analyzer" / "ui").glob("tab_*.py")):
         hits = [n for n, line in enumerate(path.read_text("utf-8").splitlines(), 1) if HAND_FORMAT.search(line)]

@@ -1459,13 +1459,11 @@ def test_under_the_american_engine_the_note_gives_the_early_exercise_the_legs_ig
     for kind in ("call", "put"):
         us = american.price(100.0, 100.0, 1.0, 0.05, 0.2, 0.0, option_type=kind, scheme="accurate")
         eu = bs.price(100.0, 100.0, 1.0, 0.05, 0.2, 0.0, kind)
-        assert (
-            md(
-                f"For one 100 {kind} (the sidebar contract), early exercise adds {money(us - eu, 4)} per share with the "
-                f"American engine (ALO): {money(us, 4)} American against {money(eu, 4)} European."
-            )
-            in note
+        sentence = (
+            f"For one 100 {kind} (the sidebar contract), early exercise adds {money(us - eu, 4)} per share with "
+            f"the American engine (ALO): {money(us, 4)} American against {money(eu, 4)} European."
         )
+        assert md(sentence) in note
     assert us - eu > 0.3  # the put's premium at r 5%, q 0: a real amount the legs leave out
     # Under the closed form there is nothing to say.
     assert not [i.value for i in _app(strategy="Long Straddle").info if "Early exercise" in i.value]

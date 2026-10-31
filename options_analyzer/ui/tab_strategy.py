@@ -33,7 +33,7 @@ from .. import black_scholes as bs
 from .. import clock
 from .. import strategies as strat
 from ..vol_surface.published import ONE_SD, TWO_SD, Expiry
-from . import cache, charts, charts_strategy, exports, surface_state, whatif
+from . import cache, charts, charts_strategy, components, exports, surface_state, whatif
 from . import legs as lg
 from . import market as mk
 from .components import Card, card_row, link_match, table
@@ -532,7 +532,7 @@ def controls(inputs: Inputs) -> None:
             max_value=COMMISSION[1],
             value=0.0,
             step=0.05,
-            format="%.2f",
+            format=components.input_format("premium"),
             key="commission",
             bind="query-params",
             help="Charged on every option contract when the position is opened.",
@@ -562,7 +562,7 @@ def _width_input(bar, enabled: bool, centre: str) -> None:
         max_value=MAX_WIDTH_PCT,
         value=None,
         step=0.5,
-        format="%.2f",
+        format=components.input_format("moneyness", 2),
         placeholder="Auto",
         key="strategy_width_pct",
         bind="query-params",
@@ -1450,9 +1450,7 @@ def _editor_config(index: bool, published) -> dict:
     not change while the user edits."""
     config = {
         lg.ON: st.column_config.CheckboxColumn("On", help="Off: kept here but out of every number.", default=True),
-        lg.QTY: st.column_config.NumberColumn(
-            "Qty", help="Signed: positive long, negative short.", step=1, format="%+d", required=True
-        ),
+        lg.QTY: components.col("quantity", "Qty", help="Signed: positive long, negative short.", step=1, required=True),
         # Put and Call, as the blotter's View writes them.
         lg.TYPE: st.column_config.SelectboxColumn(
             "Type",
@@ -1460,10 +1458,10 @@ def _editor_config(index: bool, published) -> dict:
             required=True,
             format_func=str.capitalize,
         ),
-        lg.ENTRY: st.column_config.NumberColumn(
+        lg.ENTRY: components.col(
+            "premium",
             "Entry",
             min_value=0.0,
-            format="%.2f",
             help="Your fill per share. Blank: the mid (the model value where there is no market).",
         ),
     }
@@ -1472,26 +1470,27 @@ def _editor_config(index: bool, published) -> dict:
             "Expiry", options=[lg.expiry_text(*e) for e in lg.listed(published)], required=True,
             help="A listed expiry: AM settles at the opening prints, PM at the close.",
         )  # fmt: skip
-        config[lg.STRIKE] = st.column_config.NumberColumn(
+        config[lg.STRIKE] = components.col(
+            "strike",
             "Strike",
             min_value=1.0,
             step=5.0,
-            format="%,.0f",
+            digits=0,
             help="A listed strike: every 5 points near the money, every 50 further out. A strike the chain does not "
             "list has no quote: it takes the surface vol there and enters at its model value.",
         )
-        config[lg.IV] = st.column_config.NumberColumn(
-            "IV override (%)", min_value=0.1, max_value=500.0, format="%.2f", help="Blank: the published surface."
+        config[lg.IV] = components.col(
+            "vol", "IV override", min_value=0.1, max_value=500.0, help="Blank: the published surface."
         )
     else:
-        config[lg.DAYS] = st.column_config.NumberColumn(
-            "Days", min_value=1, max_value=3650, step=1, format="%d", help="Blank: the sidebar days to expiry."
+        config[lg.DAYS] = components.col(
+            "days", "Days", min_value=1, max_value=3650, step=1, help="Blank: the sidebar days to expiry."
         )
         config[lg.STRIKE] = st.column_config.NumberColumn(
             "Strike", min_value=0.0001, format=STRIKE_FORMAT, help="Blank: the sidebar strike. Ignored for shares."
         )
-        config[lg.IV] = st.column_config.NumberColumn(
-            "IV (%)", min_value=0.1, max_value=500.0, format="%.2f", help="Blank: the sidebar volatility."
+        config[lg.IV] = components.col(
+            "vol", "IV", min_value=0.1, max_value=500.0, help="Blank: the sidebar volatility."
         )
     return config
 
