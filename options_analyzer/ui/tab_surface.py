@@ -14,7 +14,7 @@ times and vols or prices (``vol_surface.parse_quotes``). An upload is fitted on 
 the synthetic chain (or the typed inputs).
 
 The focus expiry is the sidebar's (key ``expiry``) under the synthetic chain, so that the expiry table's row click
-(:func:`on_expiry_select`) and the ◂ ▸ buttons move the Pricing contract too; for an upload or SSVI it is this tab's
+(:func:`on_expiry_select`) and the ‹ › buttons move the Pricing contract too; for an upload or SSVI it is this tab's
 own (``sf_focus``). Numbers are formatted by :mod:`.format` and the column registry (:func:`.components.table`).
 """
 
@@ -135,7 +135,7 @@ def on_expiry_select(key: str, targets: list, focus_key: str) -> None:
 
 
 def on_expiry_step(targets: list, focus_key: str, current: int, step: int) -> None:
-    """The ◂ ▸ buttons: the previous or next expiry (the keyboard route to the row click), clamped at the ends."""
+    """The ‹ › buttons: the previous or next expiry (the keyboard route to the row click), clamped at the ends."""
     st.session_state[focus_key] = targets[min(max(current + step, 0), len(targets) - 1)]
 
 
@@ -614,8 +614,8 @@ def _filters(inputs: Inputs, container) -> None:
             key="sf_fwd",
             persist_state="session",
             help="Each expiry's forward and discount factor: put-call parity on its calls and puts "
-            "(C − P = DF·(F − K), fitted near the money), or the fallback rate and yield (the sidebar's; for the "
-            "synthetic chain the Treasury rate and its 1.30% yield). American quotes always take the rate and yield.",
+            f"(C − P = DF·(F − K), fitted near the money), or the rate and yield: {REFERENCE_CARRY}. American quotes "
+            "always take the rate and yield.",
         )
         st.segmented_control(
             "Calibration",
@@ -700,6 +700,9 @@ def _data_panel(inputs: Inputs) -> Shown | None:
         label_visibility="collapsed",
         help="The synthetic chain is the surface every tab prices from. An upload is fitted here only.",
     )
+    # The panel's line sits between the source and Filters, on the one row (UI spec 3.4 item 1): drawn below it, it
+    # took a second row of about 45 px above the tiles at 1440 px. It wraps inside the row where the row is narrow.
+    line = row.container(key="surface_data_line")
     _filters(inputs, row)
     shown: Shown | None
     if source == CHAIN:
@@ -719,7 +722,7 @@ def _data_panel(inputs: Inputs) -> Shown | None:
     if shown is not None:
         # The what-if strip's note (whatif.note) belongs at the end of this line once Strategy and Risk draw the strip;
         # until then no tab sets a shift, and importing whatif here would put its URL keys in the share note's test.
-        panel.markdown(f":small[{shown.panel}]")
+        line.markdown(f":small[{shown.panel}]", width="stretch")
     return shown
 
 
@@ -855,7 +858,7 @@ def _focus(shown: Shown) -> tuple[int, str]:
 
 
 def _view_controls(shown: Shown, focus: int, focus_key: str) -> tuple[str, str]:
-    """The view switch, the focus expiry's ◂ name ▸ stepper and, for the smile, its x axis."""
+    """The view switch, the focus expiry's ‹ name › stepper and, for the smile, its x axis."""
     rows = shown.rows
     targets = list(rows["target"])
     bar = st.container(horizontal=True, vertical_alignment="center", gap="small", key="surface_view_bar")
@@ -1174,7 +1177,7 @@ def _grid(shown: Shown) -> None:
         return
     labels = [delta_label(d, atm=False) if abs(d) != 0.5 else "50Δ" for d in grid.columns]
     frame = pd.DataFrame(grid.to_numpy() * 100, columns=labels)
-    frame.insert(0, "IV (%)", [f"{d}d" for d in grid.index])
+    frame.insert(0, "Maturity", [f"{d}d" for d in grid.index])
     values = frame[labels].to_numpy(float)
     finite = values[np.isfinite(values)]
     lo, hi = (float(finite.min()), float(finite.max())) if finite.size else (0.0, 1.0)
@@ -1190,8 +1193,8 @@ def _grid(shown: Shown) -> None:
 
     styled = frame.style.map(shade, subset=labels).format(precision=2, na_rep=MISSING, subset=labels)
     config = {
-        "IV (%)": column(
-            "text", "IV (%)", help="Implied vol in %, at a constant maturity in calendar days.", pinned=True
+        "Maturity": column(
+            "text", "Maturity", help="Constant maturity in calendar days; the cells are implied vols in %.", pinned=True
         )
     }
     for label, d in zip(labels, grid.columns, strict=True):
@@ -1199,7 +1202,7 @@ def _grid(shown: Shown) -> None:
         config[label] = column(
             "vol", label, help=f"Implied vol (%) of the {side} at spot delta {number(abs(d), 2)}, at its own vol."
         )
-        config[label]["label"] = label  # the unit is in the first column's header: 17 columns fit without it
+        config[label]["label"] = label  # the unit is in the caption: 17 columns fit without it
     st.dataframe(
         styled,
         column_config=config,
@@ -1209,7 +1212,9 @@ def _grid(shown: Shown) -> None:
         placeholder=MISSING,
         key="tbl_surface_grid",
     )
-    st.caption("Implied vol by spot delta at constant maturities; – beyond the fitted expiries or the smile's reach.")
+    st.caption(
+        "Implied vol (%) by spot delta at constant maturities; – beyond the fitted expiries or the smile's reach."
+    )
 
 
 def _three_d(shown: Shown) -> None:
@@ -1237,12 +1242,22 @@ def _three_d(shown: Shown) -> None:
 # The expiry table, the diagnostics, the readout and the exports
 # --------------------------------------------------------------------------------------------------------------------
 
+#: Decimals of a carry gap in bp: the parity forwards' standard errors, 0.01 to 0.10 index points on the default
+#: chain, are 0.02 to 0.17 bp of the forward, so a second decimal (the bp kind's below 1 bp) would be noise.
+CARRY_GAP_DIGITS = 1
+#: The carry the forwards are measured against (the carry gap), which they take with Forwards = Rate and yield.
+REFERENCE_CARRY = (
+    "the sidebar's r and q; for the synthetic index the Treasury rate plus the "
+    f"{number(mk.BOX_SPREAD * 1e4, 0)} bp box spread the options finance at, r {pct(mk.INDEX_CARRY[0])}, and q "
+    f"{pct(mk.INDEX_CARRY[1])}"
+)
+
 EXPIRY_HELP = {
     "Expiry": "Expiry date and settlement (AM: the opening print, SPX monthlies; PM: the close). The ticked row is "
     "the focus expiry; click another to move it (the sidebar's expiry, for the synthetic chain).",
     "DTE": "Time to the settlement.",
-    "F": "Forward, from put-call parity on the expiry's quotes (or the fallback carry: see the expander).",
-    "Carry gap": "ln(F/S) − (r − q)T against the fallback carry, in bp of the forward.",
+    "F": "Forward, from put-call parity on the expiry's quotes, or from the rate and yield (the expander's Source).",
+    "Carry gap": f"ln(F/S) − (r − q)T in bp of the forward, against the reference carry: {REFERENCE_CARRY}.",
     "ATMF": "Vol at K = F.",
     "25Δ RR": "σ(25Δ call) − σ(25Δ put), spot delta. Negative: put skew.",
     "25Δ BF": "½(σ25Δc + σ25Δp) − σATMF.",
@@ -1250,7 +1265,7 @@ EXPIRY_HELP = {
     "In band": "Share of used quotes whose fitted vol lies within their bid/ask in vol.",
     "Used": "Quotes the fit used.",
     "Conf.": "Share of the call-delta interval 0.10 to 0.90 that the used strikes span (after ORATS's confidence).",
-    "Flags": "carry: the fallback carry misses the parity forward by more than 5 bp and half the ATM spread; thin: "
+    "Flags": "carry: the reference carry misses the forward by more than 5 bp and half the ATM spread; thin: "
     "fewer than twice the minimum strikes; cal, bfly: arbitrage on the slice's grid; extrap: a 25-delta strike "
     "beyond the quotes.",
 }
@@ -1288,12 +1303,15 @@ def _expiry_table(shown: Shown, focus: int, focus_key: str) -> None:
         "Conf.": "share",
         "Flags": "text",
     }
+    if rows["expiry"].isna().all():  # constant maturities (SSVI, a table of quotes): the name is the time
+        frame = frame.drop(columns="DTE")
     targets = list(rows["target"])
     key = f"tbl_surface_expiries_{targets[focus]}"  # remounts, with no stale selection, when the focus moves
     table(
         frame,
-        kinds,
+        {name: kinds[name] for name in frame.columns},
         EXPIRY_HELP,
+        digits={"Carry gap": CARRY_GAP_DIGITS},
         key=key,
         selection_mode="single-row",
         selection_default={"selection": {"rows": [focus]}},
@@ -1313,9 +1331,17 @@ def _diagnostics(shown: Shown, focus: int) -> None:
         forwards = surface.forwards
         if forwards is not None and len(forwards):
             spot = surface.spot or 1.0
+            # Each forward's expiry row (the slice nearest its maturity, as dg.slice_table matches them), so that the
+            # table reads by the expiry table's names and times, not by days rounded apart from them (28 against
+            # 27d 17h for 20-Nov-26 AM).
+            T = forwards["maturity"].to_numpy(float)
+            by_slice = shown.rows.set_index("slice")
+            slices = [int(np.argmin(np.abs(surface.maturities - t))) for t in T]
+            names = [str(by_slice.at[j, "name"]) if j in by_slice.index else MISSING for j in slices]
             frame = pd.DataFrame(
                 {
-                    "T (days)": forwards["maturity"].to_numpy(float) * 365.0,
+                    "Expiry": names,
+                    "DTE": [time_left(t * clock.MINUTES_PER_YEAR) for t in T],
                     "F": forwards["forward"].to_numpy(float),
                     "DF": forwards["discount_factor"].to_numpy(float),
                     "r": forwards["rate"].to_numpy(float) * 100,
@@ -1334,7 +1360,8 @@ def _diagnostics(shown: Shown, focus: int) -> None:
             table(
                 frame,
                 {
-                    "T (days)": "days",
+                    "Expiry": "text",
+                    "DTE": "text",
                     "F": "level",
                     "DF": "premium_diag",
                     "r": "rate",
@@ -1346,7 +1373,8 @@ def _diagnostics(shown: Shown, focus: int) -> None:
                     "Source": "text",
                 },
                 {
-                    "T (days)": "Calendar days to the settlement.",
+                    "Expiry": EXPIRY_HELP["Expiry"].split(" The ticked")[0],
+                    "DTE": EXPIRY_HELP["DTE"],
                     "F": "Forward.",
                     "DF": "Discount factor to the settlement.",
                     "r": "Implied rate −ln(DF)/T, the box rate the options discount at.",
@@ -1354,10 +1382,11 @@ def _diagnostics(shown: Shown, focus: int) -> None:
                     "Pairs": "Call/put pairs near the money in the parity fit, after outliers.",
                     "Residual": "RMS gap of C − P from the fitted line DF·(F − K), $ per share.",
                     "SE of F": "Standard error of the forward, index points.",
-                    "Gap": "ln(F/S) − (r − q)T against the fallback carry, bp of the forward.",
+                    "Gap": f"ln(F/S) − (r − q)T in bp of the forward, against the reference carry: {REFERENCE_CARRY}.",
                     "Source": "parity; parity (DF: rate) where the slope could not be measured; rate and yield.",
                 },
                 labels={"r": "Implied r", "q": "Implied q", "Gap": "Gap"},
+                digits={"Gap": CARRY_GAP_DIGITS},
                 key="tbl_surface_forwards",
                 max_rows=len(frame),  # every expiry: no table that scrolls in its own box
             )
@@ -1369,11 +1398,13 @@ def _diagnostics(shown: Shown, focus: int) -> None:
         row = shown.rows.iloc[focus]
         T = float(row["maturity"])
         reach = surface.reach_at(T)
-        y = np.linspace(-reach, reach, 241)
         if surface.quoted_y is not None:
             lo, hi = surface.quoted_y[int(row["slice"])]
         else:
             lo, hi = -reach, reach
+        # Every quoted strike, as the smile view: the quoted put wing reaches past 4 ATM deviations on 15 of the
+        # default chain's 16 expiries (20-Nov-26 to y = −0.234 against a reach of 0.170).
+        y = np.linspace(min(lo, -reach), max(hi, reach), 241)
         g = dg.durrleman(surface, T, y)
         charts.show(
             charts_surface.durrleman_chart(y, g, (y >= lo) & (y <= hi)),
@@ -1593,7 +1624,7 @@ def _downloads(shown: Shown) -> None:
 
 
 def render(inputs: Inputs) -> None:
-    """The Surface tab (see the module docstring). Not a fragment: the expiry table and the ◂ ▸ buttons move the
+    """The Surface tab (see the module docstring). Not a fragment: the expiry table and the ‹ › buttons move the
     sidebar's focus expiry, which the whole page shows."""
     shown = _data_panel(inputs)
     _tiles(shown)

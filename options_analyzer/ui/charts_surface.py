@@ -207,7 +207,7 @@ def smile_fit(data: SmileData, axis: str = "K/F (%)", *, call_delta=None, palett
             x=float(x_of(np.array([strike]))[0]),
             y=0.0,
             yref="y domain",
-            text=f"▲ {kind}",
+            text=f"↑ {kind}",
             showarrow=False,
             yanchor="bottom",
             font=dict(size=charts.LABEL_SIZE, color=colors["text"]),
@@ -227,17 +227,25 @@ def smile_fit(data: SmileData, axis: str = "K/F (%)", *, call_delta=None, palett
     )
     height = charts.HEIGHT + (RESIDUAL_HEIGHT if has_quotes else 0)
     charts.style(fig, colors, height)
-    fig.update_layout(
-        hovermode="closest", legend=dict(orientation="h", x=1.0, xanchor="right", y=1.0, yanchor="bottom")
-    )
+    # The legend stays at the house style's top left, above the plot (and its note): at the top right the toolbar
+    # that Plotly shows on hover covered its last two entries.
+    fig.update_layout(hovermode="closest")
     fig.update_xaxes(showspikes=False)
     # Headroom above the highest vol for the note and the F label, which otherwise sit on the first quotes' bars.
-    shown = [100.0 * np.asarray(data.fit_vols, dtype=float)]
+    shown = [(data.fit_strikes, 100.0 * np.asarray(data.fit_vols, dtype=float))]
     if has_quotes:
-        shown += [100.0 * np.asarray(data.quotes[c], dtype=float) for c in ("iv_bid", "iv_ask")]  # type: ignore[index]
+        assert data.quotes is not None
+        shown += [
+            (data.quotes["strike"], 100.0 * np.asarray(data.quotes[c], dtype=float)) for c in ("iv_bid", "iv_ask")
+        ]
     if data.excluded is not None:
-        shown.append(100.0 * np.asarray(data.excluded["iv"], dtype=float))
-    values = np.concatenate([v[np.isfinite(v)] for v in shown])
+        shown.append((data.excluded["strike"], 100.0 * np.asarray(data.excluded["iv"], dtype=float)))
+    if axis == "Call Δ":
+        # Only what the 0.90 to 0.10 delta window shows: the far wings' offers (above 30%) left a third of it empty.
+        low, high = min(DELTA_RANGE), max(DELTA_RANGE)
+        deltas = [x_of(np.asarray(k, dtype=float)) for k, _ in shown]
+        shown = [(k, np.where((d >= low) & (d <= high), v, np.nan)) for (k, v), d in zip(shown, deltas, strict=True)]
+    values = np.concatenate([v[np.isfinite(v)] for _, v in shown])
     y_range = None
     if values.size:
         lo, hi = float(values.min()), float(values.max())
@@ -311,10 +319,11 @@ def term_chart(
                 row=1,
                 col=1,
             )
-    # Neither line is a call or a put: the text colour and the muted one, told apart by the dash too.
-    for key, name, color, dash in (
-        ("rr25", "25Δ RR", colors["text"], "solid"),
-        ("bf25", "25Δ BF", colors["muted"], "dash"),
+    # Neither line is a call or a put: the text colour and the muted one, told apart by the dash too. The risk
+    # reversal is dotted with diamonds: solid with dots, its legend entry was the ATMF line's.
+    for key, name, color, dash, symbol in (
+        ("rr25", "25Δ RR", colors["text"], "dot", "diamond"),
+        ("bf25", "25Δ BF", colors["muted"], "dash", "circle"),
     ):
         fig.add_trace(
             go.Scatter(
@@ -323,7 +332,7 @@ def term_chart(
                 name=name,
                 mode="lines+markers",
                 line=dict(color=color, width=charts.LINE_WIDTH, dash=dash),
-                marker=dict(size=5),
+                marker=dict(size=6 if symbol == "diamond" else 5, symbol=symbol),
                 customdata=names,
                 hovertemplate=f"%{{customdata}} · {name} %{{y:+.2f}} vp<extra></extra>",
             ),

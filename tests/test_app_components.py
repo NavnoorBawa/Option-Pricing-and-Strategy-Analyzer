@@ -333,8 +333,11 @@ def test_the_four_card_rows_stay_two_by_two_on_a_phone(states):
             if len(groups[0]) != 2 or (state == "limits" and row in ("price_cards", "iv_cards")):
                 continue
             style = next(s for s in _styles(at) if f".st-key-{row} {{ container:" in s)
-            # None: no query applies, so each pair is at full size, its two cards side by side (the surface tiles).
-            assert (_layout(style, PHONE_ROW) or (2, 22.75))[0] == 2, (state, row)
+            layout = _layout(style, PHONE_ROW)
+            if row == "surface_tiles" and layout is None:
+                # No query applies to its three pairs: each pair is at full size, its two cards side by side.
+                layout = (2, None)
+            assert layout is not None and layout[0] == 2, (state, row)
             checked.add(row)
     assert checked == {"price_cards", "strategy_cards", "greek_cards", "var_cards", "surface_tiles", "iv_cards"}
 

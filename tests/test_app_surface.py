@@ -255,6 +255,21 @@ def test_the_call_delta_axis_runs_from_90_to_10_delta(new_app):
     axes = [v for k, v in layout.items() if k.startswith("xaxis")]
     assert any((a.get("title") or {}).get("text") == "Call delta" for a in axes)
     assert all(a.get("range") == [0.9, 0.1] for a in axes)
+    # The vol axis spans what that window shows: every point drawn between 0.90 and 0.10 delta, with the headroom
+    # for the note (24% of the span above, 5% below). It ran to over 30% for the far wings' offers, out of view.
+    smile = _smile(at)
+    points = [
+        (_array(t["x"]), _array(t["y"]) + sign * _array(t.get("error_y", {}).get(arm, [0.0])))
+        for t in smile["data"]
+        if t.get("yaxis", "y") == "y"
+        for sign, arm in ((1, "array"), (-1, "arrayminus"))
+    ]
+    y = np.concatenate([v[(x >= 0.1) & (x <= 0.9)] for x, v in points])
+    y = y[np.isfinite(y)]
+    lo, hi = y.min(), y.max()
+    span = hi - lo
+    np.testing.assert_allclose(layout["yaxis"]["range"], [lo - 0.05 * span, hi + 0.24 * span], rtol=1e-9)
+    assert hi < 25  # the 20-Nov-26 smile between 0.90 and 0.10 delta (about 12% to 21% at the mids)
 
 
 def test_the_smile_draws_one_bid_ask_bar_per_used_quote_and_dashes_the_extrapolated_fit(index):
@@ -325,8 +340,65 @@ def test_the_term_view_has_forward_vols_and_the_grid_is_by_delta(new_app):
     _ok(at)
     grid = next(d.value for d in at.dataframe if "50Δ" in d.value.columns)
     columns = list(grid.columns)
-    assert columns[0] == "IV (%)" and columns[1] == "10Δp" and columns[9] == "50Δ" and columns[-1] == "10Δc"
-    assert list(grid["IV (%)"]) == ["7d", "14d", "30d", "60d", "91d", "182d", "365d"]  # 730 d: none
+    assert columns[0] == "Maturity" and columns[1] == "10Δp" and columns[9] == "50Δ" and columns[-1] == "10Δc"
+    assert list(grid["Maturity"]) == ["7d", "14d", "30d", "60d", "91d", "182d", "365d"]  # 730 d: none
+
+
+def _diagnostics(**state) -> AppTest:
+    """The index's Surface tab with the Arbitrage and forwards expander open (and any other session state)."""
+    at = make_app(preset=None, asof=ASOF, tab="Surface")
+    at.session_state["surface_diag"] = True
+    for key, value in state.items():
+        at.session_state[key] = value
+    at.run()
+    _ok(at)
+    return at
+
+
+def test_the_forwards_read_by_the_expiry_tables_names_and_times_and_the_gap_by_tenths_of_a_bp():
+    at = _diagnostics()
+    expiries, forwards = _expiries(at), next(d.value for d in at.dataframe if "SE of F" in d.value.columns)
+    assert list(forwards.columns[:2]) == ["Expiry", "DTE"]
+    # One row per expiry, named and timed as the expiry table (they read 28 against 27d 17h for 20-Nov-26 AM).
+    assert list(forwards["Expiry"]) == list(expiries["Expiry"]) and list(forwards["DTE"]) == list(expiries["DTE"])
+    assert expiries["DTE"].iloc[3] == "27d 17h" and expiries["Expiry"].iloc[3] == "20-Nov-26 AM"
+    # Carry gaps to 0.1 bp: the forwards' standard errors are 0.02 to 0.17 bp of the forward.
+    for gaps in (expiries["Carry gap"], forwards["Gap"]):
+        values = gaps.to_numpy(float)
+        np.testing.assert_array_equal(values, np.round(values, 1))
+    np.testing.assert_array_equal(expiries["Carry gap"].to_numpy(float), forwards["Gap"].to_numpy(float))
+
+
+def test_forwards_from_the_rate_and_yield_have_no_carry_gap():
+    """With Forwards = Rate and yield each forward is S·e^((r − q)T) at the reference carry the gap is measured
+    against (the Treasury rate plus the box spread, 4.45%, and q 1.30%): every gap is 0 and none is flagged. They took
+    the Treasury rate before, and read −1 to −7 bp on the first expiries against a help that called the reference
+    their own."""
+    at = _diagnostics(sf_fwd="Rate and yield")
+    expiries = _expiries(at)
+    assert (expiries["Carry gap"] == 0).all() and not expiries["Flags"].str.contains("carry").any()
+    context = mk.index_market(AS_OF, dg.FitSettings(forward="rates"))
+    r, q = mk.INDEX_CARRY
+    T = context.expiries["maturity"].to_numpy(float)
+    np.testing.assert_allclose(context.expiries["forward"], mk.INDEX_SPOT * np.exp((r - q) * T), rtol=1e-12)
+    np.testing.assert_allclose(context.expiries["discount_factor"], np.exp(-r * T), rtol=1e-12)
+    assert "4.45%" in tab_surface.EXPIRY_HELP["Carry gap"] and "1.30%" in tab_surface.EXPIRY_HELP["Carry gap"]
+
+
+def test_durrlemans_g_covers_every_quoted_strike_of_the_focus_expiry():
+    """The g(k) chart spans the focus expiry's quoted range as the smile does: it stopped at 4 ATM deviations, and
+    left out K/F 79.1% to 84.3% of 20-Nov-26's quoted put wing."""
+    at = _diagnostics()
+    chart = next(c for c in _charts(at) if c["layout"]["yaxis"]["title"]["text"] == "g(k)")
+    x = np.concatenate([_array(t["x"]) for t in chart["data"]])
+    surface = mk.index_market(AS_OF).surface
+    j = int(np.argmin(np.abs(surface.maturities * 365 - 27.7)))  # 20-Nov-26 AM, the focus
+    lo, hi = surface.quoted_y[j]
+    assert lo < -surface.reach_at(surface.maturities[j])  # the case: quotes beyond the reach
+    assert x.min() <= lo and x.max() >= hi
+    inside = next(t for t in chart["data"] if t["name"] == "g(k)")
+    g = _array(inside["y"])
+    assert np.nanmin(g) > 0  # the arbitrage-free fit: no butterfly arbitrage across the quotes
 
 
 def test_the_tab_formats_numbers_only_through_the_standard_and_keeps_captions_short(index):
@@ -364,6 +436,7 @@ def test_the_textbook_surface_is_parametric_ssvi_on_constant_maturities(app):
     assert app.segmented_control(key="surface_source").options == [tab_surface.SSVI, tab_surface.QUOTES]
     table = _expiries(app)
     assert list(table["Expiry"]) == [f"{d}d" for d in dg.CONSTANT_MATURITIES]
+    assert "DTE" not in table.columns  # the name is the time to expiry ("7d" next to "7d 0h" before)
     # Forwards in index points, S·e^((r − q)T) at the sidebar's S 100, r 5% and q 0 (they read 1.00 to 1.11, in K/S,
     # before the surface carried the spot); sent at the column's two decimals.
     days = np.array(dg.CONSTANT_MATURITIES, dtype=float)

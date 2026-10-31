@@ -1207,24 +1207,34 @@ def test_the_kept_quotes_file_is_named_at_the_size_of_its_caption(chromium, app_
         page.close()
 
 
-#: Colour and background of every visible multiselect chip.
-_CHIPS = """() => [...document.querySelectorAll('[data-testid=stMultiSelect] [data-tag]')]
-  .filter(e => e.getBoundingClientRect().width > 0)
-  .map(e => [e.innerText, getComputedStyle(e).color, getComputedStyle(e).backgroundColor])"""
+#: Colour and background (rgba) of the selected option of the Surface tab's view switch, a segmented control.
+_SELECTED_VIEW = """() => {
+  const e = [...document.querySelectorAll('.st-key-sf_view button')].find(b => b.innerText.trim() === 'Smile');
+  return [getComputedStyle(e).color, getComputedStyle(e).backgroundColor];
+}"""
+
+
+def _over(css: str, base: str) -> str:
+    """``#RRGGBB`` of a computed ``rgba(r, g, b, a)`` colour laid over the opaque ``base``."""
+    *rgb, alpha = ([float(v) for v in re.findall(r"[\d.]+", css)] + [1.0])[:4]
+    under = [int(base[i : i + 2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(f"{round(alpha * c + (1 - alpha) * u):02X}" for c, u in zip(rgb, under, strict=True))
 
 
 @pytest.mark.e2e
 @pytest.mark.parametrize("scheme", ["dark", "light"])
 def test_text_on_the_primary_colour_is_legible_in_the_app(chromium, app_url, scheme):
+    # Streamlit writes white on a fill of the primary colour in a multiselect's chips and in a number input's step
+    # buttons while hovered; the desk stylesheet recolours both (theme.ON_PRIMARY_SELECTORS). No tab has a
+    # multiselect since the Surface tab dropped its maturities picker (SF-1), so the step buttons stand for the rule.
+    # A segmented control's selected option is the other way round: primary text on a 10% tint of it.
     page = _open(chromium, app_url, scheme, 1440)
     try:
+        primary, background = _mode(scheme)["primaryColor"], _mode(scheme)["backgroundColor"]
         _tab(page, "Surface")
-        chips = page.evaluate(_CHIPS)
-        assert chips  # the maturities of the smile chart
-        primary = _mode(scheme)["primaryColor"]
-        for text, color, background in chips:
-            assert _hex(background) == primary, text
-            assert contrast(_hex(color), _hex(background)) >= 4.5, (text, color, background)
+        color, tint = page.evaluate(_SELECTED_VIEW)
+        assert _hex(color) == primary and _hex(tint) == primary, (color, tint)
+        assert contrast(primary, _over(tint, background)) >= 4.5, (color, tint)
         _tab(page, "IV")
         step = page.locator("[data-testid=stMain] [data-testid=stNumberInputStepUp]:visible").first
         step.hover()

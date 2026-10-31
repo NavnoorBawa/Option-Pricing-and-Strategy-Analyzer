@@ -43,10 +43,11 @@ INDEX_ROOT = "SPX"
 INDEX_SPOT = 5800.0
 INDEX_RATE = 0.04
 INDEX_YIELD = 0.013
-#: The fallback carry an expiry's forward is measured against (the Surface tab's carry gap): the Treasury rate plus
-#: the box spread the options finance at, and the yield. The fit itself falls back to the Treasury rate, as it always
-#: has: no expiry of the default chain needs the fallback, but the rate seeds each parity fit's first guess, and a
-#: different seed moves the 2028 forward by 0.25 bp.
+#: The reference carry an expiry's forward is measured against (the Surface tab's carry gap): the Treasury rate plus
+#: the box spread the options finance at, and the yield. It is the carry of the forwards when the Surface tab's
+#: Forwards setting is "Rate and yield" (their carry gap is then 0). The parity fit keeps the Treasury rate as its
+#: fallback, as it always has: no expiry of the default chain needs the fallback, but the rate seeds each parity
+#: fit's first guess, and a different seed moves the 2028 forward by 0.25 bp.
 INDEX_CARRY = (INDEX_RATE + BOX_SPREAD, INDEX_YIELD)
 #: How every view of the synthetic chain is labelled (``synthetic.SYNTHETIC_LABEL``).
 SYNTHETIC_NOTE = f"{SYNTHETIC_LABEL}."
@@ -126,8 +127,11 @@ def index_market(as_of: datetime, settings: FitSettings = DEFAULT_SETTINGS) -> M
     fit (about a second).
     """
     chain = sample_chain(INDEX_SPOT, INDEX_RATE, INDEX_YIELD, as_of=as_of)
+    # Forwards from the rate and yield take the options' own carry (the box rate): from the Treasury rate they missed
+    # the carry the gap is measured against by 45 bp a year (−1 to −7 bp on the first expiries, flagged as gaps).
+    rate = INDEX_CARRY[0] if settings.forward == "rates" else INDEX_RATE
     fit = fit_chain(
-        chain.quotes, as_of=as_of, spot=INDEX_SPOT, rate=INDEX_RATE, dividend_yield=INDEX_YIELD, settings=settings
+        chain.quotes, as_of=as_of, spot=INDEX_SPOT, rate=rate, dividend_yield=INDEX_YIELD, settings=settings
     )
     surface = fit.surface
     fitted = fit.expiries[fit.expiries["slice"] >= 0]

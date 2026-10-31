@@ -7,6 +7,7 @@ The app runs at the pinned valuation time (``?asof=2026-10-23T16:00``, the cash 
 
 from __future__ import annotations
 
+import time
 from datetime import datetime
 
 import pytest
@@ -62,9 +63,9 @@ def test_the_tiles_and_the_smile_are_above_the_fold(chromium, app_url):  # noqa:
     595 px with the tiles in two rows of three), the six tiles on one line, and the page in the Smile view at most
     2,000 px tall (measured 1,758 px; 3,111 px before the desk layout).
 
-    The tiles' top is measured at 339 px, not the spec's 260: the header's price cards and the tab bar, above every
-    tab since the desk foundation, end at 226 px, and the data panel (the source and Filters, then its line) takes
-    about 100 px. The bound here is 350 px."""
+    The tiles' top is measured at 313 px, not the spec's 260: the header's price cards and the tab bar, above every
+    tab since the desk foundation, end at 226 px, and the data panel takes 73 px (the source, its line in two lines
+    of small text, and Filters on one row; 339 px with the line on a row of its own). The bound here is 320 px."""
     page = _open(chromium, app_url)
     try:
         layout = page.evaluate(
@@ -78,7 +79,7 @@ def test_the_tiles_and_the_smile_are_above_the_fold(chromium, app_url):  # noqa:
             }"""
         )
         assert layout["count"] == 6 and layout["lines"] == 1, layout
-        assert layout["tiles"] <= 350 and layout["smile"] <= 560, layout
+        assert layout["tiles"] <= 320 and layout["smile"] <= 560, layout
         assert layout["height"] <= 2000, layout
     finally:
         page.context.close()
@@ -100,5 +101,29 @@ def test_a_row_click_moves_the_focus_expiry(chromium, app_url):  # noqa: F811
         contract = page.locator(".st-key-contract_line").inner_text().replace("\xa0", " ").replace("‑", "-")
         assert contract.startswith("SPX 18-Dec-26 AM ")
         assert page.evaluate(_NOTE).endswith(f" · {_used('2026-12-18')} used")
+    finally:
+        page.context.close()
+
+
+def test_a_step_of_the_focus_expiry_redraws_the_tab_in_a_loose_time(chromium, app_url):  # noqa: F811
+    """A loose guard on the spec's 0.4 s budget for a change of the focus expiry: click to the smile's new note with
+    the script idle, at most 2 s each (CI machines vary; this is not the budget).
+
+    Measured at 1,440 × 900 on a 4-core machine shared with other jobs: 0.64 to 0.85 s a step (1.13 s for the first),
+    of which the script run is 0.15 to 0.19 s (AppTest, warm) and the rest the browser's redraw. The spec's fragment
+    does not apply: the focus expiry is the sidebar's (``?expiry=``), which sets the contract that the header and
+    every tab price, so a step reruns the whole app."""
+    page = _open(chromium, app_url)
+    try:
+        times = []
+        for key in ("sf_next", "sf_next", "sf_prev", "sf_prev"):
+            before = page.evaluate(_NOTE)
+            start = time.perf_counter()
+            page.locator(f".st-key-{key} button:visible").first.click()  # the stale copy of a rerun is hidden
+            page.wait_for_function(f"() => ({_NOTE})() !== {before!r} && {_IDLE}", timeout=60_000)
+            times.append(time.perf_counter() - start)
+            page.wait_for_timeout(500)
+        assert page.evaluate(_NOTE).startswith("20-Nov-26 AM")  # two steps forward and two back
+        assert max(times) <= 2.0, times
     finally:
         page.context.close()

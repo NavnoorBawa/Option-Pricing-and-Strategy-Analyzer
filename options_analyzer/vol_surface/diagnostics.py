@@ -758,8 +758,8 @@ def expiry_table(fit: ChainFit, *, rate: float, dividend_yield: float) -> pd.Dat
     (date) and ``settlement``, and the quote columns measured on the chain's own bid/ask vols: ``used`` (quotes the
     fit used) and ``in_band`` (share of them whose fitted vol lies within their bid/ask in vol).
 
-    The reference carry is the fallback the forwards would otherwise come from (the sidebar's, or the index's
-    Treasury rate plus the box spread): a ``carry`` flag says the quotes resolve a forward it misses."""
+    The reference carry is the rate and yield the forwards take when they do not come from parity (the sidebar's,
+    or the index's Treasury rate plus the box spread): a ``carry`` flag says the quotes resolve a forward it misses."""
     table = slice_table(
         fit.surface, rate=rate, dividend_yield=dividend_yield, min_strikes=fit.settings.filters.min_strikes
     ).set_index("slice")
