@@ -35,7 +35,8 @@ from .. import clock
 from .. import strategies as strat
 from ..vol_surface import PublishedSurface
 from ..vol_surface.published import Expiry, Quote
-from .format import NB_HYPHEN
+from .format import NB_HYPHEN, number
+from .format import strike as strike_text
 
 #: The legs table's columns: On (in every number or not), the signed quantity, the type, the listed expiry (index) or
 #: the days to expiry (textbook), the strike, an implied vol in % (an override under the index; blank = the surface,
@@ -70,7 +71,7 @@ def expiry_text(day: date, settlement: str) -> str:
     >>> expiry_text(date(2026, 12, 18), "AM")
     '18‑Dec‑26 AM'
     """
-    return f"{day.day:02d}{NB_HYPHEN}{_MONTHS[day.month - 1]}{NB_HYPHEN}{day.year % 100:02d} {settlement}"
+    return f"{day:%d}{NB_HYPHEN}{_MONTHS[day.month - 1]}{NB_HYPHEN}{day:%y} {settlement}"
 
 
 def parse_expiry(text: object) -> Expiry | None:
@@ -529,7 +530,8 @@ def price_index(
             else:
                 fit, src = float(published.surface.implied_vol_at(k / spot, T, extrapolate=True)), UNLISTED
             if not np.isfinite(fit):
-                errors.append(f"Row {i + 1}: the surface has no vol at {k:,.0f} on {label}; type an IV override.")
+                at = strike_text(k, math.nan)
+                errors.append(f"Row {i + 1}: the surface has no vol at {at} on {label}; type an IV override.")
                 continue
             vol = fit
             if iv is not None:
@@ -599,7 +601,7 @@ def price_textbook(
         else:
             theo = market.spot
         src = "" if not leg.is_option else (OVERRIDE if leg.volatility is not None else FLAT)
-        label = "" if not leg.is_option else f"{T * 365:.0f}d"
+        label = "" if not leg.is_option else f"{number(T * 365, 0)}d"
         entered = theo if entry is None else entry
         priced.append(
             PricedLeg(i, bool(on), kind, qty, leg.strike if leg.is_option else None, label, None, T, vol,

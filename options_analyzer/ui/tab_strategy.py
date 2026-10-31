@@ -45,6 +45,8 @@ from .format import (
     md_code,
     money,
     money_short,
+    number,
+    pct,
     premium,
     probability_text,
     signed,
@@ -117,9 +119,11 @@ class Position:
     def describe(self) -> str:
         if self.book is not None and self.book.front is not None:  # the index: listed expiries, legs as a desk writes
             parts = [_leg_short(p) for p in self.book.live]
-            return md(f"**{self.strategy.name}** — {' / '.join(parts)} · {self.contracts} × {self.multiplier:g}")
+            size = f"{number(self.contracts, 0)} × {number(self.multiplier, 0)}"
+            return md(f"**{self.strategy.name}** — {' / '.join(parts)} · {size}")
         legs = ", ".join(strat.leg_labels(self.strategy, self.market))
-        return md(f"**{self.strategy.name}** — {legs} · {self.contracts} × {self.multiplier:g} multiplier")
+        size = f"{number(self.contracts, 0)} × {number(self.multiplier, 0)}"
+        return md(f"**{self.strategy.name}** — {legs} · {size} multiplier")
 
 
 def _leg_short(p: lg.PricedLeg) -> str:
@@ -399,7 +403,7 @@ def _settings_label() -> str:
     multiplier = _control("multiplier", DEFAULT_MULTIPLIER, _whole, _within(MULTIPLIER))
     commission = _control("commission", 0.0, float, _within(COMMISSION))
     basis = "RN" if st.session_state.get("risk_neutral", True) else "view"
-    return f"{contracts:,} × {multiplier:g} · ${commission:.2f}/ct · {basis}"
+    return f"{number(contracts, 0)} × {number(multiplier, 0)} · {money(commission)}/ct · {basis}"
 
 
 def _link_expiry(chosen: Expiry, default: Expiry) -> None:
@@ -781,7 +785,7 @@ def expires_within_a_day(strategy: strat.Strategy, market: strat.Market) -> bool
 
 def _short_date(day: date) -> str:
     """``18‑Dec`` (non-breaking hyphen)."""
-    return f"{day.day:02d}{NB_HYPHEN}{day:%b}"
+    return f"{day:%d}{NB_HYPHEN}{day:%b}"
 
 
 # --- The analysis context -----------------------------------------------------------------------------------------
@@ -1031,7 +1035,7 @@ def _bands(ctx: _Context) -> list[charts_strategy.Band]:
         to = _short_date(ctx.front.day)
         for level, word in ((ONE_SD, "68%"), (TWO_SD, "95%")):
             lo, hi = ctx.published.rn_range(ctx.front, level)
-            out.append(charts_strategy.Band(lo, hi, f"RN {word} to {to}: {lo:,.0f}–{hi:,.0f} (smile)"))
+            out.append(charts_strategy.Band(lo, hi, f"RN {word} to {to}: {number(lo, 0)}–{number(hi, 0)} (smile)"))
         return out
     sd = market.volatility * math.sqrt(T)
     median = market.spot * math.exp((market.rate - market.dividend_yield) * T - 0.5 * sd * sd)
@@ -1094,7 +1098,7 @@ def _chart(ctx: _Context, shifts: whatif.Shifts, range_choice: str, dated: list[
         np.concatenate([np.linspace(lo, hi, GRID_POINTS), [k for k in ctx.entered.strikes if lo <= k <= hi]])
     )
     T = m.horizon
-    front_text = _short_date(ctx.front.day) if ctx.front is not None else f"{T * 365:.0f}d"
+    front_text = _short_date(ctx.front.day) if ctx.front is not None else f"{number(T * 365, 0)}d"
     curves = [
         charts_strategy.Curve(
             strat.pnl(ctx.entered, market, spots, T, carry) * units, f"Expiry {front_text}", "expiry",
@@ -1126,7 +1130,7 @@ def _chart(ctx: _Context, shifts: whatif.Shifts, range_choice: str, dated: list[
         increment = ctx.inputs.context.strike_step
         move = lg.straddle_move(ctx.published, ctx.front)
         if move is not None:
-            straddle = (spot * (1 - move[0]), spot * (1 + move[0]), f"straddle ±{move[0]:.2%}")
+            straddle = (spot * (1 - move[0]), spot * (1 + move[0]), f"straddle ±{pct(move[0], 2)}")
     scenario = None
     if shifts.spot:
         x = spot * (1 + shifts.spot / 100)
