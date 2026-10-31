@@ -220,6 +220,7 @@ def smile_fit(data: SmileData, axis: str = "K/F (%)", *, call_delta=None, palett
         xanchor="left",
         yanchor="top",
         text=data.note,
+        align="left",  # its two lines
         showarrow=False,
         font=dict(size=charts.LABEL_SIZE, color=colors["muted"]),
     )
@@ -240,7 +241,7 @@ def smile_fit(data: SmileData, axis: str = "K/F (%)", *, call_delta=None, palett
     if values.size:
         lo, hi = float(values.min()), float(values.max())
         span = max(hi - lo, 1.0)
-        y_range = [max(lo - 0.05 * span, 0.0), hi + 0.16 * span]
+        y_range = [max(lo - 0.05 * span, 0.0), hi + 0.24 * span]
     fig.update_yaxes(title_text="IV (%)", ticksuffix="", range=y_range, **({"row": 1, "col": 1} if has_quotes else {}))
     x_title = X_AXES[axis]
     if has_quotes:

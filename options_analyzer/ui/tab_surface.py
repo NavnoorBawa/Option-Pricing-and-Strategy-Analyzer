@@ -67,9 +67,10 @@ X_AXES = tuple(charts_surface.X_AXES)
 #: Session key of the focus expiry of an upload or the SSVI surface (a row of the expiry table); the synthetic chain's
 #: is the sidebar's ``expiry``.
 FOCUS_KEY = "sf_focus"
-#: The six tiles in two groups of three: six across at 1,440 px with the sidebar open (970 px of the 1,037 there, with
-#: the FIT tile's unit in its label; "0.04 / 0.10 vp" as its value needed 1,162 px), 3 + 3 below that, then 2 + 1.
-TILE_GROUPS = ("surface_tiles_a", "surface_tiles_b")
+#: The six tiles in three pairs: six across at 1,440 px with the sidebar open (970 px of the 1,037 there, with the FIT
+#: tile's unit in its label; "0.04 / 0.10 vp" as its value needed 1,162 px), 4 + 2 below that, and 2 + 2 + 2 on a
+#: phone (two groups of three went 2 + 1 + 2 + 1 there: four lines).
+TILE_GROUPS = ("surface_tiles_a", "surface_tiles_b", "surface_tiles_c")
 #: The FIT tile's label: the median fit RMSE against the median half-spread, both in vol points.
 FIT_LABEL = "FIT vs ½‑spr (vp)"
 #: The tiles' constant maturities, in calendar days.
@@ -187,7 +188,15 @@ def _method_text(surface: vs.VolSurface, settings: dg.FitSettings) -> str:
 
 def _chain_rows(fit: dg.ChainFit, rate: float, dividend_yield: float, *, iso: bool) -> pd.DataFrame:
     """The expiry rows of a chain fit, with their names (``20-Nov-26 AM``), minutes to settlement and focus targets
-    (the ISO date for the sidebar, else the row number)."""
+    (the ISO date for the sidebar, else the row number). A copy of the rows kept per fit (:func:`_measured_rows`)."""
+    return _measured_rows(fit, rate, dividend_yield, iso).copy()
+
+
+@functools.lru_cache(maxsize=16)
+def _measured_rows(fit: dg.ChainFit, rate: float, dividend_yield: float, iso: bool) -> pd.DataFrame:
+    """:func:`_chain_rows`, kept for each fit: the 16 expiries' deltas, skews and arbitrage checks take 0.44 s, which
+    every rerun of the tab paid (a click on the expiry table among them). A fit compares by identity, and the fits
+    themselves are kept by ``st.cache_resource`` (the market's and the uploads'), so an entry lives as long as one."""
     rows = dg.expiry_table(fit, rate=rate, dividend_yield=dividend_yield)
     rows["name"] = [f"{short_date(d)} {s}" for d, s in zip(rows["expiry"], rows["settlement"], strict=True)]
     rows["minutes"] = rows["maturity"] * clock.MINUTES_PER_YEAR
@@ -730,7 +739,7 @@ def _tiles(shown: Shown | None) -> None:
         f"linearly in time between the expiries around it ({vol(atmf30, 4)}). {outside}"
     }
     if shown.fit is not None:
-        vix, pair = dg.vix_style_vol(shown.fit, TILE_DAYS)
+        vix, pair = _vix_style(shown.fit)
         if math.isfinite(vix):
             names = [shown.fit.expiries.at[i, "expiry"] for i in pair or ()]
             atmf_options |= {
@@ -779,6 +788,12 @@ def _tiles(shown: Shown | None) -> None:
         ),
     ]
     card_row("surface_tiles", TILE_GROUPS, tiles)
+
+
+@functools.lru_cache(maxsize=16)
+def _vix_style(fit: dg.ChainFit) -> tuple[float, tuple[int, int] | None]:
+    """The model-free 30-day vol of a fit, kept per fit as :func:`_measured_rows` is (0.14 s a rerun before)."""
+    return dg.vix_style_vol(fit, TILE_DAYS)
 
 
 def _fit_tile(shown: Shown) -> tuple[str, str, dict]:
@@ -945,7 +960,8 @@ def _smile_data(shown: Shown, focus: int) -> charts_surface.SmileData:
         violations.append((k_over_s * (surface.spot or 1.0), kind))
     n_used = len(quotes["strike"]) if quotes is not None else 0
     in_band = row["in_band"]
-    parts = [str(row["name"])] + ([time_left(row["minutes"])] if row["expiry"] is not None else [])
+    head = [str(row["name"])] + ([time_left(row["minutes"])] if row["expiry"] is not None else [])
+    parts: list[str] = []  # the fit's numbers, on a second line: one line ran past a 390 px phone's plot
     if math.isfinite(row["rmse"]):
         parts.append(f"RMSE {number(row['rmse'] * 100, 2)} vp")
     if math.isfinite(in_band):
@@ -958,7 +974,7 @@ def _smile_data(shown: Shown, focus: int) -> charts_surface.SmileData:
         fit_vols=fit_vols,
         fit_inside=inside,
         quoted_range=(forward * math.exp(lo), forward * math.exp(hi)),
-        note=" · ".join(parts),
+        note=" · ".join(head) + ("<br>" + " · ".join(parts) if parts else ""),
         quotes=quotes,
         excluded=excluded,
         violations=tuple(violations[:6]),

@@ -262,7 +262,7 @@ def test_the_smile_draws_one_bid_ask_bar_per_used_quote_and_dashes_the_extrapola
     extrapolated = next(t for t in smile["data"] if t.get("name") == "Fit, extrapolated")
     assert extrapolated["line"]["dash"] != "solid"
     note = next(a["text"] for a in smile["layout"]["annotations"] if "used" in a["text"])
-    assert note.startswith("20-Nov-26 AM · 27d 17h · RMSE ") and note.endswith("100% in band · 138 used")
+    assert note.startswith("20-Nov-26 AM · 27d 17h<br>RMSE ") and note.endswith("100% in band · 138 used")
 
 
 def test_every_status_of_the_quotes_view_is_used_or_a_reason(new_app):

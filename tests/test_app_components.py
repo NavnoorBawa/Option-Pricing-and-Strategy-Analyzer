@@ -294,7 +294,7 @@ ROWS = {
     "greek_cards": [["Delta (shares)", "Gamma"], ["Theta / day", "Vega / vol pt"]],
     "expectation_cards": [["Expected P&L at expiry", "P&L standard deviation", "Drift used"]],
     "var_cards": [["VaR 99.0%", "Expected Shortfall 99.0%"], ["Spot-only VaR 99.0%", "Spot-only ES 99.0%"]],
-    "surface_tiles": [["ATMF 30D", "25Δ RR 30D", "25Δ BF 30D"], ["TERM 30→365D", "FIT vs ½‑spr (vp)", "ARB"]],
+    "surface_tiles": [["ATMF 30D", "25Δ RR 30D"], ["25Δ BF 30D", "TERM 30→365D"], ["FIT vs ½‑spr (vp)", "ARB"]],
     "iv_cards": [["Implied volatility", "Model check"], ["Vega at IV", "Time value"]],
 }
 
@@ -330,12 +330,13 @@ def test_the_four_card_rows_stay_two_by_two_on_a_phone(states):
     checked = set()
     for state, at in states.items():
         for row, groups in _card_rows(at).items():
-            if len(groups) != 2 or len(groups[0]) != 2 or (state == "limits" and row in ("price_cards", "iv_cards")):
+            if len(groups[0]) != 2 or (state == "limits" and row in ("price_cards", "iv_cards")):
                 continue
             style = next(s for s in _styles(at) if f".st-key-{row} {{ container:" in s)
-            assert _layout(style, PHONE_ROW)[0] == 2, (state, row)
+            # None: no query applies, so each pair is at full size, its two cards side by side (the surface tiles).
+            assert (_layout(style, PHONE_ROW) or (2, 22.75))[0] == 2, (state, row)
             checked.add(row)
-    assert checked == {"price_cards", "strategy_cards", "greek_cards", "var_cards", "iv_cards"}
+    assert checked == {"price_cards", "strategy_cards", "greek_cards", "var_cards", "surface_tiles", "iv_cards"}
 
 
 @pytest.mark.parametrize(
