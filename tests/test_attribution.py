@@ -13,6 +13,7 @@ spot and strikes around 100, vol 20 %, rate 4 %, no dividends, 30 days to expiry
 from __future__ import annotations
 
 import dataclasses
+import doctest
 import itertools
 import math
 import re
@@ -207,8 +208,10 @@ SPX_1D = S.Market(5800, 0.043, 0.18, 1 / 365, 0.013)
 @pytest.mark.parametrize("market", [*MARKETS.values(), SPX_1D], ids=[*MARKETS.keys(), "SPX 1 day"])
 def test_one_day_of_time_alone_is_explained_by_theta_and_charm(market):
     # ACC 5: theta + charm within 1e-6 of position_value(t = 1/365) minus today's value, per unit (measured worst
-    # 4.5e-13, on the index positions worth thousands). The theta term is that difference by repricing and the
-    # charm term is zero without a spot move; nothing is left unexplained.
+    # 4.5e-13, on the index positions worth thousands). This holds by construction, so it is a regression check: the
+    # theta term is that difference by repricing, leg by leg, and the charm term is zero without a spot move; nothing
+    # is left unexplained. Charm and veta themselves are checked against revaluation in
+    # test_charm_and_veta_carry_the_cross_effect_of_a_move_and_the_time, and against mpmath below.
     for name, strategy in (*_templates(market), ("1-day put", S.Strategy("put", (S.Leg("put", 1, 5800),)))):
         if name == "1-day put" and market is not SPX_1D:
             continue
@@ -221,16 +224,64 @@ def test_one_day_of_time_alone_is_explained_by_theta_and_charm(market):
 
 
 def test_theta_times_the_time_would_leave_the_time_convexity_unexplained():
-    # Why the theta term reprices instead of using theta x days: theta / 365 misses (d2V/dt2) dt^2 / 2. On the
-    # golden straddle that is 6.46e-4 per unit (0.84 % of its one-day decay of 0.0769); on time_decay's 1-day put it
-    # is half the premium (theta / 365 -10.66 against the decay -21.56), which the theta term gets right.
+    # Why the theta term reprices instead of using theta x days: theta / 365 misses (d2V/dt2) dt^2 / 2 and the
+    # higher orders in time. On the golden straddle that is 6.46e-4 per unit (0.84 % of its one-day decay of
+    # 0.0769); on time_decay's 1-day put it is half the premium (theta / 365 -10.66 against the decay -21.56), which
+    # the theta term gets right.
     explain = A.taylor_explain(STRADDLE, GOLDEN, days=1)
     greek = S.position_risk(STRADDLE, GOLDEN).theta
     assert explain.theta - greek == pytest.approx(6.465e-4, abs=1e-6)
     assert (explain.theta - greek) / explain.theta == pytest.approx(0.0084, abs=1e-4)
     put = S.Strategy("put", (S.Leg("put", 1, 5800),))
-    assert round(A.taylor_explain(put, SPX_1D, days=1).theta, 2) == -21.56
+    one_day = A.taylor_explain(put, SPX_1D, days=1)
+    assert round(one_day.theta, 2) == -21.56
     assert round(S.position_risk(put, SPX_1D).theta, 2) == -10.66
+
+    # The dt^2 term (mpmath, 40 digits) is 98 % of the straddle's gap, 6.357e-4, but a quarter of the 1-day put's,
+    # -2.73 of -10.90: near expiry an at-the-money option is worth about c (T - t)^(1/2), so over its last day
+    # theta dt = -V / 2 and (d2V/dt2) dt^2 / 2 = -V / 8, while the decay is -V. The Methodology and the docstring
+    # say so; a time series in powers of dt does not converge there.
+    def dt2_term(strategy, market):
+        at = (mp.mpf(market.spot), mp.mpf(0), mp.mpf(0), mp.mpf(market.rate))
+        second = sum(leg.quantity * mp.diff(_mp_leg(leg, market), at, (0, 0, 2, 0)) for leg in strategy.legs)
+        return float(second * (mp.mpf(1) / 365) ** 2 / 2)
+
+    straddle_gap = explain.theta - greek
+    assert dt2_term(STRADDLE, GOLDEN) / straddle_gap == pytest.approx(0.983, abs=0.001)
+    put_gap = one_day.theta - S.position_risk(put, SPX_1D).theta
+    assert (dt2_term(put, SPX_1D), put_gap) == pytest.approx((-2.725, -10.901), abs=0.001)
+    assert dt2_term(put, SPX_1D) / put_gap == pytest.approx(0.25, abs=0.001)
+
+
+@pytest.mark.parametrize(
+    ("name", "factor", "first_gap"),
+    [("Risk Reversal", "spot", 0.0134), ("Short Straddle", "vol", 0.0090), ("Iron Condor", "vol", 0.169)],
+)
+def test_charm_and_veta_carry_the_cross_effect_of_a_move_and_the_time(name, factor, first_gap):
+    # The cross effect of a spot move and the time elapsed, by revaluation, V(S1, dt) - V(S1, 0) - V(S0, dt) +
+    # V(S0, 0), is charm dS dt plus pieces of third order (dS^2 dt and dS dt^2); the same holds for a vol move and
+    # veta. So the explain's charm (or veta) term matches the cross effect to a relative gap of first order, which
+    # halves when the move and the time both halve. Measured relative gaps for a -1 % spot move over a day, then
+    # halved three times: 1.34, 0.96, 0.55 and 0.29 % on the 30-day risk reversal (short 95 put, long 105 call); for
+    # +2 vol points over a day, 0.90, 0.45, 0.22, 0.11 % on the straddle and 16.9, 8.8, 4.5, 2.3 % on the condor,
+    # whose veta is small. Asserted: the first gap to 0.001 and every halving to divide it by 1.3 or more (1.40 at
+    # worst measured). Charm per year rather than per day, or per trading day, would miss by 364 times or 45 %.
+    strategy = S.build_template(name, 100, 5)
+    gaps = []
+    for k in range(4):
+        days = 1 / 2**k
+        spot, shift = (100 * (1 - 0.01 / 2**k), 0.0) if factor == "spot" else (100.0, 0.02 / 2**k)
+        explain = A.taylor_explain(strategy, GOLDEN, spot, vol_shift=shift, days=days)
+        cross = (
+            _value(strategy, GOLDEN, spot, days / 365, shift, 0)
+            - _value(strategy, GOLDEN, spot, 0, shift, 0)
+            - _value(strategy, GOLDEN, None, days / 365, 0, 0)
+            + _value(strategy, GOLDEN, None, 0, 0, 0)
+        )
+        term = explain.charm if factor == "spot" else explain.veta
+        gaps.append(abs(cross - term) / abs(term))
+    assert gaps[0] == pytest.approx(first_gap, abs=0.001)
+    assert all(later * 1.3 <= earlier for earlier, later in itertools.pairwise(gaps)), gaps
 
 
 # --- ACC 6: legs add up to the position ------------------------------------------------------------------------------
@@ -302,6 +353,30 @@ def test_per_leg_vol_shifts_move_each_leg_by_its_own_shift():
     assert shifted == A.shapley_explain(collar, GOLDEN, 98, vol_shift=(-0.1, 0.02, 0.01), days=1)
 
 
+def test_new_vols_re_mark_each_leg():
+    # vols= takes the legs' new implied vols, as from a surface: a risk reversal whose put (today 24 %, its own) goes
+    # to 27 % and whose call (today the market's 20 %) to 19 % is the move of shifts +3 and -1 points, and the
+    # explains' P&L is the position revalued with the legs re-marked to those vols, to rounding (1e-12 per unit).
+    reversal = S.Strategy("rr", (S.Leg("put", -1, 95, volatility=0.24), S.Leg("call", 1, 105)))
+    kwargs = {"days": 1, "multiplier": LOT}
+    by_vols = A.taylor_explain(reversal, GOLDEN, 98, vols=(0.27, 0.19), **kwargs)
+    by_shifts = A.taylor_explain(reversal, GOLDEN, 98, vol_shift=(0.27 - 0.24, 0.19 - 0.20), **kwargs)
+    assert by_vols == by_shifts
+    assert A.shapley_explain(reversal, GOLDEN, 98, vols=(0.27, 0.19), **kwargs) == A.shapley_explain(
+        reversal, GOLDEN, 98, vol_shift=(0.27 - 0.24, 0.19 - 0.20), **kwargs
+    )
+    re_marked = S.Strategy("rr", (S.Leg("put", -1, 95, volatility=0.27), S.Leg("call", 1, 105, volatility=0.19)))
+    later = _value(re_marked, GOLDEN, 98, 1 / 365, 0, 0)
+    assert by_vols.total == pytest.approx(LOT * (later - _value(reversal, GOLDEN, None, 0, 0, 0)), abs=1e-10)
+    # One vol for every leg re-marks the options flat; a stock leg's entry is ignored.
+    flat = A.taylor_explain_by_leg(reversal, GOLDEN, 98, vols=0.22, **kwargs)
+    assert flat == A.taylor_explain_by_leg(reversal, GOLDEN, 98, vol_shift=(0.22 - 0.24, 0.22 - 0.20), **kwargs)
+    collar = S.build_template("Collar", 100, 5)
+    assert A.taylor_explain(collar, GOLDEN, 98, vols=(0.0, 0.21, 0.19)) == A.taylor_explain(
+        collar, GOLDEN, 98, vols=(5.0, 0.21, 0.19)
+    )
+
+
 # --- ACC 7: the golden short straddle stress day --------------------------------------------------------------------
 
 
@@ -320,7 +395,8 @@ def test_golden_short_straddle_stress_day():
     assert (round(explain.charm, 2), round(explain.veta, 2)) == (-0.46, 2.26)
     assert list(explain.terms) == list(A.TAYLOR_TERMS)
     assert explain.explained + explain.unexplained == pytest.approx(explain.total, abs=1e-12)
-    assert explain.floor == pytest.approx(2.0, rel=1e-15)  # 1 bp of 2 x 100 shares x $100
+    # The floor, a tenth of the terms' gross ($288.26), is $28.83: below the loss, which is the quality's scale.
+    assert explain.floor == pytest.approx(28.83, abs=0.005)
     assert explain.quality == pytest.approx(25.17 / 188.36, abs=1e-4)
     textbook = A.taylor_explain(STRADDLE, S.Market(100, 0.05, 0.20, 1.0), 96, vol_shift=0.06, days=1, multiplier=LOT)
     assert textbook.total == pytest.approx(-373.07, abs=0.01)
@@ -420,22 +496,76 @@ def test_the_spot_rate_cross_term_left_in_the_residual():
 # --- Quality, stock legs, expiring legs and the inputs ---------------------------------------------------------------
 
 
+def _gross(explain: A.TaylorExplain) -> float:
+    return math.fsum(abs(value) for value in explain.terms.values())
+
+
 def test_quality_uses_the_floor_when_the_pnl_is_close_to_zero():
     # A 1 % spot rise that a 0.614-point vol fall offsets: the long straddle makes $0.0073 a contract and the Greeks
-    # miss $0.144, 20 times the P&L, a meaningless ratio. Against the floor, 1 bp of the $20,000 notional ($2), the
-    # quality reads 0.072.
+    # miss $0.144, 20 times the P&L, a meaningless ratio, since the delta (+$6.85), gamma (+$6.93) and vega
+    # (-$13.99) terms cancel. Against the floor, a tenth of their gross of $27.85, the quality reads 0.052.
     long = S.build_template("Long Straddle", 100, 5)
     explain = A.taylor_explain(long, GOLDEN, 101, vol_shift=-0.00614, multiplier=LOT)
     assert (explain.total, explain.unexplained) == pytest.approx((0.0073, 0.1440), abs=5e-5)
-    assert explain.floor == pytest.approx(2.0, rel=1e-15)
-    assert explain.quality == pytest.approx(explain.unexplained / 2.0, rel=1e-15)
+    assert (explain.delta, explain.gamma, explain.vega) == pytest.approx((6.85, 6.93, -13.99), abs=0.005)
+    assert _gross(explain) == pytest.approx(27.85, abs=0.005)
+    assert explain.floor == pytest.approx(A.QUALITY_FLOOR * _gross(explain), rel=1e-15)
+    assert explain.quality == pytest.approx(explain.unexplained / explain.floor, rel=1e-15)
+    assert explain.quality == pytest.approx(0.0517, abs=1e-4)
     given = A.taylor_explain(long, GOLDEN, 101, vol_shift=-0.00614, multiplier=LOT, floor=0.05)
     assert given.floor == 0.05 and given.quality == pytest.approx(explain.unexplained / 0.05, rel=1e-15)
-    # A P&L above the floor is its own scale; each leg's floor is its own notional, $1 here.
+    # A P&L above the floor is its own scale.
     assert A.taylor_explain(long, GOLDEN, 101, vol_shift=-0.00614, multiplier=LOT, floor=1e-4).quality == (
         pytest.approx(explain.unexplained / explain.total, rel=1e-15)
     )
-    assert [leg.floor for leg in A.taylor_explain_by_leg(long, GOLDEN, 101, multiplier=LOT)] == pytest.approx([1, 1])
+    # Each leg's default floor is a tenth of its own terms' gross; the position's is a tenth of its net terms'.
+    legs = A.taylor_explain_by_leg(long, GOLDEN, 101, vol_shift=-0.00614, multiplier=LOT)
+    assert [leg.floor for leg in legs] == pytest.approx([A.QUALITY_FLOOR * _gross(leg) for leg in legs], rel=1e-15)
+    assert [leg.floor for leg in A.taylor_explain_by_leg(long, GOLDEN, 101, floor=0.5)] == [0.5, 0.5]
+
+
+#: time_decay's 7-day index market: spot 5,800, rate 4.3 %, vol 16 %, dividend yield 1.3 %.
+SPX_7D = S.Market(5800, 0.043, 0.16, 7 / 365, 0.013)
+
+
+@pytest.mark.parametrize(
+    ("name", "total", "unexplained", "decay", "notional_quality"),
+    [("Iron Condor", 43.15, -6.21, 151.97, 0.027), ("Iron Butterfly", 15.72, -2.76, 59.17, 0.012)],
+)
+def test_a_typical_day_of_a_defined_risk_spread_is_not_floored(name, total, unexplained, decay, notional_quality):
+    # 7-day index spreads with strikes 50 apart, one contract, on a day when spot falls 0.5 % and implied vol rises
+    # half a point: the Greeks miss 14.4 % of the condor's $43.15 and 17.6 % of the butterfly's $15.72, and the
+    # quality says so. A floor of one basis point of the notional (4 legs x 5,800 x 100 shares, $232) would exceed
+    # both P&Ls and even the condor's whole day of time decay ($151.97), and read 0.027 and 0.012, as the method note
+    # says.
+    spread = S.build_template(name, 5800, 50, SPX_7D.expiry)
+    explain = A.taylor_explain(spread, SPX_7D, 5800 * 0.995, vol_shift=0.005, days=1, multiplier=LOT)
+    assert (explain.total, explain.unexplained, explain.theta) == pytest.approx((total, unexplained, decay), abs=0.005)
+    notional = 1e-4 * 4 * 5800 * LOT
+    assert explain.floor < abs(explain.total) < explain.theta < notional
+    assert explain.quality == pytest.approx(abs(explain.unexplained / explain.total), rel=1e-15)
+    assert explain.quality == pytest.approx(0.144 if name == "Iron Condor" else 0.176, abs=0.0005)
+    assert abs(explain.unexplained) / notional == pytest.approx(notional_quality, abs=0.0005)
+
+
+@given(
+    name=st.sampled_from(sorted(S.TEMPLATES)),
+    spot=st.floats(60.0, 150.0),
+    vol=st.floats(-0.15, 0.5),
+    rate=st.floats(-0.02, 0.02),
+    days=st.floats(0.0, 60.0),
+)
+def test_the_quality_against_the_default_floor_is_at_most_eleven(name, spot, vol, rate, days):
+    # With G the gross of the terms and U the unexplained P&L: when |U| > 1.1 G the P&L is at least |U| - G, else
+    # the floor 0.1 G is at least |U| / 11; either way |U| / max(|P&L|, 0.1 G) <= 1 + 1 / 0.1 (up to rounding), for
+    # the position and for each leg, on random moves of every template, past the front expiry too.
+    strategy = S.build_template(name, 100, 5, GOLDEN.expiry)
+    kwargs = {"vol_shift": vol, "rate_shift": rate, "days": days, "multiplier": LOT}
+    for explain in (
+        A.taylor_explain(strategy, GOLDEN, spot, **kwargs),
+        *A.taylor_explain_by_leg(strategy, GOLDEN, spot, **kwargs),
+    ):
+        assert 0.0 <= explain.quality <= (1 + 1 / A.QUALITY_FLOOR) * (1 + 1e-12)
 
 
 def test_stock_legs_have_delta_and_dividend_accrual_only():
@@ -474,6 +604,10 @@ def test_a_leg_that_expires_within_the_period_shows_in_the_quality():
         ({"vol_shift": (0.01,)}, r"vol_shift needs one shift per leg \(2\), got 1"),
         ({"vol_shift": (0.01, math.nan)}, "vol_shift must be a finite number"),
         ({"vol_shift": -0.2}, r"vol_shift -0.2 takes the implied vol of leg 1 \(Short 1 × 100 Call, 0.2\) to zero"),
+        ({"vols": (0.2,)}, r"vols needs one vol per leg \(2\), got 1"),
+        ({"vols": (0.2, 0.0)}, r"vols must be positive: leg 2 \(Short 1 × 100 Put\) got 0"),
+        ({"vols": math.inf}, "vols must be a finite number"),
+        ({"vols": 0.2, "vol_shift": 0.0}, "pass vol_shift or vols, not both"),
         ({"multiplier": math.nan}, "multiplier must be a finite number"),
         ({"floor": 0.0}, "floor must be a positive amount of P&L"),
     ],
@@ -547,7 +681,15 @@ def test_pla_metrics_refuse_bad_series(hpl, rtpl, message):
         A.pla_metrics(hpl, rtpl)
 
 
-# --- The Methodology quotes the golden case -------------------------------------------------------------------------
+# --- The docstrings, the Methodology and the method note quote the golden case --------------------------------------
+
+
+def test_the_docstring_examples_hold():
+    # The suite runs without --doctest-modules, so the module's examples (the stress day by term, by factor and leg
+    # by leg, and the PLA example) are run here: every number they print is pinned. All 23 example lines run, so
+    # none is skipped unseen.
+    result = doctest.testmod(A, optionflags=doctest.NORMALIZE_WHITESPACE)
+    assert result == (0, 23)
 
 
 def test_the_methodology_quotes_the_golden_stress_day():

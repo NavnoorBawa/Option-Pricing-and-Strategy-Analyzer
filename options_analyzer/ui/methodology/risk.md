@@ -64,16 +64,20 @@ elapsed $\delta t$:
   ${\text{veta}\,\delta\sigma\,\delta t}$.
 * **Unexplained** — $U$, the P&L less the nine terms.
 
-Theta as $\theta\,\delta t$ would leave ${\tfrac12\,\partial_{tt}V\,\delta t^2}$ unexplained: 0.8 % of a 30-day
-at-the-money straddle's one-day decay and half of a 1-day option's. The unexplained P&L $U$ is third order in the
-spot and vol moves, so halving them divides it by about 8 (7.84, 8.10 and 8.11 on an iron condor); the
-second-order terms of a rate move are left in it too. The quality ${|U| / \max(|\text{P\&L}|, f)}$ is the share
-of the P&L that the Greeks miss; its floor $f$, one basis point of the notional (spot times the number of options
-and shares held, long or short), keeps a P&L close to zero from turning a small $U$ into a large share. On a
-30-day at-the-money short straddle (spot and strike 100, vol 20 %, rate 4 %, no dividends, one 100-share
-contract), a day on which spot falls 4 % and implied vol rises 6 points loses \$188.36, and the nine terms leave
-\$25.17 unexplained (13.4 %): mostly zomma, since the higher vol lowers the straddle's gamma (its third-order term
-${\tfrac12\,\partial_{SS\sigma}V\,\delta S^2\,\delta\sigma}$ is +\$33.19).
+Theta as $\theta\,\delta t$ would leave ${\tfrac12\,\partial_{tt}V\,\delta t^2}$ and the higher orders in time
+unexplained: 0.8 % of a 30-day at-the-money straddle's one-day decay, and half of a 1-day at-the-money option's,
+whose value falls with the square root of the time left (the $\delta t^2$ term is then only a quarter of the gap).
+The unexplained P&L $U$ is third order in the spot and vol moves, so halving them divides it by about 8 (7.84,
+8.10 and 8.11 on an iron condor); the second-order terms of a rate move are left in it too. The quality
+${|U| / \max(|\text{P\&L}|, f)}$ is the share of the P&L that the Greeks miss. Its floor $f$, a tenth of the sum of
+the nine terms' sizes, comes into play when the P&L is smaller than that, as when a day's time decay offsets the
+gamma of a spot move: such a P&L is a small difference of larger amounts, and the share of it that the Greeks miss
+means little. With this floor the quality never exceeds 11. A floor in the notional would be the wrong scale for
+options: one basis point of a 7-day index iron condor's notional is \$232, more than its whole day of time decay,
+\$151.97. On a 30-day at-the-money short straddle (spot and strike 100, vol 20 %, rate 4 %, no dividends, one
+100-share contract), a day on which spot falls 4 % and implied vol rises 6 points loses \$188.36, and the nine terms
+leave \$25.17 unexplained (13.4 %): mostly zomma, since the higher vol lowers the straddle's gamma (its third-order
+term ${\tfrac12\,\partial_{SS\sigma}V\,\delta S^2\,\delta\sigma}$ is +\$33.19).
 
 The Shapley split shares the same P&L exactly between the four factors spot, vol, time and rate. With $v(A)$ the
 P&L when only the factors in $A$ move (16 revaluations), factor $i$ gets

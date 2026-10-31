@@ -31,6 +31,12 @@
 * Board of Governors of the Federal Reserve System (2026). *2026 Stress Test Scenarios*, February 2026 (the final
   scenarios).
   [federalreserve.gov](https://www.federalreserve.gov/publications/files/2026-final-supervisory-stress-test-scenarios-20260204.pdf)
+* Shapley, L. S. (1953). A value for n-person games. In H. W. Kuhn and A. W. Tucker (eds.), *Contributions to the
+  Theory of Games II*, Annals of Mathematics Studies 28, 307–317. Princeton University Press.
+  [doi:10.1515/9781400881970-018](https://doi.org/10.1515/9781400881970-018)
+* Basel Committee on Banking Supervision (2020). *MAR32: Backtesting and P&L attribution test requirements*, Basel
+  Framework, version of 27 March 2020, in force from 1 January 2023.
+  [bis.org](https://www.bis.org/basel_framework/chapter/MAR/32.htm?inforce=20230101&published=20200327)
 
 ### Volatility surface
 * Dupire, B. (1994). Pricing with a smile. *Risk*, January 1994.

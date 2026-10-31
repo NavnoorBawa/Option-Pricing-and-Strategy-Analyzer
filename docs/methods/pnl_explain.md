@@ -14,7 +14,9 @@ $r + \delta r$, $\delta t$ = `days` / 365 years later. The P&L is the full reval
 $$\text{P\&L} = \sum_i q_i \big[V_i(S_1, \sigma_i + \delta\sigma_i, r + \delta r, \delta t) - V_i(S_0, \sigma_i, r, 0)\big],$$
 
 each leg's two values differenced on their own, so that a small P&L is not lost in the rounding of a large value. The
-rate shift moves the options' rate only, as in `position_value`; the dividends a share accrues keep today's rate.
+vol shifts are given as shifts (`vol_shift`) or as the legs' new vols (`vols`, as when re-marking legs to a surface;
+then $\delta\sigma_i$ is the new vol less today's). The rate shift moves the options' rate only, as in
+`position_value`; the dividends a share accrues keep today's rate.
 
 ## The Greek waterfall (`taylor_explain`)
 
@@ -36,9 +38,15 @@ P&L. Each term is reported in dollars, the Greeks in desk units: vega per vol po
 value with nothing but time moving (for one day, `strategies.time_decay`), not $\theta\,\delta t$. It is exact for
 the passage of time alone, so a quiet day is explained in full; $\theta\,\delta t$ leaves
 $\tfrac12 \partial_{tt} V\,\delta t^2$ and the higher orders unexplained: $6.5 \times 10^{-4}$ per unit (0.8 % of the
-one-day decay) on a 30-day at-the-money straddle, and half the decay of a 1-day at-the-money option (an index put worth
-21.56 decays by 21.56, while $\theta / 365$ reads $-10.66$). Charm and veta correct today's delta and vega for the
-time elapsed.
+one-day decay) on a 30-day at-the-money straddle, 98 % of it the $\delta t^2$ term, and half the decay of a 1-day
+at-the-money option (an index put worth 21.56 decays by 21.56, while $\theta / 365$ reads $-10.66$). There the
+$\delta t^2$ term is only $-2.73$ of the $-10.90$ gap: an at-the-money option's value near expiry is about
+$c\sqrt{T - t}$, which no series in powers of $\delta t$ follows over its last day ($\theta\,\delta t = -V/2$,
+$\tfrac12 \partial_{tt} V\,\delta t^2 = -V/8$, decay $-V$). Charm and veta correct today's delta and vega for the
+time elapsed: the cross effect of a move and the time by revaluation,
+$V(S_1, \delta t) - V(S_1, 0) - V(S_0, \delta t) + V(S_0, 0)$, differs from $\text{charm}\,\delta S\,\delta t$ by
+1.3 % on a 30-day risk reversal over a day with a $-1$ % move, and the gap halves as the move and the time halve
+(the same for veta: 0.9 % on the straddle with $+2$ vol points).
 
 **What is left.** $U$ is third order in $\delta S$ and $\delta\sigma$: on an iron condor (strikes 90/95/105/110,
 30 days, vol 20 %, rate 4 %), halving a $-4$ % spot and $+6$ vol point move three times divides $U$ by 7.84, 8.10
@@ -47,11 +55,18 @@ expansion: with a 25 bp rise as well the ratios are 7.64, 7.65 and 7.29, heading
 $\partial_{Sr}V\,\delta S\,\delta r$, which a straddle's near-zero rho hides: \$1.14 per contract on the stress day
 below with a 25 bp rise, against a rho term of −\$0.05.
 
-**Quality.** $|U| / \max(|\text{P\&L}|, f)$, the share of the P&L the Greeks miss, with the floor $f$ one basis
-point of the notional, $10^{-4} \times \sum_i |q_i| \times S_0$ times the multiplier: the P&L of a 0.01 % spot move
-on a delta-one book of that size. Without it, a P&L close to zero turns any $U$ into a large ratio: a long straddle on
-a day when a 1 % rise is offset by a 0.614-point vol fall makes \$0.0073 a contract and the Greeks miss \$0.144, 20
-times the P&L; against the \$2 floor the quality is 0.072.
+**Quality.** $|U| / \max(|\text{P\&L}|, f)$, the share of the P&L the Greeks miss, with the floor $f$ a tenth of
+the gross of the nine terms, $0.1 \sum_k |T_k|$ (a leg's own terms for a leg, the position's net terms for the
+position). Small moves need no floor, since $U$ is third order in them; the floor is for a P&L that is a small
+difference of larger amounts. A long straddle on a day when a 1 % rise is offset by a 0.614-point vol fall makes
+\$0.0073 a contract, its delta (+\$6.85), gamma (+\$6.93) and vega (−\$13.99) terms cancelling, and the Greeks miss
+\$0.144, 20 times the P&L; against the floor, \$2.785, the quality is 0.052. Whatever the move, the quality is at most
+$1 + 1/0.1 = 11$: when $|U| > 1.1 \sum_k |T_k|$ the P&L is at least $|U| - \sum_k |T_k|$, and otherwise the floor is
+at least $|U| / 11$. A floor in the notional, $10^{-4} \sum_i |q_i| S_0$, would be the wrong scale for options: for a
+7-day index iron condor (4 legs, spot 5,800, 100 shares a contract) it is \$232, more than the condor's whole day of
+time decay (\$151.97). On a day when spot falls 0.5 % and implied vol rises half a point the condor makes \$43.15 and
+the Greeks miss \$6.21, which the notional floor would report as a quality of 0.027 instead of 0.144 (an iron
+butterfly: 0.012 instead of 0.176). Against a tenth of the terms neither day is floored.
 
 **The stress day.** A 30-day at-the-money short straddle (spot and strike 100, vol 20 %, rate 4 %, no dividends,
 one 100-share contract), spot $-4$ % and implied vol $+6$ points over one day:
@@ -100,7 +115,9 @@ red zone when the correlation is below 0.70 or the KS statistic above 0.12; zoni
 | Shapley parts | average of the 24 sequential attributions of the whole position | $6.2 \times 10^{-15}$ | $10^{-12}$ |
 | Shapley parts add up to the P&L, 26 templates × 4 moves × 3 markets | | $1.8 \times 10^{-15}$ | $10^{-9}$ |
 | Legs add up to the position | Greeks and revaluations of the whole position | $1.4 \times 10^{-14}$ | $10^{-11}$ |
-| One day of time alone, theta + charm | `position_value` a day later, including 1-day index options | $4.5 \times 10^{-13}$ | $10^{-6}$ |
+| One day of time alone, theta + charm (by construction: a regression check) | `position_value` a day later, including 1-day index options | $4.5 \times 10^{-13}$ | $10^{-6}$ |
+| Charm and veta, a $-1$ % move or $+2$ vol points over a day, then both halved 3 times | the cross effect by 4 revaluations | gap 1.3 % (charm, risk reversal), 0.9 % (veta, straddle), halving | each halving divides it by 1.3 or more |
+| Quality with the default floor, every template, random moves | the bound $1 + 1/0.1$ | at most 11 | 11 |
 | Spearman and KS on 250-day series with ties | SciPy `spearmanr` and `ks_2samp` | $6.9 \times 10^{-18}$ | $10^{-12}$ |
 
 ## Limits
@@ -117,7 +134,7 @@ red zone when the correlation is below 0.70 or the KS statistic above 0.12; zoni
 
 - Basel Committee on Banking Supervision (2020), *Basel Framework*, MAR32 "Internal models approach: backtesting and
   P&L attribution test requirements", version in force from 1 January 2023, paragraphs 32.34 to 32.42,
-  <https://www.bis.org/committees/bcbs/basel-framework/standard/mar/32/inforce/2023-01-01/published/2020-03-27>.
+  <https://www.bis.org/basel_framework/chapter/MAR/32.htm?inforce=20230101&published=20200327>.
 - L. S. Shapley (1953), "A value for n-person games", in H. W. Kuhn and A. W. Tucker (eds.), *Contributions to the
   Theory of Games II*, Annals of Mathematics Studies 28, Princeton University Press, 307-317,
   doi:[10.1515/9781400881970-018](https://doi.org/10.1515/9781400881970-018).

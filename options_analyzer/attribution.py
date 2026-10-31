@@ -23,9 +23,9 @@ Conventions
 * Every leg is valued as :func:`~options_analyzer.strategies.position_value` values it (Black-Scholes-Merton at the
   leg's own implied vol and remaining time; a share with its accrued dividends), and each leg's P&L is the
   difference of its own two values, so a small P&L is not lost in the rounding of a large total value.
-* A vol shift is absolute, in decimals (0.06 = +6 vol points), one number for every leg or one per leg; a rate shift
-  is in decimals (0.0025 = +25 bp) and moves the rate of the option legs, as in ``position_value``; ``days`` are
-  calendar days (ACT/365) and may be fractional.
+* A vol shift is absolute, in decimals (0.06 = +6 vol points), one number for every leg or one per leg; the legs'
+  new vols (``vols``) can be given instead. A rate shift is in decimals (0.0025 = +25 bp) and moves the rate of the
+  option legs, as in ``position_value``; ``days`` are calendar days (ACT/365) and may be fractional.
 * Results are in dollars after ``multiplier`` (contracts x shares per contract): ``multiplier=100`` gives the P&L of
   one listed contract per unit of leg quantity.
 """
@@ -33,8 +33,9 @@ Conventions
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
+from typing import cast
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -61,9 +62,9 @@ DAYS_PER_YEAR = 365.0
 TAYLOR_TERMS = ("delta", "gamma", "vega", "theta", "rho", "vanna", "volga", "charm", "veta")
 #: The factors of :func:`shapley_explain`.
 SHAPLEY_FACTORS = ("spot", "vol", "time", "rate")
-#: The default floor of the quality measure, as a fraction of the position's notional (sum of |quantity| x spot):
-#: one basis point. See :class:`TaylorExplain`.
-QUALITY_FLOOR = 1e-4
+#: The default floor of the quality measure, as a fraction of the gross of the nine terms (the sum of their absolute
+#: values): a tenth. See :class:`TaylorExplain`.
+QUALITY_FLOOR = 0.1
 
 
 @dataclass(frozen=True)
@@ -102,11 +103,15 @@ class TaylorExplain:
         Full-revaluation P&L: the value at the new spot, vols and rate ``days`` later minus the value today.
     quality : float
         ``|unexplained| / max(|total|, floor)``: 0 for a perfect explain, 0.1 when a tenth of the P&L is unexplained.
+        With the default floor it is never above ``1 + 1 / 0.1 = 11``.
     floor : float
-        Smallest P&L ($) the quality is measured against, so that a P&L close to zero (offsetting moves, or no move)
-        does not turn a small unexplained amount into a large ratio. By default one basis point of the notional,
-        ``1e-4 x sum(|quantity|) x S0 x |multiplier|``: the P&L of a 0.01 % spot move on a delta-one book of that
-        size, below which a day's P&L is too small for the ratio to mean anything.
+        Smallest P&L ($) the quality is measured against, so that a P&L close to zero does not turn a small
+        unexplained amount into a large ratio. By default a tenth of the gross of the nine terms, ``0.1 x
+        sum(|term|)``. A P&L below it is a small difference of larger effects that offset (a day's time decay
+        against the gamma of a spot move, say), and the share of it the Greeks miss says little; small moves need no
+        floor, since what they leave unexplained is third order in them. The floor grows with the position's own
+        P&L, which a floor in the notional does not: one basis point of the notional of a 7-day index iron condor
+        (4 legs x 5,800 x 100 shares) is $232, more than the condor's whole day of time decay, $151.97.
     """
 
     delta: float
@@ -175,11 +180,45 @@ class _Move:
     multiplier: float
 
 
+def _per_leg(name: str, values: float | Sequence[float], legs: int, noun: str) -> tuple[float, ...]:
+    """``values`` as one number per leg: a single number repeated, or a sequence with one ``noun`` per leg."""
+    if np.ndim(values) == 0:
+        return (_number(name, values),) * legs
+    numbers = tuple(_number(name, value) for value in cast(Sequence[float], values))
+    if len(numbers) != legs:
+        raise ValueError(f"{name} needs one {noun} per leg ({legs}), got {len(numbers)}")
+    return numbers
+
+
+def _vol_shifts(
+    legs: Sequence[Leg], market: Market, vol_shift: float | Sequence[float] | None, vols: float | Sequence[float] | None
+) -> tuple[float, ...]:
+    """Each leg's vol shift, from ``vol_shift`` or from the new ``vols``; a stock leg's is 0."""
+    if vol_shift is not None and vols is not None:
+        raise ValueError("pass vol_shift or vols, not both")
+    today = [market.volatility if leg.volatility is None else leg.volatility for leg in legs]
+    if vols is not None:
+        new = _per_leg("vols", vols, len(legs), "vol")
+        for number, (leg, vol) in enumerate(zip(legs, new, strict=True), start=1):
+            if leg.is_option and not vol > 0:
+                raise ValueError(f"vols must be positive: leg {number} ({leg.label()}) got {vol:g}")
+        # The shift that position_value adds back to today's vol: the new vol up to the rounding of one subtraction.
+        return tuple(vol - old if leg.is_option else 0.0 for leg, vol, old in zip(legs, new, today, strict=True))
+    shifts = _per_leg("vol_shift", 0.0 if vol_shift is None else vol_shift, len(legs), "shift")
+    for number, (leg, shift, vol) in enumerate(zip(legs, shifts, today, strict=True), start=1):
+        if leg.is_option and not vol + shift > 0:
+            raise ValueError(
+                f"vol_shift {shift:g} takes the implied vol of leg {number} ({leg.label()}, {vol:g}) to zero or below"
+            )
+    return shifts
+
+
 def _check(
     strategy: Strategy,
     market: Market,
     spot: float | None,
-    vol_shift: float | Sequence[float],
+    vol_shift: float | Sequence[float] | None,
+    vols: float | Sequence[float] | None,
     rate_shift: float,
     days: float,
     multiplier: float,
@@ -191,27 +230,14 @@ def _check(
     elapsed = _number("days", days)
     if elapsed < 0:
         raise ValueError(f"days must be a non-negative number of calendar days, got {elapsed:g}")
-    legs = strategy.legs
-    if np.ndim(vol_shift) == 0:
-        shifts = (_number("vol_shift", vol_shift),) * len(legs)
-    else:
-        shifts = tuple(_number("vol_shift", shift) for shift in vol_shift)
-        if len(shifts) != len(legs):
-            raise ValueError(f"vol_shift needs one shift per leg ({len(legs)}), got {len(shifts)}")
-    for number, (leg, shift) in enumerate(zip(legs, shifts, strict=True), start=1):
-        vol = market.volatility if leg.volatility is None else leg.volatility
-        if leg.is_option and not vol + shift > 0:
-            raise ValueError(
-                f"vol_shift {shift:g} takes the implied vol of leg {number} ({leg.label()}, {vol:g}) to zero or below"
-            )
+    shifts = _vol_shifts(strategy.legs, market, vol_shift, vols)
     return _Move(end, shifts, _number("rate_shift", rate_shift), elapsed, _number("multiplier", multiplier))
 
 
-def _floor(legs: Sequence[Leg], market: Market, move: _Move, floor: float | None) -> float:
-    """The quality floor ($) of these legs: ``floor`` checked, or one basis point of their notional."""
+def _check_floor(floor: float | None) -> float | None:
+    """``floor`` checked: None (the default, from the terms) or a positive amount of P&L ($)."""
     if floor is None:
-        notional = math.fsum(abs(leg.quantity) for leg in legs) * market.spot
-        return QUALITY_FLOOR * notional * abs(move.multiplier)
+        return None
     value = _number("floor", floor)
     if not value > 0:
         raise ValueError(f"floor must be a positive amount of P&L, got {value:g}")
@@ -222,8 +248,8 @@ def _one(leg: Leg) -> Strategy:
     return Strategy(leg.label(), (leg,))
 
 
-def _leg_taylor(leg: Leg, market: Market, move: _Move, shift: float, floor: float) -> TaylorExplain:
-    """The Taylor explain of one leg (``floor`` already in dollars)."""
+def _leg_taylor(leg: Leg, market: Market, move: _Move, shift: float, floor: float | None) -> TaylorExplain:
+    """The Taylor explain of one leg (``floor`` checked, None for the default)."""
     position = _one(leg)
     risk = position_risk(position, market)  # desk units: vega per vol point, theta per day, rho per 1 %, ...
     d_spot = move.spot - market.spot
@@ -246,7 +272,8 @@ def _leg_taylor(leg: Leg, market: Market, move: _Move, shift: float, floor: floa
         "gamma": 0.5 * risk.gamma * d_spot * d_spot,
         "vega": risk.vega * d_vol,
         # By repricing rather than theta x days, which misses (d2V/dt2) dt^2 / 2 and the higher orders in time: 0.8 %
-        # of a 30-day at-the-money straddle's one-day decay, and half the decay of a 1-day option (see time_decay).
+        # of a 30-day at-the-money straddle's one-day decay, and half the decay of a 1-day option, whose value falls
+        # as the square root of the time left (the dt^2 term is then a quarter of what is missed; see time_decay).
         "theta": later - today,
         "rho": risk.rho * d_rate,
         "vanna": risk.vanna * d_spot * d_vol,
@@ -257,20 +284,29 @@ def _leg_taylor(leg: Leg, market: Market, move: _Move, shift: float, floor: floa
     terms = {name: m * value for name, value in terms.items()}
     total = m * (moved - today)
     unexplained = total - math.fsum(terms.values())
-    return TaylorExplain(**terms, unexplained=unexplained, total=total, **_quality(unexplained, total, floor))
+    return TaylorExplain(**terms, unexplained=unexplained, total=total, **_quality(terms, unexplained, total, floor))
 
 
-def _quality(unexplained: float, total: float, floor: float) -> dict[str, float]:
+def _quality(terms: Mapping[str, float], unexplained: float, total: float, floor: float | None) -> dict[str, float]:
+    """The quality and its floor ($): ``floor`` if given, else a tenth of the gross of ``terms``."""
+    if floor is None:
+        floor = QUALITY_FLOOR * math.fsum(abs(value) for value in terms.values())
     # Nothing unexplained is a perfect explain, also with no P&L at all (no move, a zero multiplier): not 0 / 0.
+    # Otherwise the scale is positive: a zero P&L with something unexplained has terms that sum to minus it, so a
+    # positive gross (only an underflow of the tenth could leave a zero scale).
     scale = max(abs(total), floor)
     quality = 0.0 if unexplained == 0 else (abs(unexplained) / scale if scale > 0 else math.inf)
     return {"quality": quality, "floor": floor}
 
 
-def _sum_taylor(parts: Sequence[TaylorExplain], floor: float) -> TaylorExplain:
-    """The position's explain: the sum of its legs' (math.fsum, so the order of the legs does not matter)."""
+def _sum_taylor(parts: Sequence[TaylorExplain], floor: float | None) -> TaylorExplain:
+    """The position's explain: the sum of its legs' (math.fsum, so the order of the legs does not matter).
+
+    The default floor is a tenth of the gross of the position's terms, after the legs' terms have offset each other.
+    """
     sums = {name: math.fsum(getattr(part, name) for part in parts) for name in (*TAYLOR_TERMS, "unexplained", "total")}
-    return TaylorExplain(**sums, **_quality(sums["unexplained"], sums["total"], floor))
+    terms = {name: sums[name] for name in TAYLOR_TERMS}
+    return TaylorExplain(**sums, **_quality(terms, sums["unexplained"], sums["total"], floor))
 
 
 def taylor_explain_by_leg(
@@ -278,7 +314,8 @@ def taylor_explain_by_leg(
     market: Market,
     spot: float | None = None,
     *,
-    vol_shift: float | Sequence[float] = 0.0,
+    vol_shift: float | Sequence[float] | None = None,
+    vols: float | Sequence[float] | None = None,
     rate_shift: float = 0.0,
     days: float = 0.0,
     multiplier: float = 1.0,
@@ -287,8 +324,7 @@ def taylor_explain_by_leg(
     """The Greek explain of each leg, in the order of ``strategy.legs``; they add up to :func:`taylor_explain`.
 
     Takes the arguments of :func:`taylor_explain`. Each leg's quality is measured against its own P&L, with the
-    default floor of one basis point of the leg's notional (``|quantity| x S0 x |multiplier|``) or the ``floor``
-    given.
+    default floor of a tenth of the gross of the leg's own terms, or the ``floor`` given.
 
     Examples
     --------
@@ -299,14 +335,13 @@ def taylor_explain_by_leg(
     >>> round(call.delta, 2), round(put.delta, 2), round(call.delta + put.delta, 2)
     (213.71, -186.29, 27.42)
     """
-    move = _check(strategy, market, spot, vol_shift, rate_shift, days, multiplier)
-    return _taylor_legs(strategy, market, move, floor)
+    move = _check(strategy, market, spot, vol_shift, vols, rate_shift, days, multiplier)
+    return _taylor_legs(strategy, market, move, _check_floor(floor))
 
 
 def _taylor_legs(strategy: Strategy, market: Market, move: _Move, floor: float | None) -> tuple[TaylorExplain, ...]:
     return tuple(
-        _leg_taylor(leg, market, move, shift, _floor((leg,), market, move, floor))
-        for leg, shift in zip(strategy.legs, move.vol_shifts, strict=True)
+        _leg_taylor(leg, market, move, shift, floor) for leg, shift in zip(strategy.legs, move.vol_shifts, strict=True)
     )
 
 
@@ -315,7 +350,8 @@ def taylor_explain(
     market: Market,
     spot: float | None = None,
     *,
-    vol_shift: float | Sequence[float] = 0.0,
+    vol_shift: float | Sequence[float] | None = None,
+    vols: float | Sequence[float] | None = None,
     rate_shift: float = 0.0,
     days: float = 0.0,
     multiplier: float = 1.0,
@@ -332,13 +368,15 @@ def taylor_explain(
     with ``dS`` the spot move, ``dsigma`` each leg's vol shift, ``dr`` the rate shift and ``dt`` the time elapsed
     (:class:`TaylorExplain` gives each term's units). The theta term is the change in value over ``days`` with
     nothing else moving, by repricing: it is exact for the passage of time alone (a quiet day is explained in full,
-    even the day before expiry), where ``theta x days`` leaves ``(d2V/dt2) dt^2 / 2`` unexplained, 6.5e-4 per unit of
-    a 30-day at-the-money straddle over a day (0.8 % of its decay) and half the decay of a 1-day option. Charm and
-    veta then correct the delta and vega of today for the time elapsed. What the terms leave out is third order in
-    the spot and vol moves, so halving those moves divides the unexplained P&L by about 8, plus the second-order
-    terms of a rate move, mostly ``(d2V/dSdr) dS dr``: on the stress day below with a 25 bp rate rise, $1.14 per
-    contract, against a rho term of -$0.05. A leg that expires within ``days`` is valued at its intrinsic value,
-    which no Taylor expansion of today's value follows: the unexplained P&L, and the quality, show it.
+    even the day before expiry), where ``theta x days`` leaves ``(d2V/dt2) dt^2 / 2`` and the higher orders in time
+    unexplained: 6.5e-4 per unit of a 30-day at-the-money straddle over a day (0.8 % of its decay, 98 % of that the
+    ``dt^2`` term), and half the decay of a 1-day at-the-money option, whose value falls as the square root of the
+    time left, which no series in powers of the time follows (the ``dt^2`` term is only a quarter of that gap).
+    Charm and veta then correct the delta and vega of today for the time elapsed. What the terms leave out is third
+    order in the spot and vol moves, so halving those moves divides the unexplained P&L by about 8, plus the
+    second-order terms of a rate move, mostly ``(d2V/dSdr) dS dr``: on the stress day below with a 25 bp rate rise,
+    $1.14 per contract, against a rho term of -$0.05. A leg that expires within ``days`` is valued at its intrinsic
+    value, which no Taylor expansion of today's value follows: the unexplained P&L, and the quality, show it.
 
     Parameters
     ----------
@@ -346,10 +384,14 @@ def taylor_explain(
         The position and today's market.
     spot : float, optional
         Spot price after the move ($ per share), finite and non-negative; defaults to ``market.spot`` (no move).
-    vol_shift : float or sequence of float, default 0.0
+    vol_shift : float or sequence of float, optional
         Absolute change in implied vol (0.06 = +6 vol points), for every leg or one per leg in the order of
-        ``strategy.legs`` (a shift for a stock leg is ignored); for a leg's new vol, pass the new vol minus the old.
-        A shift must leave every option leg's vol positive.
+        ``strategy.legs`` (a shift for a stock leg is ignored); none by default. A shift must leave every option
+        leg's vol positive.
+    vols : float or sequence of float, optional
+        The legs' new implied vols (0.26 = 26 %), in place of ``vol_shift``: one for every leg or one per leg (an
+        entry for a stock leg is ignored), positive for an option leg. Each option leg's vol shift is then its new
+        vol minus its vol today (the leg's own, or ``market.volatility``), as when re-marking the legs to a surface.
     rate_shift : float, default 0.0
         Change in the risk-free rate (0.0025 = +25 bp), finite.
     days : float, default 0.0
@@ -357,8 +399,8 @@ def taylor_explain(
     multiplier : float, default 1.0
         Dollar scaling, e.g. contracts x shares per contract; finite.
     floor : float, optional
-        Floor of the quality measure ($), positive; by default one basis point of the notional (see
-        :class:`TaylorExplain`).
+        Floor of the quality measure ($), positive, e.g. a desk's own threshold; by default a tenth of the gross of
+        the nine terms (see :class:`TaylorExplain`).
 
     Returns
     -------
@@ -368,9 +410,9 @@ def taylor_explain(
     Raises
     ------
     ValueError
-        Naming the argument, if a number is not finite, ``spot`` or ``days`` is negative, ``vol_shift`` has a
-        number of shifts other than the number of legs or takes a leg's implied vol to zero or below, or ``floor``
-        is not positive.
+        Naming the argument, if a number is not finite, ``spot`` or ``days`` is negative, ``vol_shift`` or ``vols``
+        has a number of entries other than the number of legs or leaves an option leg's implied vol at zero or below,
+        both are given, or ``floor`` is not positive.
 
     Examples
     --------
@@ -387,8 +429,9 @@ def taylor_explain(
     >>> round(explain.total, 2), round(explain.unexplained, 2), round(explain.quality, 3)
     (-188.36, 25.17, 0.134)
     """
-    move = _check(strategy, market, spot, vol_shift, rate_shift, days, multiplier)
-    return _sum_taylor(_taylor_legs(strategy, market, move, floor), _floor(strategy.legs, market, move, floor))
+    move = _check(strategy, market, spot, vol_shift, vols, rate_shift, days, multiplier)
+    floor = _check_floor(floor)
+    return _sum_taylor(_taylor_legs(strategy, market, move, floor), floor)
 
 
 #: Weight of a marginal contribution in the Shapley value of four factors, by the number of factors already moved:
@@ -426,7 +469,8 @@ def shapley_explain_by_leg(
     market: Market,
     spot: float | None = None,
     *,
-    vol_shift: float | Sequence[float] = 0.0,
+    vol_shift: float | Sequence[float] | None = None,
+    vols: float | Sequence[float] | None = None,
     rate_shift: float = 0.0,
     days: float = 0.0,
     multiplier: float = 1.0,
@@ -444,7 +488,7 @@ def shapley_explain_by_leg(
     >>> round(call.spot, 2), round(put.spot, 2)
     (158.67, -241.33)
     """
-    move = _check(strategy, market, spot, vol_shift, rate_shift, days, multiplier)
+    move = _check(strategy, market, spot, vol_shift, vols, rate_shift, days, multiplier)
     return tuple(
         _leg_shapley(leg, market, move, shift) for leg, shift in zip(strategy.legs, move.vol_shifts, strict=True)
     )
@@ -455,7 +499,8 @@ def shapley_explain(
     market: Market,
     spot: float | None = None,
     *,
-    vol_shift: float | Sequence[float] = 0.0,
+    vol_shift: float | Sequence[float] | None = None,
+    vols: float | Sequence[float] | None = None,
     rate_shift: float = 0.0,
     days: float = 0.0,
     multiplier: float = 1.0,
@@ -476,8 +521,8 @@ def shapley_explain(
 
     Parameters
     ----------
-    strategy, market, spot, vol_shift, rate_shift, days, multiplier
-        As in :func:`taylor_explain`.
+    strategy, market, spot, vol_shift, vols, rate_shift, days, multiplier
+        As in :func:`taylor_explain`; the vol factor moves every leg's vol to its new value at once.
 
     Returns
     -------
@@ -503,7 +548,14 @@ def shapley_explain(
     -188.36
     """
     parts = shapley_explain_by_leg(
-        strategy, market, spot, vol_shift=vol_shift, rate_shift=rate_shift, days=days, multiplier=multiplier
+        strategy,
+        market,
+        spot,
+        vol_shift=vol_shift,
+        vols=vols,
+        rate_shift=rate_shift,
+        days=days,
+        multiplier=multiplier,
     )
     sums = {f.name: math.fsum(getattr(part, f.name) for part in parts) for f in fields(ShapleyExplain)}
     return ShapleyExplain(**sums)
