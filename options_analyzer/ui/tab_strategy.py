@@ -27,6 +27,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import streamlit as st
+from scipy.special import ndtri
 
 from .. import black_scholes as bs
 from .. import clock
@@ -397,6 +398,12 @@ def _width(inputs: Inputs, width_pct: float | None) -> float:
 # --- The builder bar (controls) -----------------------------------------------------------------------------------
 
 
+def _days_left(as_of: datetime, day: date, years: float) -> str:
+    """Time to an expiry as the tab writes it everywhere, floored as the what-if strip floors it (``55d`` for 55.73
+    days, where rounding read 56d in the menu beside 55d in the chart)."""
+    return time_left(years * clock.MINUTES_PER_YEAR, expiry_day=day == as_of.date())
+
+
 def _settings_label() -> str:
     """The Position settings popover's label: ``1 × 100 · $0.00/ct · RN``."""
     contracts = _control("contracts", CONTRACTS[0], _whole, _within(CONTRACTS))
@@ -495,9 +502,9 @@ def controls(inputs: Inputs) -> None:
         chosen = bar.selectbox(
             "Expiry",
             order,
-            format_func=lambda e: f"{lg.expiry_text(*e)} · {mk.span(rows[e] * 365.0)}",
+            format_func=lambda e: f"{lg.expiry_text(*e)} · {_days_left(inputs.context.as_of, e.day, rows[e])}",
             key="strategy_expiry",
-            width=180,
+            width=200,
             help="The template's expiry (a time spread's front). SPX monthlies settle AM at the opening prints, SPXW "
             "weeklies PM at the close. The default is the monthly nearest 45 days.",
         )
@@ -741,16 +748,16 @@ def _money(value: float) -> str:
 
 
 def _level_text(x: float, spot: float) -> str:
-    """A spot level to 0.1% of spot or finer, with the spot's four significant digits: whole points from 1,000
-    (``5,378``), one decimal from 100 (``85.6``), three on a $1 underlying (``0.962``), so that a breakeven agrees
-    with its change from spot shown to 0.1%.
+    """A spot level to 0.1% of spot or finer: whole points on an index from 1,000 (``5,378``), else as a breakeven's
+    help writes it (:func:`breakeven_decimals`: at least cents, ``85.58``; three decimals on a $1 underlying,
+    ``0.962``), so that a tile, a chart label and the help agree.
 
     Examples
     --------
     >>> _level_text(5377.65, 5800.0), _level_text(85.58, 100.0), _level_text(0.96155, 1.0), _level_text(10.384, 10.0)
-    ('5,378', '85.6', '0.962', '10.38')
+    ('5,378', '85.58', '0.962', '10.38')
     """
-    return f"{x:,.{max(0, 3 - math.floor(math.log10(spot)))}f}"
+    return f"{x:,.{0 if spot >= 1000 else breakeven_decimals(spot)}f}"
 
 
 def _pct_text(x: float) -> str:
@@ -858,6 +865,36 @@ def _elapsed(ctx: _Context, sessions: int) -> float:
 
 # --- Tiles ----------------------------------------------------------------------------------------------------------
 
+#: The spot range over which a loss that grows without bound only through the dividend yield is read (a long
+#: calendar's): the central 99.9% of the price at the front expiry.
+BOUNDED_LEVEL = 0.999
+
+
+def worst_loss(ctx: _Context) -> tuple[float, tuple[float, float] | None]:
+    """The position's maximum loss ($, positive) at the front expiry, and the spot range it was read over (None: every
+    spot).
+
+    A long calendar or diagonal loses without bound only because a dividend yield makes its long back call gain less
+    than $1 for each $1 rise: on the default index calendar the loss passes the debit near 3.4 × spot. A desk reads its
+    worst case as about the debit, so this loss is the worst P&L over the central :data:`BOUNDED_LEVEL` of the price
+    at the front expiry (risk-neutral from the smile under the index, log-normal at the flat vol otherwise), on 2,001
+    spots and every strike inside. Any other unbounded loss (a short call) stays infinite."""
+    m = ctx.metrics
+    if math.isfinite(m.max_loss) or not strat.unbounded_loss_from_dividends(ctx.entered, ctx.market):
+        return m.max_loss * ctx.units, None
+    market, T = ctx.market, m.horizon
+    if ctx.index and ctx.front is not None:
+        lo, hi = ctx.published.rn_range(ctx.front, BOUNDED_LEVEL)
+    else:
+        sd = market.volatility * math.sqrt(T)
+        median = market.spot * math.exp((market.rate - market.dividend_yield) * T - 0.5 * sd * sd)
+        z = float(ndtri(0.5 + BOUNDED_LEVEL / 2))
+        lo, hi = median * math.exp(-z * sd), median * math.exp(z * sd)
+    strikes = [k for k in ctx.entered.strikes if lo < k < hi]
+    spots = np.unique(np.concatenate([np.linspace(lo, hi, 2001), strikes]))
+    values = strat.pnl(ctx.entered, market, spots, T, ctx.choice.carry) * ctx.units
+    return float(-np.min(values)), (float(lo), float(hi))
+
 
 def _probability(ctx: _Context) -> tuple[float, str, float, float]:
     """P(profit) at the front expiry, its basis, and the expected P&L and its standard deviation ($) under it.
@@ -957,13 +994,27 @@ def _tiles(ctx: _Context) -> None:
             {"delta": basis_front if multi else None, "delta_color": "off", "delta_arrow": "off",
              "help": md(f"The largest P&L at the {basis_front}: {money(m.max_profit * units)}.{later}")},
         )  # fmt: skip
+    loss, within = worst_loss(ctx)
     if m.max_loss < 0:
         loss_tile: Card = ("Max loss", "No loss", {"help": md(f"The position cannot lose at the {basis_front}.")})
-    else:
-        worst = signed(-m.max_loss * units, 2, "$") if math.isfinite(m.max_loss) else "unbounded"
+    elif within is not None:
+        word = "risk-neutral" if ctx.index else "flat-vol"
         loss_tile = (
             "Max loss",
-            _signed_money(-m.max_loss * units) if math.isfinite(m.max_loss) else "Unlimited",
+            _signed_money(-loss),
+            {"delta": f"{'RN ' if ctx.index else ''}99.9% range", "delta_color": "off", "delta_arrow": "off",
+             "help": md(
+                 f"The worst P&L at the {basis_front} for spot within the {word} 99.9% range to it, "
+                 f"{number(within[0], 0)}–{number(within[1], 0)}: {signed(-loss, 2, '$')}. Far above that range the "
+                 "loss grows without bound: with a dividend yield the long back call gains less than $1 for each $1 "
+                 f"rise.{later}"
+             )},
+        )  # fmt: skip
+    else:
+        worst = signed(-loss, 2, "$") if math.isfinite(loss) else "unbounded"
+        loss_tile = (
+            "Max loss",
+            _signed_money(-loss) if math.isfinite(loss) else "Unlimited",
             {"delta": basis_front if multi else None, "delta_color": "off", "delta_arrow": "off",
              "help": md(f"The worst P&L at the {basis_front}: {worst}.{later}")},
         )  # fmt: skip
@@ -1140,7 +1191,9 @@ def _chart(ctx: _Context, shifts: whatif.Shifts, range_choice: str, dated: list[
         part
         for part in (
             ctx.front and lg.expiry_text(*ctx.front),
-            time_left(clock.year_fraction(ctx.as_of, ctx.front_at) * clock.MINUTES_PER_YEAR) if ctx.index else "",
+            _days_left(ctx.as_of, ctx.front_at.date(), clock.year_fraction(ctx.as_of, ctx.front_at))
+            if ctx.index
+            else "",
             "RN smile" if ctx.index else "flat vol",
         )
         if part
@@ -1185,13 +1238,17 @@ def _download(ctx: _Context, profile: pd.DataFrame, where) -> None:
 
 
 def table_dates(ctx: _Context) -> list[tuple[int | None, date]]:
-    """The table's columns: trading sessions from today to the front expiry, weekly (every fifth session) then the
-    last five daily, and the expiry itself (``None`` sessions): ``(T+N, date)``."""
+    """The table's columns: trading sessions from today to the front expiry, weekly (the last session of each calendar
+    week: a Friday, or the session before a Friday holiday) then the last five daily, and the expiry itself (``None``
+    sessions): ``(T+N, date)``. Every fifth session drifted to Mondays after the Thanksgiving holiday."""
     sessions = whatif.sessions_to(ctx.as_of.date(), ctx.front_at.date())
     days = whatif.session_dates(ctx.as_of.date(), sessions)
     last = [n for n in range(sessions + 1) if days[n] < ctx.front_at.date() or n < sessions]
-    weekly = [n for n in last if n % 5 == 0 and n < (last[-1] - 4 if last else 0)]
     daily = last[-5:] if last else []
+    week_end: dict[tuple[int, int], int] = {}
+    for n in last:
+        week_end[days[n].isocalendar()[:2]] = n  # the sessions are in order: the last one of each week stays
+    weekly = [n for n in week_end.values() if not daily or n < daily[0]]
     picked = sorted(set(weekly) | set(daily) | {0})
     return [(n, days[n]) for n in picked if _elapsed(ctx, n) < ctx.metrics.horizon] + [(None, ctx.front_at.date())]
 
@@ -1226,7 +1283,7 @@ def _table(ctx: _Context, shifts: whatif.Shifts, unit: str) -> None:
         values.append(column)
     grid = np.array(values).T  # rows: spots
     if unit == "% of max loss":
-        scale = ctx.metrics.max_loss * units
+        scale = worst_loss(ctx)[0]
         grid = grid / scale * 100 if math.isfinite(scale) and scale > 0 else grid * np.nan
     elif unit == "% of premium":
         scale = abs(ctx.metrics.entry_cost) * units
@@ -1396,8 +1453,12 @@ def _editor_config(index: bool, published) -> dict:
         lg.QTY: st.column_config.NumberColumn(
             "Qty", help="Signed: positive long, negative short.", step=1, format="%+d", required=True
         ),
+        # Put and Call, as the blotter's View writes them.
         lg.TYPE: st.column_config.SelectboxColumn(
-            "Type", options=list(lg.INDEX_KINDS if index else strat.LEG_KINDS), required=True
+            "Type",
+            options=list(lg.INDEX_KINDS if index else strat.LEG_KINDS),
+            required=True,
+            format_func=str.capitalize,
         ),
         lg.ENTRY: st.column_config.NumberColumn(
             "Entry",
@@ -1412,7 +1473,12 @@ def _editor_config(index: bool, published) -> dict:
             help="A listed expiry: AM settles at the opening prints, PM at the close.",
         )  # fmt: skip
         config[lg.STRIKE] = st.column_config.NumberColumn(
-            "Strike", min_value=1.0, step=5.0, format="%.0f", help="Blank: the listed strike nearest the forward."
+            "Strike",
+            min_value=1.0,
+            step=5.0,
+            format="%,.0f",
+            help="A listed strike: every 5 points near the money, every 50 further out. A strike the chain does not "
+            "list has no quote: it takes the surface vol there and enters at its model value.",
         )
         config[lg.IV] = st.column_config.NumberColumn(
             "IV override (%)", min_value=0.1, max_value=500.0, format="%.2f", help="Blank: the published surface."
@@ -1430,19 +1496,23 @@ def _editor_config(index: bool, published) -> dict:
     return config
 
 
-def _steppers(ctx: _Context, grid: lg.Grid, row) -> None:
+def _steppers(ctx: _Context, grid: lg.Grid, row, frame: pd.DataFrame) -> None:
     """The structure steppers (UI-8): Shift, Width, Roll and Flip, small buttons in the blotter's head row. The
     delta-hedge ticket waits for futures legs (roadmap RK-11)."""
     store = ctx.choice.store
     forward = ctx.published.forward(ctx.front) if ctx.index and ctx.front is not None else ctx.market.spot
     roll_help = "" if ctx.index else " The textbook market lists no expiries."
+    no_wings = not lg.wings(frame, forward)
+    width_help = " This structure has no wings to move (a straddle or a calendar has one strike)." if no_wings else ""
     for key, label, change, help_text, disabled in (
         ("step_shift_down", "Shift −", lambda f: lg.shift(f, -1, grid), "Every strike one listed interval lower.",
          False),
         ("step_shift_up", "Shift +", lambda f: lg.shift(f, 1, grid), "Every strike one listed interval higher.", False),
         ("step_width_in", "Width −", lambda f: lg.widen(f, -1, grid, forward),
-         "The wings one interval in, never onto the body.", False),
-        ("step_width_out", "Width +", lambda f: lg.widen(f, 1, grid, forward), "The wings one interval out.", False),
+         "The wings one listed interval in, never onto the body: the outer strikes held the other way from the "
+         "strikes inside them (a strangle's two strikes; a vertical's far strike)." + width_help, no_wings),
+        ("step_width_out", "Width +", lambda f: lg.widen(f, 1, grid, forward),
+         "The wings one listed interval out." + width_help, no_wings),
         ("step_roll_back", "Roll ←", lambda f: lg.roll(f, -1, grid),
          "Every leg to the previous listed expiry." + roll_help, not ctx.index),
         ("step_roll_next", "Roll →", lambda f: lg.roll(f, 1, grid), "Every leg to the next listed expiry." + roll_help,
@@ -1581,7 +1651,7 @@ def _blotter(ctx, inputs, choice, state, frame, editor_key, book, profile) -> No
         label_visibility="collapsed",
     )  # fmt: skip
     if ctx is not None:
-        _steppers(ctx, grid, head)
+        _steppers(ctx, grid, head, frame)
         if profile is not None:
             _download(ctx, profile, head)
     for message in book.errors:

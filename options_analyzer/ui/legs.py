@@ -12,7 +12,8 @@ chain. Under the textbook market a leg keeps days to expiry and the flat sidebar
 
 :func:`index_template` places a template's strikes the way a desk does (RK-9a): with strikes by delta, the short
 strikes are the listed strikes whose own delta, at their own surface vol, is nearest the target
-(``PublishedSurface.delta_strike``), and the wings sit a number of index points beyond them, snapped to listed strikes;
+(``PublishedSurface.delta_strike``), and each wing sits on the first listed strike at least a number of index points
+beyond its short (:func:`beyond`), never on it;
 a template with legs at the money (a butterfly, a vertical) centres on the listed strike nearest the forward and sets
 its other strikes by the wing points.
 """
@@ -50,10 +51,11 @@ INDEX_KINDS = ("call", "put")
 #: Short-strike deltas offered by the builder (spot convention, absolute), and the default (spec 3.2 item 1).
 SHORT_DELTAS = (10, 16, 20, 25, 30)
 DEFAULT_SHORT_DELTA = 16
-#: Wing widths in index points (spec 3.2 item 1: equal on both sides, snapped to listed strikes), and the default.
-#: Fixed values rather than multiples of each expiry's local strike interval, so that a link keeps its wing: the
-#: synthetic SPX lists every 50 points from about 6% out of the money (``synthetic._INTERVALS``), every 5 near it.
-WING_POINTS = (25, 50, 100, 150, 200)
+#: Wing widths in index points (spec 3.2 item 1: equal on both sides, each wing on the first listed strike at least
+#: this far beyond its short), and the default. Fixed values rather than multiples of each expiry's local strike
+#: interval, so that a link keeps its wing: the synthetic SPX lists every 50 points from about 6% out of the money
+#: (``synthetic._INTERVALS``), every 5 near it, so the menu offers 1 to 4 × 50 (a 25-point wing would sit 50 out).
+WING_POINTS = (50, 100, 150, 200)
 DEFAULT_WING = 100
 #: The template expiry the index opens on: the AM monthly nearest this many calendar days (spec 3.2 item 1).
 DEFAULT_DTE = 45
@@ -114,6 +116,24 @@ def snap(strikes: np.ndarray, k: float) -> float:
     return float(strikes[int(np.argmin(np.abs(strikes - k)))])
 
 
+def beyond(strikes: np.ndarray, k: float, side: int) -> float:
+    """The listed strike at ``k`` or the first one beyond it: on the call side (``side`` +1) the smallest listed
+    strike ≥ ``k``, on the put side (−1) the largest ≤ ``k``. A wing so placed is never nearer the body than its
+    width: snapping to the nearest strike put a 25-point wing on the short strike itself where the chain lists every 50
+    points.
+
+    Raises
+    ------
+    ValueError
+        If no listed strike lies at or beyond ``k`` on that side.
+    """
+    tol = 1e-9 * max(abs(k), 1.0)
+    out = strikes[strikes >= k - tol] if side > 0 else strikes[strikes <= k + tol]
+    if not len(out):
+        raise ValueError(f"no strike is listed at or {'above' if side > 0 else 'below'} {strike_text(k, math.nan)}")
+    return float(out.min() if side > 0 else out.max())
+
+
 def interval(strikes: np.ndarray, k: float) -> float:
     """The listed strike interval at ``k``: the wider of the two gaps beside the listed strike nearest it, so that a
     move by it lands on a listed strike on either side (5 near the money, 50 in the synthetic SPX's wings)."""
@@ -172,10 +192,11 @@ def index_template(
       (strangles, condors, risk reversals) puts its n = ±1 strikes at the listed put and call whose own delta at their
       own surface vol is nearest ``short_delta`` (``PublishedSurface.delta_strike``) and its n = ±2 strikes ``wing``
       points beyond them;
-    * by width, every strike is the listed one nearest ATMF + n × ``width``.
+    * by width, the strike n steps out is at ATMF + n × ``width``.
 
-    Every strike is snapped to the strikes listed on its leg's expiry; a time spread's back leg is on the listed expiry
-    nearest twice the front's maturity (:func:`_back`).
+    A centre or a short strike by delta is the listed strike nearest its target; every other strike is the listed one
+    at or beyond its target (:func:`beyond`), so a wing is never nearer its body than the wing width and never on it.
+    A time spread's back leg is on the listed expiry nearest twice the front's maturity (:func:`_back`).
 
     Parameters
     ----------
@@ -224,14 +245,27 @@ def index_template(
     for leg, n, multiple in shape:
         on = expiries[multiple]
         grid = published.strikes(on)
+        sign = 1 if n > 0 else -1
         if strikes_by == "width":
             target = atm + n * float(width)  # type: ignore[arg-type]
         elif centred:
             target = atm + n * wing
         else:
-            sign = 1 if n > 0 else -1
             target = body[sign] + sign * (abs(n) - 1) * wing
-        rows.append(_row(leg.kind, leg.quantity, snap(grid, target), expiry=expiry_text(*on)))
+        if n == 0 or (strikes_by == "delta" and not centred and abs(n) == 1):
+            k = snap(grid, target)  # the centre, or a short strike by delta: the listed strike nearest it
+        else:
+            # A wing (or a strike n widths out) at least its width beyond the strike inside it: the listed strike at
+            # or beyond the target, so that it never lands on the body.
+            try:
+                k = beyond(grid, target, sign)
+            except ValueError:
+                where = "above" if sign > 0 else "below"
+                raise ValueError(
+                    f"{name}: {expiry_text(*on)} lists no strike at or {where} {strike_text(target, math.nan)}, "
+                    "where a wing would go. Pick narrower wings, a nearer delta or another expiry."
+                ) from None
+        rows.append(_row(leg.kind, leg.quantity, k, expiry=expiry_text(*on)))
     return frame(rows)
 
 
@@ -344,24 +378,46 @@ def shift(table: pd.DataFrame, direction: int, grid: Grid) -> pd.DataFrame:
     return out
 
 
-def widen(table: pd.DataFrame, direction: int, grid: Grid, forward: float) -> pd.DataFrame:
-    """The wings moved out one interval (``direction`` +1) or in (−1), never onto or across the body.
+def wings(table: pd.DataFrame, forward: float) -> dict[float, int]:
+    """The wing strikes of the legs, each with its side (−1 below the body, +1 above), as Width moves them.
 
-    With three or more distinct strikes the wings are the lowest and the highest; with two, the strike further from
-    ``forward`` (a vertical's short leg, say). A wing moving in stops one interval short of the next strike inside it.
+    A wing is the lowest or the highest strike when the legs there are held the other way from those at the next strike
+    inside it: a condor's or a butterfly's long wings outside their shorts (or short wings outside longs, flipped).
+    With two strikes, a put below a call (a strangle, a risk reversal) widens on both sides; otherwise (a vertical, a
+    ratio spread) the strike further from ``forward`` is the wing. A straddle or a calendar (one strike) has no wing,
+    nor has a jade lizard's put side (a short put alone): Width leaves them where they are.
     """
+    options = _options(table)
+    rows = table[options]
+    if rows.empty:
+        return {}
+    net = rows.groupby(STRIKE)[QTY].sum().sort_index()
+    strikes = list(net.index)
+    if len(strikes) < 2:
+        return {}
+    if len(strikes) == 2:
+        low, high = strikes
+        kinds = rows.groupby(STRIKE)[TYPE].agg(set)
+        if kinds[low] == {"put"} and kinds[high] == {"call"}:
+            return {low: -1, high: 1}
+        far = max(strikes, key=lambda k: abs(k - forward))
+        return {far: 1 if far == high else -1}
+    out = {}
+    for outer, inner, side in ((strikes[0], strikes[1], -1), (strikes[-1], strikes[-2], 1)):
+        if net[outer] != 0 and np.sign(net[outer]) != np.sign(net[inner]):
+            out[outer] = side
+    return out
+
+
+def widen(table: pd.DataFrame, direction: int, grid: Grid, forward: float) -> pd.DataFrame:
+    """The wings (:func:`wings`) moved out one interval (``direction`` +1) or in (−1), never onto or across the body:
+    a wing moving in stops one interval short of the next strike inside it."""
     out = frame(table.to_dict("records"))
     options = _options(out)
+    found = wings(out, forward)
     strikes = sorted(set(out.loc[options, STRIKE]))
-    if len(strikes) < 2:
-        return out
-    if len(strikes) == 2:
-        far = max(strikes, key=lambda k: abs(k - forward))
-        wings = {far: 1 if far == strikes[-1] else -1}
-    else:
-        wings = {strikes[0]: -1, strikes[-1]: 1}
-    for wing, side in wings.items():
-        inner = strikes[-2] if side > 0 else strikes[1]
+    for wing, side in found.items():
+        inner = strikes[strikes.index(wing) - side]
         for i in out.index[options & (out[STRIKE] == wing)]:
             label = out.at[i, EXPIRY]
             moved = grid.snap(label, wing + side * direction * grid.interval(label, wing))

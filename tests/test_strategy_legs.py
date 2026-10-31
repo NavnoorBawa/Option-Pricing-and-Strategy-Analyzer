@@ -98,8 +98,9 @@ def test_the_short_strikes_are_the_listed_strikes_nearest_16_delta_at_their_own_
         ("Short Strangle", {}, [5400.0, 6150.0]),
         ("Iron Butterfly", {"wing": 150.0}, [5680.0, 5830.0, 5830.0, 5980.0]),
         ("Bull Call Spread", {"wing": 100.0}, [5830.0, 5930.0]),
-        # 5,830 ± 200 and ± 400, each snapped: 5,430 and 6,230 are not listed (50-point strikes out there).
-        ("Iron Condor", {"strikes_by": "width", "width": 200.0}, [5450.0, 5630.0, 6030.0, 6250.0]),
+        # 5,830 ± 200 and ± 400: 5,430 and 6,230 are not listed (50-point strikes out there), so the outer strikes
+        # go to the first listed strike beyond, 5,400 and 6,250, never nearer the inner ones than the width.
+        ("Iron Condor", {"strikes_by": "width", "width": 200.0}, [5400.0, 5630.0, 6030.0, 6250.0]),
     ],
 )
 def test_templates_place_their_strikes_by_delta_or_width_on_listed_strikes(published, name, kwargs, expected):
@@ -109,6 +110,37 @@ def test_templates_place_their_strikes_by_delta_or_width_on_listed_strikes(publi
     assert sorted(table[lg.STRIKE]) == expected
     listed = set(published.strikes(DEC))
     assert all(k in listed for k in table[lg.STRIKE])
+
+
+def test_a_wing_never_lands_on_its_short_on_any_listed_expiry(published):
+    # A 25-point wing snapped to the nearest listed strike where SPX lists every 50 put the condor's call wing on its
+    # short call (+1 and −1 6,150C) and the put wing 50 points out; with 10Δ shorts on 17-Mar-28 100-point wings did
+    # the same on 7,500. Every wing is now the first listed strike at least the wing width beyond its short, or the
+    # template is refused (no listed strike there). Across every listed expiry, short delta and wing of the menus:
+    # no template holds a contract twice, and each wing lies at least the width beyond its short.
+    sides = {"Iron Condor": ((0, 1), (3, 2)), "Jade Lizard": ((2, 1),), "Iron Butterfly": ((0, 1), (3, 2))}
+    refused = 0
+    for key in lg.listed(published):
+        listed = set(published.strikes(key))
+        for name, pairs in sides.items():
+            for delta in lg.SHORT_DELTAS:
+                for wing in lg.WING_POINTS:
+                    try:
+                        table = lg.index_template(name, published, key, short_delta=delta / 100, wing=float(wing))
+                    except ValueError as exc:
+                        assert "lists no strike" in str(exc)
+                        refused += 1
+                        continue
+                    contracts = list(zip(table[lg.TYPE], table[lg.STRIKE], table[lg.EXPIRY], strict=True))
+                    assert len(set(contracts)) == len(contracts), (key, name, delta, wing, contracts)
+                    strikes = list(table[lg.STRIKE])
+                    assert set(strikes) <= listed
+                    for outer, inner in pairs:
+                        side = 1 if outer > inner else -1
+                        assert side * (strikes[outer] - strikes[inner]) >= wing, (key, name, delta, wing, strikes)
+    assert refused < 10  # only far wings past the last listed strike are refused
+    # The menu offers 1 to 4 × the 50-point interval listed out of the money (spec 3.2 item 1).
+    assert lg.WING_POINTS == (50, 100, 150, 200)
 
 
 def test_a_time_spread_puts_its_back_leg_on_the_listed_expiry_nearest_twice_the_front(published):
@@ -142,6 +174,34 @@ def test_width_moves_the_wings_only_and_never_crosses_the_body(published):
         table = lg.widen(table, -1, grid, forward)
     # The wings stop one listed interval outside the shorts: 5,350 and 6,200, never on or past 5,400 and 6,150.
     assert list(table[lg.STRIKE]) == [5350.0, 5400.0, 6150.0, 6200.0]
+
+
+@pytest.mark.parametrize(
+    ("name", "wings", "out", "inward"),
+    [
+        # A strangle has no body inside it: Width moves both strikes, symmetrically, and stops short of crossing.
+        ("Short Strangle", {5400.0: -1, 6150.0: 1}, [5350.0, 6200.0], [5450.0, 6100.0]),
+        # A jade lizard's short put stands alone: only the long call wing moves (the short put and call stay).
+        ("Jade Lizard", {6250.0: 1}, [5400.0, 6150.0, 6300.0], [5400.0, 6150.0, 6200.0]),
+        # A butterfly's long wings move one listed interval (5 points near the money); its body stays.
+        ("Long Call Butterfly", {5730.0: -1, 5930.0: 1}, [5725.0, 5830.0, 5935.0], [5735.0, 5830.0, 5925.0]),
+        # A vertical's far strike is its wing; a straddle (one strike) has none.
+        ("Bull Call Spread", {5930.0: 1}, [5830.0, 5935.0], [5830.0, 5925.0]),
+        ("Long Straddle", {}, [5830.0, 5830.0], [5830.0, 5830.0]),
+    ],
+)
+def test_width_moves_the_wings_of_each_structure(published, name, wings, out, inward):
+    # Spec 3.2 item 5: Width −/+ moves the wings only, never crossing the body. The wings were the lowest and highest
+    # strikes whatever their sign, so Width + moved a jade lizard's short put and only one side of a strangle.
+    grid, forward = lg.Grid(published), published.forward(DEC)
+    table = lg.index_template(name, published, DEC)
+    assert lg.wings(table, forward) == wings
+    assert list(lg.widen(table, 1, grid, forward)[lg.STRIKE]) == out
+    assert list(lg.widen(table, -1, grid, forward)[lg.STRIKE]) == inward
+    for _ in range(40):
+        table = lg.widen(table, -1, grid, forward)
+    strikes = sorted(table[lg.STRIKE])
+    assert len(set(strikes)) == len(set(lg.index_template(name, published, DEC)[lg.STRIKE]))  # nothing merged
 
 
 def test_roll_moves_every_leg_to_the_next_listed_expiry_and_flip_negates(published):

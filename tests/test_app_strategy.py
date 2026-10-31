@@ -376,6 +376,23 @@ def test_a_scenario_link_reproduces(published):
     assert _chart(again, "payoff_chart")["data"] == spec["data"]
 
 
+def test_the_view_and_the_scenario_leave_the_link_while_another_tab_is_open():
+    # The share note says the link holds the Strategy view and the what-if shifts while the Strategy tab is open: their
+    # widgets are drawn only there, and Streamlit drops the URL parameter of a widget it does not draw. The session
+    # keeps them, and opening the tab again puts them back in the link.
+    from options_analyzer.ui import header
+
+    held = {"st_view", "st_units", "wv"}
+    at = _index(st_view="Table", st_units="% of max loss", wv=3)
+    assert held <= set(at.query_params)
+    _open(at, "Pricing")
+    assert not held & set(at.query_params)
+    assert "while the Strategy tab is open, its view" in header.SHARE_NOTE
+    _open(at, "Strategy")
+    assert held <= set(at.query_params)
+    assert at.segmented_control(key="st_view").value == "Table" and at.number_input(key="wv").value == 3.0
+
+
 def test_the_table_view(published):
     # UI-9: the date x spot table. The cell at today's spot and date is the T+0 P&L there (−$12.77, theo less mid;
     # the spec's −$24 was the generator before SF-4), and the expiry column is the expiry curve.
@@ -385,7 +402,12 @@ def test_the_table_view(published):
     heat = _chart(at, "pnl_table")["data"][0]
     spots = np.array([float(y.split(" ")[0].replace(",", "")) for y in heat["y"]])
     z = _array(heat["z"])
-    assert heat["x"][0] == "Fri<br>23‑Oct" and heat["x"][-1] == "Exp<br>18‑Dec"
+    # Weekly on the last session of each week, then the last five sessions daily: every fifth session drifted to
+    # Mondays after Thanksgiving (Mon 30-Nov, Mon 07-Dec, then Fri 11-Dec four sessions later).
+    assert [x.replace("<br>", " ") for x in heat["x"]] == [
+        "Fri 23‑Oct", "Fri 30‑Oct", "Fri 06‑Nov", "Fri 13‑Nov", "Fri 20‑Nov", "Fri 27‑Nov", "Fri 04‑Dec",
+        "Fri 11‑Dec", "Mon 14‑Dec", "Tue 15‑Dec", "Wed 16‑Dec", "Thu 17‑Dec", "Exp 18‑Dec",
+    ]  # fmt: skip
     row = int(np.flatnonzero(spots == 5800.0)[0])
     as_of = datetime.fromisoformat(ASOF)
     market = lg.price_index(lg.index_template("Iron Condor", published, DEC), published, as_of).market
@@ -420,19 +442,30 @@ def test_the_chart_draws_the_rn_ranges_the_straddle_move_and_the_reference_lines
     assert published.cdf(lo68, DEC) == pytest.approx((1 - ONE_SD) / 2, abs=1e-12)
     rects = [s for s in spec["layout"]["shapes"] if s["type"] == "rect"]
     assert [(r["x0"], r["x1"]) for r in rects] == [(lo68, hi68), (lo95, hi95)]
-    # The straddle-implied move: the 5,830 straddle at mid over spot, two ticks on the x-axis.
+    # The straddle-implied move: the 5,830 straddle at mid over spot, two ticks on the x-axis, named in the legend
+    # (a label beside the ticks overprinted the curves' end labels on a phone).
     move = 279.65 / 5800
     texts = [a["text"] for a in spec["layout"]["annotations"]]
-    assert "straddle ±4.82%" in texts
+    assert "straddle ±4.82%" in names and "straddle ±4.82%" not in texts
     ticks = [s["x0"] for s in spec["layout"]["shapes"] if s.get("line", {}).get("width") == 2]
     assert ticks == [pytest.approx(5800 * (1 - move)), pytest.approx(5800 * (1 + move))]
     # The expiry, T+0 and two dated curves (⅓ and ⅔ of the 38 sessions to expiry), each named at its right end.
     assert names[4:8] == ["Expiry 18‑Dec", "T+0", "T+13 · 11‑Nov", "T+26 · 01‑Dec"]
     assert {"exp 18‑Dec", "T+0", "T+13 · 11‑Nov", "T+26 · 01‑Dec"} <= set(texts)
-    assert {"K 5,300", "K 5,400", "K 6,150", "K 6,250", "S 5,800", " F"} <= set(texts)
+    # Strikes 100 points apart in a range of about 2,200 share a label, which a phone's 230 px plot needs.
+    assert {"K 5,300/5,400", "K 6,150/6,250", "S 5,800", " F"} <= set(texts)
     assert sorted(_strike_lines(at)) == [5300.0, 5400.0, 6150.0, 6250.0]
     assert _trace(spec, "Breakeven")["text"] == [f"BE 5,378 ({MINUS}7.3%)", "BE 6,172 (+6.4%)"]
-    assert "18‑Dec‑26 AM · 55d · RN smile" in texts
+    # The breakeven labels: two lines, outward, on the surface colour (strike lines ran through them).
+    labels = {a["text"]: a for a in spec["layout"]["annotations"] if a["text"].startswith("BE ")}
+    assert set(labels) == {f"BE 5,378<br>{MINUS}7.3%", "BE 6,172<br>+6.4%"}
+    assert [labels[t]["xanchor"] for t in sorted(labels)] == ["right", "left"]
+    assert all("bgcolor" in a for a in labels.values())
+    # The note: the same days as the builder's expiry menu, on the third line under S and F.
+    [note] = [a for a in spec["layout"]["annotations"] if a["text"] == "18‑Dec‑26 AM · 55d · RN smile"]
+    assert note["yshift"] == -28
+    menu = at.selectbox(key="strategy_expiry")
+    assert menu.format_func(menu.value) == "18‑Dec‑26 AM · 55d"  # 55.73 days, floored as the what-if strip does
 
 
 def test_the_range_control_and_the_greek_strip():
@@ -461,14 +494,26 @@ def replace_spot(market: strat.Market, spot: float) -> strat.Market:
 def test_a_calendar_reads_its_maximum_at_the_front_expiry_with_subtotals_per_expiry():
     at = _index(strategy="Long Call Calendar")
     loss, profit = _metric(at, "Max loss"), _metric(at, "Max profit")
-    assert loss.proto.delta == profit.proto.delta == "front expiry"
+    assert profit.proto.delta == "front expiry"
     assert "front expiry" in loss.proto.help and "their losses can exceed it" in loss.proto.help
     frame = _blotter(at).value
     assert frame["On"].tolist() == ["on", "on", "Σ 18‑Dec‑26", "Σ 19‑Feb‑27", "Total"]
     assert frame["$Δ"].tolist()[-1] == frame["$Δ"].tolist()[2] + frame["$Δ"].tolist()[3]
-    # A dividend yield makes the long back call gain less than $1 per $1 rise: the loss far above is unbounded.
-    assert loss.value == "Unlimited"
+    # A dividend yield makes the long back call gain less than $1 per $1 rise: the loss far above is unbounded, but
+    # only past about 3.4 x spot. The tile reads the worst P&L within the RN 99.9% range to the front expiry, the debit
+    # (the back call is worth nothing at its low end), with that basis in its delta slot; the caption keeps the rest.
+    as_of = datetime.fromisoformat(ASOF)
+    published = surface_state.publish(mk.index_market(as_of))
+    lo, hi = published.rn_range(DEC, 0.999)
+    assert loss.value == f"{MINUS}$8,500" and loss.proto.delta == "RN 99.9% range"
+    assert f"{lo:,.0f}–{hi:,.0f}" in loss.proto.help and "grows without bound" in loss.proto.help
     assert "the loss is unbounded" in _caption(at, "long back call")
+    # The table's % of max loss divides by that loss: the worst cell at expiry is −100%, not a column of blanks.
+    at.segmented_control(key="st_view").set_value("Table").run()
+    at.segmented_control(key="st_units").set_value("% of max loss").run()
+    _ok(at)
+    z = _array(_chart(at, "pnl_table")["data"][0]["z"])
+    assert np.isfinite(z).all() and -100.0 <= z[:, -1].min() < -99.0  # the 95% range's low end: -99.74%
 
 
 def test_leg_edits_survive_a_visit_to_the_risk_tab_on_the_index():
@@ -613,10 +658,12 @@ CONDOR_LINK = {"strategy_category": "Range-bound", "strategy_Range-bound": "Iron
         {**INDEX, "strategy": "iron butterfly", "strategy_wing_pts": "150", "contracts": "3"},
         {**INDEX, "strategy_strikes_by": "Width", "strategy_width_pct": "2", "strategy_expiry": "2026-11-19 AM"},
         {**INDEX, "strategy_category": "Time spread", "strategy_short_delta": "17", "strategy_wing_pts": "7"},
+        # 25-point wings, no longer offered (they landed on the short where SPX lists every 50): the default wing.
+        {**INDEX, "strategy_wing_pts": "25"},
     ],
     ids=[
         "defaults", "condor", "custom", "calendar", "out of range", "invalid", "not finite", "index", "index strangle",
-        "index butterfly", "index width", "index legacy",
+        "index butterfly", "index width", "index legacy", "index old wing",
     ],
 )  # fmt: skip
 def test_build_position_reads_a_link_as_the_controls_do(monkeypatch, query):
@@ -1146,7 +1193,8 @@ def test_breakevens_of_a_one_dollar_underlying_show_a_tenth_of_a_cent():
 def test_both_breakevens_are_shown_in_full():
     # Review finding: the second breakeven was cut off in a narrow metric card.
     at = _app(strategy="Iron Condor")
-    assert _tiles(at)["Breakevens"] == ("85.6 / 114.4", f"{MINUS}14.4% / +14.4%")
+    # In cents on a $100 underlying, as the help and the chart write them (the tile read 85.6).
+    assert _tiles(at)["Breakevens"] == ("85.58 / 114.42", f"{MINUS}14.4% / +14.4%")
     assert f"85.58 ({MINUS}14.4%), 114.42 (+14.4%)" in _metric(at, "Breakevens").proto.help
 
 

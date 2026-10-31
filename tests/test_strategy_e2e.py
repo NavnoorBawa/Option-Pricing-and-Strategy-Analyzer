@@ -77,6 +77,20 @@ def test_the_answer_is_above_the_fold_on_a_laptop(chromium, app_url, scheme):  #
         context.close()
 
 
+@pytest.mark.xfail(strict=True, reason="until UI-1 moves the price cards above the tabs into the Pricing tab")
+def test_the_spec_fold_limits_hold_as_measured(chromium, app_url):  # noqa: F811
+    # Spec 3.2's numbers as they stand, with the price cards counted: tiles' top at most 320 px and the chart's at most
+    # 480 px. Measured 299 and 548 px: the cards and their gap (74 px) put the chart 68 px over, which the Strategy
+    # tab cannot win back without dropping the what-if strip's caption or the view bar. This test passes, and so fails
+    # as a strict xfail, once UI-1 lands; then drop the marker and the shell offset in the test above.
+    context, page = _open(chromium, app_url + INDEX)
+    try:
+        layout = page.evaluate(_LAYOUT)
+        assert layout["tiles"] <= 320 and layout["chart"] <= 480, layout
+    finally:
+        context.close()
+
+
 @pytest.mark.parametrize("query", [INDEX, TEXTBOOK], ids=["index", "textbook"])
 def test_a_phone_has_no_sideways_scroll_and_tiles_in_pairs(chromium, app_url, query):  # noqa: F811
     # Spec 2.11 at 390 x 844 with touch: the page is no wider than the screen; the six tiles go two by two.
@@ -87,6 +101,35 @@ def test_a_phone_has_no_sideways_scroll_and_tiles_in_pairs(chromium, app_url, qu
         tops = layout["tileTops"]
         assert [tops.count(top) for top in dict.fromkeys(tops)] == [2, 2, 2], tops
         assert min(layout["tileFonts"]) >= 20.0, layout["tileFonts"]
+    finally:
+        context.close()
+
+
+def test_the_payoff_chart_labels_do_not_overprint_on_a_phone(chromium, app_url):  # noqa: F811
+    # Spec 2.11 at 390 x 844: the strike labels read "K 5K 5,400", the note lay over S and F, and the straddle label
+    # over the curves' end labels. No two text labels of the P&L row overlap now, and every label but the lower
+    # breakeven's (which reaches into the axis margin, between the tick labels) is inside the plot.
+    context, page = _open(chromium, app_url + INDEX, width=390, height=844, scheme="light", touch=True)
+    try:
+        boxes = page.evaluate(
+            """() => {
+              const drag = document.querySelector('.st-key-chart_payoff_chart .nsewdrag').getBoundingClientRect();
+              const top = drag.top, bottom = drag.bottom;  // the first drag layer is the P&L row's
+              return {plot: [drag.left, drag.right],
+                labels: [...document.querySelectorAll('.st-key-chart_payoff_chart g.annotation')].map(g => {
+                  const r = g.querySelector('text').getBoundingClientRect();
+                  return {text: g.textContent, l: r.left, r: r.right, t: r.top, b: r.bottom};
+                }).filter(b => b.t >= top - 2 && b.b <= bottom + 2 && b.r > b.l)};
+            }"""
+        )
+        labels = boxes["labels"]
+        assert len(labels) >= 8, labels
+        for i, a in enumerate(labels):
+            for b in labels[i + 1 :]:
+                overlap = min(a["r"], b["r"]) - max(a["l"], b["l"]), min(a["b"], b["b"]) - max(a["t"], b["t"])
+                assert overlap[0] <= 0.5 or overlap[1] <= 0.5, (a, b)
+            if not a["text"].startswith("BE 5,378"):
+                assert boxes["plot"][0] - 0.5 <= a["l"] and a["r"] <= boxes["plot"][1] + 0.5, a
     finally:
         context.close()
 

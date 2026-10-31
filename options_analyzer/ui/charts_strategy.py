@@ -24,17 +24,33 @@ from .format import signed
 #: Heights (px): the P&L row (a primary chart) and the Greek strip under it, in one figure (spec 2.7 item 1).
 PNL_HEIGHT, STRIP_HEIGHT = 360, 140
 #: Strike labels show while at most this many strikes are in view; strikes closer than this share of the range share
-#: one label (spec 2.7 item 3).
-MAX_STRIKE_LABELS, MERGE_SHARE = 6, 0.03
+#: one label (spec 2.7 item 3, which says 3%). The server does not know the plot's width, so the share is set for the
+#: narrowest: a phone's plot is about 230 px wide (390 px screen), where ``K 5,300`` (about 45 px in 10 px Plex) and
+#: ``K 5,400`` 100 points apart in a 2,200-point range sat 10 px apart and overprinted as ``K 5K 5,400``. At 15% they
+#: share ``K 5,300/5,400`` (about 75 px), and the next label is at least 35 px clear of it on a phone.
+MAX_STRIKE_LABELS, MERGE_SHARE = 6, 0.15
+#: A breakeven's label (two lines, ``BE 5,378`` over ``−7.3%``, about 55 px) is drawn outward from its diamond, unless
+#: the breakeven lies within this share of the range from the plot's edge: then inward. An annotation is not clipped
+#: at the plot's edge as the scatter text was (cut to ``78 (−7.3%)`` on a phone): the default condor's lower
+#: breakeven, 21% of the range from the left edge, is 48 px in on a phone's 230 px plot, so its label reaches about
+#: 12 px into the axis margin, between the $0 and $2,000 tick labels. Inward, it would cover the expiry curve's steep
+#: rise from the breakeven to the short strike.
+BREAKEVEN_EDGE = 0.12
 #: Opacity of the 68% and 95% risk-neutral bands (spec 2.7 item 6).
 RN_OPACITY = (0.06, 0.03)
 #: Label size of reference lines and curve ends (px).
 SMALL = 10
-#: Room above the highest curve, as a share of the curves' span: two 14 px lines of labels in about 270 px of plot.
-HEADROOM = 0.16
-#: Least distance between two curves' right-end labels, as a share of the P&L axis' span: 18 px of the 360 px row,
-#: whose plot area (less the legend and the axis) is about 270 px, so about 13 px of plot.
-LABEL_GAP = 18 / PNL_HEIGHT
+#: Room above the highest curve, as a share of the curves' span: three 14 px lines of labels (strikes; S and F; the
+#: note) and a margin, 49 px of about 270 px of plot, so h / (1.06 + h) = 49 / 270 gives h = 0.235.
+HEADROOM = 0.24
+#: The note's offset (px) below the plot's top: the third line, under the strike labels and S and F, which it
+#: overprinted on a phone, where the spot is about 140 px from the plot's left edge and the note 180 px wide.
+NOTE_SHIFT = -28
+#: Least distance between two curves' right-end labels, as a share of the curves' span, which the axis shows over
+#: 1.06 + HEADROOM = 1.30 spans: 13 px (a 10 px label's box) on a phone, whose P&L plot is 238 px tall under the
+#: four-line legend (13 × 1.30 / 238 = 0.071); about 16 px on a laptop's 280 px. At 0.05 the labels sat 9 px apart on
+#: a phone and overprinted.
+LABEL_GAP = 0.072
 #: Width (px) given to a right-aligned label per character, and its padding: IBM Plex Sans at 10 px averages about
 #: 5.6 px a character in these labels. Plotly sizes an annotation's box from the text as first drawn, before the
 #: web font has loaded, so a box sized by Plotly was narrower than the label in Plex and cut its right end at the
@@ -169,15 +185,17 @@ def payoff_figure(
     strikes : sequence of float
         Dotted muted lines, labelled per :func:`_strike_labels`.
     breakevens : sequence of (x, label)
-        Accent diamonds on y = 0 with their labels (``BE 5,378 (−7.3%)``).
+        Accent diamonds on y = 0 with ``label`` in their hover (``BE 5,378 (−7.3%)``), each labelled in two lines on
+        the surface colour (``BE 5,378`` over ``−7.3%``), outward but inside the plot.
     bands : sequence of Band
         Risk-neutral ranges, widest last, drawn at :data:`RN_OPACITY`.
     straddle : (low, high, label), optional
-        The straddle-implied move: two accent ticks on the x-axis and a label at the upper one.
+        The straddle-implied move: two accent ticks on the x-axis, named in the legend (on a phone a label beside the
+        ticks overprinted the curves' end labels).
     scenario : (x, y, label), optional
         The what-if spot on the T+0 curve, marked.
     note : str
-        An 11 px muted annotation inside the plot at the top left (spec 2.7 item 8).
+        An 11 px muted annotation inside the plot at the top left (spec 2.7 item 8), on the third line.
     x_range : (low, high), optional
         The x-axis range (spec 2.7 item 11's Range control); default: the grid.
     strike_text : callable
@@ -293,19 +311,30 @@ def payoff_figure(
             go.Scatter(
                 x=[x for x, _ in breakevens],
                 y=[0.0] * len(breakevens),
-                mode="markers+text",
+                mode="markers",
                 name="Breakeven",
                 showlegend=False,
                 text=[label for _, label in breakevens],
-                # Outward and above the zero line, where the curves of a short-premium structure are not.
-                textposition=["top left" if x < spot else "top right" for x, _ in breakevens],
-                textfont=dict(size=SMALL, color=colors["accent"]),
                 marker=dict(size=9, color=colors["accent"], symbol="diamond"),
                 hovertemplate="%{text}<extra></extra>",
             ),
             row=1,
             col=1,
         )
+        for x, label in breakevens:
+            # Outward and above the zero line, where the curves of a short-premium structure are not; inward near the
+            # plot's edge. On the surface colour, so that a strike line through it does not cross the text.
+            left = x < spot
+            if (x - lo) < BREAKEVEN_EDGE * (hi - lo) or (hi - x) < BREAKEVEN_EDGE * (hi - lo):
+                left = (hi - x) < (x - lo)
+            level, _, change = label.partition(" (")
+            lines = (level, change.rstrip(")"))
+            fig.add_annotation(
+                x=x, y=0.0, text="<br>".join(lines), showarrow=False, xanchor="right" if left else "left",
+                align="right" if left else "left", yanchor="bottom", xshift=-5 if left else 5, yshift=8,
+                width=max(_label_width(t) for t in lines), font=dict(size=SMALL, color=colors["accent"]),
+                bgcolor=colors["surface"], row=1, col=1,
+            )  # fmt: skip
     if straddle is not None:
         s_lo, s_hi, s_label = straddle
         for x in (s_lo, s_hi):
@@ -313,9 +342,13 @@ def payoff_figure(
                 type="line", x0=x, x1=x, xref="x", y0=0.0, y1=0.035, yref="y domain",
                 line=dict(color=colors["accent"], width=2), row=1, col=1,
             )  # fmt: skip
-        fig.add_annotation(
-            x=s_hi, y=0.035, xref="x", yref="y domain", text=s_label, showarrow=False, xanchor="left",
-            yanchor="bottom", font=dict(size=SMALL, color=colors["accent"]), row=1, col=1,
+        fig.add_trace(
+            go.Scatter(
+                x=[None], y=[None], mode="markers", name=s_label, hoverinfo="skip",
+                marker=dict(symbol="line-ns-open", size=10, color=colors["accent"], line=dict(width=2)),
+            ),
+            row=1,
+            col=1,
         )  # fmt: skip
     if scenario is not None:
         x, y, label = scenario
@@ -331,7 +364,7 @@ def payoff_figure(
     if note:
         fig.add_annotation(
             x=0.0, y=1.0, xref="x domain", yref="y domain", text=note, showarrow=False, xanchor="left",
-            yanchor="top", yshift=-14, align="left", font=dict(size=11, color=colors["muted"]), row=1, col=1,
+            yanchor="top", yshift=NOTE_SHIFT, align="left", font=dict(size=11, color=colors["muted"]), row=1, col=1,
         )  # fmt: skip
     if strip is not None:
         values, title = strip
@@ -351,7 +384,7 @@ def payoff_figure(
         fig.update_yaxes(title_text=title, row=2, col=1, nticks=3, tickformat=",.0f")
     height = PNL_HEIGHT + (STRIP_HEIGHT if strip is not None else 0)
     charts.style(fig, colors, height)
-    # Headroom above the curves for the two lines of labels at the plot's top (strikes; then the note, S and F).
+    # Headroom above the curves for the three lines of labels at the plot's top (strikes; S and F; the note).
     shown = np.concatenate([np.asarray(c.values, dtype=float)[inside] for c in curves] + [np.zeros(1)])
     low, high = float(np.nanmin(shown)), float(np.nanmax(shown))
     pad = (high - low) or max(abs(high), 1.0)

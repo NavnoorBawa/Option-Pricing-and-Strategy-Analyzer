@@ -520,10 +520,13 @@ def test_no_export_lacks_its_source(monkeypatch, new_app, query, tag):
     strategy = _exports(monkeypatch, new_app(tab="Strategy", **query))
     files = surface + strategy
     names = {name for name, _ in files}
+    # The Strategy tab opens on the iron condor under the index (spec 3.2, default state) and on the bull call spread
+    # under the textbook market; its P&L profile is named after the template.
+    pnl = "iron_condor_pnl" if tag == "SYNTHETIC" else "bull_call_spread_pnl"
     assert {n.split("_SYNTHETIC")[0].split("_TEXTBOOK")[0] for n in names if "PARAMETRIC" not in n} >= {
         "sample_option_quotes",
         "sample_option_prices",
-        "bull_call_spread_pnl",
+        pnl,
     }
     assert any("PARAMETRIC" in n for n in names) and any(n.endswith(".xlsx") for n in names) == bool(
         importlib.util.find_spec("xlsxwriter") or importlib.util.find_spec("openpyxl")
