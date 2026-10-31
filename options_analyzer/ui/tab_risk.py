@@ -129,6 +129,11 @@ def _signed_short(value: float) -> str:
     return _minus(money_short(value, signed=True))
 
 
+def exact(value: float, decimals: int = 2) -> str:
+    """A dollar amount in a tile's help, to the cent and signed with U+2212 (``−$1,921.62``)."""
+    return signed(value, decimals, "$")
+
+
 def dollars(value: float) -> str:
     """A position's dollar figure on a tile, signed (U+2212): whole dollars from $10 (``−$7,663``), cents below
     (``+$4.20``), and ``−$1.23M`` from a million, with the exact amount in the tile's help."""
@@ -147,6 +152,23 @@ def shown(value: float) -> float:
     text = dollars(value).replace(MINUS, "-").replace("$", "").replace(",", "").lstrip("+")
     scale = {suffix: size for size, suffix in SHORT_SCALES}.get(text[-1])
     return float(text) if scale is None else float(text[:-1]) * scale
+
+
+def difference(a: float, b: float) -> str:
+    """``a − b`` for a tile that compares two tiles: from the amounts :func:`dollars` shows when it is $10 or more, so
+    that the three tiles add up on screen (−$1,922 − (−$1,978) = +$56); to the cent from the unrounded amounts below
+    $10, where the shown amounts' difference is a rounding artefact (the textbook option's −$54.87 and −$55.50 read
+    −$55 and −$56, whose difference "+$1.00" was not the gap, +$0.63).
+
+    >>> difference(-1921.6, -1977.7), difference(-54.87, -55.50), difference(-54.60, -55.24)
+    ('+$56', '+$0.63', '+$0.64')
+    """
+    if not (math.isfinite(a) and math.isfinite(b)):
+        return signed(a - b)
+    if abs(round(a - b, 2)) < 10:
+        return signed(a - b, 2, "$")
+    gap = shown(a) - shown(b)
+    return dollars(gap) if abs(gap) >= 10 else signed(gap, 0, "$")
 
 
 #: Scales of a grid's printed cells: the largest |P&L| from which cells read in thousands or millions of dollars.
@@ -399,32 +421,32 @@ def _tile_cards(book: Book, t: Tiles) -> list[Card]:
         _card(
             "$Δ",
             dollars(t.dollar_delta),
-            f"Δ × S: {money(t.dollar_delta, 2, True)}. Δ {signed(t.delta, 2)} index units (shares), sticky strike: "
+            f"Δ × S: {exact(t.dollar_delta)}. Δ {signed(t.delta, 2)} index units (shares), sticky strike: "
             f"leg vols fixed by strike.{units_help}",
             units_line,
         ),
         _card(
             "Γ P&L 1%",
             dollars(t.gamma_pnl),
-            f"½Γ(0.01·S)², the convexity P&L of a 1% move either way: {money(t.gamma_pnl, 2, True)}. The change in $Δ "
-            f"per 1% move, ΓS²/100, is {money(t.dollar_gamma, 2, True)}.",
+            f"½Γ(0.01·S)², the convexity P&L of a 1% move either way: {exact(t.gamma_pnl)}. The change in $Δ "
+            f"per 1% move, ΓS²/100, is {exact(t.dollar_gamma)}.",
         ),
         _card(
             "Vega ($/vp)",
             dollars(t.vega),
-            f"$ per vol point on every leg: {money(t.vega, 2, True)}. 1M: each expiry weighted √(1M/τ), the P&L of a "
+            f"$ per vol point on every leg: {exact(t.vega)}. 1M: each expiry weighted √(1M/τ), the P&L of a "
             f"one-point rise in one-month vol under the square-root-of-time rule. Relative-weighted (1% of one-month "
-            f"vol, damped by tenor): {money(t.vega_relative, 2, True)}.",
+            f"vol, damped by tenor): {exact(t.vega_relative)}.",
             f"1M {dollars(t.vega_1m)}",
         ),
         _card(
             "Θ ($/day)",
             dollars(t.theta),
-            f"∂V/∂t ÷ 365 at fixed vols: {money(t.theta, 2, True)} a calendar day. BE: the breakeven daily move that "
+            f"∂V/∂t ÷ 365 at fixed vols: {exact(t.theta)} a calendar day. BE: the breakeven daily move that "
             f"½Γ pays for, 1% × √(|Θ| ÷ |Γ P&L 1%|) = {be}, against the implied daily move σ ATMF ÷ √365 = "
             f"{t.implied_move:.2%} ({MISSING} when Θ and Γ have one sign). To the next session ({date_text(ns.date())} "
-            f"{ns:%H:%M}) by full revaluation: {money(t.next_session, 2, True)}; over one calendar day: "
-            f"{money(t.one_day, 2, True)}.",
+            f"{ns:%H:%M}) by full revaluation: {exact(t.next_session)}; over one calendar day: "
+            f"{exact(t.one_day)}.",
             # "BE", not the spec's "BE move": with it the six tiles need 1,162 px and wrap 3 + 3 in the 1,038 px main
             # column of a 1,440 px window with the sidebar open; with "BE" they need 964 px (components._card_width).
             # Where Θ misstates a day's decay by more than 10% (within days of expiry, Milestone 1), the slot gives
@@ -437,7 +459,7 @@ def _tile_cards(book: Book, t: Tiles) -> list[Card]:
             "Worst grid",
             dollars(t.worst_grid),
             f"The worst cell of today's desk grid (9 spot moves × 7 vol shocks in vp, now): "
-            f"{money(t.worst_grid, 2, True)}. Today's market, whatever the what-if: the grid is where a scenario is "
+            f"{exact(t.worst_grid)}. Today's market, whatever the what-if: the grid is where a scenario is "
             "picked (Scenarios report).",
             t.worst_grid_at,
         ),
@@ -445,7 +467,7 @@ def _tile_cards(book: Book, t: Tiles) -> list[Card]:
             "Worst stress",
             dollars(t.worst_stress),
             f"The worst of {len(ALL_STRESSES)} named stresses at the what-if state, instantaneous, one-month vol "
-            f"shocks damped by tenor: {t.worst_stress_name}, {money(t.worst_stress, 2, True)} (Stress report).",
+            f"shocks damped by tenor: {t.worst_stress_name}, {exact(t.worst_stress)} (Stress report).",
             t.worst_stress_name.split(" (")[0],
         ),
     ]
@@ -1037,19 +1059,20 @@ def _var(book: Book) -> None:
         ).expected_shortfall
     basis = f"{model} Monte Carlo, {int(paths):,} paths, seed {int(seed)}"
     vol_text = "spot and implied vol moving" if with_vol else "implied vol frozen"
+    ci = 2 if abs(var) < 1000 else 0  # the interval to the cent on a small position (−$54.30: −$54.08 to −$54.55)
     cards = [
         _var_card(
             f"VaR 99% {h} · MC",
             -var,
-            f"The 1% worst P&L over {h} by full revaluation, {vol_text} ({basis}): {money(-var, 2, True)}; 95% "
-            f"simulation interval {money(-result.var_ci95[0], 0, True)} to {money(-result.var_ci95[1], 0, True)}.",
-            f"{dollars(shown(-var) - shown(-spot_var))} vs spot only" if with_vol else None,
+            f"The 1% worst P&L over {h} by full revaluation, {vol_text} ({basis}): {exact(-var)}; 95% "
+            f"simulation interval {exact(-result.var_ci95[0], ci)} to {exact(-result.var_ci95[1], ci)}.",
+            f"{difference(-var, -spot_var)} vs spot only" if with_vol else None,
         ),
         _var_card(
             f"ES 97.5% {h} · MC",
             -es,
-            f"The mean P&L of the worst 2.5% (FRTB's level), {vol_text}: {money(-es, 2, True)}.",
-            f"{dollars(shown(-es) - shown(-spot_es))} vs spot only" if with_vol else None,
+            f"The mean P&L of the worst 2.5% (FRTB's level), {vol_text}: {exact(-es)}.",
+            f"{difference(-es, -spot_es)} vs spot only" if with_vol else None,
         ),
     ]
     if with_vol:
@@ -1057,26 +1080,25 @@ def _var(book: Book) -> None:
             _var_card(
                 f"Spot-only VaR 99% {h}",
                 -spot_var,
-                "The same spot paths with implied vol frozen, which leaves out the vega risk: "
-                f"{money(-spot_var, 2, True)}.",
+                f"The same spot paths with implied vol frozen, which leaves out the vega risk: {exact(-spot_var)}.",
             ),
-            _var_card(f"Spot-only ES 97.5% {h}", -spot_es, f"Implied vol frozen: {money(-spot_es, 2, True)}."),
+            _var_card(f"Spot-only ES 97.5% {h}", -spot_es, f"Implied vol frozen: {exact(-spot_es)}."),
         ]
     # The comparator's like: the delta-gamma-theta VaR moves spot alone, Normally, at the leg vol, so its gap is taken
     # to the spot-only run (the full VaR when implied vol is frozen), which differs from it by the full revaluation
     # alone (and by fatter tails under a Student-t or GARCH model). Against the spot-plus-vol VaR the gap would mix
     # in the vega risk: on the default call spread at the pinned valuation time (ASOF in tests/_apptest.py), +$248
     # against the full VaR (−$1,729, implied vol moving) but +$56 against the spot-only one (−$1,922; DGT −$1,978).
-    # The amounts shown are subtracted, so that the tile adds up on screen.
-    gap = None if dg is None else shown(-spot_var) - shown(-dg.var)
+    # From $10 the amounts shown are subtracted, so that the tiles add up on screen; below, the unrounded amounts.
+    gap = None if dg is None else difference(-spot_var, -dg.var)
     comparator = f"Spot-only VaR {MINUS} DGT VaR" if with_vol else f"VaR {MINUS} DGT VaR"
     cards += [
         _var_card(
             f"DGT VaR 99% {h}",
             MISSING if dg is None else -dg.var,
             "Exact VaR of Δ·x + ½Γ·x² + Θ·h for a Normal spot move at the leg vol, implied vol frozen (the analytic "
-            f"comparator): {MISSING if dg is None else money(-dg.var, 2, True)}; its ES 97.5%: "
-            f"{MISSING if dg_es is None else money(-dg_es, 2, True)}.",
+            f"comparator): {MISSING if dg is None else exact(-dg.var)}; its ES 97.5%: "
+            f"{MISSING if dg_es is None else exact(-dg_es)}.",
         ),
         _var_card(
             "Non-linearity",

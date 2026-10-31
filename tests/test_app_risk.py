@@ -24,6 +24,7 @@ from streamlit.testing.v1 import AppTest
 from options_analyzer import scenarios
 from options_analyzer.ui import market as mk
 from options_analyzer.ui import tab_risk
+from options_analyzer.ui.format import signed
 from options_analyzer.ui.tab_risk import GridAxes
 
 #: The default Strategy position under the index preset at ASOF: 1 × 100 of a 5,815 / 5,915 call spread.
@@ -308,12 +309,14 @@ def test_the_stress_table_is_sorted_worst_first_with_readable_labels():
     assert set(table.columns) == {"Scenario", "Source", "Spot", "1M vol", "Rate", "Days", "P&L"}
     bars = _chart(at, "stress_chart")["data"][0]
     assert list(bars["y"]) == table["Scenario"].tolist()
-    # A label sits inside its bar only on a bar that spans a third of the axis or more; a short bar's label goes
-    # outside it, in the text colour, rather than running out of the bar in the bar's label colour.
+    # Each amount in the column right of the plot, in the bars' order, signed with U+2212, whole dollars from $100:
+    # on the bars they were clipped or ran over the scenario names on a phone (tests/test_risk_e2e.py measures it).
+    notes = _chart(at, "stress_chart")["layout"]["annotations"]
     pnl = table["P&L"].to_numpy(float)
-    third = (pnl.max() - pnl.min()) / 3
-    assert bars["textposition"] == ["inside" if abs(v) >= third else "outside" for v in pnl]
-    assert "inside" in bars["textposition"] and "outside" in bars["textposition"]
+    assert [n["y"] for n in notes] == table["Scenario"].tolist()
+    assert [n["text"] for n in notes] == [signed(v, 0 if abs(v) >= 100 else 2, "$") for v in pnl]
+    assert all(n["xref"] == "paper" and n["x"] == 1.0 and n["xanchor"] == "right" for n in notes)
+    assert "text" not in bars
 
 
 def test_the_desk_grid_axes_and_its_zero_cell():

@@ -6,6 +6,8 @@ tests/test_theme.py's ``app_url`` fixture.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from test_theme import _settle, app_url, chromium  # noqa: F401  (fixtures)
 
@@ -97,39 +99,48 @@ def test_a_click_on_a_scenario_cell_sets_the_what_if_strip(chromium, app_url):  
         page.context.close()
 
 
-#: Each stress bar's label: its fill, and the fill behind it (the bar's when it sits inside the bar).
+#: The stress chart's amounts (the annotations right of the plot): their text, fill and box, with the boxes of the
+#: plot area and of the scenario names (the y tick labels).
 _BAR_LABELS = """() => {
   const chart = document.querySelector('.st-key-chart_stress_chart');
-  const bars = [...chart.querySelectorAll('g.point')];
-  return bars.map(point => {
-    const bar = point.querySelector('path'), text = point.querySelector('text');
-    if (!text) return null;
-    const b = bar.getBoundingClientRect(), t = text.getBoundingClientRect();
-    const inside = t.left >= b.left - 0.5 && t.right <= b.right + 0.5;
-    return {text: getComputedStyle(text).fill, bar: getComputedStyle(bar).fill, inside, label: text.textContent};
-  }).filter(Boolean);
+  const box = e => { const r = e.getBoundingClientRect(); return {l: r.left, r: r.right, t: r.top, b: r.bottom}; };
+  const svg = chart.querySelector('svg.main-svg');
+  return {
+    svg: box(svg),
+    plot: box(chart.querySelector('.cartesianlayer .bg, rect.nsewdrag')),
+    names: [...chart.querySelectorAll('.ytick text')].map(box),
+    labels: [...chart.querySelectorAll('.annotation-text')].map(t => ({
+      label: t.textContent, text: getComputedStyle(t).fill, box: box(t)})),
+  };
 }"""
 
 
 def _hex(css: str) -> str:
-    import re
-
     red, green, blue = (int(float(v)) for v in re.findall(r"[\d.]+", css)[:3])
     return f"#{red:02X}{green:02X}{blue:02X}"
 
 
-def test_stress_bar_labels_have_contrast_in_dark_mode(chromium, app_url):  # noqa: F811
-    # Spec 2.6: labels inside a bar in the background colour (5.51:1 on the dark loss red), outside in the text
-    # colour. Before, white on #EF5350 was 3.49:1.
-    page = _risk(chromium, app_url, "report=Stress", scheme="dark")
+def _overlap(a: dict, b: dict) -> bool:
+    return a["l"] < b["r"] and b["l"] < a["r"] and a["t"] < b["b"] and b["t"] < a["b"]
+
+
+@pytest.mark.parametrize(("width", "scheme"), [(390, "light"), (1440, "dark")])
+def test_stress_amounts_are_whole_and_clear_of_the_bars_and_names(chromium, app_url, width, scheme):  # noqa: F811
+    # On a 390 px phone the amounts sat on the bars of a plot about 140 px wide: "−$3,35" for Black Monday's −$3,353
+    # (its last digit clipped) and Tariff shock's "−$3,261" drawn over its own name. Now each amount is complete,
+    # inside the chart, right of the plot area and clear of every name; in the text colour on the background
+    # (spec 2.6, 4.5:1 at least).
+    page = _risk(chromium, app_url, "report=Stress", width=width, scheme=scheme, touch=width < 600)
     try:
-        labels = page.evaluate(_BAR_LABELS)
-        assert len(labels) == 14
-        surface = theme.SEMANTIC["dark"]["surface"]
-        for label in labels:
-            behind = _hex(label["bar"]) if label["inside"] else surface
-            assert charts_risk.contrast(_hex(label["text"]), behind) >= 4.5, label
-        assert any(label["inside"] for label in labels) and any(not label["inside"] for label in labels)
+        found = page.evaluate(_BAR_LABELS)
+        assert len(found["labels"]) == 14, found
+        assert all(re.fullmatch(r"[+−]\$[0-9,]+(\.[0-9]{2})?", label["label"]) for label in found["labels"]), found
+        surface = theme.SEMANTIC[scheme]["surface"]
+        for label in found["labels"]:
+            box = label["box"]
+            assert box["l"] >= found["plot"]["r"] - 0.5 and box["r"] <= found["svg"]["r"] + 0.5, (label, found["plot"])
+            assert not any(_overlap(box, name) for name in found["names"]), label
+            assert charts_risk.contrast(_hex(label["text"]), surface) >= 4.5, label
         # The stress table shows every scenario without a scrollbar: the header and 14 rows of 28 px.
         # (the report's one table: a dataframe without selection carries no key class)
         tables = page.locator("[role=tabpanel] [data-testid=stDataFrame]")

@@ -16,7 +16,17 @@ import numpy as np
 import plotly.graph_objects as go
 
 from . import theme as desk_theme
-from .charts import HEIGHT, HEIGHT_SECONDARY, LABEL_SIZE, LINE_WIDTH, REFERENCE_WIDTH, _hline, _vline, apply_layout
+from .charts import (
+    HEIGHT,
+    HEIGHT_SECONDARY,
+    LABEL_SIZE,
+    LINE_WIDTH,
+    MARGIN,
+    REFERENCE_WIDTH,
+    _hline,
+    _vline,
+    apply_layout,
+)
 from .format import signed
 
 #: Smallest contrast of a cell's printed value with the cell's fill (WCAG 2.2 SC 1.4.3, normal text).
@@ -234,39 +244,52 @@ def ladder_chart(
     return fig
 
 
-def stress_bars(names: Sequence[str], values, *, palette: dict[str, str] | None = None) -> go.Figure:
-    """Horizontal P&L bars, one per stress scenario in the order given (worst first, at the top), each labelled with
-    its signed amount.
+#: Width (px) of a character of the stress chart's amounts at 12 px, generous for the app's sans fonts (Source Sans
+#: draws "−$4,096" 44 px wide at 12 px: 6.3 px a character), and the gap between the plot and the amounts.
+AMOUNT_CHAR_WIDTH, AMOUNT_GAP = 7.0, 8
 
-    Labels inside a bar are in the background colour and labels outside in the text colour (UI spec 2.6): white on
-    the dark theme's loss red was 3.49:1, the background colour on it is 5.51:1.
+
+def stress_bars(names: Sequence[str], values, *, palette: dict[str, str] | None = None) -> go.Figure:
+    """Horizontal P&L bars, one per stress scenario in the order given (worst first, at the top), with each signed
+    amount in a column right of the plot, right-aligned like a table's figures, in the text colour.
+
+    The amounts sat on the bars before (inside a long bar, outside a short one), sized for a plot about 250 px wide:
+    on a 390 px phone the scenario names take half the chart and the plot is about 140 px, so an amount inside a
+    bar lost its last digit ("−$3,35") and one outside a negative bar ran over its scenario's name. In a margin of
+    their own the amounts never meet a bar or a name at any width, and need no second colour (spec 2.6: text in the
+    text colour on the background).
     """
     colors = palette or desk_theme.palette()
     values = [float(v) for v in values]
-    # A label goes inside its bar only when the bar spans at least a third of the axis: about 85 px of a phone's
-    # 250 px plot, room for "−$4,096" at 12 px. Plotly's "auto" kept a label inside a short bar and let it run out
-    # of the bar in the background colour, where it vanished (Vol crush, −$47, on the default call spread).
-    span = (max(values, default=0.0) - min(values, default=0.0)) or 1.0
+    labels = [signed(v, 0 if abs(v) >= 100 else 2, "$") for v in values]
+    column = int(np.ceil(AMOUNT_CHAR_WIDTH * max((len(t) for t in labels), default=0))) + AMOUNT_GAP
     fig = go.Figure(
         go.Bar(
             x=values,
             y=list(names),
             orientation="h",
             marker_color=[colors["profit"] if v >= 0 else colors["loss"] for v in values],
-            text=[signed(v, 0 if abs(v) >= 100 else 2, "$") for v in values],
-            textposition=["inside" if abs(v) >= span / 3 else "outside" for v in values],
-            insidetextfont=dict(color=colors["surface"], size=LABEL_SIZE + 1),
-            outsidetextfont=dict(color=colors["text"], size=LABEL_SIZE + 1),
-            cliponaxis=False,
-            hovertemplate="%{y}<br>%{x:+$,.2f}<extra></extra>",
+            customdata=labels,
+            hovertemplate="%{y}<br>%{customdata}<extra></extra>",
             name="P&L",
         )
     )
+    for name, label in zip(names, labels, strict=True):
+        fig.add_annotation(
+            x=1.0,
+            xref="paper",
+            xanchor="right",
+            xshift=column,
+            y=name,
+            yref="y",
+            text=label,
+            showarrow=False,
+            font=dict(color=colors["text"], size=LABEL_SIZE + 1),
+        )
     fig.add_vline(x=0.0, line=dict(color=colors["muted"], width=REFERENCE_WIDTH))
     fig = apply_layout(fig, None, "P&L ($)", "", height=max(HEIGHT_SECONDARY, 24 * len(values) + 70), palette=colors)
-    # Plotly shrinks a label to fit inside its bar (to 4 px on a short bar): at least 11 px, moved outside if need be.
     fig.update_layout(
-        hovermode="closest", yaxis=dict(autorange="reversed"), bargap=0.25, uniformtext=dict(minsize=11, mode="show")
+        hovermode="closest", yaxis=dict(autorange="reversed"), bargap=0.25, margin=dict(r=column + MARGIN["r"])
     )
     fig.update_xaxes(showspikes=False, tickformat="$,.0f")
     return fig
