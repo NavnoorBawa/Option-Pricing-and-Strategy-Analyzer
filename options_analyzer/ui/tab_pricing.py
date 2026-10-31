@@ -591,7 +591,7 @@ def _tiles(inputs: Inputs, prices: Prices, market: Contract) -> None:
             )
         )
     else:
-        pair = "S·e^((r−q)T)"  # no quotes, so no pair: the forward is the carry's (an en dash read as missing)
+        pair = "from r and q"  # no quotes, so no pair: the forward is S·e^((r−q)T) (an en dash read as missing)
         forward_help = (
             f"F = S·e^((r−q)T), discount factor e^(−rT) = {number(market.discount, 6)}. No pair-implied forward: the "
             "textbook market has no quotes."

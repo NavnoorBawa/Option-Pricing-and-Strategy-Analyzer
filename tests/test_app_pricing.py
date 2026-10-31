@@ -162,7 +162,7 @@ def test_the_tiles_at_the_default_index(index_app, default_index):
 def test_the_textbook_tiles_read_a_dash_where_the_market_would_be(app):
     tiles = _tiles(app)
     assert (tiles["Call"].value, tiles["Put"].value) == ("10.45", "5.57")  # version 2's $10.4506 and $5.5735
-    assert tiles["Forward"].value == f"{100 * math.exp(0.05):.2f}" and tiles["Forward"].delta == "S·e^((r−q)T)"
+    assert tiles["Forward"].value == f"{100 * math.exp(0.05):.2f}" and tiles["Forward"].delta == "from r and q"
     assert "the textbook market has no quotes" in tiles["Forward"].proto.help
     assert tiles["Vol"].delta == "flat" and tiles["Time"].value == "365d"
 
