@@ -64,8 +64,9 @@ def worst_cell(z, centre: tuple[int, int] | None = None) -> tuple[int, int, int]
     column first, so the smallest spot move that reaches the loss; ``ties`` counts them. ``None`` without a finite
     cell.
 
-    A plain argmin outlined the first in row order: on the default call spread at its maximum loss, the −10% ·
-    −10 vp corner of two cells at −$4,096, and on Spot × Date T+0 · −10% when −$4,096 runs from T+15 to expiry.
+    A plain argmin outlined the first in row order: on a 5,815 / 5,915 call spread at its maximum loss (the index's
+    default before the iron condor), the −10% · −10 vp corner of two cells at −$4,096, and on Spot × Date T+0 · −10%
+    when −$4,096 runs from T+15 to expiry.
 
     >>> worst_cell([[-4096.2, -4095.8, -4000.0], [-3611.0, -3000.0, -2000.0]])
     (0, 1, 2)
