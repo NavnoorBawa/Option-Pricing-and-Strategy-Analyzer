@@ -35,7 +35,8 @@ by one. Measured on the recording machine with NumPy's AVX-512 code paths and Op
 text, count and NaN was the same, and the largest difference was 4.2% of that tolerance (4.2e-8 relative, a butterfly
 in vol points; 4.1e-8 in the local-vol grids). Raw SVI parameters are not identifiable on a flat smile (there ``s``
 moved by a factor of three while every vol agreed), so they are compared only through the variances and vols they
-give.
+give. The estimated truncation error of local vol, a difference of two local vols, is compared to an absolute
+:data:`LOCAL_VOL_ERROR_ATOL` instead.
 
 The fit is not bit-reproducible on every input, before the split as after it: on some quote tables (about one in
 twelve random ones) repeating the same call can end :func:`~options_analyzer.vol_surface.fit_svi`'s
@@ -96,6 +97,10 @@ RTOL, ATOL = 1e-4, 1e-9
 #: up to 1.4e-5 half-spread (5e-4 relative) under those settings, so it is compared to this many half-spreads instead.
 ERROR_RATIO = "Median |error| / half-spread"
 ERROR_RATIO_ATOL = 5e-5
+#: The estimated truncation error of local vol is a difference of two local vols of about 0.2, each within RTOL off
+#: the recording platform: with NumPy 1.26 and SciPy 1.11 it moved by 4.0e-7 (0.00004 vol point, 2.6e-4 of a value of
+#: 0.0015), so it is compared to 0.001 vol point instead; a change of the stencils moves it by tens of percent.
+LOCAL_VOL_ERROR, LOCAL_VOL_ERROR_ATOL = "local_vol_error", 1e-5
 #: Quotes that hold static arbitrage themselves (or a smile at zero variance): their arbitrage-free fit is the end of
 #: a constrained search whose path depends on the last bits of the BLAS kernels, so off the recording platform it may
 #: end at another arbitrage-free smile, or, on fit_zero_total_variance, at none (and the surface says so). Under the
@@ -616,7 +621,7 @@ def _differences(actual: Any, expected: Any, path: str = "", *, exact: bool) -> 
             for found in _differences(*pair, f"{path}[{i}]", exact=exact)
         ]
     if isinstance(expected, float) and isinstance(actual, float) and not exact:
-        atol = ERROR_RATIO_ATOL if ERROR_RATIO in path else ATOL
+        atol = ERROR_RATIO_ATOL if ERROR_RATIO in path else LOCAL_VOL_ERROR_ATOL if LOCAL_VOL_ERROR in path else ATOL
         close = math.isclose(actual, expected, rel_tol=RTOL, abs_tol=atol)
         return [] if close else [f"{path}: {actual!r} != {expected!r}"]
     same = type(actual) is type(expected) and (
