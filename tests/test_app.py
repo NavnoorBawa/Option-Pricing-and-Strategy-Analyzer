@@ -67,9 +67,9 @@ def test_every_strategy_template(new_app):
 
 
 def test_var_models(new_app):
-    app = new_app(tab="Risk").run()
-    for dist in ("student_t", "garch", "normal"):
-        app.selectbox(key="var_dist").set_value(dist).run()
+    app = new_app(tab="Risk", report="VaR").run()
+    for model in ("Student-t MC", "GARCH MC", "GARCH-t MC", "Normal MC"):
+        app.segmented_control(key="var_model").set_value(model).run()
         _ok(app)
     assert any(m.label.startswith("VaR") for m in app.metric)
 
@@ -116,9 +116,10 @@ def test_iv_shift_leaves_the_expiry_curve_and_metrics_alone(new_app):
 #: Every chart of the app, by key; together the three pricing models draw each of them.
 CHART_KEYS = {
     "sensitivity_chart", "heatmap_call", "heatmap_put", "tree_convergence_call", "tree_convergence_put",
-    "exercise_boundary", "mc_paths", "mc_terminal", "payoff_chart", "risk_heatmap", "date_heatmap", "time_decay",
-    "greek_profiles", "stress_chart", "var_hist", "surf_iv", "surf_lv", "smiles", "term_structure", "iv_curve",
+    "exercise_boundary", "mc_paths", "mc_terminal", "payoff_chart", "ladder_chart", "surf_iv", "surf_lv", "smiles",
+    "term_structure", "iv_curve",
 }  # fmt: skip
+#: The Risk tab's other reports draw their charts through charts.show too: tests/test_app_risk.py checks them.
 
 
 def test_every_chart_has_the_desk_config_and_a_description(new_app):
@@ -148,7 +149,7 @@ def test_every_chart_has_the_desk_config_and_a_description(new_app):
 TAB_CHARTS = {
     "Pricing": {"sensitivity_chart", "heatmap_call", "heatmap_put"},
     "Strategy": {"payoff_chart"},
-    "Risk": {"risk_heatmap", "date_heatmap", "time_decay", "greek_profiles", "stress_chart", "var_hist"},
+    "Risk": {"ladder_chart"},  # the default report, Ladder: only the selected report computes
     "Surface": {"surf_iv", "surf_lv", "smiles", "term_structure"},
     "IV": {"iv_curve"},
     "Methodology": set(),
@@ -292,7 +293,8 @@ def _counted(calls: dict[str, int], name: str, function):
 def test_a_sidebar_change_recomputes_only_the_open_tab(new_app, monkeypatch):
     # Count the work of each tab in the run that follows a sidebar change: the charts it builds (every chart goes
     # through charts.show), the strategy analysis and the Monte Carlo VaR (its cache is cleared first, so that a
-    # call cannot hide in it). The Risk tab simulates twice, with implied vol moving and with it frozen.
+    # call cannot hide in it). The Risk tab reads the position's maximum loss from the analysis for its position line,
+    # and simulates only in its VaR report (tests/test_app_risk.py), which is not the default.
     from options_analyzer import risk
     from options_analyzer import strategies as strat
     from options_analyzer.ui import cache, charts
@@ -311,7 +313,7 @@ def test_a_sidebar_change_recomputes_only_the_open_tab(new_app, monkeypatch):
         at.sidebar.number_input(key="spot").set_value(105.0).run()
         _ok(at)
         assert set(shown) == TAB_CHARTS[tab], tab
-        assert calls == {"analyze": int(tab == "Strategy"), "value_at_risk": 2 * (tab == "Risk")}, tab
+        assert calls == {"analyze": int(tab in ("Strategy", "Risk")), "value_at_risk": 0}, tab
 
 
 def test_value_at_risk_is_not_simulated_while_the_pricing_tab_is_open(app, monkeypatch):
@@ -328,7 +330,9 @@ def test_value_at_risk_is_not_simulated_while_the_pricing_tab_is_open(app, monke
     app.selectbox(key="strategy_category").set_value("Range-bound").run()  # the Strategy controls are on every run
     _ok(app)
     assert calls == []
-    _open(app, "Risk")  # the counter does see the simulations once the Risk tab opens
+    _open(app, "Risk")
+    assert calls == []  # its default report is the Ladder
+    app.pills(key="report").set_value("VaR").run()  # the counter does see the simulations once the report opens
     assert len(calls) == 2  # with implied vol moving, and with it frozen (the spot-only VaR)
     assert any(chart.proto.id.endswith("-var_hist") for chart in app.get("plotly_chart"))
 
@@ -379,25 +383,23 @@ def test_the_date_slider_starts_again_when_the_expiry_changes(new_app):
 
 
 def test_risk_settings_survive_a_visit_to_another_tab(new_app):
-    at = new_app(tab="Risk").run()
-    at.slider(key="grid_span").set_value(40)
-    at.slider(key="grid_days_365").set_value(30)
-    at.select_slider(key="date_grid_reach").set_value(3.0)
-    at.toggle(key="stress_hist").set_value(False)
-    at.selectbox(key="var_conf").set_value(0.975)
+    at = new_app(tab="Risk", report="VaR").run()
     at.select_slider(key="var_paths").set_value(25_000)
-    at.selectbox(key="var_dist").set_value("student_t").run()
+    at.segmented_control(key="var_model").set_value("Student-t MC").run()
     at.slider(key="var_dof").set_value(4)
     at.number_input(key="var_seed").set_value(11).run()
     _ok(at)
     before = {m.label: m.value for m in at.metric}
     _away_and_back(at, "Risk")
-    assert at.slider(key="grid_span").value == 40 and at.slider(key="grid_days_365").value == 30
-    assert at.select_slider(key="date_grid_reach").value == 3.0 and at.toggle(key="stress_hist").value is False
-    assert at.selectbox(key="var_conf").value == 0.975 and at.select_slider(key="var_paths").value == 25_000
-    assert at.selectbox(key="var_dist").value == "student_t" and at.slider(key="var_dof").value == 4
+    assert at.pills(key="report").value == "VaR" and at.select_slider(key="var_paths").value == 25_000
+    assert at.segmented_control(key="var_model").value == "Student-t MC" and at.slider(key="var_dof").value == 4
     assert at.number_input(key="var_seed").value == 11
     assert {m.label: m.value for m in at.metric} == before  # the same simulation: same seed, paths and model
+    at.pills(key="report").set_value("Scenarios").run()
+    at.segmented_control(key="sc_volmode").set_value("relative")
+    at.slider(key="sc_date").set_value(5).run()
+    _away_and_back(at, "Risk")
+    assert at.segmented_control(key="sc_volmode").value == "relative" and at.slider(key="sc_date").value == 5
 
 
 def test_uploaded_quotes_survive_a_visit_to_another_tab(new_app):

@@ -293,7 +293,7 @@ ROWS = {
     "strategy_cards": [["Net premium", "Max profit"], ["Max loss", "Probability of profit"]],
     "greek_cards": [["Delta (shares)", "Gamma"], ["Theta / day", "Vega / vol pt"]],
     "expectation_cards": [["Expected P&L at expiry", "P&L standard deviation", "Drift used"]],
-    "var_cards": [["VaR 99.0%", "Expected Shortfall 99.0%"], ["Spot-only VaR 99.0%", "Spot-only ES 99.0%"]],
+    "risk_tiles": [["$Δ", "Γ P&L 1%"], ["Vega ($/vp)", "Θ ($/day)"], ["Worst grid", "Worst stress"]],
     "surface_cards": [["Grid", "Calendar arbitrage"], ["Butterfly arbitrage", "Local vol defined"]],
     "iv_cards": [["Implied volatility", "Model check"], ["Vega at IV", "Time value"]],
 }
@@ -330,12 +330,13 @@ def test_the_four_card_rows_stay_two_by_two_on_a_phone(states):
     checked = set()
     for state, at in states.items():
         for row, groups in _card_rows(at).items():
-            if len(groups) != 2 or (state == "limits" and row in ("price_cards", "iv_cards")):
+            if any(len(group) != 2 for group in groups) or (state == "limits" and row in ("price_cards", "iv_cards")):
                 continue
             style = next(s for s in _styles(at) if f".st-key-{row} {{ container:" in s)
-            assert _layout(style, PHONE_ROW)[0] == 2, (state, row)
+            # No query applies where a pair fits the row at full size (the Risk tiles): each pair then has its line.
+            assert (_layout(style, PHONE_ROW) or (2,))[0] == 2, (state, row)
             checked.add(row)
-    assert checked == {"price_cards", "strategy_cards", "greek_cards", "var_cards", "surface_cards", "iv_cards"}
+    assert checked == {"price_cards", "strategy_cards", "greek_cards", "risk_tiles", "surface_cards", "iv_cards"}
 
 
 @pytest.mark.parametrize(
@@ -432,7 +433,9 @@ def test_the_card_width_model_covers_every_card_row_in_plex_sans(states):
         label_px = wrapped(metric.label, label) + components._HELP_ICON_PX
         value_width = text(metric.value, medium, value_px)
         # A delta sits in a pill, with its padding on either side.
-        pill = wrapped(metric.proto.delta, delta) + components._DELTA_PADDING_PX if metric.proto.delta else 0.0
+        # (a dollar sign escaped for Markdown shows without its backslash)
+        shown = metric.proto.delta.replace("\\$", "$")
+        pill = wrapped(shown, delta) + components._DELTA_PADDING_PX if shown else 0.0
         return max(value_width, label_px, pill) + components._CARD_CHROME_PX
 
     for at in states.values():

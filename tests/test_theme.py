@@ -823,7 +823,7 @@ _RUNNING = "document.querySelector('[data-test-script-state]')?.getAttribute('da
 TAB_READY = {
     "Pricing": ".st-key-sensitivity_chart",
     "Strategy": ".st-key-strategy_cards",
-    "Risk": ".st-key-var_cards",
+    "Risk": ".st-key-risk_tiles",
     "Surface": ".st-key-surface_cards",
     "IV": ".st-key-iv_cards",
     "Methodology": ".st-key-methodology",
@@ -887,7 +887,7 @@ CARD_ROW_TABS = {
     "strategy_cards": "Strategy",
     "greek_cards": "Strategy",
     "expectation_cards": "Strategy",
-    "var_cards": "Risk",
+    "risk_tiles": "Risk",
     "surface_cards": "Surface",
     "iv_cards": "IV",
 }
@@ -970,7 +970,7 @@ def test_card_rows_line_up(chromium, app_url, width, query, three_up):
     # The cards of each line of a row have one width, one height and one value baseline; a card is as wide on a
     # line of its own (2 + 1) as above it; and no value or label runs out of its card's content box. Every value is
     # at the theme's full size, and on a line of three cards no label takes more than two lines. The row of three
-    # goes 2 + 1 on phones, the rows of two pairs (the VaR row among them: implied vol moving, and frozen) 2 + 2,
+    # goes 2 + 1 on phones, the rows of two pairs 2 + 2, the Risk tab's three pairs of tiles 2 + 2 + 2,
     # and the Strategy summary and Greek rows wrap together with their cards lined up.
     # (The subgrid and stretch rules of ui/components.py depend on Streamlit's DOM: the bordered stMetric box, the
     # padded box inside it and the element container around it.)
@@ -982,7 +982,7 @@ def test_card_rows_line_up(chromium, app_url, width, query, three_up):
                 _tab(page, tab)
             rows[key] = page.evaluate(_CARD_ROW, key)
         for key, cards in rows.items():
-            assert len(cards) in (3, 4), key
+            assert len(cards) in (3, 4, 6), key
             for line in _lines(cards):
                 for measure in ("width", "height", "valueTop"):
                     values = [card[measure] for card in line]
@@ -1000,8 +1000,10 @@ def test_card_rows_line_up(chromium, app_url, width, query, three_up):
                 if card["iconGap"] is not None:
                     assert 0 <= card["iconGap"] <= 8 and card["iconOnLastLine"], (key, card)
         assert [len(line) for line in _lines(rows["expectation_cards"])] == ([3] if three_up else [2, 1])
-        for key in ("strategy_cards", "greek_cards", "var_cards"):
+        for key in ("strategy_cards", "greek_cards"):
             assert [len(line) for line in _lines(rows[key])] == [2, 2], key
+        # The Risk tab's six tiles in three pairs: 2 + 2 + 2 on a phone, 4 + 2 at 1,024 px with the sidebar open.
+        assert [len(line) for line in _lines(rows["risk_tiles"])] == ([4, 2] if three_up else [2, 2, 2])
 
         def boxes(key: str) -> list[list[tuple[int, int]]]:
             return [[(round(c["x"]), round(c["width"])) for c in line] for line in _lines(rows[key])]
@@ -1059,7 +1061,7 @@ def test_monte_carlo_intervals_are_never_cut_off(chromium, app_url, width):
 
 
 #: A chart that each tab draws (the key given to charts.show), and the number of charts it draws, at the default URL.
-TAB_CHART = {"Pricing": ("sensitivity_chart", 3), "Strategy": ("payoff_chart", 1), "Risk": ("var_hist", 6),
+TAB_CHART = {"Pricing": ("sensitivity_chart", 3), "Strategy": ("payoff_chart", 1), "Risk": ("ladder_chart", 1),
              "Surface": ("surf_iv", 4), "IV": ("iv_curve", 1), "Methodology": (None, 0)}  # fmt: skip
 
 
@@ -1092,12 +1094,12 @@ def test_a_click_on_a_tab_runs_that_tab_and_puts_it_in_the_link(chromium, app_ur
         _tab(page, "Risk")
         assert _query(page) == {"preset": ["Textbook"], "contracts": ["3"], "tab": ["Risk"]}
         analysed = "Long 1 × 100 Call, Short 1 × 110 Call · 3 × 100 multiplier"
-        assert analysed in page.get_by_text("Analysing").inner_text()
+        assert analysed in page.locator(".st-key-risk_position").inner_text()
         link = _open(chromium, page.url, "light", 1440)
         try:
-            link.locator(".st-key-var_hist [data-testid=stPlotlyChart]").wait_for(state="visible", timeout=60_000)
+            link.locator(".st-key-ladder_chart [data-testid=stPlotlyChart]").wait_for(state="visible", timeout=60_000)
             assert link.locator("[role=tab][aria-selected=true]").inner_text().strip() == "Risk"
-            assert analysed in link.get_by_text("Analysing").inner_text()
+            assert analysed in link.locator(".st-key-risk_position").inner_text()
         finally:
             link.close()
     finally:
@@ -1114,10 +1116,10 @@ def test_a_hand_typed_link_opens_the_tab_and_template_it_names(chromium, app_url
     plain.close()
     page = _open(chromium, f"{app_url}/?tab=risk&strategy=Iron+Condor&preset=Textbook", "light", 1440)
     try:
-        page.locator(".st-key-var_hist [data-testid=stPlotlyChart]").wait_for(state="visible", timeout=120_000)
+        page.locator(".st-key-ladder_chart [data-testid=stPlotlyChart]").wait_for(state="visible", timeout=120_000)
         assert page.locator("[role=tab][aria-selected=true]").inner_text().strip() == "Risk"
         condor = "Iron Condor — Long 1 × 80 Put, Short 1 × 90 Put, Short 1 × 110 Call, Long 1 × 120 Call"
-        assert condor in page.get_by_text("Analysing").inner_text()
+        assert condor in page.locator(".st-key-risk_position").inner_text()
         assert _query(page) == {"tab": ["Risk"], "preset": ["Textbook"], "strategy_category": ["Range-bound"],
                                 "strategy_Range-bound": ["Iron Condor"]}  # fmt: skip
         assert page.evaluate("history.length") == entries + 1
@@ -1161,7 +1163,7 @@ def test_a_leg_edit_is_kept_when_another_tab_is_clicked_before_enter(chromium, a
         )
         _tab(page, tab)
         if tab == "Risk":
-            assert "Long 3 × 100 Call, Short 1 × 110 Call" in page.get_by_text("Analysing").inner_text()
+            assert "Long 3 × 100 Call, Short 1 × 110 Call" in page.locator(".st-key-risk_position").inner_text()
         _tab(page, "Strategy")
         assert _net_premium(page) == "$2,531"  # 3 x $10.4506 - $6.0401, for 100 shares
     finally:
@@ -1460,7 +1462,7 @@ def test_the_share_link_reopens_this_view(chromium, app_url):
         other = chromium.new_page(viewport={"width": 1440, "height": 900})
         try:
             other.goto(link)
-            other.wait_for_selector("[role=tabpanel] .st-key-var_cards", timeout=120_000)
+            other.wait_for_selector("[role=tabpanel] .st-key-risk_tiles", timeout=120_000)
             ticker = other.locator(".st-key-desk_identity p").inner_text()
             assert "S 101.00 · K 100.00 · " in ticker.replace("\xa0", " ")
         finally:

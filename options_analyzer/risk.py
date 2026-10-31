@@ -59,6 +59,7 @@ __all__ = [
     "VaRResult",
     "delta_gamma_var",
     "simulate_horizon",
+    "tail_measures",
     "value_at_risk",
 ]
 
@@ -263,6 +264,34 @@ def _var_es(pnl: np.ndarray, confidence: float) -> tuple[float, float, tuple[flo
     lo = int(np.clip(np.floor(w - half), 1, n)) - 1
     hi = int(np.clip(np.ceil(w + half), 1, n)) - 1
     return var, es, (float(-ordered[hi]), float(-ordered[lo]))
+
+
+def tail_measures(pnl: np.ndarray, confidence: float) -> tuple[float, float]:
+    """VaR and ES of a sample of P&L at one confidence, by the estimators of :func:`value_at_risk`.
+
+    For a second confidence on the same simulated P&L, such as ES at 97.5% (FRTB's level) beside VaR at 99%.
+
+    Parameters
+    ----------
+    pnl : numpy.ndarray
+        Simulated P&L ($), such as :attr:`VaRResult.pnl`.
+    confidence : float
+        Between 0.5 and 1.
+
+    Returns
+    -------
+    tuple of float
+        ``(var, es)``, losses: positive when the tail loses money.
+
+    Examples
+    --------
+    >>> tail_measures(np.arange(-50.0, 50.0), 0.95)  # the 5 worst of 100: -50 to -46
+    (46.0, 48.0)
+    """
+    if not 0.5 < confidence < 1.0:
+        raise ValueError(f"confidence must be between 0.5 and 1, got {confidence!r}")
+    var, es, _ = _var_es(np.asarray(pnl, dtype=float), confidence)
+    return var, es
 
 
 def _settlement_days(strategy: Strategy, market: Market, horizon_days: int) -> dict[int, int]:

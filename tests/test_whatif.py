@@ -89,6 +89,43 @@ def test_apply_shifts_the_market():
     assert late.expiry == pytest.approx(1 / 525_600)
 
 
+@pytest.mark.parametrize(
+    ("shifts", "kwargs"),
+    [
+        (Shifts(spot=-2.0, vol=3.0, sessions=5, rate=25.0), {"vol_shift": 0.03}),
+        (Shifts(spot=1.5, vol=10.0, mode="relative", sessions=1), {"vol_multiplier": 1.10}),
+        (Shifts(vol=25.0, mode="1M-scaled", sessions=10), {"vol_multiplier": 1.25, "vol_tenor_decay": 0.25}),
+    ],
+)
+def test_apply_position_values_every_leg_at_the_scenario(shifts, kwargs):
+    # The shifted position today must be worth what the risk library gives for the original position moved by the
+    # same shocks after the same calendar time (position_value's own t, vol and rate arguments): a leg on the market's
+    # expiry, one with its own longer expiry and vol, and one that expires before the scenario date (worth its
+    # intrinsic value). The one-minute floor of that leg leaves a minute of discounting, K·r / 525,600 = 5.4e-4 per
+    # share at K 6,000; everything else agrees to rounding (measured 1e-11).
+    market = strat.Market(5800.0, 0.0475, 0.1552, 28 / 365, 0.013)
+    legs = (
+        strat.Leg("call", 1, 5815.0),
+        strat.Leg("put", -2, 5600.0, 120 / 365, 0.19),
+        strat.Leg("put", 1, 6000.0, 3 / 365),
+    )
+    book = strat.Strategy("book", legs)
+    moved, m = whatif.apply_position(book, market, shifts, as_of=ASOF)
+    elapsed = clock.year_fraction(ASOF, whatif.scenario_time(ASOF, shifts.sessions))
+    expected = strat.position_value(
+        book, market, 5800.0 * (1 + shifts.spot / 100), elapsed, rate_shift=shifts.rate / 1e4, **kwargs
+    )
+    got = strat.position_value(moved, m)
+    assert float(got) == pytest.approx(float(expected), abs=6e-4)
+    assert [leg.expiry for leg in moved.legs][1] == pytest.approx(120 / 365 - elapsed, abs=1e-15)
+
+
+def test_apply_position_is_the_identity_without_shifts():
+    book = strat.Strategy("book", (strat.Leg("call", 1, 5815.0),))
+    market = strat.Market(5800.0, 0.0475, 0.1552, 28 / 365, 0.013)
+    assert whatif.apply_position(book, market, Shifts(mode="relative"), as_of=ASOF) == (book, market)
+
+
 def test_shifts_are_active_while_any_is_non_zero():
     assert not Shifts().active and not Shifts(mode="relative").active
     for shifts in (Shifts(spot=0.5), Shifts(vol=-1.0), Shifts(sessions=1), Shifts(rate=5.0)):

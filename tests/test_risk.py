@@ -725,3 +725,20 @@ def test_the_methodology_quotes_the_comparator_on_the_index_straddle():
         rf"the one-day 99 % VaR is \${res.delta_gamma.var:,.0f} delta-gamma-theta and \${res.var:,.0f} by full "
         rf"revaluation (\${res.delta_normal_var:,.0f} delta-normal)" in _methodology()
     )
+
+
+def test_tail_measures_reads_a_second_confidence_off_the_same_pnl():
+    # ES at 97.5% beside VaR at 99% on one simulation: tail_measures at the run's own confidence is the run's VaR and
+    # ES exactly, and at 97.5% it is the Acerbi-Tasche estimate counted by hand (the 2,500 worst of 100,000).
+    res = risk.value_at_risk(STRADDLE, SPX, risk.VaRConfig(0.99, 1, 100_000, seed=7), 100)
+    assert risk.tail_measures(res.pnl, 0.99) == (res.var, res.expected_shortfall)
+    worst = np.sort(res.pnl)[:2_500]
+    var, es = risk.tail_measures(res.pnl, 0.975)
+    assert var == -worst[-1] and es == pytest.approx(-worst.mean(), rel=1e-12)
+    assert es >= var
+    with pytest.raises(ValueError, match="confidence"):
+        risk.tail_measures(res.pnl, 1.0)
+    runner = doctest.DocTestRunner()
+    for test in doctest.DocTestFinder().find(risk.tail_measures, globs={"tail_measures": risk.tail_measures, "np": np}):
+        runner.run(test)
+    assert runner.tries == 1 and runner.failures == 0

@@ -33,7 +33,7 @@ import streamlit as st
 
 from .. import clock
 from ..scenarios import DEFAULT_VOL_TENOR_DECAY
-from ..strategies import VOL_SHOCK_REFERENCE_TENOR, Market
+from ..strategies import VOL_SHOCK_REFERENCE_TENOR, Market, Strategy
 from .format import MINUS, bp, level, session_label, signed, time_left, vol, vol_change
 
 #: The vol modes, as the strip's control shows them and a link holds them (``?wvmode=relative``): a bound segmented
@@ -214,6 +214,53 @@ def apply(market: Market, shifts: Shifts, *, as_of: datetime) -> Market:
         volatility=leg_vol(market.volatility, tau, shifts),
         expiry=tau,
     )
+
+
+def apply_position(strategy: Strategy, market: Market, shifts: Shifts, *, as_of: datetime) -> tuple[Strategy, Market]:
+    """A position and its market under the shifts: :func:`apply` for the market, and every option leg with its own
+    expiry or vol moved the same way, so the shifted pair values each leg at the scenario.
+
+    A leg with its own expiry keeps the time it has left at the scenario date, floored at one minute as
+    :func:`apply` floors the market's (a leg that expires before the scenario date is then worth about its
+    intrinsic value at the scenario spot). Every option leg's vol becomes its own: :func:`leg_vol` of its vol
+    today (its own, or the market's) at its own time left, which the 1M-scaled mode damps by that leg's tenor.
+
+    Parameters
+    ----------
+    strategy : strategies.Strategy
+        The position today.
+    market : strategies.Market
+        Today's market.
+    shifts : Shifts
+        The what-if shifts.
+    as_of : datetime
+        The valuation time, from which T+N counts.
+
+    Returns
+    -------
+    tuple of (strategies.Strategy, strategies.Market)
+        The position and market as of the scenario; unchanged when no shift is set.
+
+    Examples
+    --------
+    >>> from options_analyzer.strategies import Leg
+    >>> book = Strategy("book", (Leg("call", 1, 100), Leg("put", -1, 95, 0.5, 0.25)))
+    >>> moved, m = apply_position(book, Market(100, 0.05, 0.2, 0.1), Shifts(vol=2.0), as_of=datetime(2026, 1, 5, 16))
+    >>> [round(leg.volatility, 4) for leg in moved.legs], m.volatility
+    ([0.22, 0.27], 0.22)
+    """
+    if not shifts.active:
+        return strategy, market
+    moved = apply(market, shifts, as_of=as_of)
+    elapsed = clock.year_fraction(as_of, scenario_time(as_of, shifts.sessions)) if shifts.sessions else 0.0
+    legs = []
+    for leg in strategy.legs:
+        if leg.is_option:
+            own = None if leg.expiry is None else max(leg.expiry - elapsed, 1.0 / clock.MINUTES_PER_YEAR)
+            today = market.volatility if leg.volatility is None else leg.volatility
+            leg = replace(leg, expiry=own, volatility=leg_vol(today, moved.expiry if own is None else own, shifts))
+        legs.append(leg)
+    return replace(strategy, legs=tuple(legs)), moved
 
 
 def note(shifts: Shifts) -> str:
