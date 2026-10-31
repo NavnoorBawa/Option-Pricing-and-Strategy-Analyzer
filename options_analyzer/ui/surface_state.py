@@ -1,11 +1,11 @@
 """The app's published surface: one :class:`~options_analyzer.vol_surface.PublishedSurface` per market context.
 
-Every tab reads its forwards, vols, risk-neutral ranges, quotes and delta strikes from :func:`current` (UI spec 2.0:
-the published surface is owned here and read everywhere else). Under the synthetic index preset it is the surface
-fitted to the synthetic chain at the valuation time (:func:`.market.index_market`); an uploaded chain will publish
-through :func:`publish` once the Surface tab reads uploads in the canonical schema (roadmap SF-11). The textbook
-preset has no chain and so no published surface: :func:`current` returns None, and a tab falls back to its flat
-vol, labelled ``flat vol``.
+The tabs will read their forwards, vols, risk-neutral ranges, quotes and delta strikes from :func:`current` (UI spec
+2.0: the published surface is owned here and read everywhere else) as each tab's redesign adopts it; none reads it
+yet. Under the synthetic index preset it is the surface fitted to the synthetic chain at the valuation time
+(:func:`.market.index_market`); an uploaded chain will publish through :func:`publish` once the Surface tab reads
+uploads in the canonical schema (roadmap SF-11). The textbook preset has no chain and so no published surface:
+:func:`current` returns None, and a tab will fall back to its flat vol, labelled ``flat vol``.
 
 The mathematics lives in :mod:`options_analyzer.vol_surface.published`, which holds no Streamlit code, so the
 library and its tests use it without the app; this module only builds and caches it.

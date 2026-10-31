@@ -23,7 +23,9 @@ from options_analyzer.ui import components, theme
 
 ROOT = Path(__file__).resolve().parents[1]
 PAGE = Path(__file__).with_name("_desk_foundation_page.py")
-_RUNNING = "document.querySelector('[data-test-script-state]')?.getAttribute('data-test-script-state') === 'running'"
+#: The script has run to its end: "notRunning", which the app root reads only after a run (it reads "initial" before
+#: the first, and a page waited on with "not running" alone was measured with one of its six inputs drawn).
+_IDLE = "document.querySelector('[data-test-script-state]')?.getAttribute('data-test-script-state') === 'notRunning'"
 
 pytestmark = [pytest.mark.e2e, pytest.mark.slow]
 
@@ -70,16 +72,23 @@ def _open(chromium, url: str, *, width: int = 1440, scheme: str = "dark", touch:
     page = context.new_page()
     page.goto(url)
     page.wait_for_selector(".st-key-whatif", timeout=120_000)
-    page.wait_for_function(f"() => !({_RUNNING})", timeout=120_000)
+    page.wait_for_function(
+        f"() => {_IDLE} && !!document.querySelector('.st-key-chart_foundation_chart')", timeout=120_000
+    )
     # The desk stylesheet reaches the page as an st.html element of its own, measured 0.6 to 1.0 s after the script
     # state reads idle on a loaded machine: wait for its rules rather than for a fixed time, or the amber rule and
     # the fonts are read before they apply.
     page.wait_for_function(_STYLED, timeout=60_000)
+    # Every element the tests measure, drawn: the five number inputs (two in the sidebar, three in the strip) and
+    # both tables, which load their grid separately and were once measured before it came.
+    page.wait_for_function(_DRAWN, timeout=60_000)
     page.evaluate("document.fonts.ready.then(() => true)")
     page.wait_for_timeout(300)  # a settle for layout only; nothing below depends on it for correctness
     return context, page
 
 
+_DRAWN = """() => document.querySelectorAll('[data-testid=stNumberInputContainer]').length >= 5
+  && [...document.querySelectorAll('[data-testid=stDataFrame]')].filter(e => e.offsetHeight > 100).length === 2"""
 #: True once the desk stylesheet's rules are in the document (its what-if rule is the marker).
 _STYLED = """() => [...document.styleSheets].some(sheet => {
   try { return [...sheet.cssRules].some(r => (r.selectorText || '').includes('st-key-whatif_scenario')); }

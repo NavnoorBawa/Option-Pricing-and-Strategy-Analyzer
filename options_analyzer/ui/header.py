@@ -50,9 +50,8 @@ BRAND = "Options Analytics"
 #: tests/test_app_header.py checks against the parameters the app writes.
 SHARE_NOTE = (
     "The link holds the market (the preset, and its valuation time or typed inputs), the contract, the pricing model "
-    "and its settings, the open tab, the Strategy tab's template, strike width, contracts, shares per contract and "
-    "commission, and the what-if shifts. Edited legs, uploaded quotes and the other settings of a tab stay in this "
-    "session."
+    "and its settings, the open tab, and the Strategy tab's template, strike width, contracts, shares per contract "
+    "and commission. Edited legs, uploaded quotes and the other settings of a tab stay in this session."
 )
 #: The keyboard shortcut of the Methodology button (Streamlit shows Option for Alt on a Mac).
 METHODOLOGY_SHORTCUT = "Alt+Shift+M"

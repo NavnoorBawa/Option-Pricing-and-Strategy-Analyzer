@@ -177,10 +177,9 @@ def _quote_controls(inputs: Inputs) -> vs.VolSurface | None:
         ("Sample with implied vols", False, "sample_quotes"),
         ("Sample with prices", True, "sample_prices"),
     ):
-        sample = vs.sample_quotes(inputs.spot, inputs.rate, inputs.dividend_yield, prices=prices)
         c2.download_button(
             label,
-            exports.csv(sample, sample_provenance),
+            exports.builder(_sample_csv, inputs.spot, inputs.rate, inputs.dividend_yield, prices, sample_provenance),
             sample_provenance.file_name(f"sample_option_{'prices' if prices else 'quotes'}", "csv"),
             "text/csv",
             on_click="ignore",
@@ -437,6 +436,11 @@ def _contract_readout(surface: vs.VolSurface, inputs: Inputs) -> None:
         f"|ln K/F| = {reach:.2f} from that expiry's forward F (four at-the-money standard deviations, at most "
         f"{vs.svi.WING_CAP:g}), so it gives no implied vol for it."
     )
+
+
+def _sample_csv(spot: float, rate: float, dividend_yield: float, prices: bool, provenance: exports.Provenance) -> bytes:
+    """A sample quotes file with its provenance lines, built when its button is clicked (not on every rerun)."""
+    return exports.csv(vs.sample_quotes(spot, rate, dividend_yield, prices=prices), provenance)
 
 
 def _provenance(inputs: Inputs, source: str) -> exports.Provenance:

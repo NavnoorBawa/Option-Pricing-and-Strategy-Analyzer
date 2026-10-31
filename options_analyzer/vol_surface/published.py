@@ -1,4 +1,4 @@
-"""The published surface: what every tab reads from a fitted market surface and the chain it was fitted to.
+"""The published surface: what the tabs will read from a fitted market surface and the chain it was fitted to.
 
 Roadmap item SF-11 (core), UI spec 2.0, 2.7 item 6 and 3.4. A :class:`PublishedSurface` holds, for each listed expiry,
 its forward, discount factor, settlement and maturity, and answers:

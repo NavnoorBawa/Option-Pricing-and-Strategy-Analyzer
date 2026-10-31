@@ -358,8 +358,12 @@ PROBABILITY_BASES = ("RN smile", "flat vol", "view")
 
 
 def _absent(value) -> bool:
-    """None or NaN."""
-    return value is None or (isinstance(value, float) and math.isnan(value))
+    """None, a NaN of any float type (a NumPy float32's too), pandas' NA or NaT: what reads as ``–``, never ``nan``.
+    A missing value is the one that differs from itself; pandas' NA cannot say so (its truth value raises)."""
+    try:
+        return value is None or bool(value != value)
+    except TypeError:
+        return True
 
 
 def _minus(value: float, text: str) -> str:
@@ -403,7 +407,8 @@ def strike(k: float, increment: float) -> str:
     """
     if _absent(k) or math.isinf(k):
         return MISSING
-    decimals = max(_decimals_of(increment, 2), _decimals_of(k, 2))
+    known = not _absent(increment) and math.isfinite(increment)  # else the strike's own decimals alone
+    decimals = max(_decimals_of(increment, 2) if known else 0, _decimals_of(k, 2))
     return _minus(k, f"{abs(k):,.{decimals}f}")
 
 
@@ -691,7 +696,7 @@ def time_left(minutes: float, *, expiry_day: bool = False) -> str:
     >>> time_left(30 * 1440), time_left(1440), time_left(0.5), time_left(0)
     ('30d', '1d 0h', '0h 0m', 'expired')
     """
-    if _absent(minutes):
+    if _absent(minutes) or minutes == math.inf:
         return MISSING
     if minutes <= 0:
         return "expired"
@@ -756,7 +761,7 @@ def timestamp(moment: dt.datetime | None) -> str:
     >>> timestamp(dt.datetime(2026, 10, 23, 20, 0, tzinfo=dt.timezone.utc))
     '23‑Oct‑26 16:00 ET'
     """
-    if moment is None:
+    if _absent(moment):
         return MISSING
     if moment.tzinfo is not None and moment.utcoffset() is not None:
         moment = clock.to_new_york(moment)

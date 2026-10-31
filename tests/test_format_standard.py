@@ -403,6 +403,20 @@ def test_significant_digit_columns_round_to_three_digits(monkeypatch):
     np.testing.assert_array_equal(data["Vanna"], [1.23e-4, -9.88e-7, 0.0])
 
 
+def test_every_kind_of_missing_value_reads_as_the_en_dash():
+    # Spec 2.5: never "nan". A NumPy float32 NaN is not a Python float, pandas' NA has no truth value and NaT is a
+    # datetime: each once showed "nan" or raised.
+    for missing in (None, math.nan, np.float32("nan"), np.float64("nan"), pd.NA):
+        for writer in (fmt.vol, fmt.premium, fmt.vol_change, fmt.bp, fmt.signed_sci, fmt.time_left):
+            assert writer(missing) == MISSING, (writer.__name__, missing)
+        assert fmt.strike(missing, 5.0) == MISSING
+    assert fmt.timestamp(pd.NaT) == MISSING and fmt.timestamp(None) == MISSING
+    assert fmt.time_left(math.inf) == MISSING
+    assert fmt.vol(np.float32(0.1552)) == "15.52%"  # a float32 that is there still writes
+    # A strike without a known increment keeps its own decimals.
+    assert fmt.strike(5815.0, math.nan) == "5,815" and fmt.strike(582.5, None) == "582.5"
+
+
 # --- the lint the tabs will pass once they adopt the standard --------------------------------------------------------
 
 #: Hand formatting in a tab, any of:

@@ -419,7 +419,8 @@ EXPORT_NAME = re.compile(r"[a-z0-9_]+_(SYNTHETIC|UPLOAD|TEXTBOOK|PARAMETRIC)_\d{
 
 def test_every_download_button_builds_its_file_through_the_exports_module():
     """The static half: no ``st.download_button`` in the package hands out bytes it built itself, so that no export
-    can leave without its provenance lines."""
+    can leave without its provenance lines; and each passes a builder, so that no file is built until it is clicked
+    (spec 2.13: ``data`` a callable)."""
     offences = []
     for path in sorted((PACKAGE / "ui").glob("*.py")):
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
@@ -429,7 +430,7 @@ def test_every_download_button_builds_its_file_through_the_exports_module():
                     node.args[2] if len(node.args) > 2 else next(k.value for k in node.keywords if k.arg == "file_name")
                 )
                 built = ast.unparse(data)
-                if not built.startswith(("exports.csv(", "exports.xlsx(", "exports.json(", "exports.builder(")):
+                if not built.startswith("exports.builder(exports.") and not re.match(r"exports\.builder\(_\w+,", built):
                     offences.append(f"{path.name}:{node.lineno} data={built}")
                 if ".file_name(" not in ast.unparse(name):
                     offences.append(f"{path.name}:{node.lineno} file_name={ast.unparse(name)}")
