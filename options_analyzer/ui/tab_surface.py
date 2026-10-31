@@ -92,6 +92,11 @@ FOOTER = (
     "SVI per expiry (Gatheral 2004), Durrleman g ≥ 0, calendar w(k, T) non-decreasing; wing cap |k| ≤ "
     f"{number(vs.svi.WING_CAP, 1)} (SF-8). Method: Methodology › Surface."
 )
+#: The parametric surface's footer: no fit, one formula for every maturity (the SVI footer misdescribed it).
+FOOTER_SSVI = (
+    "Power-law SSVI (Gatheral and Jacquier 2014), one formula for every maturity, free of static arbitrage for "
+    "η(1 + |ρ|) ≤ 2. Method: Methodology › Surface."
+)
 
 
 @dataclass(frozen=True, eq=False)  # holds tables: compared by identity
@@ -1434,7 +1439,7 @@ def _contract_readout(shown: Shown, inputs: Inputs) -> None:
     where = (
         f"extrapolated, |k| {number(abs(math.log(inputs.strike / forward)), 2)}"
         if surface.is_extrapolated(k_over_s, T)
-        else "inside quotes"
+        else ("inside its strike grid" if shown.source == SSVI else "inside quotes")  # SSVI has no quotes
     )
     tail = "" if shown.published else f" · Pricing uses {'the synthetic chain' if inputs.context else 'the typed σ'}"
     st.caption(f"{lead} → σ {vol(iv)} (K/F {moneyness(inputs.strike, forward)}, {where}){tail}")
@@ -1611,4 +1616,4 @@ def render(inputs: Inputs) -> None:
     _diagnostics(shown, focus)
     _contract_readout(shown, inputs)
     _downloads(shown)
-    st.caption(FOOTER)
+    st.caption(FOOTER_SSVI if shown.source == SSVI else FOOTER)

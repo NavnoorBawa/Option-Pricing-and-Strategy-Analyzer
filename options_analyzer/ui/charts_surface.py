@@ -223,6 +223,7 @@ def smile_fit(data: SmileData, axis: str = "K/F (%)", *, call_delta=None, palett
         align="left",  # its two lines
         showarrow=False,
         font=dict(size=charts.LABEL_SIZE, color=colors["muted"]),
+        bgcolor=colors["surface"],  # the quoted range's dotted line otherwise runs through the text
     )
     height = charts.HEIGHT + (RESIDUAL_HEIGHT if has_quotes else 0)
     charts.style(fig, colors, height)
@@ -310,9 +311,10 @@ def term_chart(
                 row=1,
                 col=1,
             )
+    # Neither line is a call or a put: the text colour and the muted one, told apart by the dash too.
     for key, name, color, dash in (
-        ("rr25", "25Δ RR", colors["put"], "solid"),
-        ("bf25", "25Δ BF", colors["call"], "dash"),
+        ("rr25", "25Δ RR", colors["text"], "solid"),
+        ("bf25", "25Δ BF", colors["muted"], "dash"),
     ):
         fig.add_trace(
             go.Scatter(

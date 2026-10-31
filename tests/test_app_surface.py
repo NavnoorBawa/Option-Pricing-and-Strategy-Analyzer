@@ -25,7 +25,7 @@ from test_format_standard import HAND_FORMAT
 
 from options_analyzer import vol_surface
 from options_analyzer.market_data import sample_chain
-from options_analyzer.ui import exports, surface_state, tab_surface
+from options_analyzer.ui import exports, surface_state, tab_surface, theme
 from options_analyzer.ui import market as mk
 from options_analyzer.ui.format import date as short_date
 from options_analyzer.vol_surface import diagnostics as dg
@@ -313,6 +313,10 @@ def test_the_term_view_has_forward_vols_and_the_grid_is_by_delta(new_app):
     windows = ["7→14d", "14→30d", "30→60d", "60→91d", "91→182d", "182→365d", "365→730d"]
     assert list(strip.columns) == ["Between", *windows]
     assert math.isnan(strip["365→730d"].iloc[0])  # beyond the last expiry (692 days): no extrapolation in time
+    # The 25-delta lines are neither calls nor puts: not in the call or put colour (they were, put and call).
+    term = next(c for c in _charts(at) if any(t.get("name") == "25Δ RR" for t in c["data"]))
+    sides = {theme.SEMANTIC[mode][side] for mode in ("light", "dark") for side in ("call", "put")}
+    assert not [t["name"] for t in term["data"] if t.get("name", "").startswith("25Δ") and t["line"]["color"] in sides]
     at.segmented_control(key="sf_view").set_value("Grid").run()
     _ok(at)
     grid = next(d.value for d in at.dataframe if "50Δ" in d.value.columns)
@@ -363,6 +367,11 @@ def test_the_textbook_surface_is_parametric_ssvi_on_constant_maturities(app):
     params = vol_surface.SSVIParams(0.24, 0.20, 1.5, -0.6, 1.0, 0.5)  # the defaults at the sidebar's 20% vol
     assert _metric(app, "ATMF 30D").value == f"{math.sqrt(params.theta(30 / 365) / (30 / 365)) * 100:.2f}%"
     assert _metric(app, tab_surface.FIT_LABEL).value == "–"  # no quotes to fit
+    # The footer and the readout describe a parametric surface: no SVI fit, no quotes (both said so before).
+    captions = [c.value for c in app.caption]
+    assert tab_surface.FOOTER_SSVI in captions and tab_surface.FOOTER not in captions
+    readout = next(c for c in captions if c.startswith("Pricing contract K"))
+    assert "inside its strike grid" in readout and "quotes" not in readout
 
 
 def test_ssvi_atm_vols_follow_the_sidebar_volatility(app):
