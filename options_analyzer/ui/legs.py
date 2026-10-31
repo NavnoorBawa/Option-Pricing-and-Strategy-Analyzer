@@ -414,9 +414,10 @@ def widen(table: pd.DataFrame, direction: int, grid: Grid, forward: float) -> pd
     a wing moving in stops one interval short of the next strike inside it."""
     out = frame(table.to_dict("records"))
     options = _options(out)
-    found = wings(out, forward)
-    strikes = sorted(set(out.loc[options, STRIKE]))
-    for wing, side in found.items():
+    for wing, side in wings(out, forward).items():
+        # The strikes as already moved: a strangle's two wings are each other's inner strike, and against the original
+        # strikes 5,835P / 5,845C would both have moved in onto 5,840.
+        strikes = sorted(set(out.loc[options, STRIKE]))
         inner = strikes[strikes.index(wing) - side]
         for i in out.index[options & (out[STRIKE] == wing)]:
             label = out.at[i, EXPIRY]

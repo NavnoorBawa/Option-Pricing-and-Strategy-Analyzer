@@ -198,10 +198,18 @@ def test_width_moves_the_wings_of_each_structure(published, name, wings, out, in
     assert lg.wings(table, forward) == wings
     assert list(lg.widen(table, 1, grid, forward)[lg.STRIKE]) == out
     assert list(lg.widen(table, -1, grid, forward)[lg.STRIKE]) == inward
-    for _ in range(40):
+    for _ in range(200):  # enough steps for every wing to come in to the body (50 then 5 points a step)
         table = lg.widen(table, -1, grid, forward)
     strikes = sorted(table[lg.STRIKE])
     assert len(set(strikes)) == len(set(lg.index_template(name, published, DEC)[lg.STRIKE]))  # nothing merged
+
+
+def test_a_strangle_narrowed_to_adjacent_strikes_stays_a_strangle(published):
+    # A strangle's two wings are each other's inner strike: against the strikes before the step, 5,835P and 5,845C
+    # both moved in onto 5,840, a straddle. Against the strikes as already moved, the call stops at 5,845.
+    grid, forward = lg.Grid(published), published.forward(DEC)
+    table = lg.index_template("Short Strangle", published, DEC).assign(**{lg.STRIKE: [5835.0, 5845.0]})
+    assert list(lg.widen(table, -1, grid, forward)[lg.STRIKE]) == [5840.0, 5845.0]
 
 
 def test_roll_moves_every_leg_to_the_next_listed_expiry_and_flip_negates(published):
