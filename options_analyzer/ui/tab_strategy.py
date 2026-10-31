@@ -740,9 +740,16 @@ def _money(value: float) -> str:
 
 
 def _level_text(x: float, spot: float) -> str:
-    """A spot level to about 0.1% of spot: whole points from 1,000 (``5,378``), one decimal from 100 (``85.6``), and
-    so on (:func:`breakeven_decimals` less one, which the help's exact figures keep)."""
-    return f"{x:,.{max(0, breakeven_decimals(spot) - 1 - (spot >= 1000))}f}"
+    """A spot level to 0.1% of spot or finer, with the spot's four significant digits: whole points from 1,000
+    (``5,378``), one decimal from 100 (``85.6``), three on a $1 underlying (``0.962``), so that a breakeven agrees
+    with its change from spot shown to 0.1%.
+
+    Examples
+    --------
+    >>> _level_text(5377.65, 5800.0), _level_text(85.58, 100.0), _level_text(0.96155, 1.0), _level_text(10.384, 10.0)
+    ('5,378', '85.6', '0.962', '10.38')
+    """
+    return f"{x:,.{max(0, 3 - math.floor(math.log10(spot)))}f}"
 
 
 def _pct_text(x: float) -> str:
@@ -892,9 +899,9 @@ def _tiles(ctx: _Context) -> None:
             "delta_color": "off",
             "delta_arrow": "off",
             "help": md(
-                f"{premium(abs(m.entry_cost))} per share at {basis} ({_money(abs(cost))} for the position, "
+                f"{premium(abs(m.entry_cost))} per share at {basis} ({money(abs(cost))} for the position, "
                 f"commissions included). The theo {'credit' if theo_cost < 0 else 'debit'} is "
-                f"{_money(abs(theo_cost))}, so entry at {basis} is {_signed_money(t0)} against theo: the T+0 P&L at "
+                f"{money(abs(theo_cost))}, so entry at {basis} is {signed(t0, 2, '$')} against theo: the T+0 P&L at "
                 "today's spot."
             ),
         },
@@ -952,11 +959,12 @@ def _tiles(ctx: _Context) -> None:
     if m.max_loss < 0:
         loss_tile: Card = ("Max loss", "No loss", {"help": md(f"The position cannot lose at the {basis_front}.")})
     else:
+        worst = signed(-m.max_loss * units, 2, "$") if math.isfinite(m.max_loss) else "unbounded"
         loss_tile = (
             "Max loss",
-            _signed_money(-m.max_loss * units),
+            _signed_money(-m.max_loss * units) if math.isfinite(m.max_loss) else "Unlimited",
             {"delta": basis_front if multi else None, "delta_color": "off", "delta_arrow": "off",
-             "help": md(f"The worst P&L at the {basis_front}: {signed(-m.max_loss * units, 2, '$')}.{later}")},
+             "help": md(f"The worst P&L at the {basis_front}: {worst}.{later}")},
         )  # fmt: skip
     be = sorted(m.breakevens)
     spot = market.spot
@@ -1320,11 +1328,53 @@ BLOTTER_HELP = {
 }
 
 
+#: The blotter's dollar Greeks: whole dollars (spec 2.5: −$68, −$306, +$41) unless every value of the column is below
+#: this many dollars, when they show cents (a one-lot on the textbook's $100 underlying has a theta of $2 a day).
+CENTS_BELOW = 10.0
+#: The blotter's columns that hold a quote; the textbook market has none, so it leaves them out.
+QUOTE_COLUMNS = ("Bid", "Ask", "Mid", "Mid vs fit")
+
+
+def strike_decimals(strikes: pd.Series, most: int = 6) -> int:
+    """The fewest decimals (at most ``most``) that write every strike exactly: a textbook strike shows the decimals it
+    has (``0.975``, ``1,234,567.89``), as the legs editor does.
+
+    >>> strike_decimals(pd.Series([0.95, 0.975, 1.025, float("nan")])), strike_decimals(pd.Series([100.0, 110.0]))
+    (3, 0)
+    """
+    values = pd.to_numeric(strikes, errors="coerce").dropna().to_numpy(float)
+    for places in range(most + 1):
+        if np.allclose(values, np.round(values, places), rtol=0, atol=1e-9):
+            return places
+    return most
+
+
+def blotter_digits(frame: pd.DataFrame, index: bool) -> dict[str, int]:
+    """The blotter's precisions other than its kinds': listed strikes whole under the index (textbook strikes with
+    the decimals they have); each dollar Greek in cents where its largest value rounds below :data:`CENTS_BELOW`
+    dollars, else whole dollars.
+
+    Examples
+    --------
+    >>> frame = pd.DataFrame({"Strike": [5300.0, 6250.0], "$Δ": [-18870.7, 63.68], "Γ P&L 1%": [-0.64, 0.4],
+    ...                       "Vega": [9.96, -9.2], "Θ": [float("nan"), 1.5], "Decay": [0.0, 0.0]})
+    >>> blotter_digits(frame, index=True)
+    {'Strike': 0, 'Γ P&L 1%': 2, 'Θ': 2, 'Decay': 2}
+    """
+    digits = {"Strike": 0} if index else {"Strike": strike_decimals(frame["Strike"])}
+    for column in ("$Δ", "Γ P&L 1%", "Vega", "Θ", "Decay"):
+        values = pd.to_numeric(frame[column], errors="coerce").abs()
+        if not (values.round(0) >= CENTS_BELOW).any():
+            digits[column] = 2
+    return digits
+
+
 def _blotter_view(ctx: _Context, frame: pd.DataFrame) -> None:
     decay = frame.attrs.get("decay_label", "1-day decay")
     labels = {"Decay": "1d decay ($)" if decay == "1-day decay" else "To expiry ($)"}
-    increment = ctx.inputs.context.strike_step if ctx.index else None
-    digits = {"Strike": 0} if increment else None
+    if not ctx.index:
+        frame = frame.drop(columns=list(QUOTE_COLUMNS))
+    digits = blotter_digits(frame, ctx.index)
     table(
         frame,
         BLOTTER_KINDS,
@@ -1385,19 +1435,22 @@ def _steppers(ctx: _Context, grid: lg.Grid, row) -> None:
     store = ctx.choice.store
     forward = ctx.published.forward(ctx.front) if ctx.index and ctx.front is not None else ctx.market.spot
     roll_help = "" if ctx.index else " The textbook market lists no expiries."
-    for label, change, help_text, disabled in (
-        ("Shift −", lambda f: lg.shift(f, -1, grid), "Every strike one listed interval lower.", False),
-        ("Shift +", lambda f: lg.shift(f, 1, grid), "Every strike one listed interval higher.", False),
-        ("Width −", lambda f: lg.widen(f, -1, grid, forward), "The wings one interval in, never onto the body.", False),
-        ("Width +", lambda f: lg.widen(f, 1, grid, forward), "The wings one interval out.", False),
-        ("Roll ◂", lambda f: lg.roll(f, -1, grid), "Every leg to the previous listed expiry." + roll_help,
+    for key, label, change, help_text, disabled in (
+        ("step_shift_down", "Shift −", lambda f: lg.shift(f, -1, grid), "Every strike one listed interval lower.",
+         False),
+        ("step_shift_up", "Shift +", lambda f: lg.shift(f, 1, grid), "Every strike one listed interval higher.", False),
+        ("step_width_in", "Width −", lambda f: lg.widen(f, -1, grid, forward),
+         "The wings one interval in, never onto the body.", False),
+        ("step_width_out", "Width +", lambda f: lg.widen(f, 1, grid, forward), "The wings one interval out.", False),
+        ("step_roll_back", "Roll ◂", lambda f: lg.roll(f, -1, grid),
+         "Every leg to the previous listed expiry." + roll_help, not ctx.index),
+        ("step_roll_next", "Roll ▸", lambda f: lg.roll(f, 1, grid), "Every leg to the next listed expiry." + roll_help,
          not ctx.index),
-        ("Roll ▸", lambda f: lg.roll(f, 1, grid), "Every leg to the next listed expiry." + roll_help, not ctx.index),
-        ("Flip", lg.flip, "Every quantity negated: long becomes short.", False),
+        ("step_flip", "Flip", lg.flip, "Every quantity negated: long becomes short.", False),
     ):  # fmt: skip
         row.button(
             label,
-            key=f"step_{label.replace(' ', '_').replace('−', 'minus').replace('+', 'plus')}",
+            key=key,
             on_click=_set_legs,
             args=(store, change),
             help=help_text,
@@ -1424,15 +1477,16 @@ def _row_actions(ctx: _Context, grid: lg.Grid) -> None:
         help="The leg the actions apply to; a click on a blotter row selects it too.",
     )
     i = legs[int(chosen)].row
-    for label, change, help_text, disabled in (
-        ("Flip leg", lambda f: lg.flip(f, [i]), "This leg's quantity negated.", False),
-        ("Duplicate", lambda f: lg.duplicate(f, i), "A copy of this leg after it.", False),
-        ("Roll leg ▸", lambda f: lg.roll(f, 1, grid, [i]), "This leg to the next listed expiry.", not ctx.index),
-        ("Remove", lambda f: lg.remove(f, i), "This leg out of the position.", len(legs) < 2),
-    ):
+    for key, label, change, help_text, disabled in (
+        ("row_flip", "Flip leg", lambda f: lg.flip(f, [i]), "This leg's quantity negated.", False),
+        ("row_duplicate", "Duplicate", lambda f: lg.duplicate(f, i), "A copy of this leg after it.", False),
+        ("row_roll", "Roll leg ▸", lambda f: lg.roll(f, 1, grid, [i]), "This leg to the next listed expiry.",
+         not ctx.index),
+        ("row_remove", "Remove", lambda f: lg.remove(f, i), "This leg out of the position.", len(legs) < 2),
+    ):  # fmt: skip
         bar.button(
             label,
-            key=f"row_{label.split()[0].lower()}_{label.split()[-1].strip('▸').lower() or 'roll'}",
+            key=key,
             on_click=_set_legs,
             args=(store, change),
             help=help_text,
@@ -1533,8 +1587,8 @@ def _blotter(ctx, inputs, choice, state, frame, editor_key, book, profile) -> No
         st.error(message)
     if choice.name != CUSTOM and not _same(state["base"], choice.base) and not _same(frame, choice.base):
         st.caption(
-            "These legs differ from the template (edited or moved), so they are kept as they are while the builder "
-            "or the market changes. Reset legs to template (Edit) rebuilds them."
+            "Edited legs: kept as they are while the builder or the market changes. Reset legs to template (Edit) "
+            "rebuilds them."
         )
     if mode == "Edit" or ctx is None:
         columns = [lg.ON, lg.QTY, lg.TYPE, lg.EXPIRY if index else lg.DAYS, lg.STRIKE, lg.IV, lg.ENTRY]
@@ -1578,8 +1632,8 @@ def _footer(ctx: _Context) -> None:
     st.caption(" · ".join(parts))
     if strat.unbounded_loss_from_dividends(ctx.entered, ctx.market):
         st.caption(
-            "With a dividend yield a European long-dated call gains less than $1 for each $1 rise, so far above the "
-            "strikes the short front call dominates and the loss is unbounded."
+            "With a dividend yield the long back call gains less than \\$1 for each \\$1 rise, so far above the "
+            "strikes the loss is unbounded."
         )
     if not ctx.index:
         _valuation_note(ctx.inputs, ctx.entered)

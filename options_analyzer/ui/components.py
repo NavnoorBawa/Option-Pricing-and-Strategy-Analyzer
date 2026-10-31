@@ -587,8 +587,9 @@ def table(
     labels : mapping of str to str, optional
         Headers other than the column names (without their units, which :func:`col` adds).
     digits : mapping of str to int, optional
-        A precision other than the one chosen from the data, for a column whose kind leaves it to the data (strikes,
-        money, bp): whole dollars in a column of fees below $1,000, say.
+        A precision other than the one the kind sets or chooses from the data: whole dollars in a column of fees
+        below $1,000, say, or cents in a column of position Greeks that are all below $10 (a one-lot on a $100
+        underlying, whose whole-dollar theta would read 0).
     max_rows : int, default 15
         Rows shown before the table scrolls.
     **kwargs
@@ -625,7 +626,7 @@ def table(
         if kind.format is not None:
             values = pd.to_numeric(data[name], errors="coerce").to_numpy(float)
             places = _auto_digits(kind, values)
-            if kind.digits is None and digits and name in digits:
+            if digits and name in digits:
                 places = int(digits[name])
             if kinds[name] in _PERCENT_OF_CERTAINTY:
                 values, clipped = _short_of_certainty(values)
