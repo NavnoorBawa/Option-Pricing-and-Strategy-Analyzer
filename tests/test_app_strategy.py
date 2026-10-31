@@ -30,7 +30,7 @@ from options_analyzer.ui import format as fmt
 from options_analyzer.ui import legs as lg
 from options_analyzer.ui import market as mk
 from options_analyzer.ui.app import TABS
-from options_analyzer.ui.format import MINUS
+from options_analyzer.ui.format import MINUS, md, money
 from options_analyzer.vol_surface.published import ONE_SD, TWO_SD, Expiry
 
 NO_EDITS = {"edited_rows": {}, "added_rows": [], "deleted_rows": []}
@@ -1446,10 +1446,29 @@ def test_calendar_is_described_with_its_expiries():
     assert "Short 1 × 100 Call (365d), Long 1 × 100 Call (730d)" in _position(at)
 
 
-# The American-tree note (the early-exercise premium of the sidebar contract on the sidebar's tree) had its tests
-# here. The sidebar offers the closed form and the American engine only now (UI spec Appendix B, decision 8), so the
-# note's tree branch in tab_strategy._valuation_note cannot be reached; the Strategy tab's engine badge replaces it
-# (UI spec 2.0, engine policy: "BSM · early exercise ignored").
+def test_under_the_american_engine_the_note_gives_the_early_exercise_the_legs_ignore():
+    # The textbook market with the sidebar's American engine (ALO): the legs stay European BSM values, and the note
+    # says what early exercise adds to each leg on the sidebar contract, by the engine against the closed form
+    # (independently: options_analyzer.american and black_scholes). The sidebar offers no tree since UI spec
+    # Appendix B, decision 8, so this note once tested a tree that the sidebar no longer offers and never showed.
+    from options_analyzer import american
+
+    at = _app(model="alo", strategy="Long Straddle")
+    assert at.sidebar.segmented_control(key="model").value == "alo"
+    (note,) = [i.value for i in at.info if "Early exercise" in i.value]
+    for kind in ("call", "put"):
+        us = american.price(100.0, 100.0, 1.0, 0.05, 0.2, 0.0, option_type=kind, scheme="accurate")
+        eu = bs.price(100.0, 100.0, 1.0, 0.05, 0.2, 0.0, kind)
+        assert (
+            md(
+                f"For one 100 {kind} (the sidebar contract), early exercise adds {money(us - eu, 4)} per share with the "
+                f"American engine (ALO): {money(us, 4)} American against {money(eu, 4)} European."
+            )
+            in note
+        )
+    assert us - eu > 0.3  # the put's premium at r 5%, q 0: a real amount the legs leave out
+    # Under the closed form there is nothing to say.
+    assert not [i.value for i in _app(strategy="Long Straddle").info if "Early exercise" in i.value]
 
 
 # --- Chart and label helpers ---------------------------------------------------------------------------------

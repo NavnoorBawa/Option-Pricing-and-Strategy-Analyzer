@@ -1712,11 +1712,12 @@ def _footer(ctx: _Context) -> None:
 
 
 def _valuation_note(inputs: Inputs, strategy: strat.Strategy) -> None:
-    """Under an American binomial tree in the sidebar, what early exercise adds to the sidebar contract (the legs here
-    are European BSM values). The premium is the American minus the European price on one lattice, so the tree's
-    discretisation error cancels."""
+    """Under an American engine in the sidebar (the textbook market's ALO, or a tree from a caller), what early
+    exercise adds to the sidebar contract: the legs here are European Black-Scholes-Merton values. The ALO premium is
+    the engine's American value less the closed form; a tree's is its American less its European price on one lattice,
+    so that the tree's discretisation error cancels."""
     model = inputs.model
-    if not (model.kind == "binomial" and model.american):
+    if not model.is_american:
         return
     kinds = sorted(
         {
@@ -1736,25 +1737,40 @@ def _valuation_note(inputs: Inputs, strategy: strat.Strategy) -> None:
         inputs.dividend_yield,
     )
     if not kinds:
-        st.caption("The sidebar's American tree prices the Pricing tab only: early exercise is not modelled here.")
+        st.caption(
+            "The sidebar's American engine prices the Pricing and IV tabs only: early exercise is not modelled here."
+        )
         return
     try:
-        trees = {
-            style: cache.tree_results(S, K, T, r, sigma, q, model.steps, style == "American", model.tree_method)
-            for style in ("American", "European")
-        }
+        if model.kind == "alo":
+            where = "with the American engine (ALO)"
+            values = {
+                k: (cache.alo_value(S, K, T, r, sigma, q, k, model.scheme), bs.price(S, K, T, r, sigma, q, k))
+                for k in kinds
+            }
+        else:
+            where = "on this tree"
+            trees = {
+                style: cache.tree_results(S, K, T, r, sigma, q, model.steps, style == "American", model.tree_method)
+                for style in ("American", "European")
+            }
+            values = {k: (trees["American"][k].price, trees["European"][k].price) for k in kinds}
     except ValueError:
         return
     sentences = []
     for kind in kinds:
-        on_tree = {style: tree[kind].price for style, tree in trees.items()}
-        sentences.append(
+        american, european = values[kind]
+        sentence = (
             f"For one {strat.strike_text(K)} {kind} (the sidebar contract), early exercise adds "
-            f"{money(on_tree['American'] - on_tree['European'], 4)} per share on this tree: "
-            f"{money(on_tree['American'], 4)} American against {money(on_tree['European'], 4)} European. "
-            f"The strategy values it at {money(bs.price(S, K, T, r, sigma, q, kind), 4)}, its European "
-            "Black-Scholes-Merton value."
+            f"{money(american - european, 4)} per share {where}: {money(american, 4)} American against "
+            f"{money(european, 4)} European."
         )
+        if model.kind != "alo":
+            sentence += (
+                f" The strategy values it at {money(bs.price(S, K, T, r, sigma, q, kind), 4)}, its European "
+                "Black-Scholes-Merton value."
+            )
+        sentences.append(sentence)
     st.info(
         md("**Early exercise is not modelled here:** the legs are European BSM values. " + " ".join(sentences)),
         icon=":material/info:",
