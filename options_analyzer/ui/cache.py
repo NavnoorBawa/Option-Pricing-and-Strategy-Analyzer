@@ -114,6 +114,39 @@ def mc_results(S, K, T, r, sigma, q, n_paths, seed, antithetic, control_variate)
     return monte_carlo.price_european(S, K, T, r, sigma, q, ("call", "put"), n_paths, seed, antithetic, control_variate)
 
 
+#: The smallest sample of the Monte Carlo convergence view (Engine diagnostics), and the factor between samples: a
+#: quarter of the paths each step down doubles the interval, so the 1/sqrt(N) guide's slope reads at a glance.
+MC_CONVERGENCE_FROM, MC_CONVERGENCE_STEP = 1_000, 4
+
+
+def mc_convergence_paths(n_paths: int) -> list[int]:
+    """The samples of the Monte Carlo convergence view: ``n_paths``, then a quarter of it each step down to
+    :data:`MC_CONVERGENCE_FROM`, each even (antithetic pairs), in ascending order.
+
+    >>> mc_convergence_paths(100_000)
+    [1562, 6250, 25000, 100000]
+    """
+    paths, n = [], int(n_paths)
+    while n >= MC_CONVERGENCE_FROM:
+        paths.append(n - n % 2)
+        n //= MC_CONVERGENCE_STEP
+    return sorted(paths)
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def mc_convergence(S, K, T, r, sigma, q, n_paths, seed, antithetic, control_variate) -> tuple[list[int], dict]:
+    """The 95% interval's width (2 x 1.96 standard errors, $) of the call and the put at each of
+    :func:`mc_convergence_paths`, on the same seed and settings: ``(paths, {kind: widths})``. The samples below
+    ``n_paths`` add a third of its time (1/4 + 1/16 + ...)."""
+    paths = mc_convergence_paths(n_paths)
+    widths: dict[str, list[float]] = {"call": [], "put": []}
+    for n in paths:
+        results = monte_carlo.price_european(S, K, T, r, sigma, q, KINDS, n, seed, antithetic, control_variate)
+        for kind, width in widths.items():
+            width.append(2 * 1.96 * float(results[kind].std_error))
+    return paths, widths
+
+
 @st.cache_data(show_spinner=False, max_entries=24)
 def value_at_risk(strategy: Strategy, market: Market, config: risk.VaRConfig, multiplier: float) -> risk.VaRResult:
     """``risk.value_at_risk``. The Risk tab makes two runs per view, with implied vol moving and with it frozen (one

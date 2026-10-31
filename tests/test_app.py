@@ -122,9 +122,9 @@ def test_iv_shift_leaves_the_expiry_curve_and_metrics_alone(new_app):
 #: Every chart of the app, by key; the closed form and the American engine, with Engine diagnostics open, draw
 #: each of them.
 CHART_KEYS = {
-    "pricing_profile", "pricing_convergence", "pricing_boundary", "payoff_chart", "risk_heatmap", "date_heatmap",
-    "time_decay", "greek_profiles", "stress_chart", "var_hist", "surf_iv", "surf_lv", "smiles", "term_structure",
-    "iv_price",
+    "pricing_profile", "pricing_convergence", "pricing_mc_convergence", "pricing_boundary", "payoff_chart",
+    "risk_heatmap", "date_heatmap", "time_decay", "greek_profiles", "stress_chart", "var_hist", "surf_iv", "surf_lv",
+    "smiles", "term_structure", "iv_price",
 }  # fmt: skip
 
 

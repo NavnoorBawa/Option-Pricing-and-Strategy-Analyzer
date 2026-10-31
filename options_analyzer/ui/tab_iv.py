@@ -39,9 +39,11 @@ from .format import MISSING, md, money, number, premium, vol, vol_change
 from .inputs import Inputs
 from .tab_pricing import DRAWER, context_line, contract
 
-#: The tiles' row and its two groups of three: the quote's IV BID, IV MID and IV ASK, then SURFACE, VEGA and BOUNDS.
-#: In pairs, as the Pricing tab's, IV ASK went with SURFACE, apart from the other two vols on a phone.
-TILES = ("iv_tiles", ("iv_tiles_quote", "iv_tiles_context"))
+#: The tiles' row and its three pairs, which wrap as the Pricing tab's do (``tab_pricing.TILES``): the quote's IV BID
+#: and IV ASK, then IV MID beside SURFACE (the two that mid vs fit compares), then VEGA and BOUNDS. In the spec's
+#: order (bid, mid, ask) the pairs put IV ASK beside SURFACE, apart from the other two vols on a phone; in groups of
+#: three they went 2 + 1 twice there, with a hole after IV ASK and after BOUNDS.
+TILES = ("iv_tiles", ("iv_tiles_quote", "iv_tiles_mid", "iv_tiles_context"))
 #: The index's tick (Cboe SPX: $0.05 below $3, $0.10 from $3); the textbook market's cent.
 INDEX_TICKS = ((3.0, 0.05), (math.inf, 0.10))
 TEXTBOOK_TICK = 0.01
@@ -170,7 +172,9 @@ def render(inputs: Inputs) -> None:
     identity = f"{S!r}|{K!r}|{T!r}|{r!r}|{q!r}|{option_type}"
     # The prices go before the toggle that picks them: on a phone the row then wraps as Type and Exercise, Bid and
     # Ask, then the toggle (the toggle sat beside Bid, with Ask alone on the next line).
-    quote_box = row.container(horizontal=True, key="iv_quote", vertical_alignment="bottom", gap="small", width="content")
+    quote_box = row.container(
+        horizontal=True, key="iv_quote", vertical_alignment="bottom", gap="small", width="content"
+    )
     single = row.toggle(
         "Single price",
         value=quote is None,
@@ -420,8 +424,8 @@ def _tiles(inputs, market, by_label, mid, single, american, alo, bounds, floor_n
 
     tiles = [
         iv_tile("IV bid", None if single else by_label.get("Bid")),
-        iv_tile("IV" if single else "IV mid", mid),
         iv_tile("IV ask", None if single else by_label["Ask"]),
+        iv_tile("IV" if single else "IV mid", mid),
     ]
     # Vega at the mid's implied vol, or at the ask's for an offer only.
     at = mid if mid is not None else by_label["Ask"]

@@ -100,18 +100,6 @@ STRIDES = ("Auto", 5, 10, 25, 50, 100)
 CHAIN_ROWS = 14
 #: Orders of the Greeks table.
 ORDERS = ("1st", "+2nd", "+3rd")
-#: The profile (item 4) and the Greeks table (item 6) side by side from a main column of 960 px (1440 px with the
-#: sidebar open: 1,037 px), the table at its content's width and the chart in the rest (about 550 px); stacked on a
-#: narrower one (a laptop at 1,280 px with the sidebar open, tablets and phones). Both show the contract's
-#: sensitivities, and side by side they take one screen instead of two: the page at 1440 x 900 is about 1,650 px
-#: high with the diagnostics closed, within UI spec 3.1's 1,800 (2,492 px stacked, with the 28-row ladder).
-VIEWS_STYLE = (
-    "<style>"
-    ".st-key-pricing_views { container: pricing-views / inline-size; } "
-    "@container pricing-views (width >= 960px) { .st-key-pricing_views_row { display: grid !important; "
-    "grid-template-columns: minmax(520px, 1fr) minmax(0, max-content); column-gap: 1.5rem; align-items: start; } }"
-    "</style>"
-)
 #: The fixed trees of Engine diagnostics: (lattice, steps).
 DIAGNOSTIC_TREES = (("lr", 501), ("lr", 2001), ("crr", 2001))
 #: What the CALL and PUT tiles compare the American engine with: an American Leisen-Reimer tree of this many steps.
@@ -584,6 +572,7 @@ def _tiles(inputs: Inputs, prices: Prices, market: Contract) -> None:
             help_text = f"The published surface's vol at {moneyness} (arbitrage-free SVI fitted to the chain)."
     else:
         source, help_text = "flat", "Typed in the sidebar: one vol for every strike (the textbook market has no smile)."
+    # Labelled Vol, not σ: the tiles' labels are set in capitals (desk.css), and a capital sigma reads as a sum.
     tiles.append(("Vol", vol(sigma), {"delta": source, **off, "help": help_text}))
     # Forward: the parity forward of the expiry, and the forward this strike's own pair implies, as a market check.
     implied = pair_forward(market, K)
@@ -998,14 +987,12 @@ def chain_vols(inputs: Inputs, market: Contract, strikes: np.ndarray) -> np.ndar
     return np.full(strikes.shape, inputs.volatility)
 
 
-def chain_frame(
-    inputs: Inputs, market: Contract, strikes: np.ndarray, vols: np.ndarray | None = None
-) -> pd.DataFrame:
+def chain_frame(inputs: Inputs, market: Contract, strikes: np.ndarray, vols: np.ndarray | None = None) -> pd.DataFrame:
     """The ladder's rows: calls (bid, ask, theo, mid IV, Δ), the strike and a mark on the Pricing strike's row, then
     puts mirrored. Theo is the engine's value at each strike's surface vol (index) or at the flat vol (textbook);
     without quotes (textbook) the bid, ask and IV columns are left out. ``vols``: :func:`chain_vols`, if read
     already."""
-    S, K, T, r, sigma, q = _args(inputs)
+    S, K, T, r, _sigma, q = _args(inputs)
     vols = chain_vols(inputs, market, strikes) if vols is None else vols
     # Beyond the surface's reach the vol is NaN (on the default 20-Nov expiry the nine listed strikes 4,150 to 4,550,
     # which only the "All" window shows): those rows keep their quotes and read "–" for theo and delta.
@@ -1175,6 +1162,11 @@ def p_itm(inputs: Inputs, market: Contract) -> tuple[dict[str, float], dict[str,
     return flat, flat, "flat vol"
 
 
+def _money_greek(value: float, places: int) -> str:
+    """A Greek in $ per share in the Greeks table: signed to ``places`` decimals, and an exact zero as ``0``."""
+    return "0" if value == 0 else signed(value, places)
+
+
 def greeks_frame(
     inputs: Inputs, prices: Prices, market: Contract, *, order: int, bsm_ref: bool
 ) -> tuple[pd.DataFrame, str]:
@@ -1212,9 +1204,10 @@ def greeks_frame(
         row = {"Greek": label, "Unit": unit}
         if text is None:
             # Money per share: cents, or two significant digits of the row's largest value below 10 cents (the
-            # textbook put's Θ of -0.0045 read 0.00), one precision across the row.
+            # textbook put's Θ of -0.0045 read 0.00), one precision across the row; an exact zero (an option
+            # exercised at once) reads 0, as Γ's does, not 0.00000 beside a call's -0.00068.
             places = cents_places(max((abs(u[name]) for u in units.values() if np.isfinite(u[name])), default=0.0))
-            row |= {header: signed(u[name], places) for header, u in units.items()}
+            row |= {header: _money_greek(u[name], places) for header, u in units.items()}
         else:
             row |= {header: text(u) for header, u in units.items()}
         rows.append(row)
@@ -1227,7 +1220,7 @@ def greeks_frame(
         for header, source, kind in columns
     }
     places = cents_places(max((abs(v) for v in decays.values() if np.isfinite(v)), default=0.0))
-    decay_row |= {header: signed(value, places) for header, value in decays.items()}
+    decay_row |= {header: _money_greek(value, places) for header, value in decays.items()}
     at = next(i for i, row in enumerate(rows) if row["Greek"] == "Θ") + (0 if leads else 1)
     rows.insert(at, decay_row)
     for row_order, name, label in _HIGHER:
@@ -1457,12 +1450,29 @@ def _convergence(inputs: Inputs, tree: ModelConfig, ref_name: str, reference: di
             dash = "solid" if short == "LR" else "dot"
             lines[f"{short} {kind}"] = (steps, np.asarray(values, dtype=float) - reference[kind], kind, dash)
     charts.show(
-        charts_pricing.error_chart(lines, reference=ref_name),
+        charts_pricing.error_chart(lines, reference=ref_name, guides=(("CRR", 1), ("LR", 2))),
         key="pricing_convergence",
         alt=f"Absolute error of the trees against {ref_name} by number of steps, log-log",
     )
     st.caption(
-        f"Up to the settings' {number(tree.steps, 0)} steps. CRR oscillates with the strike's place among the nodes."
+        f"Up to the settings' {number(tree.steps, 0)} steps. CRR converges at first order, oscillating with the "
+        "strike's place among the nodes; LR at second."
+    )
+
+
+def _mc_convergence(inputs: Inputs, mc: ModelConfig) -> None:
+    """Monte Carlo's 95% interval width against the paths, with a 1/√N guide (UI spec 3.1 item 7), on the settings'
+    seed and variance reduction, from 1,000 paths to the settings' paths."""
+    S, K, T, r, sigma, q = _args(inputs)
+    paths, widths = cache.mc_convergence(S, K, T, r, sigma, q, mc.n_paths, mc.seed, mc.antithetic, mc.control_variate)
+    charts.show(
+        charts_pricing.interval_chart(paths, widths),
+        key="pricing_mc_convergence",
+        alt="Width of the Monte Carlo 95% interval of the call and the put by number of paths, log-log",
+    )
+    st.caption(
+        f"Monte Carlo, European, seed {mc.seed}: the interval narrows as 1/√N, by half for four times the paths "
+        "(shown even where it is withheld)."
     )
 
 
@@ -1598,6 +1608,7 @@ def _diagnostics(inputs: Inputs, prices: Prices) -> None:
     )
     st.caption(f"Reference: {ref_name}. Monte Carlo values European exercise only.")
     _convergence(inputs, tree, ref_name, {"call": float(reference["Call"]), "put": float(reference["Put"])})
+    _mc_convergence(inputs, mc)
     _tree_greeks(inputs, tree)
     if prices.alo is not None:
         _alo_boundary(inputs, prices)
@@ -1636,8 +1647,7 @@ def render(inputs: Inputs, prices: Prices) -> None:
         _tiles(inputs, prices, market)
     frame, kinds, help_text, labels = contract_frame(inputs, prices, market)
     table(frame, kinds, help_text, labels=labels, key="tbl_pricing_contract")
-    # The profile and the Greeks table side by side where there is room (VIEWS_STYLE), stacked otherwise.
-    st.html(VIEWS_STYLE)
+    # The profile and the Greeks table side by side where there is room (desk.css, Pricing tab), stacked otherwise.
     with st.container(key="pricing_views"), st.container(key="pricing_views_row"):
         with st.container(key="pricing_views_profile"):
             _profile(inputs, market)

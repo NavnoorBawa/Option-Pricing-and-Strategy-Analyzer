@@ -295,7 +295,7 @@ ROWS = {
     "expectation_cards": [["Expected P&L at expiry", "P&L standard deviation", "Drift used"]],
     "var_cards": [["VaR 99.0%", "Expected Shortfall 99.0%"], ["Spot-only VaR 99.0%", "Spot-only ES 99.0%"]],
     "surface_cards": [["Grid", "Calendar arbitrage"], ["Butterfly arbitrage", "Local vol defined"]],
-    "iv_tiles": [["IV bid", "IV"], ["IV ask", "Surface"], ["Vega", "Bounds"]],
+    "iv_tiles": [["IV bid", "IV ask"], ["IV", "Surface"], ["Vega", "Bounds"]],
 }
 
 

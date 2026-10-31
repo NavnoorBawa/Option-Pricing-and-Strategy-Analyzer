@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -43,12 +44,21 @@ LABEL_PLOT_PX, LABEL_CHAR_PX = 320.0, 7.0
 LABEL_ROW_PX = 14
 
 
-def label_rows(lines: Sequence[tuple[float, str, bool]], lo: float, hi: float) -> list[tuple[int, bool]]:
+def legend_px(names: Sequence[str]) -> float:
+    """The width the top-left legend takes on the labels' top row, px: per entry its 40 px swatch and gap and its
+    name at :data:`LABEL_CHAR_PX` a character (Plotly's 12 px legend text; "Call" and "Put" measured 104 px)."""
+    return float(sum(40.0 + LABEL_CHAR_PX * len(name) for name in names))
+
+
+def label_rows(
+    lines: Sequence[tuple[float, str, bool]], lo: float, hi: float, reserved: float = 0.0
+) -> list[tuple[int, bool]]:
     """Where the labels of vertical reference lines go so that none prints over another: for each ``(x, label,
     leftwards)``, its row (0 just above the plot, then rows inside its top, one under the other) and whether it reads
     to the left of its line. A label reads to the side it asks for (``leftwards``: the spot's, so that it keeps clear
     of a strike just above spot) unless that side runs off the plot. Labels go, in the order of x, on the first row
-    where they clear every label already placed there.
+    where they clear every label already placed there. ``reserved`` px at the left of the top row are the legend's
+    (:func:`legend_px`): the spot's label printed over "Put" on a phone.
 
     Examples
     --------
@@ -57,9 +67,16 @@ def label_rows(lines: Sequence[tuple[float, str, bool]], lo: float, hi: float) -
 
     >>> label_rows([(5800.0, "S 5,800.00", True), (5815.0, "K 5,815", False), (5813.91, "F", False)], 5220.0, 6380.0)
     [(0, True), (1, False), (0, False)]
+
+    With the legend of two curves on the top row, the spot's label goes under it, beside the strike's (the one reads
+    to the left of its line, the other to the right).
+
+    >>> label_rows([(5800.0, "S 5,800.00", True), (5815.0, "K 5,815", False), (5813.91, "F", False)], 5220.0, 6380.0,
+    ...            legend_px(["Call", "Put"]))
+    [(1, True), (1, False), (0, False)]
     """
     span = max(hi - lo, 1e-12)
-    taken: list[list[tuple[float, float]]] = []
+    taken: list[list[tuple[float, float]]] = [[(0.0, reserved)]] if reserved > 0 else []
     placed: dict[int, tuple[int, bool]] = {}
     for i in sorted(range(len(lines)), key=lambda j: lines[j][0]):
         x, text, leftwards = lines[i]
@@ -75,7 +92,6 @@ def label_rows(lines: Sequence[tuple[float, str, bool]], lo: float, hi: float) -
         taken[row].append(box)
         placed[i] = (row, left)
     return [placed[i] for i in range(len(lines))]
-
 
 
 def _text(value: str) -> str:
@@ -169,7 +185,8 @@ def profile_chart(
     }
     # The lines, then their labels as annotations: the default contract's strike (5,815) and forward (5,813.91) are a
     # pixel apart, and two labels drawn at the top of each line printed "FK 5,815".
-    rows = label_rows([(v, t, kind == "current") for v, t, kind in marks], lo, hi)
+    names = [t.name for t in fig.data if t.showlegend is not False]
+    rows = label_rows([(v, t, kind == "current") for v, t, kind in marks], lo, hi, legend_px(names))
     for (value, text, kind), (row, left) in zip(marks, rows, strict=True):
         dash, color = styles[kind]
         fig.add_vline(x=value, line=dict(color=color, dash=dash, width=charts.REFERENCE_WIDTH))
@@ -193,13 +210,20 @@ def profile_chart(
     return fig
 
 
+#: How far above a lattice's first error its guide starts (a factor; 2.5 is about 0.4 of a decade on the log axis),
+#: so that the guide runs beside its curves instead of on top of them.
+GUIDE_OFFSET = 2.5
+
+
 def error_chart(
     series: dict[str, tuple[Sequence[float], Sequence[float], str, str]],
     *,
     reference: str,
+    guides: Sequence[tuple[str, int]] = (("", 1),),
     palette: dict[str, str] | None = None,
 ) -> go.Figure:
-    """Absolute error of tree values against their step count, both axes logarithmic, with a guide of slope −1.
+    """Absolute error of tree values against their step count, both axes logarithmic, with a guide of each lattice's
+    order of convergence.
 
     Parameters
     ----------
@@ -209,21 +233,34 @@ def error_chart(
         (a tree that hits the reference to the last digit) are left out, as a log axis cannot show them.
     reference : str
         What the errors are measured against, for the y-axis title (``BSM``, ``ALO high``).
+    guides : sequence of (str, int)
+        ``(prefix, order)``: a dashed guide of slope ``-order`` for the series whose names start with ``prefix``,
+        from :data:`GUIDE_OFFSET` times their largest first error to their last step. Cox-Ross-Rubinstein converges
+        at first order and Leisen-Reimer at second (its European error falls from 2.5e-3 at 12 steps to 1e-6 at 500
+        on the textbook contract); one slope −1 guide through the largest first error lay on the CRR curves.
     palette : dict, optional
         The mode's colours.
 
     Returns
     -------
     plotly.graph_objects.Figure
+
+    Examples
+    --------
+    >>> fig = error_chart({"LR call": ([10, 100], [1e-3, 1e-5], "call", "solid"),
+    ...                    "CRR call": ([10, 100], [1e-2, 1e-3], "call", "dot")},
+    ...                   reference="BSM", guides=(("CRR", 1), ("LR", 2)))
+    >>> [(t.name, [float(f"{y:.3g}") for y in t.y]) for t in fig.data[2:]]
+    [('CRR: slope −1 (1/n)', [0.025, 0.0025]), ('LR: slope −2 (1/n²)', [0.0025, 2.5e-05])]
     """
     colors = palette or desk_theme.palette()
     fig = go.Figure()
-    floor = []
+    floor = {}
     for name, (steps, errors, option, dash) in series.items():
         n = np.asarray(steps, dtype=float)
         e = np.abs(np.asarray(errors, dtype=float))
         keep = np.isfinite(e) & (e > 0)
-        floor.append((n[keep], e[keep]))
+        floor[name] = (n[keep], e[keep])
         fig.add_trace(
             go.Scatter(
                 x=n[keep],
@@ -233,24 +270,95 @@ def error_chart(
                 line=dict(color=colors["call" if option == "call" else "put"], width=charts.LINE_WIDTH, dash=dash),
             )
         )
-    # A guide of slope -1 (first order: the error halves as the steps double), through the largest first error.
-    starts = [(n[0], e[0]) for n, e in floor if len(n)]
-    ends = [n[-1] for n, e in floor if len(n)]
-    if starts:
-        n0, e0 = max(starts, key=lambda p: p[1])
-        n1 = max(ends)
+    # A guide per lattice of its order (first: the error halves as the steps double; second: it quarters), from above
+    # the lattice's largest first error, dashed for first order and dash-dotted for second.
+    for prefix, order in guides:
+        own = [(n, e) for name, (n, e) in floor.items() if name.startswith(prefix) and len(n)]
+        if not own:
+            continue
+        n0, e0 = max(((n[0], e[0]) for n, e in own), key=lambda p: p[1])
+        n1 = max(n[-1] for n, _ in own)
+        power = "" if order == 1 else "²" if order == 2 else f"^{order}"
+        label = f"slope −{order} (1/n{power})"
         fig.add_trace(
             go.Scatter(
                 x=[n0, n1],
-                y=[e0, e0 * n0 / n1],
-                name="slope −1 (1/n)",
+                y=[GUIDE_OFFSET * e0, GUIDE_OFFSET * e0 * (n0 / n1) ** order],
+                name=f"{prefix}: {label}" if prefix else label,
                 mode="lines",
-                line=dict(color=colors["muted"], width=charts.REFERENCE_WIDTH, dash="dash"),
+                hoverinfo="skip",
+                line=dict(
+                    color=colors["muted"], width=charts.REFERENCE_WIDTH, dash="dash" if order == 1 else "dashdot"
+                ),
             )
         )
     fig = charts.apply_layout(fig, None, "Steps", f"|Tree − {reference}| ($)", palette=colors)
     ticks = [10, 20, 50, 100, 200, 500, 1_000, 2_000, 5_000]
     fig.update_xaxes(type="log", tickmode="array", tickvals=ticks, ticktext=[number(t, 0) for t in ticks])
+    fig.update_yaxes(type="log", exponentformat="power")
+    return fig
+
+
+def interval_chart(
+    paths: Sequence[int],
+    widths: dict[str, Sequence[float]],
+    *,
+    palette: dict[str, str] | None = None,
+) -> go.Figure:
+    """Monte Carlo's 95% interval width ($) against the number of paths, log-log, with a 1/√N guide (UI spec 3.1
+    item 7): the standard error falls as the square root of the sample, so the width halves as the paths quadruple.
+
+    Parameters
+    ----------
+    paths : sequence of int
+        The samples, ascending (``cache.mc_convergence_paths``).
+    widths : dict
+        ``kind -> widths`` for ``"call"`` and ``"put"``; NaN widths (a sample with no estimate of its error) are left
+        out.
+    palette : dict, optional
+        The mode's colours.
+
+    Returns
+    -------
+    plotly.graph_objects.Figure
+
+    Examples
+    --------
+    >>> fig = interval_chart([1000, 4000], {"call": [0.4, 0.2], "put": [0.3, 0.15]})
+    >>> [(t.name, [float(y) for y in t.y]) for t in fig.data]
+    [('Call', [0.4, 0.2]), ('Put', [0.3, 0.15]), ('1/√N', [1.0, 0.5])]
+    """
+    colors = palette or desk_theme.palette()
+    n = np.asarray(paths, dtype=float)
+    fig = go.Figure()
+    firsts = []
+    for kind, values in widths.items():
+        w = np.asarray(values, dtype=float)
+        keep = np.isfinite(w) & (w > 0)
+        if keep[:1].all():  # the guide starts at the first sample's widest interval
+            firsts.append(float(w[0]))
+        fig.add_trace(
+            go.Scatter(
+                x=n[keep], y=w[keep], name=kind.capitalize(), mode="lines+markers",
+                line=dict(color=colors[kind], width=charts.LINE_WIDTH), marker=dict(size=5),
+            )
+        )  # fmt: skip
+    first = max(firsts, default=math.nan)
+    if np.isfinite(first) and n.size > 1:
+        fig.add_trace(
+            go.Scatter(
+                x=[n[0], n[-1]],
+                y=[GUIDE_OFFSET * first, GUIDE_OFFSET * first * math.sqrt(n[0] / n[-1])],
+                name="1/√N",
+                mode="lines",
+                hoverinfo="skip",
+                line=dict(color=colors["muted"], width=charts.REFERENCE_WIDTH, dash="dash"),
+            )
+        )
+    fig = charts.apply_layout(
+        fig, None, "Paths", "95% interval width ($)", height=charts.HEIGHT_SECONDARY, palette=colors
+    )
+    fig.update_xaxes(type="log", tickmode="array", tickvals=list(n), ticktext=[number(v, 0) for v in n])
     fig.update_yaxes(type="log", exponentformat="power")
     return fig
 

@@ -295,17 +295,33 @@ def _engine_inputs(**inputs) -> Inputs:
     return Inputs(c["S"], c["K"], c["T"] * 365, c["sigma"], c["r"], c["q"], ModelConfig(kind="alo"))
 
 
-def _desk_text(greeks: dict[str, float], S: float, r: float, q: float, T: float) -> dict[str, str]:
+def _row_places(*values: float) -> int:
+    """The decimals of a row of money per share: two, or two significant digits of the row's largest value when it is
+    below $0.10 (at most six)."""
+    largest = max(abs(v) for v in values)
+    if largest == 0 or round(largest, 2) >= 0.1:
+        return 2
+    return min(6, 1 - int(np.floor(np.log10(largest))))
+
+
+def _desk_text(
+    greeks: dict[str, float], S: float, r: float, q: float, T: float, other: dict[str, float]
+) -> dict[str, str]:
     """The Greeks table's first-order rows in desk units, written out here: Δ to 3 dp, Δ fwd = Δ·e^{−(r−q)T}, Γ 1% =
-    ΓS/100 to 3 significant digits, vega per vol point, Θ per calendar day, ρ and ε per 1%, each to 2 dp."""
+    ΓS/100 to 3 significant digits, vega per vol point, Θ per calendar day, ρ and ε per 1%, each in cents or, when
+    the row's largest value (this option's or ``other``'s) is below 10 cents, to two significant digits of it."""
+
+    def money(name: str, scale: float) -> str:
+        return _signed(greeks[name] / scale, _row_places(greeks[name] / scale, other[name] / scale))
+
     return {
         "Δ": _signed(greeks["delta"], 3),
         "Δ fwd": _signed(greeks["delta"] * np.exp(-(r - q) * T), 3),
         "Γ 1%": _signed_sig(greeks["gamma"] * S / 100),
-        "Vega": _signed(greeks["vega"] / 100, 2),
-        "Θ": _signed(greeks["theta"] / 365, 2),
-        "ρ": _signed(greeks["rho"] / 100, 2),
-        "ε": _signed(greeks["epsilon"] / 100, 2),
+        "Vega": money("vega", 100),
+        "Θ": money("theta", 365),
+        "ρ": money("rho", 100),
+        "ε": money("epsilon", 100),
     }
 
 
@@ -325,8 +341,8 @@ def test_the_greeks_are_finite_differences_of_the_engine(new_app):
     at = _run(new_app, div="2")
     table = _table(at, "Greek").set_index("Greek")
     assert list(table.index) == ["Δ", "Δ fwd", "Γ 1%", "Vega", "Θ", "1-day decay", "ρ", "ε", "P(ITM)"]
-    for kind in ("call", "put"):
-        shown = _desk_text(_differences(kind, q=0.02), 100, 0.05, 0.02, 1.0)
+    for kind, other in (("call", "put"), ("put", "call")):
+        shown = _desk_text(_differences(kind, q=0.02), 100, 0.05, 0.02, 1.0, _differences(other, q=0.02))
         for row, text in shown.items():
             assert table.loc[row, f"{kind.capitalize()} (ALO)"] == text, (kind, row)
     note = _column_help(at, "Call (ALO)")
@@ -342,9 +358,9 @@ def test_the_greeks_are_finite_differences_of_the_engine(new_app):
 def test_at_zero_rate_and_yield_the_table_is_black_scholes_mertons_and_says_one_sided(new_app):
     at = _run(new_app, rate="0")
     table = _table(at, "Greek").set_index("Greek")
-    for kind in ("call", "put"):
+    for kind, other in (("call", "put"), ("put", "call")):
         exact = bs.greeks(100, 100, 1.0, 0.0, 0.2, 0.0, kind)
-        for row, text in _desk_text(exact, 100, 0.0, 0.0, 1.0).items():
+        for row, text in _desk_text(exact, 100, 0.0, 0.0, 1.0, bs.greeks(100, 100, 1.0, 0.0, 0.2, 0.0, other)).items():
             assert table.loc[row, f"{kind.capitalize()} (ALO)"] == text, (kind, row)
     note = _column_help(at, "Call (ALO)")
     assert "The call and the put equal their Black-Scholes-Merton values, so their Greeks are the closed-form" in note
@@ -387,9 +403,9 @@ def test_an_option_exercised_at_once_has_the_greeks_of_its_exercise_value(new_ap
     assert call.basis == "exercise value" and call["delta"] == 1.0 and call["gamma"] == 0.0
     at = _run(new_app, spot="60")
     table = _table(at, "Greek").set_index("Greek")
-    # Exercised at once today and a day later, it is worth K - S at both: its 1-day decay is zero too.
-    assert list(table["Put (ALO)"])[:8] == [f"{MINUS}1.000", f"{MINUS}0.951", "0", "0.00", "0.00", "0.00", "0.00",
-                                           "0.00"]  # fmt: skip
+    # Exercised at once today and a day later, it is worth K - S at both: its 1-day decay is zero too. An exact zero
+    # reads 0 (the call's Θ of -0.00068 sets five decimals for its row).
+    assert list(table["Put (ALO)"])[:8] == [f"{MINUS}1.000", f"{MINUS}0.951", "0", "0", "0", "0", "0", "0"]
     note = _column_help(at, "Put (ALO)")
     assert (
         "The put is exercised at once at this spot (at or below its critical spot), so its Greeks are those of its "

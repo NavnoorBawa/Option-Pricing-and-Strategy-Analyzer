@@ -127,9 +127,17 @@ def _read_link() -> None:
     if legacy in (MODELS["binomial"], MODELS["monte_carlo"]):
         for key in (*LEGACY_ENGINE_PARAMS, "model"):
             params.pop(key, None)
-        state[tab_pricing.DIAGNOSTICS] = True
         engine = {MODELS["binomial"]: "a binomial tree", MODELS["monte_carlo"]: "Monte Carlo"}[legacy]
-        where = " (open below)" if "tab" not in params else ", open there"  # the link opens Pricing, or another tab
+        if "tab" not in params:
+            # The link opens the Pricing tab: the expander is bound to the URL, so the new link holds it open and a
+            # link shared from this view opens it again.
+            params[tab_pricing.DIAGNOSTICS] = ["true"]
+            where = " (open below)"
+        else:
+            # Another tab: Streamlit drops the parameter of a widget it does not draw, so the session holds it open
+            # until the Pricing tab draws it.
+            state[tab_pricing.DIAGNOSTICS] = True
+            where = ", open there"
         notes.append(
             f"This link asks for {engine}, which now runs in the Pricing tab's Engine diagnostics{where}; the "
             f"sidebar prices with {MODELS['bsm']}."

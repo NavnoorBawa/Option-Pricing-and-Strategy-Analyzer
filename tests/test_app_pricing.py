@@ -22,11 +22,12 @@ from _apptest import ASOF
 from scipy.optimize import brentq
 from scipy.special import ndtr
 from streamlit.testing.v1 import AppTest
+from test_app_alo import _row_places
 from test_format_standard import HAND_FORMAT
 
 from options_analyzer import american, monte_carlo
 from options_analyzer import black_scholes as bs
-from options_analyzer.ui import cache, charts, tab_iv, tab_pricing
+from options_analyzer.ui import cache, charts, charts_pricing, components, tab_iv, tab_pricing
 from options_analyzer.ui import market as mk
 from options_analyzer.ui.app import TABS
 
@@ -75,6 +76,11 @@ def _values(data) -> np.ndarray:
     if isinstance(data, dict):
         return np.frombuffer(base64.b64decode(data["bdata"]), dtype=data["dtype"])
     return np.asarray(data, dtype=float)
+
+
+def _sci(text: str) -> float:
+    """A difference written by format.signed_sci (``−8.9e−8``, ``0``) as a float."""
+    return float(text.replace(MINUS, "-"))
 
 
 def _number(text: str) -> float:
@@ -238,15 +244,23 @@ def test_the_contract_and_greeks_tables_give_one_put_delta(new_app):
 def test_the_greeks_table_is_in_desk_units(app):
     table = _frame(app, "tbl_pricing_greeks").value.set_index("Greek")
     call = bs.greeks(100, 100, 1.0, 0.05, 0.2, 0.0, "call")
+    put = bs.greeks(100, 100, 1.0, 0.05, 0.2, 0.0, "put")
+
+    def money(name: str, scale: float) -> str:
+        # One precision a row: cents, or two significant digits of the row's largest value below 10 cents (the
+        # put's Θ of -0.0049 a day read 0.00; the call's -0.0176 sets three decimals for the row).
+        return f"{call[name] / scale:+.{_row_places(call[name] / scale, put[name] / scale)}f}"
+
     expected = {
         "Δ": f"{call['delta']:+.3f}",
         "Δ fwd": f"{call['delta'] * math.exp(-0.05):+.3f}",
         "Γ 1%": f"{call['gamma'] * 100 / 100:+.3g}",
-        "Vega": f"{call['vega'] / 100:+.2f}",
-        "Θ": f"{call['theta'] / 365:+.2f}",
-        "ρ": f"{call['rho'] / 100:+.2f}",
-        "ε": f"{call['epsilon'] / 100:+.2f}",
+        "Vega": money("vega", 100),
+        "Θ": money("theta", 365),
+        "ρ": money("rho", 100),
+        "ε": money("epsilon", 100),
     }
+    assert expected["Θ"] == "-0.018"
     for row, text in expected.items():
         assert table.loc[row, "Call (BSM)"] == text.replace("-", MINUS), row
     # The textbook market has no smile: P(ITM) is N(d2) at the flat vol, and says so.
@@ -326,10 +340,14 @@ def test_the_decay_follows_the_american_engine(new_app):
     _ok(at)
     table = _frame(at, "tbl_pricing_greeks").value.set_index("Greek")
     T = 30 / 365
-    for kind in ("call", "put"):
-        later = american.price(100, 100, T - 1 / 365, 0.05, 0.2, 0.0, option_type=kind)
-        now = american.price(100, 100, T, 0.05, 0.2, 0.0, option_type=kind)
-        assert table.loc["1-day decay", f"{kind.capitalize()} (ALO)"] == f"{later - now:+.2f}".replace("-", MINUS)
+    decay = {
+        kind: american.price(100, 100, T - 1 / 365, 0.05, 0.2, 0.0, option_type=kind)
+        - american.price(100, 100, T, 0.05, 0.2, 0.0, option_type=kind)
+        for kind in ("call", "put")
+    }
+    places = _row_places(*decay.values())
+    for kind, value in decay.items():
+        assert table.loc["1-day decay", f"{kind.capitalize()} (ALO)"] == f"{value:+.{places}f}".replace("-", MINUS)
 
 
 # --- The profile (item 4) --------------------------------------------------------------------------------------------
@@ -399,15 +417,22 @@ def test_under_the_american_engine_the_profile_draws_the_closed_form_as_a_refere
 
 
 def test_the_chain_ladder_spans_ten_delta_to_ten_delta(index_app):
-    # 10Δ put to 10Δ call is 5,425 to 6,075 on the default expiry; Auto picks 25 points (27 rows) and the Pricing
-    # strike, 5,815, is always a row: 28.
+    # 10Δ put to 10Δ call is 5,425 to 6,075 on the default expiry. The spec's Auto (at most 30 rows) took 25 points:
+    # 28 rows, the Pricing strike's the 17th, below the fold of the 15-row frame (UI spec 2.8), and the page 2,492 px
+    # high against the spec's 1,800. Auto keeps to 14 rows: 50 points, 5,450 to 6,050, and 5,815: 14 rows.
     table = _frame(index_app, "tbl_pricing_chain_").value
     strikes = list(table["Strike"])
-    assert len(strikes) == 28 and (strikes[0], strikes[-1]) == (5425.0, 6075.0) and 5815.0 in strikes
+    assert strikes == [*np.arange(5450.0, 5801.0, 50.0), 5815.0, *np.arange(5850.0, 6051.0, 50.0)]
+    assert len(strikes) <= components.TABLE_ROWS  # the frame shows every row, the strike's among them
     assert list(table.loc[table["Strike"] == 5815.0, "Mark"]) == ["←"]
-    assert list(_headers(index_app, "tbl_pricing_chain_").values()) == [
-        "Bid", "Ask", "Theo", "IV (%)", "Δ", "Strike", " ", "Δ", "IV (%)", "Theo", "Bid", "Ask",
+    # Each side's headers name it; nothing is pinned (a pinned column is drawn first, and the ladder is mirrored).
+    headers = _headers(index_app, "tbl_pricing_chain_")
+    assert list(headers.values()) == [
+        "Call bid", "Call ask", "Call theo", "Call IV (%)", "Call Δ", "Strike", " ",
+        "Put Δ", "Put IV (%)", "Put theo", "Put bid", "Put ask",
     ]  # fmt: skip
+    columns = json.loads(_frame(index_app, "tbl_pricing_chain_").proto.columns)
+    assert not any(config.get("pinned") for config in columns.values())
     # Each theo is Black-76 at the strike's own surface vol.
     context = mk.index_market(AT)
     row = context.expiry_row(date(2026, 11, 20))
@@ -423,7 +448,8 @@ def test_the_chain_window_and_stride(index_app):
     _ok(index_app)
     table = _frame(index_app, "tbl_pricing_chain_").value
     strikes = list(table["Strike"])
-    assert len(strikes) <= tab_pricing.CHAIN_ROWS + 1 and all(k % 100 == 0 or k == 5815.0 for k in strikes)
+    # Even 100 points gives 27 rows over every listed strike (Auto's coarsest), and 5,815: the frame scrolls.
+    assert len(strikes) == 28 and all(k % 100 == 0 or k == 5815.0 for k in strikes)
     # Every listed strike, 4,150 to 6,850: below 4,600 the surface has no vol (beyond its reach), so those rows keep
     # their quotes and read "–" for theo and delta (they raised an error before).
     context = mk.index_market(AT)
@@ -446,6 +472,7 @@ def test_chain_strikes_auto_stride():
         *np.arange(5800.0, 5812.0, 5.0), 5812.0, *np.arange(5815.0, 5851.0, 5.0)
     ]  # fmt: skip
     assert tab_pricing.chain_strikes(listed, 5425.0, 6075.0, 25, 5815.0).size == 28
+    assert tab_pricing.chain_strikes(listed, 5425.0, 6075.0, "Auto", 5815.0).size == 14
 
 
 def test_a_click_on_a_chain_row_sets_the_strike(monkeypatch):
@@ -459,6 +486,35 @@ def test_a_click_on_a_chain_row_sets_the_strike(monkeypatch):
     monkeypatch.setattr(tab_pricing.st, "session_state", state)
     tab_pricing.on_chain_select("k", (5800.0,))
     assert state == {"strike": 5815.0, "k": {"selection": {"rows": [], "columns": []}}}
+
+
+def test_a_click_on_a_row_beyond_the_surface_leaves_the_strike(monkeypatch):
+    # The "All" window lists 4,200 to 4,500 with their quotes, beyond the smile's reach: a click on one crashed the
+    # app (no vol to price it). The strike stays and the ladder says why.
+    state = {"strike": 5815.0, "k": {"selection": {"rows": [0], "columns": []}}}
+    monkeypatch.setattr(tab_pricing.st, "session_state", state)
+    tab_pricing.on_chain_select("k", (4200.0, 5815.0), priced=(False, True), step=5.0)
+    assert state["strike"] == 5815.0 and tab_pricing._CHAIN_MOVED not in state
+    assert state[tab_pricing._CHAIN_NOTE].startswith("4,200 lies beyond the surface's reach at this expiry")
+
+
+def test_a_strike_beyond_the_surface_says_so_instead_of_failing(new_app):
+    # A link or the sidebar can ask for 4,300 on 20-Nov: the smile reaches 4,600 to 6,890 there (the strikes on the
+    # 5-point grid where the surface's vol is finite, read here independently), so the page says so and stops.
+    at = new_app(**INDEX, strike="4300").run()
+    assert not at.exception
+    context = mk.index_market(AT)
+    T = float(context.expiry_row(date(2026, 11, 20))["maturity"])
+    grid = np.arange(5.0, 4 * context.spot + 2.5, 5.0)
+    reach = grid[[np.isfinite(context.surface.implied_vol_at(k / context.spot, T, extrapolate=True)) for k in grid]]
+    assert (reach[0], reach[-1]) == (4600.0, 6890.0)
+    assert [e.value for e in at.error] == [
+        "The surface gives no vol at the strike 4,300: at this expiry its smile reaches the strikes 4,600 to 6,890, "
+        "so nothing can be priced. Choose a strike in that range in the sidebar, or ATMF."
+    ]
+    assert not at.tabs and not at.metric
+    # The sidebar stays, so the strike can be moved back.
+    assert next(n for n in at.number_input if n.key == "strike").value == 4300.0
 
 
 # --- Engine diagnostics (item 7, Appendix B decision 8) ---------------------------------------------------------------
@@ -477,7 +533,11 @@ def _count(monkeypatch, calls: dict, names: tuple[str, ...]) -> None:
 
 def test_the_diagnostic_engines_run_only_while_their_expander_is_open(new_app, monkeypatch):
     calls: dict[str, int] = {}
-    _count(monkeypatch, calls, ("tree_timed", "mc_timed", "tree_convergence", "tree_results", "alo_timed"))
+    _count(
+        monkeypatch,
+        calls,
+        ("tree_timed", "mc_timed", "tree_convergence", "mc_convergence", "tree_results", "alo_timed"),
+    )
     at = new_app(**INDEX).run()
     _ok(at)
     assert calls == {}
@@ -485,6 +545,7 @@ def test_the_diagnostic_engines_run_only_while_their_expander_is_open(new_app, m
     at.run()
     _ok(at)
     assert calls["tree_timed"] == 3 and calls["mc_timed"] == 1 and calls["tree_convergence"] == 1
+    assert calls["mc_convergence"] == 1
     assert "alo_timed" not in calls  # the index is European: no American engine rows
 
 
@@ -500,7 +561,9 @@ def test_the_engine_comparison_against_the_closed_form(new_app):
     call = bs.price(100, 100, 1.0, 0.05, 0.2, 0.0, "call")
     assert table.loc["BSM · European", "Call"] == round(call, 6)
     # Leisen-Reimer converges at second order: 2,001 steps within 1e-7 of the closed form here (measured 8.9e-8).
-    assert abs(table.loc["LR 2,001 · European", "Call − ref"]) < 1e-7
+    # The differences are in scientific notation (spec 2.5), one form a column: "−8.9e−8".
+    assert abs(_sci(table.loc["LR 2,001 · European", "Call − ref"])) < 1e-7
+    assert all(re.fullmatch(r"0|[+−]\d\.\de−?\d+", text) for text in table["Call − ref"]), list(table["Call − ref"])
     assert "call 10.4237 – 10.4582" in table.loc["MC 100,000 · European", "MC 95% interval"]
 
 
@@ -524,9 +587,9 @@ def test_the_american_engine_rows_and_its_exercise_boundary(new_app):
     _ok(at)
     table = _frame(at, "tbl_pricing_engines").value.set_index("Engine")
     assert list(table.index)[:3] == ["ALO fast", "ALO accurate", "ALO high"]
-    assert table.loc["ALO high", "Put − ref"] == 0
+    assert table.loc["ALO high", "Put − ref"] == "0"
     # ALO accurate within 5e-6 of high (its validated error, docs/methods/american_alo.md).
-    assert abs(table.loc["ALO accurate", "Put − ref"]) < 5e-6
+    assert abs(_sci(table.loc["ALO accurate", "Put − ref"])) < 5e-6
     spec = _chart(at, "pricing_boundary")
     assert {t["name"] for t in spec["data"]} == {"Call boundary", "Put boundary"}
     assert spec["layout"]["xaxis"]["range"][0] == 0.0  # the x-axis from today
@@ -709,6 +772,55 @@ def test_the_iv_chart_marks_the_quotes_and_their_vols(new_app, default_index):
     assert not spec["layout"].get("shapes")
 
 
+def test_an_offer_only_quote_inverts_its_ask_alone(new_app, default_index):
+    # The 6,500 call on 20-Nov is offered at 0.10 with no bid. The chain, the contract table and the published surface
+    # read a zero bid as none; the tab inverted it as a price ("no time value") and made a mid of 0.05, 1.78 vp over
+    # the fit. Now the bid starts empty, only the ask is inverted, and mid vs fit reads "–".
+    at = new_app(**INDEX, tab="IV", strike="6500").run()
+    _ok(at)
+    assert not at.warning
+    assert [(n.label, n.value) for n in at.number_input if n.label in ("Bid", "Ask")] == [("Bid", None), ("Ask", 0.1)]
+    d = default_index
+    tiles = _tiles(at)
+    assert tiles["IV bid"].value == "–" and tiles["IV bid"].proto.help == "No bid: the quote is an offer only."
+    assert tiles["IV mid"].value == "–" and tiles["IV mid"].proto.help == "No mid: the quote is one-sided."
+    assert tiles["IV ask"].value == f"{_implied(0.10, d['F'], 6500.0, d['T'], d['DF'], 'call'):.2%}"
+    assert tiles["Surface"].delta == "mid vs fit –"
+    assert "an offer only has no mid" in tiles["Surface"].proto.help
+    assert [t["name"] for t in _chart(at, "iv_price")["data"]][1].startswith("Ask 0.10 · ")
+    # A typed bid makes it two-sided again.
+    next(n for n in at.number_input if n.label == "Bid").set_value(0.05).run()
+    _ok(at)
+    assert _tiles(at)["IV mid"].value != "–"
+
+
+def test_the_pricing_view_reads_from_the_link(new_app):
+    # UI spec 2.4 and 2.7 item 11: the profile, chain and Greeks controls and the diagnostics are bound to the URL.
+    at = new_app(
+        **INDEX, pr_metric="Vega", pr_x="Vol", pr_chain_win="All", pr_chain_stride="50 pts", pr_greeks="+2nd",
+        pricing_diag="true",
+    ).run()  # fmt: skip
+    _ok(at)
+    assert at.segmented_control(key="pr_metric").value == "Vega"
+    assert at.segmented_control(key="pr_x").value == "Vol"
+    assert at.segmented_control(key="pr_chain_win").value == "All"
+    assert at.selectbox(key="pr_chain_stride").value == 50
+    assert at.segmented_control(key="pr_greeks").value == "+2nd"
+    assert any(d.proto.id.endswith("-tbl_pricing_engines") or "Engine" in d.value.columns for d in at.dataframe)
+
+
+@pytest.mark.parametrize(("query", "where"), [({}, " (open below)"), ({"tab": "Risk"}, ", open there")])
+def test_a_version_2_engine_link_opens_the_diagnostics_in_the_link(new_app, query, where):
+    # Spec 2.4: an old link to a tree opens the closed form with the diagnostics open; on the Pricing tab the new link
+    # holds pricing_diag (a link shared from that view opens them again), on another tab the session does (Streamlit
+    # drops the parameter of a widget it does not draw).
+    at = new_app(**INDEX, model="Binomial tree", **query).run()
+    _ok(at)
+    assert ("pricing_diag" in at.query_params) is not query
+    assert at.session_state[tab_pricing.DIAGNOSTICS] is True
+    assert any(f"Engine diagnostics{where}; the sidebar prices with" in w.value for w in at.warning)
+
+
 def test_the_iv_tick_follows_the_index_rule():
     assert (tab_iv.tick(2.95, True), tab_iv.tick(3.0, True), tab_iv.tick(98.2, False)) == (0.05, 0.1, 0.01)
 
@@ -716,15 +828,73 @@ def test_the_iv_tick_follows_the_index_rule():
 # --- The chart builders -----------------------------------------------------------------------------------------------
 
 
-def test_the_error_chart_draws_a_slope_guide_on_log_axes():
-    from options_analyzer.ui import charts_pricing
-
+def test_the_error_chart_draws_each_lattices_order_beside_it():
+    # CRR converges at first order, Leisen-Reimer at second: one slope −1 guide through the largest first error lay
+    # on the CRR curves and said nothing of LR's. Each guide starts GUIDE_OFFSET above its own lattice's first error.
     steps = np.array([10, 100, 1000])
-    fig = charts_pricing.error_chart({"LR call": (steps, 1.0 / steps**2, "call", "solid")}, reference="BSM")
+    fig = charts_pricing.error_chart(
+        {"LR call": (steps, 1.0 / steps**2, "call", "solid"), "CRR call": (steps, 1.0 / steps, "call", "dot")},
+        reference="BSM",
+        guides=(("CRR", 1), ("LR", 2)),
+    )
     assert fig.layout.xaxis.type == "log" and fig.layout.yaxis.type == "log"
-    guide = fig.data[-1]
-    assert guide.name == "slope −1 (1/n)" and list(guide.y) == pytest.approx([1e-2, 1e-4])
+    guides = {t.name: list(t.y) for t in fig.data[2:]}
+    offset = charts_pricing.GUIDE_OFFSET
+    assert guides == {
+        "CRR: slope −1 (1/n)": pytest.approx([offset * 1e-1, offset * 1e-3]),
+        "LR: slope −2 (1/n²)": pytest.approx([offset * 1e-2, offset * 1e-6]),
+    }
     assert fig.layout.yaxis.title.text == "|Tree − BSM| ($)"
+
+
+def test_the_monte_carlo_interval_narrows_as_one_over_root_n(new_app):
+    # UI spec 3.1 item 7: the 95% interval's width against the paths, with a 1/√N guide, on the settings' seed. Each
+    # width is 2 x 1.96 standard errors of monte_carlo.price_european at that sample, run here.
+    at = new_app()
+    at.session_state[tab_pricing.DIAGNOSTICS] = True
+    at.run()
+    _ok(at)
+    spec = _chart(at, "pricing_mc_convergence")
+    traces = {t["name"]: t for t in spec["data"]}
+    paths = [1562, 6250, 25000, 100000]
+    assert list(_values(traces["Call"]["x"])) == paths
+    for kind in ("call", "put"):
+        expected = [
+            2 * 1.96 * monte_carlo.price_european(100, 100, 1.0, 0.05, 0.2, 0.0, n_paths=n, seed=42)[kind].std_error
+            for n in paths
+        ]
+        np.testing.assert_allclose(_values(traces[kind.capitalize()]["y"]), expected, rtol=1e-12)
+    guide = _values(traces["1/√N"]["y"])
+    assert guide[1] / guide[0] == pytest.approx(math.sqrt(paths[0] / paths[-1]))
+    assert spec["layout"]["xaxis"]["type"] == "log" and spec["layout"]["yaxis"]["type"] == "log"
+
+
+def test_the_profile_labels_do_not_print_over_one_another():
+    # The default contract: spot 5,800, the forward 5,813.91 and the strike 5,815, a point apart on a ±10% axis,
+    # under a legend of two curves. Drawn at the top of their lines the labels printed "FK 5,815", and the spot's
+    # label printed over "Put" on a phone. On each row, the labels' boxes (and the legend's) do not overlap.
+    marks = [(5800.0, "S 5,800.00", True), (5815.0, "K 5,815", False), (5813.91, "F", False)]
+    legend = charts_pricing.legend_px(["Call", "Put"])
+    rows = charts_pricing.label_rows(marks, 5220.0, 6380.0, legend)
+    boxes: dict[int, list[tuple[float, float]]] = {0: [(0.0, legend)]}
+    for (x, text, _), (row, left) in zip(marks, rows, strict=True):
+        at = (x - 5220.0) / 1160.0 * charts_pricing.LABEL_PLOT_PX
+        width = charts_pricing.LABEL_CHAR_PX * (len(text) + 1)
+        box = (at - width, at) if left else (at, at + width)
+        assert all(box[1] <= a or box[0] >= b for a, b in boxes.get(row, [])), (text, row)
+        boxes.setdefault(row, []).append(box)
+    assert rows[0][1] is True  # the spot's label reads to the left of its line
+    # In the figure: one annotation a line, each on its row's offset.
+    fig = charts_pricing.profile_chart(
+        np.linspace(5220.0, 6380.0, 5),
+        [charts_pricing.Line("Call", np.zeros(5), "call"), charts_pricing.Line("Put", np.zeros(5), "put")],
+        x_title="Spot",
+        y_title="Value ($ per share)",
+        current=(5800.0, "S 5,800.00"),
+        references=[(5815.0, "K 5,815", "strike"), (5813.91, "F", "forward")],
+    )
+    shown = {a.text: (a.yanchor, a.yshift or 0) for a in fig.layout.annotations}
+    assert shown == {"S 5,800.00": ("top", 0), "K 5,815": ("top", 0), "F": ("bottom", 0)}
 
 
 def test_exercise_boundary_colours_follow_the_option_type():

@@ -279,6 +279,7 @@ GOLDEN_CELLS = [
     ("vega_share", [6.3712], "X ($/vp)", "6.37"),
     ("theta_share", [-2.0371], "X ($/day)", "-2.04"),  # a contract's theta per share (the Pricing contract table)
     ("rho_share", [2.1712], "X ($/1%)", "2.17"),
+    ("theta_share", [-0.0045, -0.0012], "X ($/day)", "-0.0045"),  # below 10 cents: two significant digits
     ("vol", [15.4612], "X (%)", "15.46"),
     ("vol_change", [-0.0701], "X (vp)", "-0.07"),
     ("rate", [4.75], "X (%)", "4.75"),
