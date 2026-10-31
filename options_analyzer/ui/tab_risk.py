@@ -453,7 +453,11 @@ def _tile_cards(book: Book, t: Tiles) -> list[Card]:
             # the day's decay by repricing instead.
             f"{decay_label(t.expiring)} {dollars(t.one_day)}"
             if decay_leads(t.theta, t.one_day, t.expiring)
-            else f"BE {be} vs {t.implied_move:.2%}",
+            else f"BE {be} vs {t.implied_move:.2%}"
+            if t.breakeven_move is not None
+            # Θ and Γ of one sign (a long-dated spread whose carry outweighs its decay): no move pays for the day, and
+            # "BE – vs 1.05%" read as a missing number.
+            else f"{t.implied_move:.2%} implied move",
         ),
         _card(
             "Worst grid",
@@ -967,12 +971,13 @@ def _stress(book: Book) -> None:
         key="tbl_stress",
     )
     st.toggle(
-        f"IV shocks damped by tenor, (τ/1M)^{MINUS}{scenarios.DEFAULT_VOL_TENOR_DECAY:g}",
+        "IV shocks damped by tenor",
         value=True,
         key="stress_damp",
         persist_state="session",
-        help="Historical and Fed shocks move one-month (VIX-like) vol; longer legs move less. Hypothetical shocks "
-        "apply to every leg as written.",
+        help="Historical and Fed shocks move one-month (VIX-like) vol; a leg of tenor τ longer than a month moves by "
+        f"the shock × (1M/τ) to the power {scenarios.DEFAULT_VOL_TENOR_DECAY:g}. Hypothetical shocks apply to every "
+        "leg as written.",
     )
 
 
@@ -1078,11 +1083,12 @@ def _var(book: Book) -> None:
     if with_vol:
         cards += [
             _var_card(
-                f"Spot-only VaR 99% {h}",
+                "Spot-only VaR",
                 -spot_var,
-                f"The same spot paths with implied vol frozen, which leaves out the vega risk: {exact(-spot_var)}.",
+                f"VaR 99% {h} of the same spot paths with implied vol frozen, which leaves out the vega risk: "
+                f"{exact(-spot_var)}.",
             ),
-            _var_card(f"Spot-only ES 97.5% {h}", -spot_es, f"Implied vol frozen: {exact(-spot_es)}."),
+            _var_card("Spot-only ES", -spot_es, f"ES 97.5% {h}, implied vol frozen: {exact(-spot_es)}."),
         ]
     # The comparator's like: the delta-gamma-theta VaR moves spot alone, Normally, at the leg vol, so its gap is taken
     # to the spot-only run (the full VaR when implied vol is frozen), which differs from it by the full revaluation
@@ -1110,7 +1116,10 @@ def _var(book: Book) -> None:
         ),
     ]
     # Pairs, VaR beside its ES: the full simulation, its spot-only twin (with implied vol moving), then the analytic
-    # comparator and the gap. Two groups of three went 2 + 1 and 2 + 1 on a phone.
+    # comparator and the gap. Two groups of three went 2 + 1 and 2 + 1 on a phone. The spot-only pair names neither
+    # level nor horizon (its help does): "Spot-only ES 97.5% 1D" needed 176 px, and six such cards 1,126 px, so the
+    # row went 4 + 2 in the 1,038 px main column of a 1,440 px window with the sidebar open; with these labels the
+    # widest card needs 145 px and the six one line (components._card_width).
     pairs = ("var_cards_full", "var_cards_spot", "var_cards_comparator")
     card_row("var_cards", pairs if with_vol else pairs[::2], cards)
     left, right = st.columns([1, 2], gap="medium")
@@ -1194,9 +1203,11 @@ def _vega(book: Book) -> None:
                 "1% of 1M vol",
             ),
             _card(
-                "1M √T-weighted",
+                # Not "1M √T-weighted": the labels are set in capitals, where √T read "VT".
+                "1M-weighted",
                 dollars(scenarios.weighted_vega(book.strategy, book.market, scheme="sqrt_time", multiplier=book.units)),
-                "The P&L of a one-point rise in one-month vol, each expiry moving √(1M/τ) points.",
+                "The P&L of a one-point rise in one-month vol, each expiry moving √(1M/τ) points (square-root-of-time "
+                "weighting).",
                 "1 vp of 1M vol",
             ),
         ],

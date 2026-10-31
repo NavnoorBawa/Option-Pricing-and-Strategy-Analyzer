@@ -293,6 +293,36 @@ def test_small_greek_columns_keep_their_cents_as_the_tiles_do():
     assert json.loads(index_ladder.proto.columns)["Θ"]["type_config"]["format"] == "%,.0f"
 
 
+def test_the_theta_tile_without_a_breakeven_names_the_implied_move():
+    # The textbook 100/110 call spread over a year: Θ −$0.14 and Γ P&L 1% −$0.05 have one sign (the carry of the
+    # 5% rate outweighs the decay), so no daily move pays for a day of theta. The slot gives the implied daily move,
+    # 20% ÷ √365 = 1.05%, rather than "BE – vs 1.05%".
+    tile = _tiles(_risk(preset="Textbook"))["Θ ($/day)"]
+    assert tile.value == "−$0.14" and _tiles(_risk(preset="Textbook"))["Γ P&L 1%"].value == "−$0.05"
+    assert f"{0.20 / math.sqrt(365):.2%}" == "1.05%"
+    assert tile.delta == "1.05% implied move"
+
+
+def test_a_what_if_step_and_the_var_report_are_fast():
+    # Spec 3.3's budgets, as loose guards (timing assertions only as such): a what-if step updates the tiles in 1.0 s
+    # and the VaR report renders in 2.5 s. Measured on a shared 4-core machine: 0.10 to 0.14 s a step (the tiles'
+    # 63-cell grid and 14 stresses), 0.35 s for the VaR report with both simulations of 100,000 paths uncached.
+    # Three times the budget, for a loaded CI runner.
+    import time
+
+    from options_analyzer.ui import cache
+
+    at = _risk()
+    for step in (-1.0, -2.0):
+        start = time.perf_counter()
+        _ok(at.number_input(key="ws").set_value(step).run(timeout=240))
+        assert time.perf_counter() - start < 3.0
+    cache.value_at_risk.clear()
+    start = time.perf_counter()
+    _ok(at.pills(key="report").set_value("VaR").run(timeout=240))
+    assert time.perf_counter() - start < 7.5
+
+
 def test_the_ladder_in_sigma_and_second_order():
     ladder = _frame(_risk(lad_axis="σ", lad_order="+2nd"), "Move")
     assert len(ladder) == len(tab_risk.LADDER_SIGMA)
@@ -371,11 +401,11 @@ def test_the_var_report(index):
     hist = _chart(at, "var_hist")
     assert hist["layout"]["yaxis"]["title"]["text"] == "Probability (%)"
     cards = {m.label: m for m in at.metric}
-    for label in ("VaR 99% 1D · MC", "ES 97.5% 1D · MC", "Spot-only VaR 99% 1D", "Spot-only ES 97.5% 1D"):
+    for label in ("VaR 99% 1D · MC", "ES 97.5% 1D · MC", "Spot-only VaR", "Spot-only ES"):
         assert cards[label].value.startswith("−"), label
     # The comparator's gap is taken like for like, to the spot-only run (implied vol frozen in both), and from the
     # amounts shown, so that the three tiles add up on screen: −$1,922 − (−$1,978) = +$56.
-    gap = tab_risk.shown(_amount(cards["Spot-only VaR 99% 1D"].value)) - _amount(cards["DGT VaR 99% 1D"].value)
+    gap = tab_risk.shown(_amount(cards["Spot-only VaR"].value)) - _amount(cards["DGT VaR 99% 1D"].value)
     assert cards["Non-linearity"].value == tab_risk.dollars(gap)
     assert cards["Non-linearity"].delta == "spot only − DGT"
     # The models simulate from the leg vol: no statistic of a history, so none is tagged SYN HIST; the line under
@@ -562,7 +592,7 @@ def test_var_simulates_index_vol_dynamics_beside_the_spot_only_var(monkeypatch):
     moving = risk.VaRConfig(0.99, 1, 100_000, seed=7, vol_of_vol=1.0, spot_vol_correlation=-0.7)
     assert configs == [replace(moving, vol_of_vol=0.0), moving]
     cards = {m.label: m for m in at.metric}
-    assert cards["VaR 99% 1D · MC"].value == "−$3,862" and cards["Spot-only VaR 99% 1D"].value == "−$2,833"
+    assert cards["VaR 99% 1D · MC"].value == "−$3,862" and cards["Spot-only VaR"].value == "−$2,833"
     assert cards["VaR 99% 1D · MC"].delta == r"−\$1,029 vs spot only"  # Markdown, as the delta renders it
     # ES at 97.5% (FRTB's level) off the same simulation: the mean of the 2,500 worst of 100,000.
     straddle = build_template("Short Straddle", 5800, 580, 45 / 365)
@@ -595,9 +625,13 @@ def test_the_spot_only_run_keeps_every_setting_but_the_vol_moves(monkeypatch):
     assert [m.label for m in at.metric if "VaR" in m.label or "ES" in m.label][:4] == [
         "VaR 99% 5D · MC",
         "ES 97.5% 5D · MC",
-        "Spot-only VaR 99% 5D",
-        "Spot-only ES 97.5% 5D",
+        "Spot-only VaR",
+        "Spot-only ES",
     ]
+    # The spot-only pair's labels are short enough for one line of six cards; their help names level and horizon.
+    spot_only = {m.label: m for m in at.metric}
+    assert spot_only["Spot-only VaR"].help.startswith("VaR 99% 5D of the same spot paths")
+    assert spot_only["Spot-only ES"].help.startswith("ES 97.5% 5D, implied vol frozen")
 
 
 def test_vol_moves_switched_off_show_the_spot_only_run_from_the_cache(monkeypatch):

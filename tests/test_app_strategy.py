@@ -293,7 +293,7 @@ def test_a_link_to_the_risk_tab_analyses_the_linked_template():
     frozen = risk.VaRConfig(confidence=0.99, horizon_days=1, n_paths=100_000, seed=7)
     for config, var_label in (
         (dataclasses.replace(frozen, **INDEX_VOL), "VaR 99% 1D · MC"),
-        (frozen, "Spot-only VaR 99% 1D"),
+        (frozen, "Spot-only VaR"),
     ):
         var = risk.value_at_risk(strategy, strat.Market(100, 0.05, 0.2, 1.0), config, 200)
         assert _metric(at, var_label).value == tab_risk.dollars(-var.var)
