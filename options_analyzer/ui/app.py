@@ -36,6 +36,9 @@ PRESET_ALIASES = {"index": mk.INDEX, "synthetic": mk.INDEX, "spx": mk.INDEX}
 #: Parameters that only the textbook market has: a link with any of them and no preset (a link from version 2)
 #: opens the textbook market, so that it reproduces the numbers it was made with.
 TEXTBOOK_PARAMS = ("spot", "days", "rate", "div")
+#: The settings of version 2's tree and Monte Carlo models, which a link to them carried (``?model=Monte+Carlo&paths=
+#: 250%2C000``): the Engine diagnostics set their own, so the link reader drops them with the model.
+LEGACY_ENGINE_PARAMS = ("tree", "steps", "style", "paths", "seed", "antithetic", "control_variate")
 #: Session-state keys: the link was read (on the session's first run), and its notes, shown once.
 _LINK_READ, _LINK_NOTES = "link_read", "link_notes"
 #: Session-state key: the header's Methodology button was clicked, so this run opens the Methodology drawer.
@@ -115,6 +118,17 @@ def _read_link() -> None:
                 notes.append(
                     f"This link asks for a {what} named {_shown(value)}, which does not exist, so {default} is used."
                 )
+    # A version-2 link to a tree or to Monte Carlo (UI spec 2.4): those engines are diagnostics now, so the link opens
+    # the closed form with the Pricing tab's Engine diagnostics open. Their settings are dropped with the model.
+    legacy = params.get("model", [None])[-1]
+    if legacy in (MODELS["binomial"], MODELS["monte_carlo"]):
+        for key in (*LEGACY_ENGINE_PARAMS, "model"):
+            params.pop(key, None)
+        state[tab_pricing.DIAGNOSTICS] = True
+        notes.append(
+            f"This link asks for the {legacy.lower()}, which now runs in the Pricing tab's Engine diagnostics (open "
+            f"below); the sidebar prices with {MODELS['bsm']}."
+        )
     # The market: a preset by its label or a short name (?preset=textbook), a version-2 link's typed inputs, and
     # the valuation time in any ISO form.
     if "preset" in params:
@@ -172,8 +186,8 @@ def _open_methodology() -> None:
 
 
 def run() -> None:
-    """One script run of the app: the page settings, stylesheet and logo, the sidebar, the header strip, the price
-    cards and the open tab."""
+    """One script run of the app: the page settings, stylesheet and logo, the sidebar, the header strip and the open
+    tab. The shell draws no price cards (UI-1): the Pricing tab owns its headline tiles."""
     st.set_page_config(
         page_title="Options Analytics",
         # Streamlit links a Material icon favicon from fonts.gstatic.com: the app's only request to another host.
@@ -194,7 +208,8 @@ def run() -> None:
     _read_link()
     inputs = sidebar()
 
-    # The prices come first, so that the header's badge names the model of the values on screen.
+    # The engine's prices come first (cached; under the closed form two formulas), so that if the American engine
+    # cannot value the contract the header's badge names the engine of the values on screen.
     fallback = None
     try:
         prices = tab_pricing.compute_prices(inputs)
@@ -210,7 +225,6 @@ def run() -> None:
         st.info(note, icon=":material/event:")
     if fallback:
         st.warning(fallback, icon=":material/warning:")
-    tab_pricing.render_price_cards(inputs, prices)
 
     # Only the open tab runs: opening a tab reruns the app, and the closed tabs stay empty (their widgets keep their
     # values with persist_state). The exception is the Strategy tab's controls (template, strike width, position

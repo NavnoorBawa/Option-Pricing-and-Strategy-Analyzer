@@ -381,6 +381,8 @@ COLUMN_KINDS: dict[str, ColumnKind] = {
     "theta": ColumnKind("$/day", "%,.{d}f", 0),  # per position, per calendar day
     "rho": ColumnKind("$/1%", "%,.{d}f", 0),  # per position
     "vega_share": ColumnKind("$/vp", "%.{d}f", 2),  # per share, in a contract table: 6.37
+    "theta_share": ColumnKind("$/day", "%.{d}f", 2),  # per share, in a contract table: -2.04
+    "rho_share": ColumnKind("$/1%", "%.{d}f", 2),  # per share, in a contract table: 2.17
     "vol": ColumnKind("%", "%.{d}f", 2),  # implied vol: 15.46
     "vol_change": ColumnKind("vp", "%.{d}f", 2),  # vol changes, RR, BF, mid vs fit, edges
     "rate": ColumnKind("%", "%.{d}f", 2),  # rates and yields: 4.75

@@ -7,6 +7,8 @@ seeds), so ``st.cache_data`` can safely memoise results across reruns.
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import streamlit as st
 
@@ -111,17 +113,6 @@ def mc_results(S, K, T, r, sigma, q, n_paths, seed, antithetic, control_variate)
     return monte_carlo.price_european(S, K, T, r, sigma, q, ("call", "put"), n_paths, seed, antithetic, control_variate)
 
 
-@st.cache_data(show_spinner=False, max_entries=16)
-def mc_paths(S, T, r, sigma, q, n_paths, seed, antithetic, n_show) -> tuple[np.ndarray, np.ndarray]:
-    steps = int(np.clip(round(T * 252), 20, 500))
-    return monte_carlo.scenario_paths(S, T, r, sigma, q, n_paths, seed, antithetic, n_show, steps)
-
-
-@st.cache_data(show_spinner=False, max_entries=16)
-def mc_terminal(S, T, r, sigma, q, n_paths, seed, antithetic) -> np.ndarray:
-    return monte_carlo.terminal_prices(S, T, r, sigma, q, min(n_paths, 200_000), seed, antithetic)
-
-
 @st.cache_data(show_spinner=False, max_entries=24)
 def value_at_risk(strategy: Strategy, market: Market, config: risk.VaRConfig, multiplier: float) -> risk.VaRResult:
     """``risk.value_at_risk``. The Risk tab makes two runs per view, with implied vol moving and with it frozen (one
@@ -183,3 +174,39 @@ def american_curve(
             return np.nan
 
     return vols, np.array([value(v) for v in vols])
+
+
+# --- The Pricing tab's Engine diagnostics: each engine on the call and the put, with its time ------------------------
+# The time is measured once, when the result is computed (later runs read the cache), on the server: a guide to the
+# engines' relative cost, not a benchmark (benchmarks/ holds those).
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def tree_timed(S, K, T, r, sigma, q, steps, american, method) -> tuple[dict, float]:
+    """``binomial.price`` of the call and the put on one tree, and the milliseconds the two took."""
+    start = time.perf_counter()
+    values = {kind: binomial.price(S, K, T, r, sigma, q, kind, steps, american, method) for kind in KINDS}
+    return values, (time.perf_counter() - start) * 1e3
+
+
+@st.cache_data(show_spinner=False, max_entries=32)
+def mc_timed(S, K, T, r, sigma, q, n_paths, seed, antithetic, control_variate) -> tuple[dict, float]:
+    """``monte_carlo.price_european`` of the call and the put (one sample), and the milliseconds it took."""
+    start = time.perf_counter()
+    results = monte_carlo.price_european(S, K, T, r, sigma, q, KINDS, n_paths, seed, antithetic, control_variate)
+    return results, (time.perf_counter() - start) * 1e3
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def alo_timed(S, K, T, r, sigma, q, scheme) -> tuple[dict, float]:
+    """``american.price`` of the call and the put with one scheme, and the milliseconds the two took."""
+    start = time.perf_counter()
+    values = {kind: float(american.price(S, K, T, r, sigma, q, option_type=kind, scheme=scheme)) for kind in KINDS}
+    return values, (time.perf_counter() - start) * 1e3
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def alo_values(S, K, T, r, sigma, q, option_type, scheme) -> np.ndarray:
+    """``american.price`` over arrays (spots, strikes, vols or expiries, broadcast together): the engine solves one
+    boundary per distinct (K, T, r, σ, q), so 121 spots on one boundary take about 4 ms."""
+    return np.asarray(american.price(S, K, T, r, sigma, q, option_type=option_type, scheme=scheme), dtype=float)
