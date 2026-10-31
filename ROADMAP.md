@@ -65,6 +65,16 @@ an independent adversarial check before it merged:
   0.03). The last expiry is still worse than secants on 8 of 52 random four-expiry grids and, by 0.05 vol point, on
   the synthetic index chain; the Methodology states it.
 
+The desk redesign of every tab (UI specification sections 2 and 3), built tab by tab on branches from one shared
+foundation and each reviewed by an independent correctness and design pass before it merged:
+
+- The foundation: the number standard (`ui/format.py`) and the column registry (`ui/components.py`), the published
+  surface (`vol_surface/published.py`, `ui/surface_state.py`), the what-if strip (`ui/whatif.py`), colour and state
+  roles, and export provenance (`ui/exports.py`).
+- Pricing and IV (PR-7, UI-1), Strategy (BK-2, BK-3, RK-9a, UI-4, UI-8, UI-9, UI-13), Risk (BK-1, UI-10, RK-8a) and
+  Surface (SF-1, SF-6, SF-11, UI-26) as listed below. The Strategy tab's answer is above the fold at 1,440 × 900
+  with the sidebar open (tiles at 226 px, chart at 474 px; the spec's limits are 320 and 480).
+
 ## Remaining
 
 ### Volatility surface
@@ -80,13 +90,14 @@ an independent adversarial check before it merged:
   found keeps its unconstrained fit with a note, never silently.
 - [x] SF-8 Wing extrapolation within Lee's moment bound (wing slope at most 2), out to four at-the-money standard
   deviations and at most |ln K/F| = 1.5, flagged as extrapolated in the readout and drawn dotted on the smiles.
-- [ ] SF-1 Surface tab message severity and empty cells.
+- [x] SF-1 Surface tab message severity and empty cells: no view shows a literal None or nan in any cell (tested).
 - [ ] SF-5 Vectorised inversion at chain scale and de-Americanised quotes.
-- [ ] SF-6 Desk conventions on the Surface tab: delta axes, 25-delta risk reversal and butterfly, term structure,
-  fit diagnostics.
-- [ ] SF-11 Data-source panel, carry diagnostics, and a published fitted surface that other tabs read. Done: the
-  synthetic chain's fitted surface is published to the sidebar's contract (its vol, forward and carry) and shown by
-  default on the Surface tab, with the chain's quotes for download. Left: the data panel, filters and the FIT flag.
+- [x] SF-6 Desk conventions on the Surface tab: delta axes, 25-delta risk reversal and butterfly, term structure,
+  fit diagnostics (six tiles, smile, quotes, term, grid by delta and 3D views, an expiry table).
+- [x] SF-11 Data-source panel, carry diagnostics, and a published fitted surface that other tabs read: the
+  published surface (vol, risk-neutral CDF and quantiles, quotes, delta strikes per listed expiry) that Pricing,
+  Strategy and Risk price from; a data panel whose counts reconcile; filters and calibration with an amber FIT
+  badge while any is changed; exports with provenance.
 - [ ] SF-9 Trading-time clock for short-dated expiries.
 - [ ] SF-7 Andreasen–Huge arbitrage-free interpolation (optional precision mode).
 - [ ] SF-10 Quote-level static arbitrage with minimal L1 repair (could).
@@ -98,7 +109,9 @@ an independent adversarial check before it merged:
 - [ ] PR-6 Monte Carlo honesty: the reliability flag and coverage study are done; randomised quasi-Monte Carlo, the
   small-σ ultima limit, NaN input validation and a flag for heavy-tailed samples (coverage 0.94 at σ√T of 2.5 to 3)
   remain.
-- [ ] PR-7 Pricing and IV tabs in the desk layout of the UI specification.
+- [x] PR-7 Pricing and IV tabs in the desk layout of the UI specification: six tiles, the contract table against the
+  chain, the profile chart, the chain ladder, Greeks with P(ITM) from the smile, engine diagnostics on demand; the
+  IV tab inverts the contract's bid, ask and mid.
 - [ ] RK-12 American revaluation in Strategy and Risk through an ALO price grid.
 - [ ] PR-8 Heston with the Albrecher characteristic function and calibration (could).
 
@@ -114,32 +127,39 @@ an independent adversarial check before it merged:
   2,020 synthetic days at 99 %, the Normal model with implied vol frozen has 50 exceptions (red), the app's default
   with implied-vol moves 31 (amber) and vol-scaled historical simulation 17 (green), against 20.2 expected.
 - [ ] RK-5 Historical and filtered historical simulation, calibrated dynamics, realistic defaults.
-- [ ] RK-7 Volatility-surface shocks and smile regimes, legs read from the fitted surface.
-- [ ] RK-8 Margin-style risk arrays (FINRA 4210(g) portfolio margin; SPAN-like array as a library function).
+- [ ] RK-7 Volatility-surface shocks and smile regimes. Done: legs read from the fitted surface at their strike and
+  expiry (BK-3). Left: shocks to the surface's shape and smile regimes in scenarios (today: sticky strike).
+- [ ] RK-8 Margin-style risk arrays. Done: an illustrative FINRA 4210(g)-style portfolio-margin array
+  (`options_analyzer/margin.py`; ten points from −8 % to +6 % for a broad-based index) in the Risk tab's Scenarios.
+  Left: a SPAN-like array as a library function.
 - [ ] RK-11 Futures legs and per-leg exercise style.
 - [ ] RK-10 Euler ES contributions by leg and expiry (could).
 
 ### Strategy and Risk interface
-- [ ] BK-1 Risk console: headline strip and report selector.
-- [ ] BK-2 Strategy desk layout: builder bar, package market, blotter, dated P&L curves, Greek strip.
-- [ ] BK-3 Leg implied vols from the fitted surface.
+- [x] BK-1 Risk console: a position line, six pinned tiles and six reports, each computed only when chosen (Ladder,
+  Scenarios, Stress, VaR, Vega, Explain).
+- [x] BK-2 Strategy desk layout: builder bar, package market, blotter, dated P&L curves, Greek strip.
+- [x] BK-3 Leg implied vols from the fitted surface (or a marked override), with bid and ask from the chain.
 - [ ] UI-4 Shared what-if strip; UI-9 date × spot P&L table; UI-10 apply a scenario cell; UI-13 risk-neutral ranges
-  from the smile; UI-8 structure steppers and delta-hedge ticket; UI-24 undo.
+  from the smile; UI-8 structure steppers and delta-hedge ticket; UI-24 undo. Done: UI-4, UI-9, UI-10, UI-13 and the
+  steppers of UI-8. Left: the delta-hedge ticket (needs futures legs, RK-11) and undo.
 - [ ] BK-4 Position CSV import, expiry ladder, pin risk (could).
 
 ### App shell and data
-- [ ] UI-1 Price cards move into the Pricing tab; UI-2 market-level header; UI-3 and DK-4 one number standard
-  everywhere; UI-5 stale-state marking; UI-6 phone pass; UI-22 colour roles; UI-28 provenance in every export.
+- [x] UI-1 Price cards move into the Pricing tab; UI-2 market-level header (one row; no contract in it); UI-3 and
+  DK-4 one number standard everywhere, enforced by a lint over the tabs; UI-5 stale-state marking; UI-6 phone pass;
+  UI-22 colour roles; UI-28 provenance in every export.
 - [ ] DT-2 Sidebar: expiry dates, intraday valuation time, 0DTE, presets (synthetic index default, textbook preset).
   Done: the Synthetic index market (default) and the Textbook one, a valuation time on 5-minute steps defaulting to
   the last cash close, listed expiries with their settlement, strikes on the listed grid with an ATMF button, the
   surface's vol or a marked override, the carry implied by parity, and links that carry all of it. Left: an ETF
   (American) preset, 0DTE listings (DT-10), and a typed spot under a chain.
 - [ ] DT-2a Cboe trading sessions; DT-5a quote times from uploaded files; DT-10 SPXW daily listings; RK-9a strikes
-  by smile delta snapped to listed strikes.
+  by smile delta snapped to listed strikes. Done: RK-9a (the Strategy tab's short strikes).
 - [ ] DT-3 Treasury curve (Federal Reserve H.15) and cash dividend schedules.
 - [ ] UI-23 Trader marks on the smile; UI-26 model-free 30-day vol; UI-27 realised vol and breakeven move; DT-9 and
-  UI-25 earnings events.
+  UI-25 earnings events. Done: UI-26 (the VIX-style figure on the Surface tab's ATMF 30D tile) and the breakeven move
+  against the implied move on the Risk tab's theta tile.
 - [ ] DK-7 Browser regression and performance-budget suite in CI.
 - [ ] DK-8 Keyboard shortcuts and export menus.
 - [ ] DT-7 Local-only live adapters; DT-8 weekly network canary (could).
