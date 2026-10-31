@@ -98,9 +98,16 @@ an independent adversarial check before it merged:
 - [ ] PR-8 Heston with the Albrecher characteristic function and calibration (could).
 
 ### Risk
-- [ ] RK-6 Exact delta-gamma-theta VaR as the analytic comparator.
-- [ ] RK-3 P&L explain: second-order Taylor waterfall and Shapley attribution.
-- [ ] RK-4 VaR/ES backtesting library and a synthetic market-history generator.
+- [x] RK-6 Exact delta-gamma-theta VaR and ES as the analytic comparator (the non-central chi-square quantile; ES by
+  quadrature), within 2e-14 of the P&L's size against mpmath, shown beside the full-revaluation VaR on the Risk tab.
+  At one day the gap is at most 3.2 % on ten strategy templates (10 % on a put ratio backspread).
+- [x] RK-3 P&L explain: a second-order Taylor waterfall (nine Greek terms and the unexplained), the exact Shapley
+  split over spot, vol, time and rate from 16 revaluations, and MAR32 PLA statistics, in the library
+  (`options_analyzer/attribution.py`); the Risk tab's Explain report is part of BK-1.
+- [x] RK-4 VaR/ES backtesting library (Kupiec, Christoffersen, the Basel traffic light, Acerbi–Szekely Z2, FZ0 with
+  Diebold–Mariano, the PLA test, each with its power) and a synthetic GARCH-t history with an implied-vol index. On
+  2,020 synthetic days at 99 %, the Normal model with implied vol frozen has 50 exceptions (red), the app's default
+  with implied-vol moves 31 (amber) and vol-scaled historical simulation 17 (green), against 20.2 expected.
 - [ ] RK-5 Historical and filtered historical simulation, calibrated dynamics, realistic defaults.
 - [ ] RK-7 Volatility-surface shocks and smile regimes, legs read from the fitted surface.
 - [ ] RK-8 Margin-style risk arrays (FINRA 4210(g) portfolio margin; SPAN-like array as a library function).

@@ -72,7 +72,11 @@ built from.
 - Monte Carlo VaR and Expected Shortfall with Normal, Student-t or GARCH(1,1) returns and implied-vol dynamics on by
   default (index-like: vol of vol 100 %, spot–vol correlation −0.7), shown beside the spot-only VaR and ES with implied
   vol frozen, which understates a 45-day short straddle's 99 % VaR by 27 % ($2,833 against $3,862), and delta-normal
-  VaR for comparison.
+  VaR and the exact delta-gamma-theta VaR (the non-central chi-square quantile) for comparison.
+- In the library: VaR and ES backtests (Kupiec, Christoffersen, the Basel traffic light, Acerbi–Szekely Z2, FZ0 and
+  Diebold–Mariano, MAR32's P&L attribution test, each with its power at the sample size) run on a synthetic GARCH-t
+  history, and P&L explain by a second-order Greek waterfall and by the exact Shapley split over spot, vol, time and
+  rate.
 
 **Surface and IV**
 - Surfaces from quotes as a desk builds them: each expiry's forward and discount factor from put–call parity (a
