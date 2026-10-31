@@ -35,19 +35,33 @@ HEADROOM = 0.16
 #: Least distance between two curves' right-end labels, as a share of the P&L axis' span: 18 px of the 360 px row,
 #: whose plot area (less the legend and the axis) is about 270 px, so about 13 px of plot.
 LABEL_GAP = 18 / PNL_HEIGHT
+#: Width (px) given to a right-aligned label per character, and its padding: IBM Plex Sans at 10 px averages about
+#: 5.6 px a character in these labels. Plotly sizes an annotation's box from the text as first drawn, before the
+#: web font has loaded, so a box sized by Plotly was narrower than the label in Plex and cut its right end at the
+#: plot's edge; a box of a set width with the text right-aligned in it ends at its anchor whatever the font.
+CHAR_PX, LABEL_PAD = 6.4, 4
 
 
-def _spread(ys: Sequence[float], gap: float, floor: float = -np.inf) -> list[float]:
-    """Label heights near ``ys`` with at least ``gap`` between neighbours, none below ``floor``.
+def _label_width(text: str) -> int:
+    """The box width (px) of a right-aligned label: generous for its characters at :data:`SMALL` px."""
+    return round(CHAR_PX * len(text)) + LABEL_PAD
+
+
+def _spread(ys: Sequence[float], gap: float, floor: float = -np.inf, ceiling: float = np.inf) -> list[float]:
+    """Label heights near ``ys`` with at least ``gap`` between neighbours, none below ``floor`` and, where they fit,
+    none above ``ceiling``.
 
     Labels closer than ``gap`` form a cluster laid out ``gap`` apart around the mean of their heights; clusters that
-    then overlap merge, until none do. A last pass from the bottom up keeps every label at or above ``floor`` and
-    ``gap`` above the one below it, so converging curves at the plot's bottom keep their labels inside it.
+    then overlap merge, until none do. A pass from the bottom up keeps every label at or above ``floor`` and ``gap``
+    above the one below it, so converging curves at the plot's bottom keep their labels inside it; then labels above
+    ``ceiling`` move down, as far as the floor allows, so curves that converge at the top keep theirs inside too.
 
     >>> _spread([0.0, 0.1, 5.0], 1.0)
     [-0.45, 0.55, 5.0]
     >>> _spread([0.0, 0.1, 0.2], 1.0, floor=0.0)
     [0.0, 1.0, 2.0]
+    >>> _spread([5.0, 5.0, 5.0], 1.0, ceiling=5.0)
+    [3.0, 4.0, 5.0]
     """
     order = sorted(range(len(ys)), key=lambda i: ys[i])
     clusters: list[list[int]] = []
@@ -67,6 +81,10 @@ def _spread(ys: Sequence[float], gap: float, floor: float = -np.inf) -> list[flo
         for n, k in enumerate(cluster):
             placed[k] = max(first + n * gap, floor, previous + gap)
             previous = placed[k]
+    over = max(placed, default=-np.inf) - ceiling
+    if over > 0:
+        down = min(over, min(placed) - floor)
+        placed = [v - down for v in placed]
     return [round(v, 12) for v in placed]
 
 
@@ -87,6 +105,19 @@ class Band:
     low: float
     high: float
     name: str
+
+
+def _vline(fig: go.Figure, x: float, line: dict) -> None:
+    """A vertical reference line through both rows (the P&L chart and its Greek strip): one shape on the shared x-axis
+    from the bottom of the figure's plot area to its top. ``add_vline`` on a figure of subplots works out the axes of
+    every subplot for each line: with it a what-if step's server run took about 0.25 s, with these shapes 0.22 s."""
+    fig.add_shape(type="line", x0=x, x1=x, xref="x", y0=0, y1=1, yref="paper", line=line)
+
+
+def _hline(fig: go.Figure, row: int, line: dict) -> None:
+    """The zero line across row ``row``."""
+    axis = "" if row == 1 else str(row)
+    fig.add_shape(type="line", x0=0, x1=1, xref=f"x{axis} domain", y0=0.0, y1=0.0, yref=f"y{axis}", line=line)
 
 
 def _strike_labels(strikes: Sequence[float], x_range: tuple[float, float], text) -> list[tuple[float, str]]:
@@ -173,7 +204,10 @@ def payoff_figure(
 
     # Risk-neutral ranges: muted bands behind everything, named in the legend with their basis.
     for band, opacity in zip(bands, RN_OPACITY, strict=False):
-        fig.add_vrect(x0=band.low, x1=band.high, fillcolor=colors["muted"], opacity=opacity, line_width=0, row=1, col=1)
+        fig.add_shape(
+            type="rect", x0=band.low, x1=band.high, xref="x", y0=0, y1=1, yref="y domain", fillcolor=colors["muted"],
+            opacity=opacity, line_width=0, layer="below",
+        )  # fmt: skip
         fig.add_trace(
             go.Scatter(
                 x=[None],
@@ -225,29 +259,31 @@ def payoff_figure(
         shown = np.concatenate([np.asarray(c.values, dtype=float)[inside] for c in curves] + [np.zeros(1)])
         span = float(np.nanmax(shown) - np.nanmin(shown)) or 1.0
         floor = float(np.nanmin(shown)) - 0.04 * span  # the axis' lower end (see the range below), less a margin
-        heights = _spread([e[0] for e in ends], span * LABEL_GAP, floor)
+        ceiling = float(np.nanmax(shown)) + 0.5 * span * LABEL_GAP  # half a label above the highest curve
+        heights = _spread([e[0] for e in ends], span * LABEL_GAP, floor, ceiling)
         for (_y, text, color, x), placed in zip(ends, heights, strict=True):
             fig.add_annotation(
-                x=x, y=placed, text=text, xanchor="right", yanchor="middle", showarrow=False,
-                font=dict(size=SMALL, color=color), bgcolor=colors["surface"], row=1, col=1,
+                x=x, y=placed, text=text, xanchor="right", yanchor="middle", showarrow=False, align="right",
+                width=_label_width(text), font=dict(size=SMALL, color=color), bgcolor=colors["surface"], row=1, col=1,
             )  # fmt: skip
-    fig.add_hline(y=0.0, line=dict(color=colors["rule"], width=charts.REFERENCE_WIDTH), row=1, col=1)
+    _hline(fig, 1, dict(color=colors["rule"], width=charts.REFERENCE_WIDTH))
     # Reference lines across both rows (the strip shares the x-axis): spot, forward, strikes.
     for k in strikes:
         if lo <= k <= hi:
-            fig.add_vline(x=k, line=dict(color=colors["muted"], width=charts.REFERENCE_WIDTH, dash="dot"))
+            _vline(fig, k, dict(color=colors["muted"], width=charts.REFERENCE_WIDTH, dash="dot"))
     for x, label in _strike_labels(strikes, (lo, hi), strike_text):
         fig.add_annotation(
             x=x, y=1.0, xref="x", yref="y domain", text=label, showarrow=False, yanchor="top",
             font=dict(size=SMALL, color=colors["muted"]), bgcolor=colors["surface"], row=1, col=1,
         )  # fmt: skip
-    fig.add_vline(x=spot, line=dict(color=colors["muted"], width=charts.REFERENCE_WIDTH, dash="dash"))
+    _vline(fig, spot, dict(color=colors["muted"], width=charts.REFERENCE_WIDTH, dash="dash"))
     fig.add_annotation(
-        x=spot, y=1.0, xref="x", yref="y domain", text=f"S {strike_text(spot)} ", showarrow=False, xanchor="right",
-        yanchor="top", yshift=-14, row=1, col=1, font=dict(size=SMALL, color=colors["muted"]),
+        x=spot, y=1.0, xref="x", yref="y domain", text=f"S {strike_text(spot)}", showarrow=False, xanchor="right",
+        align="right", width=_label_width(f"S {strike_text(spot)}"), yanchor="top", yshift=-14, xshift=-2, row=1,
+        col=1, font=dict(size=SMALL, color=colors["muted"]),
     )  # fmt: skip
     if forward is not None:
-        fig.add_vline(x=forward, line=dict(color=colors["accent"], width=charts.REFERENCE_WIDTH))
+        _vline(fig, forward, dict(color=colors["accent"], width=charts.REFERENCE_WIDTH))
         fig.add_annotation(
             x=forward, y=1.0, xref="x", yref="y domain", text=" F", showarrow=False, yanchor="top", yshift=-14,
             xanchor="left", font=dict(size=SMALL, color=colors["accent"]),
@@ -311,7 +347,7 @@ def payoff_figure(
             row=2,
             col=1,
         )
-        fig.add_hline(y=0.0, line=dict(color=colors["rule"], width=charts.REFERENCE_WIDTH), row=2, col=1)
+        _hline(fig, 2, dict(color=colors["rule"], width=charts.REFERENCE_WIDTH))
         fig.update_yaxes(title_text=title, row=2, col=1, nticks=3)
     height = PNL_HEIGHT + (STRIP_HEIGHT if strip is not None else 0)
     charts.style(fig, colors, height)

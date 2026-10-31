@@ -28,6 +28,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from .. import black_scholes as bs
 from .. import clock
 from .. import strategies as strat
 from ..vol_surface.published import ONE_SD, TWO_SD, Expiry
@@ -901,7 +902,6 @@ def _tiles(ctx: _Context) -> None:
     pkg = lg.package(ctx.book) if ctx.index else None
     if pkg is not None:
         tag = "cr" if pkg.credit else "db"
-        mid_vs_fit = (pkg.mid - pkg.theo) / abs(pkg.vega) / 100 if pkg.vega else math.nan
         cross = (pkg.ask - pkg.bid) / 2 * units
         package_tile: Card = (
             "Package",
@@ -915,8 +915,8 @@ def _tiles(ctx: _Context) -> None:
                     f"{'Σ shorts’ bids − Σ longs’ asks' if pkg.credit else 'Σ longs’ bids − Σ shorts’ asks'} to "
                     f"{'Σ shorts’ asks − Σ longs’ bids' if pkg.credit else 'Σ longs’ asks − Σ shorts’ bids'}. "
                     f"Package mid {premium(pkg.mid)} against theo {premium(pkg.theo)}: mid vs fit "
-                    f"{vol_change(mid_vs_fit / 100 if math.isfinite(mid_vs_fit) else math.nan)} of the package vega "
-                    f"({_signed_money(pkg.vega * units)} per vp). Crossing half the spread costs {_money(cross)} "
+                    f"{vol_change(pkg.mid_vs_fit / 100)} in the package vega ({_signed_money(pkg.vega * units)} per "
+                    f"vp). Crossing half the spread costs {_money(cross)} "
                     "per side; closing at the market rather than the mid costs the same again."
                 ),
             },
@@ -1043,9 +1043,8 @@ def _x_range(ctx: _Context, choice: str, bands: list[charts_strategy.Band]) -> t
     if choice in ("±5%", "±10%", "±20%"):
         x = float(choice.strip("±%")) / 100
         return spot * (1 - x), spot * (1 + x)
-    if choice == "RN 95%" and bands:
-        pad = 0.05 * (bands[1].high - bands[1].low)
-        return bands[1].low - pad, bands[1].high + pad
+    if choice == "RN 95%" and bands:  # the range itself (UI-12), the smile's under the index
+        return bands[1].low, bands[1].high
     sigma_t = market.volatility * math.sqrt(ctx.metrics.horizon)
     forward = spot * math.exp((market.rate - market.dividend_yield) * ctx.metrics.horizon)
     return payoff_range(spot, strategy.strikes, forward * math.exp(-0.5 * sigma_t**2), sigma_t)
@@ -1532,12 +1531,12 @@ def _blotter(ctx, inputs, choice, state, frame, editor_key, book, profile) -> No
             _download(ctx, profile, head)
     for message in book.errors:
         st.error(message)
+    if choice.name != CUSTOM and not _same(state["base"], choice.base) and not _same(frame, choice.base):
+        st.caption(
+            "These legs differ from the template (edited or moved), so they are kept as they are while the builder "
+            "or the market changes. Reset legs to template (Edit) rebuilds them."
+        )
     if mode == "Edit" or ctx is None:
-        if choice.name != CUSTOM and not _same(state["base"], choice.base) and not _same(frame, choice.base):
-            st.caption(
-                "These legs differ from the template (edited or moved), so they stay as they are when the builder "
-                "changes. Reset legs to template rebuilds them."
-            )
         columns = [lg.ON, lg.QTY, lg.TYPE, lg.EXPIRY if index else lg.DAYS, lg.STRIKE, lg.IV, lg.ENTRY]
         edited = st.data_editor(
             state["seed"],
@@ -1626,7 +1625,9 @@ def _valuation_note(inputs: Inputs, strategy: strat.Strategy) -> None:
         sentences.append(
             f"For one {strat.strike_text(K)} {kind} (the sidebar contract), early exercise adds "
             f"{money(on_tree['American'] - on_tree['European'], 4)} per share on this tree: "
-            f"{money(on_tree['American'], 4)} American against {money(on_tree['European'], 4)} European."
+            f"{money(on_tree['American'], 4)} American against {money(on_tree['European'], 4)} European. "
+            f"The strategy values it at {money(bs.price(S, K, T, r, sigma, q, kind), 4)}, its European "
+            "Black-Scholes-Merton value."
         )
     st.info(
         md("**Early exercise is not modelled here:** the legs are European BSM values. " + " ".join(sentences)),

@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 import pytest
+from _apptest import ASOF
 from streamlit.testing.v1 import AppTest
 
 from options_analyzer import vol_surface
@@ -88,7 +89,16 @@ def _app_states(new_app) -> dict[str, list[AppTest]]:
     )
     default = pages()
     with_quotes = [quotes if tab == "Surface" else page for tab, page in zip(CARD_TABS, default, strict=True)]
-    states = {"default": default, "quotes": with_quotes, "large": pages(contracts=100000), "limits": limits}
+    # The app's own default market, the synthetic index, whose Strategy tiles hold the widest default values (the
+    # package market "20.80 / 23.90"); the other states are on the textbook market the tests pin.
+    index = [new_app(tab="Strategy", preset=None, asof=ASOF).run()]
+    states = {
+        "default": default,
+        "index": index,
+        "quotes": with_quotes,
+        "large": pages(contracts=100000),
+        "limits": limits,
+    }
     for page in (page for state in states.values() for page in state):
         _ok(page)
     return states
@@ -328,24 +338,33 @@ def test_the_rows_of_pairs_stay_two_across_on_a_phone(states):
             if state == "limits" and row in ("price_cards", "iv_cards", "strategy_tiles"):
                 continue
             style = next(s for s in _styles(at) if f".st-key-{row} {{ container:" in s)
-            assert _layout(style, PHONE_ROW)[0] == 2, (state, row)
+            # No query at all: every pair fits at full size, side by side (each group is one flex line of two).
+            assert (_layout(style, PHONE_ROW) or (2, 22.75))[0] == 2, (state, row)
             checked.add(row)
     assert checked == {"price_cards", "strategy_tiles", "var_cards", "surface_cards", "iv_cards"}
+
+
+#: The index's Strategy tiles' value size (px) on the phones where it is below the theme's 22.75 px.
+INDEX_TILES = {360: 20.0, 375: 21.14, 390: 22.28}
 
 
 @pytest.mark.parametrize("phone", [360, 375, 390, 412, 430, 440])
 def test_every_card_value_of_a_phone_screen_has_one_size(states, phone):
     # Every row of every tab at the default URL shows its values at the theme's full size on a phone, so the type
     # does not change from row to row on one screen (no query applies: full size). On a 320 px phone the price
-    # cards' values shrink to 21.4 px so that each pair stays side by side, and on a 360 px phone the Strategy tiles'
-    # to 22.0 px (the package market "20.80 / 23.90" beside the net premium).
+    # cards' values shrink to 21.4 px so that each pair stays side by side. The exception is the index's Strategy
+    # tiles below a 412 px phone: two values of 13 characters ("20.80 / 23.90", the package market, and "5,378 /
+    # 6,172", the breakevens) set the width of every tile, and keep their pairs side by side at 20.0, 21.1 and 22.3 px
+    # on 360, 375 and 390 px phones (spec 2.11 does not gate tile positions on phones).
     row = phone - 2 * 14
-    for key, style in ((k, s) for s in _styles(states["default"]) for k in ROWS if f".st-key-{k} {{ container:" in s):
-        size = (_layout(style, row) or (0, 22.75))[1]
-        if key == "strategy_tiles" and phone == 360:
-            assert size == pytest.approx(22.0, abs=0.05)
-            continue
-        assert size == 22.75, (key, _layout(style, row))
+    for state in ("default", "index"):
+        styles = _styles(states[state])
+        for key, style in ((k, s) for s in styles for k in ROWS if f".st-key-{k} {{ container:" in s):
+            size = (_layout(style, row) or (0, 22.75))[1]
+            if state == "index" and key == "strategy_tiles" and phone in INDEX_TILES:
+                assert size == pytest.approx(INDEX_TILES[phone], abs=0.05)
+                continue
+            assert size == 22.75, (state, key, _layout(style, row))
 
 
 def _advances(weight: str) -> dict[str, float]:

@@ -624,7 +624,7 @@ def _book(legs, market, front, errors, name, fees_per_contract, multiplier) -> B
 class Package:
     """The structure's natural market per share: ``bid`` and ``ask`` in the structure's direction (a credit's are what
     selling it receives), ``theo`` at the fit, ``mid`` at the legs' mids, ``credit`` and the package vega ($ per vol
-    point per share)."""
+    point per share, signed as the position holds it)."""
 
     bid: float
     ask: float
@@ -632,6 +632,14 @@ class Package:
     theo: float
     credit: bool
     vega: float
+
+    @property
+    def mid_vs_fit(self) -> float:
+        """Package mid against theo in vol points of the package vega (spec 2.5: packages use the same signs in vp):
+        the parallel vol move that takes the theo to the mid, (Σ q·mid − Σ q·theo) ÷ Σ q·vega. Positive: the market
+        is rich against the fit. NaN for a package without vega."""
+        direction = -1.0 if self.credit else 1.0  # mid and theo are in the structure's direction; vega is signed
+        return direction * (self.mid - self.theo) / self.vega if self.vega else math.nan
 
 
 def package(book: Book) -> Package | None:
