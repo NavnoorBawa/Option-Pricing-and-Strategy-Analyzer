@@ -3,7 +3,9 @@
 ``tests/fixtures/surface_golden.jsonl`` was first recorded from the flat module ``options_analyzer/vol_surface.py``
 just before it became the ``options_analyzer.vol_surface`` package, and recorded again when parity forwards (SF-3),
 the spread-weighted arbitrage-free SVI calibration (SF-4) and Lee-bounded wings (SF-8) changed these outputs on
-purpose. For every case below it holds what
+purpose, and when local vol's ``dw/dT`` came to read the smile's scaling in the ATM total variance off each slice
+(the model validator's finding 1 in ``docs/reviews/panel-v3.0.md``), which changed the local-vol grids and the
+summary's ATM local vol and nothing else, bit for bit. For every case below it holds what
 :func:`~options_analyzer.vol_surface.parse_quotes`, :func:`~options_analyzer.vol_surface.fit_market_surface` (or
 :func:`~options_analyzer.vol_surface.ssvi_surface`), :func:`~options_analyzer.vol_surface.surface_summary` and
 :meth:`~options_analyzer.vol_surface.VolSurface.implied_vol_at` returned or raised:
@@ -78,9 +80,9 @@ GOLDEN = FIXTURES / "surface_golden.jsonl"
 HEADER = (
     "# Provenance: synthetic",
     "# Description: outputs of options_analyzer.vol_surface for the cases in tests/test_surface_golden.py, recorded",
-    "# after SF-3, SF-4 and SF-8 (parity forwards, the arbitrage-free SVI fit). The first JSON line holds the",
-    "# recording platform and the module's names; each further line holds one case. Record again with",
-    "# PYTHONPATH=. python tests/test_surface_golden.py --record",
+    "# after SF-3, SF-4 and SF-8 (parity forwards, the arbitrage-free SVI fit) and the scaled dw/dT of local vol.",
+    "# The first JSON line holds the recording platform and the module's names; each further line holds one case.",
+    "# Record again with PYTHONPATH=. python tests/test_surface_golden.py --record",
 )
 #: Off the recording platform numbers must agree to RTOL (ATOL near zero). Since SF-4 the default calibration ends in
 #: a constrained search (SLSQP) that stops at a tolerance, not at a bit pattern: with OpenBLAS on one thread instead
