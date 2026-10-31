@@ -23,6 +23,7 @@ from __future__ import annotations
 import functools
 import importlib.util
 import math
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
@@ -161,10 +162,16 @@ def _size(n_bytes: int) -> str:
 # --------------------------------------------------------------------------------------------------------------------
 
 
-def _counts_text(counts: dict[str, int]) -> str:
-    """``5,012 quoted → 2,357 used (2,506 ITM side · 149 zero bid · 0 wide)``: every reason with quotes, and wide."""
+def _counts_text(counts: dict[str, int], *, dropped_reading: int = 0) -> str:
+    """``5,012 quoted → 2,357 used (149 zero bid · 2,506 ITM side · 0 wide)``: every reason with quotes, and wide.
+
+    For an uploaded chain, ``dropped_reading`` counts the contracts the file reader dropped before the screen
+    (``read_chain``: unreadable, expired, crossed or zero-bid rows), so the file's rows still reconcile."""
     reasons = [f"{number(counts[r], 0)} {r}" for r in dg.REASONS if counts[r] or r == "wide"]
-    return f"{number(counts['quoted'], 0)} quoted → {number(counts['used'], 0)} used ({' · '.join(reasons)})"
+    if dropped_reading:
+        reasons.insert(0, f"{number(dropped_reading, 0)} dropped reading")
+    quoted = counts["quoted"] + dropped_reading
+    return f"{number(quoted, 0)} quoted → {number(counts['used'], 0)} used ({' · '.join(reasons)})"
 
 
 def _method_text(surface: vs.VolSurface, settings: dg.FitSettings) -> str:
@@ -389,9 +396,11 @@ def _upload_source(inputs: Inputs, upload) -> Shown | None:
     panel = (
         f"Upload · {md_code(name)} · the user's file, not published: the other tabs price from "
         f"{'the synthetic chain' if index else 'the typed inputs'} · valued at {timestamp(as_of)}, quote time unknown "
-        f"· {spot_text} · {_counts_text(fit.counts())} · {_method_text(fit.surface, settings)}"
+        f"· {spot_text} · {_counts_text(fit.counts(), dropped_reading=_dropped_reading(messages, fit))} · "
+        f"{_method_text(fit.surface, settings)}"
     )
     vendor = bool(fit.quotes["vendor_iv"].notna().any()) if "vendor_iv" in fit.quotes else False
+    _file_notes(fit.surface)
     return Shown(
         QUOTES,
         fit.surface,
@@ -407,6 +416,12 @@ def _upload_source(inputs: Inputs, upload) -> Shown | None:
         name,
         vendor,
     )
+
+
+def _dropped_reading(messages, fit: dg.ChainFit) -> int:
+    """Contracts of the file that ``read_chain`` dropped: its first message counts the contracts read."""
+    found = re.match(r"Read ([\d,]+) contract", messages[0]) if messages else None
+    return max(int(found.group(1).replace(",", "")) - len(fit.quotes), 0) if found else 0
 
 
 def _quotes_table_source(
@@ -446,6 +461,7 @@ def _quotes_table_source(
             if not isinstance(message, vs.QuoteWarning):
                 st.caption(message)
         return None
+    _file_notes(surface)
     used = len(surface.quotes) if surface.quotes is not None else 0
     quoted = len(raw)
     panel = (
@@ -469,6 +485,14 @@ def _quotes_table_source(
         False,
         name,
     )
+
+
+def _file_notes(surface: vs.VolSurface) -> None:
+    """The fit's notes on an uploaded file, as warnings under the data panel: they are about the user's quotes (a
+    spot far from the strikes, a poor fit, arbitrage held out), unlike the synthetic chain's, which the Arbitrage and
+    forwards expander lists."""
+    for note in surface.notes:
+        st.warning(note)
 
 
 def _provenance(inputs: Inputs, source: str, *, name: str = "quotes.csv", as_of: datetime | None = None):
@@ -585,32 +609,32 @@ def _filters(inputs: Inputs, container) -> None:
         )
         if not surface_state.settings().is_default:
             st.button("Reset to defaults", key="sf_reset", icon=":material/restart_alt:", on_click=_reset_fit)
-        if inputs.context is None:
-            st.caption("Sample files (synthetic) in the layout of a table of quotes:")
-            prov = exports.provenance(
-                inputs,
-                tag=exports.SYNTHETIC,
-                source=exports.SYNTHETIC_SOURCE,
-                model="Black-76 prices on a parametric SSVI surface",
-                dynamics="none (a snapshot)",
-                forwards="S·e^((r−q)T) from the sidebar r and q",
-                fit="none (the sample's own SSVI surface)",
-                seed=0,  # vol_surface.sample_quotes's noise
+        # The samples show the layout of a table of quotes, at the sidebar's spot.
+        st.caption("Sample files (synthetic) in the layout of a table of quotes:")
+        prov = exports.provenance(
+            inputs,
+            tag=exports.SYNTHETIC,
+            source=exports.SYNTHETIC_SOURCE,
+            model="Black-76 prices on a parametric SSVI surface",
+            dynamics="none (a snapshot)",
+            forwards="S·e^((r−q)T) from the sidebar r and q",
+            fit="none (the sample's own SSVI surface)",
+            seed=0,  # vol_surface.sample_quotes's noise
+        )
+        for label, prices, key in (
+            ("Sample with implied vols", False, "sample_quotes"),
+            ("Sample with prices", True, "sample_prices"),
+        ):
+            st.download_button(
+                label,
+                exports.builder(_sample_csv, inputs.spot, inputs.rate, inputs.dividend_yield, prices, prov),
+                prov.file_name(f"sample_option_{'prices' if prices else 'quotes'}", "csv"),
+                "text/csv",
+                on_click="ignore",
+                icon=":material/download:",
+                key=key,
+                width="stretch",
             )
-            for label, prices, key in (
-                ("Sample with implied vols", False, "sample_quotes"),
-                ("Sample with prices", True, "sample_prices"),
-            ):
-                st.download_button(
-                    label,
-                    exports.builder(_sample_csv, inputs.spot, inputs.rate, inputs.dividend_yield, prices, prov),
-                    prov.file_name(f"sample_option_{'prices' if prices else 'quotes'}", "csv"),
-                    "text/csv",
-                    on_click="ignore",
-                    icon=":material/download:",
-                    key=key,
-                    width="stretch",
-                )
 
 
 def _sample_csv(spot: float, rate: float, dividend_yield: float, prices: bool, provenance: exports.Provenance) -> bytes:
