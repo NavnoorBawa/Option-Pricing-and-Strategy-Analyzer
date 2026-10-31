@@ -68,6 +68,26 @@ def test_the_tab_is_one_screen_of_tiles_and_report(chromium, app_url):  # noqa: 
         page.context.close()
 
 
+def test_the_var_cards_are_one_line_under_the_tiles(chromium, app_url):  # noqa: F811
+    # Six VaR cards (the simulation, its spot-only twin, the comparator and the gap) on one line at 1,440 px with the
+    # sidebar open, as wide as the six tiles above: with "Spot-only ES 97.5% 1D" they went 4 + 2, the last two
+    # stretched across the row.
+    page = _risk(chromium, app_url, "report=VaR", scheme="light")
+    try:
+        boxes = page.evaluate(
+            """() => [...document.querySelectorAll('.st-key-var_cards [data-testid=stMetric]')]
+                 .map(e => { const r = e.getBoundingClientRect(); return [Math.round(r.top), Math.round(r.width)]; })"""
+        )
+        tiles = page.evaluate(
+            """() => [...document.querySelectorAll('.st-key-risk_tiles [data-testid=stMetric]')]
+                 .map(e => Math.round(e.getBoundingClientRect().width))"""
+        )
+        assert len(boxes) == 6 and len({top for top, _ in boxes}) == 1, boxes
+        assert all(abs(width - tiles[0]) <= 1 for _, width in boxes), (boxes, tiles)
+    finally:
+        page.context.close()
+
+
 @pytest.mark.parametrize("report", ["Ladder", "Scenarios", "VaR"])
 def test_no_sideways_scroll_on_a_phone(chromium, app_url, report):  # noqa: F811
     page = _risk(chromium, app_url, f"report={report}", width=390, touch=True)
