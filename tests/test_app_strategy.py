@@ -1371,8 +1371,13 @@ def test_stress_table_and_var_cards():
     full = next(c.value for c in at.caption if c.value.startswith("Full revaluation"))
     assert "ν ≤ 4" in full
     # Delta-normal VaR assumes Normal returns, so its gap to the VaR also shows the fat tails of Student-t returns,
-    # and of GARCH ones beyond a day (one-day GARCH returns with Normal shocks are Normal).
-    assert "vega, and the fatter tails of the return model." in full
+    # and of GARCH ones beyond a day (one-day GARCH returns with Normal shocks are Normal). So does the
+    # delta-gamma-theta comparator's.
+    assert "vega, and the fatter tails of the return model. Delta-gamma-theta" in full
+    assert (
+        "spot risk beyond gamma, how its time decay and gamma change as expiry nears, its vega, and the fatter tails "
+        "of the return model." in full
+    )
     at.selectbox(key="var_dist").set_value("garch").run()
     full = next(c.value for c in at.caption if c.value.startswith("Full revaluation"))
     assert "fatter tails" not in full
@@ -1557,9 +1562,25 @@ def test_var_cards_show_the_spot_only_var_beside_the_var_with_implied_vol_moves(
     assert md(f"Exact: {money(moving.var)}") in helps["VaR 99.0%"]
     assert md(f"Exact: {money(spot_only.var)}") in helps["Spot-only VaR 99.0%"]
     assert "implied vol frozen" in helps["Spot-only VaR 99.0%"]
-    # The delta-normal VaR, a card before, is in the table of statistics.
-    stats = next(df.value for df in at.dataframe if "Statistic" in df.value.columns).set_index("Statistic")
-    assert stats.loc["Delta-normal VaR 99.0%", "Value"] == money(moving.delta_normal_var)
+    # The delta-normal VaR, a card before, is in the table of statistics, and below it the delta-gamma-theta VaR and
+    # ES (roadmap RK-6), the same for both runs: $2,881.89 and $3,765.84 against $2,833 and $3,683 by full revaluation
+    # with implied vol frozen, where delta-normal says $1,016.04.
+    stats = next(df.value for df in at.dataframe if "Statistic" in df.value.columns)
+    assert stats["Statistic"].tolist()[-3:] == [
+        "Delta-normal VaR 99.0%",
+        "Delta-gamma-theta VaR 99.0%",
+        "Delta-gamma-theta ES 99.0%",
+    ]
+    stats = stats.set_index("Statistic")
+    assert stats.loc["Delta-normal VaR 99.0%", "Value"] == money(moving.delta_normal_var) == "$1,016.04"
+    assert moving.delta_gamma == spot_only.delta_gamma
+    assert stats.loc["Delta-gamma-theta VaR 99.0%", "Value"] == money(moving.delta_gamma.var) == "$2,881.89"
+    assert stats.loc["Delta-gamma-theta ES 99.0%", "Value"] == money(moving.delta_gamma.expected_shortfall)
+    assert stats.loc["Delta-gamma-theta ES 99.0%", "Value"] == "$3,765.84"
+    # One minus sign, U+2212, in every row: the short straddle's worst P&L and skewness are negative.
+    assert stats.loc["Worst simulated P&L", "Value"] == MINUS + money(moving.worst)[1:]
+    assert stats.loc["Skewness", "Value"] == f"{moving.skewness:.3f}".replace("-", MINUS) and moving.skewness < 0
+    assert not stats["Value"].str.contains("-").any()
     # With two VaRs on the cards, the simulation interval says which is which; delta-normal VaR leaves out vega too.
     (lo, hi), (lo_spot, hi_spot) = moving.var_ci95, spot_only.var_ci95
     uncertainty = next(c.value for c in at.caption if c.value.startswith("Simulation uncertainty"))
@@ -1568,9 +1589,18 @@ def test_var_cards_show_the_spot_only_var_beside_the_var_with_implied_vol_moves(
         f"with implied-vol moves and {money(lo_spot)} to {money(hi_spot)} spot only (order statistics of the "
         "100,000 simulated outcomes of each run)."
     )
+    # Each comparator's caption says what its gap to the full revaluation shows: the delta-gamma-theta one keeps
+    # today's gamma and theta, so its gap shows how they change with the spot and as expiry nears (panel finding: the
+    # change in time decay, which can dominate beyond a few days, was left out).
     full = next(c.value for c in at.caption if c.value.startswith("Full revaluation"))
+    assert (
+        "with Normal returns: its gap to the full-revaluation VaR shows the position's gamma, time decay and vega. "
+        in full
+    )
     assert full.endswith(
-        "with Normal returns: its gap to the full-revaluation VaR shows the position's gamma, time decay and vega."
+        "Delta-gamma-theta VaR and ES are exact for the P&L Δ·x + ½Γ·x² + θ·h/252 (θ per year), x a Normal spot move "
+        "of standard deviation S·σ·√(h/252): their gap to the full revaluation shows the position's spot risk beyond "
+        "gamma, how its time decay and gamma change as expiry nears, and its vega."
     )
 
 
@@ -1590,7 +1620,11 @@ def test_implied_vol_moves_switched_off_show_the_spot_only_run_from_the_cache(mo
     assert "implied vol frozen (no vega risk)" in _metric(at, "VaR 99.0%").proto.help
     full = next(c.value for c in at.caption if c.value.startswith("Full"))
     assert "time decay and implied vol frozen" in full
-    assert full.endswith("shows the position's gamma and time decay.")  # no vega in the full revaluation
+    assert "shows the position's gamma and time decay. " in full  # no vega in the full revaluation
+    assert full.endswith(
+        "their gap to the full revaluation shows the position's spot risk beyond gamma, and how its time decay and "
+        "gamma change as expiry nears."
+    )
     uncertainty = next(c.value for c in at.caption if c.value.startswith("Simulation uncertainty"))
     assert uncertainty.startswith("Simulation uncertainty: the 95% confidence interval of the VaR estimate is ")
     assert "spot only" not in uncertainty and uncertainty.endswith("of the 100,000 simulated outcomes).")
@@ -1617,6 +1651,9 @@ def test_var_caption_counts_legs_that_expire_on_the_horizon_day():
     # settle on day 1, the horizon itself, so the caption left them out.
     at = _app("Risk", days=1)
     assert any("2 option leg(s) expire before the horizon" in c.value for c in at.caption)
+    # They are also part of the delta-gamma-theta comparator's gap: its Greeks are today's, before the legs settle.
+    full = next(c.value for c in at.caption if c.value.startswith("Full revaluation"))
+    assert "its vega, and the legs that expire before the horizon. 2 option leg(s)" in full
     assert not any("expire before the horizon" in c.value for c in _app("Risk", days=2).caption)  # 1.38 trading days
 
 
@@ -1695,6 +1732,16 @@ def test_risk_heatmaps_give_the_colour_scale_width_to_their_cells():
 )
 def test_shock_label(x, label):
     assert tab_risk.shock_label(x) == label
+
+
+@pytest.mark.parametrize(
+    ("text", "shown"),
+    [("$70.55", "$70.55"), ("-$4.20", "−$4.20"), ("+$1.00", "+$1.00"), ("-0.512", "−0.512"), ("–", "–")],
+)
+def test_the_statistics_table_writes_the_minus_sign(text, shown):
+    # The table of statistics shows money() and number(), which write a hyphen-minus, with the minus sign U+2212 (the
+    # delta-gamma-theta VaR is negative when even the tail is a gain; a missing one reads as a dash).
+    assert tab_risk._minus(text) == shown
 
 
 def test_price_labels_tell_close_prices_apart():
