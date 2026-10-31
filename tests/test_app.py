@@ -20,32 +20,37 @@ def _ok(at: AppTest) -> None:
 def test_default_render(app):
     _ok(app)
     labels = {m.label: m.value for m in app.metric}
-    assert labels["Call value"] == "$10.4506"
-    assert labels["Put value"] == "$5.5735"
+    assert labels["Call"] == "10.45"
+    assert labels["Put"] == "5.57"
     assert len(app.tabs) == 6
 
 
-@pytest.mark.parametrize("model", ["binomial", "monte_carlo"])
-def test_pricing_models(app, model):
-    app.sidebar.radio(key="model").set_value(model).run()
-    _ok(app)
-    call = float(next(m.value for m in app.metric if m.label == "Call value").strip("$"))
-    assert call == pytest.approx(10.4506, abs=0.02)
+@pytest.mark.parametrize("model", ["Binomial tree", "Monte Carlo"])
+def test_a_version_2_engine_link_opens_the_engine_diagnostics(new_app, model):
+    # Trees and Monte Carlo are diagnostics now (Appendix B decision 8): the link prices with the closed form and
+    # opens Engine diagnostics, where the engine runs.
+    app = new_app(model=model).run()
+    assert not app.exception
+    assert app.sidebar.segmented_control(key="model").value == "bsm"
+    assert next(m.value for m in app.metric if m.label == "Call") == "10.45"
+    assert app.session_state["pricing_diag"] is True
+    assert any(d.value["Engine"].str.startswith("MC").any() for d in app.dataframe if "Engine" in d.value)
 
 
-def test_american_binomial_with_dividends(app):
+def test_the_american_engine_with_dividends(app):
     app.sidebar.number_input(key="div").set_value(6.0).run()
-    app.sidebar.radio(key="model").set_value("binomial").run()
-    app.sidebar.segmented_control(key="style").set_value("American").run()
+    app.sidebar.segmented_control(key="model").set_value("alo").run()
+    app.session_state["pricing_diag"] = True
+    app.run()
     _ok(app)
 
 
-def test_invalid_crr_tree_falls_back_with_warning(app):
-    app.sidebar.radio(key="model").set_value("binomial").run()
-    app.sidebar.radio(key="tree").set_value("crr").run()
-    app.sidebar.number_input(key="vol").set_value(0.5).run()
+def test_an_invalid_crr_tree_in_the_diagnostics_says_so(app):
+    app.session_state["pricing_diag"] = True
+    app.sidebar.number_input(key="vol").set_value(0.5)
     app.sidebar.number_input(key="rate").set_value(30.0).run()
-    app.sidebar.slider(key="steps").set_value(10).run()
+    app.segmented_control(key="diag_tree").set_value("crr")
+    app.slider(key="diag_steps").set_value(10).run()
     assert not app.exception
     assert any("not arbitrage-free" in w.value for w in app.warning)
 
@@ -88,8 +93,9 @@ def test_volatility_surface_upload(new_app):
 
 def test_implied_vol_round_trip(new_app):
     app = new_app(tab="IV").run()
-    iv = next(m.value for m in app.metric if m.label == "Implied volatility")
-    assert iv == "20.000%"
+    # The textbook market has no quotes: the tab starts at a single price, the model value to the cent (10.45).
+    iv = next(m.value for m in app.metric if m.label == "IV")
+    assert iv == "20.00%"
 
 
 def _trace(at: AppTest, prefix: str) -> dict:
@@ -113,11 +119,12 @@ def test_iv_shift_leaves_the_expiry_curve_and_metrics_alone(new_app):
     assert _trace(app, "Today")["name"] == "Today, IV +10 pts"
 
 
-#: Every chart of the app, by key; together the three pricing models draw each of them.
+#: Every chart of the app, by key; the closed form and the American engine, with Engine diagnostics open, draw
+#: each of them.
 CHART_KEYS = {
-    "sensitivity_chart", "heatmap_call", "heatmap_put", "tree_convergence_call", "tree_convergence_put",
-    "exercise_boundary", "mc_paths", "mc_terminal", "payoff_chart", "risk_heatmap", "date_heatmap", "time_decay",
-    "greek_profiles", "stress_chart", "var_hist", "surf_iv", "surf_lv", "smiles", "term_structure", "iv_curve",
+    "pricing_profile", "pricing_convergence", "pricing_boundary", "payoff_chart", "risk_heatmap", "date_heatmap",
+    "time_decay", "greek_profiles", "stress_chart", "var_hist", "surf_iv", "surf_lv", "smiles", "term_structure",
+    "iv_price",
 }  # fmt: skip
 
 
@@ -125,8 +132,10 @@ def test_every_chart_has_the_desk_config_and_a_description(new_app):
     # Every chart goes through charts.show: the desk toolbar and SVG download, and an accessible name for screen
     # readers (Streamlit leaves a chart without one unnamed).
     seen = set()
-    for query in ({}, {"model": "Binomial tree", "style": "American"}, {"model": "Monte Carlo"}):
-        at = new_app(**query).run()
+    for query in ({}, {"model": "American (ALO)"}):
+        at = new_app(**query)
+        at.session_state["pricing_diag"] = True
+        at.run()
         _ok(at)
         charts = []
         for tab in TABS:  # only the open tab runs
@@ -146,11 +155,11 @@ def test_every_chart_has_the_desk_config_and_a_description(new_app):
 
 #: The charts each tab draws at the default URL.
 TAB_CHARTS = {
-    "Pricing": {"sensitivity_chart", "heatmap_call", "heatmap_put"},
+    "Pricing": {"pricing_profile"},
     "Strategy": {"payoff_chart"},
     "Risk": {"risk_heatmap", "date_heatmap", "time_decay", "greek_profiles", "stress_chart", "var_hist"},
     "Surface": {"surf_iv", "surf_lv", "smiles", "term_structure"},
-    "IV": {"iv_curve"},
+    "IV": {"iv_price"},
     "Methodology": set(),
 }  # fmt: skip
 #: The Strategy tab's controls (at the default URL), which are drawn on every run: they are bound to the URL.
@@ -276,7 +285,7 @@ def test_switching_tabs_runs_each_tab_in_turn(app):
     # The order runs every tab once from every other: Pricing to Methodology and back.
     for tab in (*TABS[1:], *reversed(TABS[:-1])):
         _assert_only_open(_open(app, tab), tab)
-    assert {m.label for m in app.metric} >= {"Call value", "Put value"}  # the price cards sit above the tabs
+    assert {m.label for m in app.metric} >= {"Call", "Put"}  # the Pricing tab's tiles (UI-1: none in the shell)
 
 
 def _counted(calls: dict[str, int], name: str, function):
@@ -443,21 +452,24 @@ def test_surface_and_iv_settings_survive_a_visit_to_another_tab(new_app):
     assert at.selectbox(key="surface_colors").value == "Cividis"
 
     _open(at, "IV")
-    quote = next(n for n in at.number_input if n.label == "Market price")
+    quote = next(n for n in at.number_input if n.label == "Price")
     quote.set_value(12.0).run()
     at.segmented_control(key="iv_style_european").set_value("American").run()
     _ok(at)
     _away_and_back(at, "IV")
-    assert next(n for n in at.number_input if n.label == "Market price").value == 12.0
+    assert next(n for n in at.number_input if n.label == "Price").value == 12.0
     assert at.segmented_control(key="iv_style_european").value == "American"
-    assert next(m.value for m in at.metric if m.label == "Implied volatility") == "24.112%"
+    assert next(m.value for m in at.metric if m.label == "IV") == "24.11%"
 
 
 def test_pricing_settings_survive_a_visit_to_another_tab(app):
-    app.toggle(key="higher_greeks").set_value(True)
-    app.selectbox(key="sens_quantity").set_value("Vega / vol pt")
-    app.slider(key="hm_spot").set_value(35).run()
+    app.segmented_control(key="pr_greeks").set_value("+3rd")
+    app.segmented_control(key="pr_metric").set_value("Vega")
+    app.segmented_control(key="pr_range").set_value("±20%")
+    app.segmented_control(key="pr_chain_win").set_value("25Δ–25Δ").run()
     _ok(app)
     _away_and_back(app, "Pricing", "Methodology")
-    assert app.toggle(key="higher_greeks").value is True
-    assert app.selectbox(key="sens_quantity").value == "Vega / vol pt" and app.slider(key="hm_spot").value == 35
+    assert app.segmented_control(key="pr_greeks").value == "+3rd"
+    assert app.segmented_control(key="pr_metric").value == "Vega"
+    assert app.segmented_control(key="pr_range").value == "±20%"
+    assert app.segmented_control(key="pr_chain_win").value == "25Δ–25Δ"

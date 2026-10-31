@@ -179,9 +179,9 @@ def test_the_index_prices_are_black_76_on_the_parity_forward_and_the_surface_vol
     d2 = d1 - vol * math.sqrt(T)
     call = DF * (F * ndtr(d1) - K * ndtr(d2))
     put = DF * (K * ndtr(-d2) - F * ndtr(-d1))
-    cards = _cards(index_app)
-    assert cards["Call value"] == f"${call:,.2f}" and cards["Put value"] == f"${put:,.2f}"
-    assert cards["Forward price"] == f"${F:,.2f}"
+    cards = _cards(index_app)  # the Pricing tab's tiles (UI-1)
+    assert cards["Call"] == f"{call:,.2f}" and cards["Put"] == f"{put:,.2f}"
+    assert cards["Forward"] == f"{F:,.2f}"
     contract = next(m.value for m in index_app.markdown if m.value.startswith("SPX"))
     assert f"σ\xa0{vol:.2%}\xa0·" in contract
     assert any(f"DF {DF:.5f}" in c.value for c in index_app.sidebar.caption)
@@ -193,7 +193,7 @@ def test_the_textbook_preset_reproduces_version_2(new_app):
     assert at.sidebar.selectbox(key="preset").value == mk.TEXTBOOK
     assert at.query_params["preset"] == "Textbook"
     cards = _cards(at)
-    assert (cards["Call value"], cards["Put value"]) == ("$10.4506", "$5.5735")
+    assert (cards["Call"], cards["Put"]) == ("10.45", "5.57")
 
 
 @pytest.mark.parametrize("query", [{"spot": "105"}, {"days": "30"}, {"rate": "4", "div": "1"}])
@@ -259,17 +259,22 @@ def test_a_link_picks_a_listed_expiry(new_app, expiry, chosen, note):
 def test_the_index_offers_no_american_engine(new_app):
     at = new_app(preset=None, asof=ASOF, model="alo").run()
     _ok(at)
-    assert at.sidebar.radio(key="model").value == "bsm"
-    assert "alo" not in at.sidebar.radio(key="model").options
+    control = at.sidebar.segmented_control(key="model")
+    assert control.value == "bsm" and control.disabled  # shown at European, with help that says why
     assert [w.value for w in at.warning] == [
         "This link asks for the American engine, but options on the Synthetic index are European-exercise (as SPX "
-        "options are), so Black-Scholes-Merton is used. The American engine prices the Textbook market."
+        "options are), so European (BSM) is used. The American engine prices the Textbook market."
     ]
     tree = new_app(preset=None, asof=ASOF, model="Binomial tree").run()
-    _ok(tree)
-    with pytest.raises(KeyError):  # a tree values European exercise: no Exercise control
-        tree.sidebar.segmented_control(key="style")
-    assert "European exercise: SPX options are European-style." in [c.value for c in tree.sidebar.caption]
+    assert not tree.exception
+    assert tree.sidebar.segmented_control(key="model").value == "bsm"
+    assert [w.value for w in tree.warning] == [
+        "This link asks for a binomial tree, which now runs in the Pricing tab's Engine diagnostics (open below); "
+        "the sidebar prices with European (BSM)."
+    ]
+    # The diagnostics' trees value European exercise, as SPX options are.
+    engines = next(d.value for d in tree.dataframe if "Engine" in d.value)
+    assert engines["Engine"].str.contains("European").all()
 
 
 def test_switching_the_market_resets_the_contract(new_app):
@@ -278,7 +283,7 @@ def test_switching_the_market_resets_the_contract(new_app):
     at.sidebar.selectbox(key="preset").set_value(mk.TEXTBOOK).run()
     _ok(at)
     assert at.sidebar.number_input(key="strike").value == 100.0
-    assert (_cards(at)["Call value"], _cards(at)["Put value"]) == ("$10.4506", "$5.5735")
+    assert (_cards(at)["Call"], _cards(at)["Put"]) == ("10.45", "5.57")
     at.sidebar.selectbox(key="preset").set_value(mk.INDEX).run()
     _ok(at)
     assert at.sidebar.number_input(key="strike").value == 5815.0
@@ -296,17 +301,17 @@ def test_atmf_snaps_the_strike_to_the_forward(new_app):
 
 def test_an_override_vol_is_marked(new_app):
     at = new_app(preset=None, asof=ASOF).run()
-    surface_card = _cards(at)["Call value"]
+    surface_card = _cards(at)["Call"]
     at.sidebar.segmented_control(key="vol_src").set_value("Override").run()
     _ok(at)
     vol = at.sidebar.number_input(key="vol")
-    assert _cards(at)["Call value"] == surface_card  # the override starts at the surface's vol, rounded
+    assert _cards(at)["Call"] == surface_card  # the override starts at the surface's vol, rounded
     assert not any("OVERRIDE" in b for b in _badges(at))
     vol.set_value(vol.value + 1.0).run()
     _ok(at)
     assert ":yellow-badge[OVERRIDE]" in _badges(at)
     assert "%*" in next(m.value for m in at.markdown if m.value.startswith("SPX"))
-    assert _cards(at)["Call value"] != surface_card
+    assert _cards(at)["Call"] != surface_card
     assert any(c.value.startswith("+1.00 vp against the surface's") for c in at.sidebar.caption)
 
 

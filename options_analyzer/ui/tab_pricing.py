@@ -76,8 +76,11 @@ DIAGNOSTICS = "pricing_diag"
 _CHAIN_MOVED = "pricing_chain_moved"
 #: Session-state key of the header's Methodology button (``app.DRAWER``): the footer's button sets it too.
 DRAWER = "methodology_drawer"
-#: The headline tiles' row and its two groups of three: they wrap 6 across, then 3 + 3 (UI spec 2.9).
-TILES = ("pricing_tiles", ("pricing_tiles_price", "pricing_tiles_market"))
+#: The headline tiles' row and its three pairs: 6 across on a desktop, 4 + 2 on a laptop with the sidebar open and
+#: 2 + 2 + 2 on a phone. (Groups of three, UI spec 2.9's 3 + 3, cannot hold three cards on a 390 px phone: their
+#: values and deltas, "5,813.91" over "pair −0.29 bp", need about 130 px a card, so the groups went 2 + 1 twice, four
+#: lines of tiles above the contract table.)
+TILES = ("pricing_tiles", ("pricing_tiles_price", "pricing_tiles_vol", "pricing_tiles_market"))
 #: The profile's controls (UI spec 3.1 item 4).
 METRICS = ("Value", "Δ", "Γ", "Vega", "Θ")
 AXES = ("Spot", "Vol", "Time")
@@ -979,7 +982,9 @@ def chain_frame(inputs: Inputs, market: Contract, strikes: np.ndarray) -> pd.Dat
     order = ("Bid", "Ask", "Theo", "IV", "Δ") if market.listed else ("Theo", "Δ")
     data = {f"C {name}": sides["call"][name] for name in order}
     data["Strike"] = strikes
-    data["Mark"] = ["◂" if abs(k - K) < 1e-9 else "" for k in strikes]
+    # The Pricing strike's row: an arrow at its strike (UI spec 3.1 item 5 draws a left-pointing triangle, U+25C2,
+    # which IBM Plex Sans lacks).
+    data["Mark"] = ["←" if abs(k - K) < 1e-9 else "" for k in strikes]
     # Mirrored the OMON way: the puts read outwards from the strike, Δ · IV · Theo · Bid · Ask.
     mirror = ("Δ", "IV", "Theo", "Bid", "Ask") if market.listed else ("Δ", "Theo")
     data |= {f"P {name}": sides["put"][name] for name in mirror}
@@ -1047,7 +1052,7 @@ def _chain(inputs: Inputs, market: Contract) -> None:
             "Δ": f"{engine} {option} delta at the strike's " + ("surface vol." if market.listed else "flat vol."),
         }[name]
     kinds |= {"Strike": "strike", "Mark": "text"}
-    help_text |= {"Strike": "The strike. Click a row to price it.", "Mark": "◂ marks the Pricing strike."}
+    help_text |= {"Strike": "The strike. Click a row to price it.", "Mark": "← marks the Pricing strike."}
     labels |= {"Mark": " "}
     key = current_key("tbl_pricing_chain_", f"tbl_pricing_chain_{inputs.strike!r}")
     table(
@@ -1312,8 +1317,14 @@ def _tree_greeks(inputs: Inputs, tree: ModelConfig) -> None:
     """The settings tree's own Greeks, with its one-day decay (Milestone 1): on the lattice, so they include early
     exercise under the American engine."""
     S, K, T, r, sigma, q = _args(inputs)
-    results = cache.tree_results(S, K, T, r, sigma, q, tree.steps, tree.american, tree.tree_method)
-    decay, trees = tree_decay(inputs, tree, results)
+    try:
+        results = cache.tree_results(S, K, T, r, sigma, q, tree.steps, tree.american, tree.tree_method)
+        decay, trees = tree_decay(inputs, tree, results)
+    except ValueError:  # a CRR lattice that is not arbitrage-free at these steps
+        st.warning(
+            f"{tree.label}: the lattice is not arbitrage-free at these inputs; raise the steps or use Leisen-Reimer."
+        )
+        return
     expiring = to_expiry(T)
     label = decay_label(expiring)
     leads = any(decay_leads(res.theta / 365, decay[kind], expiring) for kind, res in results.items())

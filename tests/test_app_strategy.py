@@ -577,7 +577,6 @@ def test_large_strikes_are_shown_in_full():
     at.selectbox(key="strategy_Single option").set_value("Long Put").run()
     _ok(at)
     assert "Long Put** — Long 1 × 12,345.67 Put ·" in _position(at)
-    assert "one 12,345.67 put (the sidebar contract)" in _american_note(_american(at))
     at = _app(spot=1234567.89, strike=1234567.89)
     assert "Long 1 × 1,234,567.89 Call, Short 1 × 1,334,567.89 Call" in _position(at)
     table = _legs_table(at)
@@ -1189,56 +1188,10 @@ def test_calendar_is_described_with_its_expiries():
     assert "Short 1 × 100 Call (365d), Long 1 × 100 Call (730d)" in _position(at)
 
 
-def _american(at: AppTest, method: str = "lr", steps: int = 501) -> AppTest:
-    at.sidebar.radio(key="model").set_value("binomial").run()
-    at.sidebar.radio(key="tree").set_value(method)
-    at.sidebar.slider(key="steps").set_value(steps)
-    at.sidebar.segmented_control(key="style").set_value("American").run()
-    _ok(at)
-    return at
-
-
-def _american_note(at: AppTest) -> str:
-    return next(i.value for i in at.info if "Early exercise is not modelled" in i.value)
-
-
-def _dollars(text: str, after: str) -> float:
-    """The (Markdown-escaped) dollar amount that directly precedes ``after`` in ``text``."""
-    return float(re.search(r"\\\$([\d,.]+)" + re.escape(after), text).group(1).replace(",", ""))
-
-
-@pytest.mark.parametrize(
-    ("method", "steps", "days"), [("crr", 10, 365), ("lr", 10, 365), ("crr", 10, 30), ("lr", 501, 365)]
-)
-def test_american_note_measures_early_exercise_on_one_tree(method, steps, days):
-    # Round-2 verifier: the note set the American tree against the closed-form European value, so the tree's
-    # discretisation error read as early exercise. A no-dividend call, which is never exercised early, was "worth
-    # $10.2534 with early exercise against $10.4506 European" on a 10-step tree: less than the European option.
-    at = _american(_app(days=days), method, steps)
-    note = _american_note(at)
-    assert "one 100 call (the sidebar contract)" in note
-    assert "early exercise adds \\$0.0000 per share on this tree" in note
-    american, european = _dollars(note, " American"), _dollars(note, " European")
-    assert american == european == float(_metric(at, "Call value").value.lstrip("$"))
-    assert any("Early-exercise premium: call \\$0.0000," in c.value for c in at.caption)  # the Pricing caption
-    bsm = bs.price(100, 100, days / 365, 0.05, 0.2, 0.0, "call")
-    assert f"The strategy values it at \\${bsm:.4f}" in note  # the leg's Black-Scholes-Merton value
-
-
-def test_american_note_reports_the_same_premium_as_the_pricing_tab():
-    at = _american(_app(div=3, strategy_category="Single option"))
-    at.selectbox(key="strategy_Single option").set_value("Long Put").run()
-    _ok(at)
-    note = _american_note(at)
-    assert "one 100 put (the sidebar contract)" in note
-    premium = _dollars(note, " per share on this tree")
-    american, european = _dollars(note, " American"), _dollars(note, " European")
-    assert american == float(_metric(at, "Put value").value.lstrip("$"))
-    assert premium > 0 and premium == pytest.approx(american - european, abs=1.5e-4)
-    assert any(f"put +\\${premium:.4f} (against the same tree" in c.value for c in at.caption)
-    assert "The strategy values it at \\$6.7309" in note
-    assert _metric(at, "Net premium").value == "$673.09"
-    assert any("whatever the sidebar pricing model" in c.value for c in _open(at, "Risk").caption)
+# The American-tree note (the early-exercise premium of the sidebar contract on the sidebar's tree) had its tests
+# here. The sidebar offers the closed form and the American engine only now (UI spec Appendix B, decision 8), so the
+# note's tree branch in tab_strategy._valuation_note cannot be reached; the Strategy tab's engine badge replaces it
+# (UI spec 2.0, engine policy: "BSM · early exercise ignored").
 
 
 # --- Risk tab ------------------------------------------------------------------------------------------------------

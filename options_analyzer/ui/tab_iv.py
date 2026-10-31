@@ -39,8 +39,8 @@ from .format import MISSING, md, money, number, premium, vol, vol_change
 from .inputs import Inputs
 from .tab_pricing import DRAWER, context_line, contract
 
-#: The tiles' row and its two groups of three.
-TILES = ("iv_tiles", ("iv_tiles_quote", "iv_tiles_context"))
+#: The tiles' row and its three pairs, which wrap as the Pricing tab's do (``tab_pricing.TILES``).
+TILES = ("iv_tiles", ("iv_tiles_bid", "iv_tiles_ask", "iv_tiles_context"))
 #: The index's tick (Cboe SPX: $0.05 below $3, $0.10 from $3); the textbook market's cent.
 INDEX_TICKS = ((3.0, 0.05), (math.inf, 0.10))
 TEXTBOOK_TICK = 0.01
@@ -260,7 +260,7 @@ def render(inputs: Inputs) -> None:
     )
     charts.show(
         fig,
-        key="chart_iv_price",
+        key="iv_price",
         alt=f"{style} {option_type} value against vol, with the quoted prices and their implied vols",
     )
     foot = st.container(horizontal=True, key="iv_footer", vertical_alignment="center", gap="small")

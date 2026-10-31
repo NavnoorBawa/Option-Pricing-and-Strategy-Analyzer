@@ -125,9 +125,10 @@ def _read_link() -> None:
         for key in (*LEGACY_ENGINE_PARAMS, "model"):
             params.pop(key, None)
         state[tab_pricing.DIAGNOSTICS] = True
+        engine = {MODELS["binomial"]: "a binomial tree", MODELS["monte_carlo"]: "Monte Carlo"}[legacy]
         notes.append(
-            f"This link asks for the {legacy.lower()}, which now runs in the Pricing tab's Engine diagnostics (open "
-            f"below); the sidebar prices with {MODELS['bsm']}."
+            f"This link asks for {engine}, which now runs in the Pricing tab's Engine diagnostics (open below); the "
+            f"sidebar prices with {MODELS['bsm']}."
         )
     # The market: a preset by its label or a short name (?preset=textbook), a version-2 link's typed inputs, and
     # the valuation time in any ISO form.

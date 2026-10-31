@@ -606,7 +606,7 @@ def test_the_page_carries_the_stylesheet_once():
         bodies[1],
     )
     assert header and header[1] == header[2], bodies[1]
-    assert all(re.match(r"<style>\.st-key-\w+_cards \{ container:", b) for b in bodies[2:]), bodies[2:]
+    assert all(re.match(r"<style>\.st-key-\w+_(cards|tiles) \{ container:", b) for b in bodies[2:]), bodies[2:]
 
 
 def test_both_static_folders_are_identical():

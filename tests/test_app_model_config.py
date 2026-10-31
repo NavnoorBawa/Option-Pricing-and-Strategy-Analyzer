@@ -64,52 +64,52 @@ def test_sidebar_takes_its_model_from_model_sidebar(monkeypatch):
 
 
 MARKET = ["# Market", "Market", "Spot price", "Strike price", "Days to expiry", "Volatility (%)", "Risk-free rate (%)",
-          "Dividend yield (%)", "# Pricing model", "Model"]  # fmt: skip
+          "Dividend yield (%)", "# Pricing model", "Engine"]  # fmt: skip
 
 
 @pytest.mark.parametrize(
     ("query", "widgets"),
     [
         ({}, []),
-        ({"model": "Binomial tree"}, ["Lattice", "Steps", "Exercise"]),
-        (
-            {"model": "Monte Carlo"},
-            ["Paths", "Random seed", "Antithetic variates", "Control variate (discounted spot)"],
-        ),
+        ({"model": "American (ALO)"}, ["Scheme"]),
+        # Version 2's engines are diagnostics now: their settings are in the Pricing tab, not the sidebar.
+        ({"model": "Binomial tree"}, []),
+        ({"model": "Monte Carlo"}, []),
     ],
 )
 def test_the_model_section_follows_the_market_inputs(new_app, query, widgets):
     at = new_app(**query).run()
-    _ok(at)
+    assert not at.exception
     assert _sidebar(at) == [*MARKET, *widgets]
 
 
 @pytest.mark.parametrize(
     ("query", "label"),
     [
-        (
-            {"model": "Binomial tree", "tree": "Cox-Ross-Rubinstein", "steps": 1001, "style": "American"},
-            "Cox-Ross-Rubinstein tree · 1001 steps · American",
-        ),
-        (
-            {"model": "Monte Carlo", "paths": "250,000", "seed": 7, "antithetic": "false"},
-            "Monte Carlo · 250,000 paths · control variate",
-        ),
+        ({}, "Black-Scholes-Merton (closed form)"),
+        ({"model": "American (ALO)", "scheme": "High"}, "Andersen-Lake-Offengenden engine · high scheme · American"),
     ],
 )
 def test_a_shared_link_reopens_the_same_model(new_app, query, label):
-    # Every model widget is bound to the URL (shown values, as a shared link carries them). The header's model
-    # badge names the model in full in its tooltip.
+    # The engine and its scheme are bound to the URL. The header's badge names the engine in full in its tooltip.
     at = new_app(**query).run()
     _ok(at)
     [badge] = [m for m in at.markdown if m.value.startswith(":gray-badge[")]
-    assert badge.proto.help == f"Pricing model of the price cards: {label}."
+    assert badge.proto.help == f"Pricing model of the Pricing and IV tabs: {label}."
 
 
 def test_every_model_has_a_sidebar_label():
     assert model_config.MODELS == {
-        "bsm": "Black-Scholes-Merton",
+        "bsm": "European (BSM)",
         "binomial": "Binomial tree",
         "monte_carlo": "Monte Carlo",
         "alo": "American (ALO)",
     }
+    # The sidebar offers the closed form and the American engine only (UI spec Appendix B, decision 8).
+    assert model_config.SIDEBAR_MODELS == ("bsm", "alo")
+
+
+def test_the_index_shows_the_engine_disabled_at_european_and_says_why(index_app):
+    control = index_app.sidebar.segmented_control(key="model")
+    assert control.value == "bsm" and control.disabled
+    assert "SPX options are European-exercise" in control.help

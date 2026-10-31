@@ -341,7 +341,7 @@ def render(inputs: Inputs, *, on_methodology: Callable[[], None]) -> DeltaGenera
             help=f"σ {pct(inputs.volatility, 2)} typed over the surface's {pct(inputs.surface_vol, 2)} "
             f"({gap:+.2f} vp).".replace("-", MINUS),
         )
-    model = f"Pricing model of the price cards: {inputs.model.label}."
+    model = f"Pricing model of the Pricing and IV tabs: {inputs.model.label}."
     actions.badge(model_badge(inputs.model), color="gray", help=model)
     share = actions.popover("Share", icon=":material/link:", key="desk_share", help="Link to this view")
     actions.button(
