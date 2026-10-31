@@ -79,6 +79,13 @@ VAR_MODELS: dict[str, tuple[str, bool]] = {
     "GARCH-t": ("garch", True),
 }
 
+#: The Methodology's backtest of the Normal model on the RK-4 synthetic history (methodology/risk.md, Backtesting;
+#: tests/test_backtest.py's acceptance 7, seed 0): a 45-day at-the-money short straddle struck again at every close,
+#: 2,020 days at 99% (20.2 exceptions expected), 5,000 paths a day. Exceptions and Basel zone, with implied-vol moves
+#: at the default dynamics and with implied vol frozen. Synthetic-history statistics: the report tags them SYN HIST.
+SYN_BACKTEST_DAYS, SYN_BACKTEST_EXPECTED = 2_020, 20.2
+SYN_BACKTEST = {True: (31, "amber"), False: (50, "red")}
+
 #: The desk grid (UI spec 3.3, Scenarios): spot moves in percent by vol shocks in each vol mode.
 DESK_SPOT = (-10.0, -7.5, -5.0, -2.5, 0.0, 2.5, 5.0, 7.5, 10.0)
 DESK_VOL = {"vp": (-10.0, -5.0, -2.0, 0.0, 2.0, 5.0, 10.0), "relative": (-50.0, -25.0, -10.0, 0.0, 10.0, 25.0, 50.0)}
@@ -1153,9 +1160,20 @@ def _var(book: Book) -> None:
     )
     settled = f" {result.settled_legs} leg(s) settle before the horizon." if result.settled_legs else ""
     st.caption(f"{basis}; vol of vol {100 * config.vol_of_vol:g}%, correlation {signed(corr)}.{settled}")
-    # No statistic here comes from a history: the models simulate from the leg vol. Their backtests on the RK-4
-    # synthetic history are in the Methodology tab, tagged as such.
-    st.caption("Backtests of these models on a synthetic history (SYN HIST): Methodology tab, Risk, Backtesting.")
+    # No statistic above comes from a history: the models simulate from the leg vol. The one backtest quoted, of the
+    # Normal model on the RK-4 synthetic history, is a synthetic-history statistic and says so (spec 3.3, VaR).
+    default_dynamics = config.vol_of_vol == INDEX_VOL_OF_VOL and math.isclose(corr, INDEX_SPOT_VOL_CORRELATION)
+    if model == "Normal" and (default_dynamics or not with_vol):
+        exceptions, zone = SYN_BACKTEST[with_vol]
+        st.caption(
+            f"SYN HIST · This model on {SYN_BACKTEST_DAYS:,} synthetic days of a short straddle: {exceptions} "
+            f"exceptions at 99% vs {SYN_BACKTEST_EXPECTED:g} expected, {zone} (Methodology, Risk)"
+        )
+    else:
+        st.caption(
+            "SYN HIST · Not backtested with this model and vol dynamics; the Normal model's backtest is in "
+            "Methodology, Risk, Backtesting"
+        )
 
 
 def vega_frame(book: Book, axis: str = "Δ") -> pd.DataFrame:

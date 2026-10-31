@@ -411,7 +411,10 @@ def test_the_var_report(index):
     # The models simulate from the leg vol: no statistic of a history, so none is tagged SYN HIST; the line under
     # the report points to the backtests on the synthetic history.
     assert not any("SYN HIST" in label for label in cards)
-    assert any("SYN HIST" in c.value and "Methodology" in c.value for c in at.caption)
+    line = next(c.value for c in at.caption if "SYN HIST" in c.value)
+    assert line.startswith("SYN HIST · ") and "Methodology" in line
+    # The default model with the default vol dynamics: the Methodology's backtest of it, 31 exceptions against 20.2.
+    assert "31 exceptions at 99% vs 20.2 expected, amber" in line
     # The VaR, ES and spot-only numbers are read off the cached simulations with the Milestone 1 defaults.
     assert "vs spot only" in cards["VaR 99% 1D · MC"].delta
     # The bars are shares of all outcomes in percent: they add up to the share inside the plotted range.
@@ -439,6 +442,25 @@ def _array(value) -> np.ndarray:
             array = array.reshape([int(n) for n in str(shape).split(",")] if isinstance(shape, str) else shape)
         return array
     return np.asarray(value, dtype=float)
+
+
+def test_the_quoted_backtest_is_the_methodologys_and_follows_the_vol_dynamics():
+    # One source: the numbers the VaR report quotes are those of the Methodology's Backtesting section (whose own
+    # numbers tests/test_backtest.py's acceptance 7 measures).
+    from pathlib import Path
+
+    text = " ".join((Path(tab_risk.__file__).parent / "methodology" / "risk.md").read_text(encoding="utf-8").split())
+    assert f"{tab_risk.SYN_BACKTEST_DAYS:,} days ({tab_risk.SYN_BACKTEST_EXPECTED:g} exceptions expected" in text
+    (moving, moving_zone), (frozen, frozen_zone) = tab_risk.SYN_BACKTEST[True], tab_risk.SYN_BACKTEST[False]
+    assert f"implied vol frozen has {frozen} exceptions ({frozen_zone})" in text
+    assert f"default with implied-vol moves {moving} ({moving_zone})" in text
+    at = _risk(report="VaR")
+    at.toggle(key="var_volmoves").set_value(False).run()
+    assert "50 exceptions at 99% vs 20.2 expected, red" in next(
+        c.value for c in _ok(at).caption if "SYN HIST" in c.value
+    )
+    at.segmented_control(key="var_model").set_value("Student-t").run()
+    assert "Not backtested" in next(c.value for c in _ok(at).caption if "SYN HIST" in c.value)
 
 
 def test_the_vega_report_buckets_add_up_to_the_vega_tile():
