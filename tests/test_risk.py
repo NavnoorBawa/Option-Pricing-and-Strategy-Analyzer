@@ -1,8 +1,14 @@
+import doctest
+import math
 from pathlib import Path
 
+import mpmath
 import numpy as np
 import pytest
-from scipy.stats import norm
+from hypothesis import given
+from hypothesis import strategies as st
+from scipy.special import erfcinv, erfinv
+from scipy.stats import binom, norm
 
 from options_analyzer import black_scholes as bs
 from options_analyzer import risk
@@ -290,3 +296,432 @@ def test_implied_vol_moves_leave_the_spot_paths_unchanged(cfg):
     assert np.all(ones == 1.0) and multiplier.std() > 0.1
     pnl_moving, pnl_frozen = (risk.value_at_risk(STOCK, MARKET, config, 100).pnl for config in (moving, frozen))
     assert np.array_equal(pnl_moving, pnl_frozen)
+
+
+# --- Delta-gamma-theta VaR, the analytic comparator (roadmap RK-6) -------------------------------------------------
+
+#: The comparator's examples (docs and roadmap): spot 100, volatility 20 %, rate 4 %, 30 days, strikes 5 apart.
+DG_MARKET = S.Market(100, 0.04, 0.2, 30 / 365)
+#: Ten templates, at least one of every kind: single option, stock and option, vertical spread, volatility (long
+#: and short gamma), range-bound, synthetic and time spread.
+DG_TEMPLATES = (
+    "Long Call",
+    "Covered Call",
+    "Bull Call Spread",
+    "Long Straddle",
+    "Short Straddle",
+    "Short Strangle",
+    "Iron Condor",
+    "Long Call Butterfly",
+    "Risk Reversal",
+    "Long Call Calendar",
+)
+
+
+def _dollar_greeks(name: str) -> tuple[float, float, float]:
+    """Delta, gamma and theta (per year) of one contract (100 shares) of a template in :data:`DG_MARKET`."""
+    greeks = S.position_greeks(S.build_template(name, 100, 5, DG_MARKET.expiry), DG_MARKET)
+    return tuple(100 * float(greeks[k]) for k in ("delta", "gamma", "theta"))
+
+
+def _quadratic(delta, gamma, theta, spot, vol, horizon_days):
+    """The delta-gamma-theta P&L as ``c + a z + b z²`` in a standard Normal ``z``, and its size |c| + |a| + |b|."""
+    tau = horizon_days / 252
+    s = spot * vol * math.sqrt(tau)
+    c, a, b = theta * tau, delta * s, 0.5 * gamma * s * s
+    return c, a, b, abs(c) + abs(a) + abs(b)
+
+
+def _reference(delta, gamma, theta, spot, vol, horizon_days, confidence):
+    """VaR and ES of the delta-gamma-theta P&L in 50-digit mpmath, without the chi-square or any quadrature.
+
+    In a standard Normal z the P&L is c + a z + b z². The quantile q solves P(P&L <= q) = 1 - confidence by
+    bisection on the Normal probability of the set {P&L <= q} (an interval around the vertex z = -a / (2b) when
+    b > 0, the two tails beyond the vertex when b < 0, a half-line when b = 0), and ES is minus the closed form of
+    the integral of (c + a z + b z²) φ(z) over that set (∫φ = Φ, ∫zφ = -φ, ∫z²φ = Φ - zφ), over 1 - confidence.
+    """
+    with mpmath.workdps(50):
+        mpf, inf = mpmath.mpf, mpmath.inf
+        tau = mpf(horizon_days) / 252
+        s = mpf(spot) * mpf(vol) * mpmath.sqrt(tau)
+        c, a, b = mpf(theta) * tau, mpf(delta) * s, mpf(gamma) * s * s / 2
+        tail = 1 - mpf(confidence)
+        if a == 0 and b == 0:  # a constant P&L
+            return float(-c), float(-c)
+
+        def loss_set(q):
+            if b == 0:
+                root = (q - c) / a
+                return [(-inf, root)] if a > 0 else [(root, inf)]
+            vertex = -a / (2 * b)
+            r2 = (q - c) / b + vertex**2  # the set is (z - vertex)² <= r2 when b > 0, >= r2 when b < 0
+            if b > 0:
+                return [] if r2 <= 0 else [(vertex - mpmath.sqrt(r2), vertex + mpmath.sqrt(r2))]
+            return [(-inf, inf)] if r2 <= 0 else [(-inf, vertex - mpmath.sqrt(r2)), (vertex + mpmath.sqrt(r2), inf)]
+
+        size = abs(c) + abs(a) + abs(b)
+        lo, hi = c - 200 * size, c + 200 * size  # the quantile is within 10 standard deviations: 10 |a| + 100 |b|
+        for _ in range(110):  # 400 size / 2^110 = 3e-31 size
+            mid = (lo + hi) / 2
+            if sum(mpmath.ncdf(right) - mpmath.ncdf(left) for left, right in loss_set(mid)) < tail:
+                lo = mid
+            else:
+                hi = mid
+        q = (lo + hi) / 2
+
+        def phi(z):
+            return mpmath.npdf(z) if mpmath.isfinite(z) else mpf(0)
+
+        def z_phi(z):
+            return z * mpmath.npdf(z) if mpmath.isfinite(z) else mpf(0)
+
+        def integral(left, right):
+            mass = mpmath.ncdf(right) - mpmath.ncdf(left)
+            return c * mass + a * (phi(left) - phi(right)) + b * (mass + z_phi(left) - z_phi(right))
+
+        return float(-q), float(-sum(integral(left, right) for left, right in loss_set(q)) / tail)
+
+
+def _positions(n: int, seed: int) -> list[tuple]:
+    """Random positions over the domain the docstring's accuracy statement covers: delta 1e-3 to 1e3 shares and gamma
+    1e-4 to 1e2 shares per $1 of either sign (one in twenty zero), theta to 1e4 a year, spot 1 to 1e4, volatility
+    1 % to 200 %, 1 to 60 trading days, confidence 51 % to 99.99 %."""
+    rng = np.random.default_rng(seed)
+    out = []
+    for _ in range(n):
+        delta = rng.normal() * 10 ** rng.uniform(-3, 3) * (rng.random() > 0.05)
+        gamma = rng.normal() * 10 ** rng.uniform(-4, 2) * (rng.random() > 0.05)
+        theta = rng.normal() * 10 ** rng.uniform(-1, 4)
+        confidence = float(rng.choice([0.51, 0.75, 0.9, 0.95, 0.975, 0.99, 0.995, 0.999, 0.9999]))
+        spot, vol = 10 ** rng.uniform(0, 4), 10 ** rng.uniform(-2, 0.3)
+        out.append((float(delta), float(gamma), float(theta), spot, vol, int(rng.integers(1, 61)), confidence))
+    return out
+
+
+#: Positions where the method changes: no gamma, no delta (λ = 0, the central chi-square) with either sign of gamma,
+#: neither (a constant P&L), the far tail, a confidence just above one half, the straddle of the examples, and deltas
+#: so small that λ is subnormal (5e-161 shares: λ = 2e-321, where ncx2.isf put the VaR $0.016 too high, 2e-4 of it,
+#: before the function read the central quantile below λ = 1e-30; found by Hypothesis. 7.45e-162 shares: λ = 3.5e-323,
+#: where ncx2.isf is 74 % too high at a 30 % tail, which would put this VaR $0.63 too high).
+DG_EDGES = [
+    (25.0, 0.0, -300.0, 100, 0.2, 1, 0.99),
+    (0.0, 4.0, -900.0, 100, 0.2, 1, 0.99),
+    (0.0, -4.0, 900.0, 100, 0.2, 5, 0.9999),
+    (0.0, 0.0, 1000.0, 100, 0.2, 10, 0.95),
+    (-6.854, -13.864, 2781.9, 100, 0.2, 1, 0.5001),
+    (40.0, 1e-9, 0.0, 100, 0.2, 1, 0.99),
+    (-40.0, -1e-9, 0.0, 100, 0.2, 1, 0.99),
+    (*_dollar_greeks("Short Straddle"), 100, 0.2, 1, 0.99),
+    (5.677225589706171e-161, -1.0, -21343.0, 100, 0.2, 1, 0.75),
+    (-5.677225589706171e-161, 1.0, 21343.0, 100, 0.2, 1, 0.75),
+    (7.45e-162, -1.0, -21343.0, 100, 0.2, 1, 0.7),
+]
+
+
+@pytest.mark.parametrize("position", _positions(40, seed=6) + DG_EDGES)
+def test_delta_gamma_var_matches_an_independent_mpmath_reference(position):
+    # The chi-square quantile and the ES quadrature against 50-digit mpmath that uses neither. On these 51 positions
+    # the worst errors are 5.4e-15 (VaR) and 4.0e-14 (ES) of the P&L's size |θ| h/252 + |Δ| s + ½ |Γ| s². Over 3,000
+    # random positions like these and 400 extreme ones (delta down to 1e-300, gamma down to 1e-300, either side of the
+    # switch to the Normal quantile, confidence up to 99.9999 %; with the reference's precision raised by the
+    # 2 log10 |δ| digits its vertex form loses) they were 1.9e-14 and 2.7e-13, in SciPy 1.11 and 1.18; the
+    # tolerances are three times those. The worst ES error is the integration's, within its own error estimate
+    # es_error, which was at most 1.6e-9 of the size over 20,000 random positions.
+    var, es = _reference(*position)
+    result = risk.delta_gamma_var(*position)
+    *_, size = _quadratic(*position[:6])
+    assert result.var == pytest.approx(var, rel=0, abs=6e-14 * size)
+    assert result.expected_shortfall == pytest.approx(es, rel=0, abs=8e-13 * size)
+    assert result.es_error <= 5e-9 * size
+
+
+@pytest.mark.parametrize(("delta", "theta", "horizon", "confidence"), [(100, 0, 1, 0.99), (-37.5, 2_500, 10, 0.975)])
+def test_without_gamma_it_is_the_delta_normal_var_less_the_time_decay(delta, theta, horizon, confidence):
+    # Roadmap RK-6, acceptance (1). With no gamma the P&L is Normal: VaR is the delta-normal |Δ| S σ √(h/252) z_α
+    # less the time decay θ h/252, and ES is |Δ| S σ √(h/252) φ(z_α) / (1 - α) less the same, both in closed form here.
+    # VaR to rounding; ES within the integration's error estimate and rounding (1e-14 of the P&L's size).
+    tau = horizon / 252
+    s = 100 * 0.2 * math.sqrt(tau)
+    z = norm.ppf(confidence)
+    result = risk.delta_gamma_var(delta, 0.0, theta, 100, 0.2, horizon, confidence)
+    assert result.var == pytest.approx(abs(delta) * s * z - theta * tau, rel=1e-14)
+    exact_es = abs(delta) * s * norm.pdf(z) / (1 - confidence) - theta * tau
+    size = abs(theta * tau) + abs(delta) * s
+    assert abs(result.expected_shortfall - exact_es) <= result.es_error + 1e-14 * size
+
+
+@pytest.mark.parametrize(
+    "strategy", [STOCK, S.build_template("Synthetic Long Stock", 100, 5)], ids=["stock", "synthetic"]
+)
+def test_var_result_stores_the_comparator_without_gamma_as_delta_normal_less_the_time_decay(strategy):
+    # Acceptance (1) through value_at_risk, on positions without gamma: shares paying a 3 % dividend yield (theta
+    # S q a year, the dividend they accrue: $5.95 over 5 days for 100 shares) and a synthetic long stock (call minus
+    # put: their gammas cancel exactly; its theta is the carry of the strike). The comparator is the delta-normal VaR
+    # that the result shows beside it, less the horizon's theta.
+    market = S.Market(100, 0.05, 0.2, 0.5, 0.03)
+    greeks = S.position_greeks(strategy, market)
+    assert greeks["gamma"] == 0.0 and greeks["theta"] != 0.0
+    res = risk.value_at_risk(strategy, market, risk.VaRConfig(0.99, 5, 10_000, seed=1), 100)
+    theta_h = 100 * greeks["theta"] * 5 / 252
+    assert res.delta_gamma.var == pytest.approx(res.delta_normal_var - theta_h, rel=1e-14)
+
+
+@pytest.mark.parametrize(("delta", "sign"), [(30.0, 1), (30.0, -1), (-30.0, 1), (-30.0, -1)])
+def test_var_and_es_are_continuous_in_gamma_and_tend_to_the_gamma_free_values(delta, sign):
+    # As gamma goes to zero the vertex of the parabola moves out without bound, where the chi-square fails, so the
+    # function reads the quantile off the Normal distribution once the loss region's part beyond the vertex holds
+    # less than 2^-56 of the tail. (a) No jump where it switches: on both sides of the switch the VaR and ES agree with
+    # the mpmath reference to the tolerances of the test above. (b) Below the switch the VaR and ES are those of the
+    # Normal tail, -c - a z - b z² at z = ∓z_α and -c + |a| φ(z_α)/(1-α) - b (1 + z_α φ(z_α)/(1-α)) in closed form,
+    # which tend linearly in gamma to the gamma-free values, down to gamma = ±1e-16.
+    spot, vol, horizon, confidence = 100.0, 0.2, 1, 0.99
+    s = spot * vol * math.sqrt(horizon / 252)
+    z_alpha = norm.ppf(confidence)
+    z_far = -norm.ppf(risk._FAR_TAIL * (1 - confidence))
+    switch = sign * 2 * abs(delta) / ((z_alpha + z_far) * s)  # |Δ s| = (z_α + z_f) |Γ| s² / 2
+    # The function's own test of which side it is on: the Normal quantile below the switch, the chi-square above.
+    below, above = switch * (1 - 1e-12), switch * (1 + 1e-12)
+    assert abs(delta * s) >= (z_alpha + z_far) * 0.5 * abs(below) * s * s
+    assert abs(delta * s) < (z_alpha + z_far) * 0.5 * abs(above) * s * s
+    for gamma in (below, above, switch * 0.999, switch * 1.001):
+        var, es = _reference(delta, gamma, 50.0, spot, vol, horizon, confidence)
+        result = risk.delta_gamma_var(delta, gamma, 50.0, spot, vol, horizon, confidence)
+        size = _quadratic(delta, gamma, 50.0, spot, vol, horizon)[-1]
+        assert result.var == pytest.approx(var, rel=0, abs=6e-14 * size)
+        assert result.expected_shortfall == pytest.approx(es, rel=0, abs=8e-13 * size)
+    tail_mass = norm.pdf(z_alpha) / (1 - confidence)
+    flat = risk.delta_gamma_var(delta, 0.0, 50.0, spot, vol, horizon, confidence)
+    for k in range(1, 17):
+        gamma = sign * 10.0**-k
+        c, a, b, size = _quadratic(delta, gamma, 50.0, spot, vol, horizon)
+        result = risk.delta_gamma_var(delta, gamma, 50.0, spot, vol, horizon, confidence)
+        assert result.var == pytest.approx(-c + abs(a) * z_alpha - b * z_alpha**2, rel=0, abs=1e-14 * size)
+        exact_es = -c + abs(a) * tail_mass - b * (1 + z_alpha * tail_mass)
+        assert abs(result.expected_shortfall - exact_es) <= result.es_error + 1e-14 * size
+        assert abs(result.var - flat.var) <= 0.5 * s * s * 10.0**-k * z_alpha**2 + 1e-14 * size
+    assert risk.delta_gamma_var(delta, sign * 1e-16, 50.0, spot, vol, horizon, confidence).var == pytest.approx(
+        flat.var, rel=1e-15
+    )
+
+
+@pytest.mark.parametrize("sign", [1, -1])
+def test_without_delta_the_var_is_linear_in_gamma_down_to_zero(sign):
+    # With no delta the P&L is c + b z²: a central chi-square, the vertex at the centre. The loss region is |z| <= r
+    # for long gamma, with erf(r / √2) = 1 - α, and |z| >= r for short gamma, with erfc(r / √2) = 1 - α, so in
+    # closed form VaR = -c - b r² and ES = -c - b (1 ∓ 2 r φ(r) / (1 - α)): linear in gamma, and -c at gamma = 0.
+    confidence, theta = 0.99, -300.0 * sign
+    tail = 1 - confidence
+    r = math.sqrt(2) * (erfinv(tail) if sign > 0 else erfcinv(tail))
+    for k in range(17):
+        gamma = sign * 10.0**-k
+        c, _, b, size = _quadratic(0.0, gamma, theta, 100, 0.2, 1)
+        result = risk.delta_gamma_var(0.0, gamma, theta, 100, 0.2, 1, confidence)
+        assert result.var == pytest.approx(-c - b * r * r, rel=0, abs=1e-14 * size)
+        exact_es = -c - b * (1 - sign * 2 * r * norm.pdf(r) / tail)
+        assert abs(result.expected_shortfall - exact_es) <= result.es_error + 1e-14 * size
+    assert risk.delta_gamma_var(0.0, 0.0, theta, 100, 0.2, 1, confidence).var == pytest.approx(-theta / 252, rel=1e-15)
+
+
+#: One Normal sample for every template (seed 7, the app's default), so that the checks below share their draws.
+DG_PATHS = 400_000
+DG_SEED = 7
+#: Each of the 20 checks below (a VaR and an ES for each of the ten templates) at a two-sided level of 0.05 / 20, so
+#: that by Bonferroni's inequality, which needs no independence, all twenty pass together with probability at least
+#: 95 % when the VaR and ES are exact, whatever the seed.
+DG_LEVEL = 0.05 / (2 * len(DG_TEMPLATES))
+
+
+@pytest.mark.parametrize("name", DG_TEMPLATES)
+def test_delta_gamma_var_is_the_quantile_of_the_simulated_quadratic_pnl(name):
+    # Acceptance (2): 400,000 draws of the quadratic P&L itself. If the VaR is exact, the number of draws that lose
+    # more than it is Binomial(400,000, 1 %), inside binom.ppf(DG_LEVEL / 2) to binom.ppf(1 - DG_LEVEL / 2), 3,811 to
+    # 4,192, with probability at least 1 - DG_LEVEL. Measured at this seed: 4,011 for the templates that lose on a fall
+    # (Long Call, Covered Call, Bull Call Spread, Risk Reversal), 4,025 (Long Call Calendar), 3,921 (Long Straddle,
+    # whose losses are the small moves), 4,017, 4,030, 4,002 and 4,010 (Short Straddle, Short Strangle, Iron Condor,
+    # Long Call Butterfly). The ES is checked through ES = VaR + E[(loss - VaR)+] / (1 - α), which holds at the exact
+    # VaR: by the central limit theorem the sample estimate of the right side is within 3.02 standard errors (the
+    # Normal quantile at 1 - DG_LEVEL / 2) of the ES with probability about 1 - DG_LEVEL, and every template's is,
+    # within 1.46 (Short Straddle: 92.79 in 90.91 to 93.84). The draws are shared, so the checks are not independent,
+    # which Bonferroni does not need. Over seeds 0 to 999 all twenty checks pass at 981 seeds; with each check at
+    # 95 % instead, at only 708 (seed 1 puts 4,194 draws beyond the calendar's VaR and fails either way). The mpmath
+    # test above is the tight check; this one checks the distribution.
+    delta, gamma, theta = _dollar_greeks(name)
+    result = risk.delta_gamma_var(delta, gamma, theta, 100, 0.2, 1, 0.99)
+    c, a, b, _ = _quadratic(delta, gamma, theta, 100, 0.2, 1)
+    z = np.random.default_rng(DG_SEED).standard_normal(DG_PATHS)
+    loss = -(c + a * z + b * z * z)
+    exceed = int(np.count_nonzero(loss > result.var))
+    assert binom.ppf(DG_LEVEL / 2, DG_PATHS, 0.01) <= exceed <= binom.ppf(1 - DG_LEVEL / 2, DG_PATHS, 0.01)
+    excess = np.maximum(loss - result.var, 0.0)
+    half = norm.ppf(1 - DG_LEVEL / 2) * excess.std(ddof=1) / math.sqrt(DG_PATHS)
+    assert abs(result.var + excess.mean() / 0.01 - result.expected_shortfall) <= half / 0.01
+
+
+def _methodology() -> str:
+    return " ".join((Path(risk.__file__).parent / "ui" / "methodology" / "risk.md").read_text(encoding="utf-8").split())
+
+
+def test_delta_gamma_var_is_within_5_percent_of_full_revaluation_at_one_day():
+    # Acceptance (3): one day, 99 %, against full revaluation (400,000 paths, seed 7, implied vol frozen). Measured
+    # gaps: Long Call +1.6 %, Covered Call +0.8 %, Bull Call Spread +3.2 % (the largest), Long Straddle -0.1 %, Short
+    # Straddle +0.4 % ($70.55 against $70.29), Short Strangle -0.3 %, Iron Condor +1.1 %, Long Call Butterfly +1.4 %
+    # ($20.10 against $19.82), Risk Reversal -1.4 %, Long Call Calendar +0.1 %. The simulation's own 95 % interval
+    # spans at most 2.1 % of its VaR (the calendar; 1.7 % for the straddle), so 5 % bounds the comparator's gap. The
+    # delta-normal VaR of the straddle is $20.09, 71 % short. ES gaps are larger, up to +4.9 % (butterfly; not
+    # asserted). About 2 s.
+    gaps = {}
+    for name in DG_TEMPLATES:
+        strategy = S.build_template(name, 100, 5, DG_MARKET.expiry)
+        res = risk.value_at_risk(strategy, DG_MARKET, risk.VaRConfig(0.99, 1, 400_000, seed=7), 100)
+        lo, hi = res.var_ci95
+        assert hi - lo <= 0.025 * res.var, name
+        gaps[name] = res.delta_gamma.var / res.var - 1
+    worst = max(abs(gap) for gap in gaps.values())
+    assert worst <= 0.05, gaps
+    assert f"the one-day gap is at most {100 * worst:.1f} %" in _methodology()
+
+
+def test_the_gap_to_full_revaluation_shows_what_the_quadratic_leaves_out():
+    # Where gamma changes fast with spot, the quadratic misses the third-order term. A put ratio backspread (short
+    # the 100 put, long two 95 puts) has gamma 1.67 shares per $1 at 100 and 4.80 at 98: as the spot falls its
+    # convexity grows, so it loses less than the quadratic says. Measured: $35.10 against $31.81 by full
+    # revaluation (95 % interval $31.76 to $31.85), +10.4 %, the only template of the 26 beyond 5 %.
+    strategy = S.build_template("Put Ratio Backspread", 100, 5)
+    res = risk.value_at_risk(strategy, DG_MARKET, risk.VaRConfig(0.99, 1, 400_000, seed=7), 100)
+    assert res.delta_gamma.var > 1.05 * res.var_ci95[1]
+    gap = res.delta_gamma.var / res.var - 1
+    assert f"on a put ratio backspread it is {100 * gap:.0f} %, since its gamma grows" in _methodology()
+
+
+def test_beyond_a_few_days_the_gap_is_the_time_decay_that_theta_leaves_out():
+    # The comparator takes today's theta for the whole horizon, θ h/252, but an option's time decay speeds up as
+    # expiry nears. Over 20 trading days (29 calendar days) of a 30-day long straddle, whose largest loss, $372.60,
+    # is at a spot of 99.99, full revaluation at an unchanged spot loses $372.59 where θ h/252 = $220.79 (over one
+    # day: $11.18 and $11.04). The VaR is $372.43 by full revaluation (100,000 paths, seed 7; 95 % interval $372.41
+    # to $372.45) and $222.45 by the comparator, 40 % lower. Of the $149.98 gap the faster time decay is $151.80 and
+    # the spot terms the other -$1.82 (1.2 % of the gap); the test allows 2 %. Measured gaps of the 30-day short
+    # straddle, long call and iron condor at 1, 5, 10 and 20 days: +0.7, +3.5, +8.2 and +24 %; +1.5, +4.7, +10 and
+    # +35 %; +1.3, +3.3, +8.3 and +45 % (200,000 paths). The long call's comparator, $332 at 20 days, is more than its
+    # premium, $245, the most it can lose.
+    strategy = S.build_template("Long Straddle", 100, 5, DG_MARKET.expiry)
+    res = risk.value_at_risk(strategy, DG_MARKET, risk.VaRConfig(0.99, 20, 100_000, seed=7), 100)
+    assert res.settled_legs == 0
+    today = float(S.position_value(strategy, DG_MARKET))
+    decay = 100 * (float(S.position_value(strategy, DG_MARKET, 100.0, 20 / 252)) - today)
+    linear = 100 * S.position_greeks(strategy, DG_MARKET)["theta"] * 20 / 252
+    gap = res.var - res.delta_gamma.var
+    assert res.delta_gamma.var < 0.65 * res.var_ci95[0]
+    assert abs(gap - (linear - decay)) <= 0.02 * gap
+    full, quadratic = f"{res.var:,.0f}", f"{res.delta_gamma.var:,.0f}"
+    assert (
+        rf"full revaluation loses \${-decay:,.0f} at an unchanged spot, about its worst outcome, where "
+        rf"${{\theta h/252}}$ says \${-linear:,.0f}, and the 99 % VaR is \${full} by full revaluation against "
+        rf"\${quadratic} delta-gamma-theta" in _methodology()
+    )
+
+
+CONFIDENCES = [0.5001, 0.6, 0.75, 0.9, 0.95, 0.975, 0.99, 0.995, 0.999, 0.9999, 0.99999]
+
+
+@pytest.mark.parametrize("name", DG_TEMPLATES)
+def test_delta_gamma_var_and_es_rise_with_confidence(name):
+    # Acceptance (4): VaR and ES never fall as the confidence rises, and ES is at least VaR (to rounding: 8e-13 of the
+    # size, the ES tolerance above), from just above 50 % to 99.999 %.
+    greeks = _dollar_greeks(name)
+    results = [risk.delta_gamma_var(*greeks, 100, 0.2, 1, c) for c in CONFIDENCES]
+    size = _quadratic(*greeks, 100, 0.2, 1)[-1]
+    assert np.all(np.diff([r.var for r in results]) > 0)
+    assert np.all(np.diff([r.expected_shortfall for r in results]) > 0)
+    assert all(r.expected_shortfall >= r.var - 8e-13 * size for r in results)
+
+
+#: Greeks for the property below; subnormal ones (below 2.2e-308 shares) are left out, since their P&L is rounded to
+#: the nearest 5e-324 and VaR and ES then differ by that.
+greek_values = {"allow_subnormal": False}
+
+
+@given(
+    delta=st.floats(-1e4, 1e4, **greek_values),
+    gamma=st.floats(-1e3, 1e3, **greek_values),
+    theta=st.floats(-1e5, 1e5, **greek_values),
+    horizon=st.integers(1, 60),
+    confidences=st.lists(st.floats(0.5, 0.99999, exclude_min=True), min_size=2, max_size=2),
+)
+def test_delta_gamma_var_is_monotone_in_confidence(delta, gamma, theta, horizon, confidences):
+    # Acceptance (4) on any position: a higher confidence never gives a lower VaR or ES, and ES is at least VaR. Two
+    # confidences can be closer than the errors of the results, so VaR may fall by 6e-14 of the P&L's size and ES by
+    # 8e-13 of it plus the integration's error estimate, the tolerances of the mpmath test above.
+    low, high = sorted(confidences)
+    a, b = (risk.delta_gamma_var(delta, gamma, theta, 100, 0.2, horizon, c) for c in (low, high))
+    size = _quadratic(delta, gamma, theta, 100, 0.2, horizon)[-1]
+    assert b.var >= a.var - 6e-14 * size
+    assert b.expected_shortfall >= a.expected_shortfall - a.es_error - b.es_error - 8e-13 * size
+    assert a.expected_shortfall >= a.var - a.es_error - 8e-13 * size
+
+
+def test_var_result_carries_the_comparator_of_the_position_greeks():
+    # value_at_risk stores delta_gamma_var of the position's Greeks (times the multiplier), the market volatility and
+    # the configured horizon and confidence: the same for any return model, vol of vol, seed or number of paths.
+    straddle = S.build_template("Short Straddle", 100, 5)
+    expected = risk.delta_gamma_var(*_dollar_greeks("Short Straddle"), 100, 0.2, 3, 0.975)
+    for cfg in (
+        {},
+        {"distribution": "student_t", "dof": 4},
+        {"distribution": "garch"},
+        {"vol_of_vol": 1.0, "seed": 3, "n_paths": 20_000},
+    ):
+        config = risk.VaRConfig(**({"confidence": 0.975, "horizon_days": 3, "n_paths": 10_000} | cfg))
+        assert risk.value_at_risk(straddle, DG_MARKET, config, 100).delta_gamma == expected
+
+
+def test_var_result_has_no_comparator_when_a_greek_is_not_a_number(monkeypatch):
+    real = risk.position_greeks
+    monkeypatch.setattr(risk, "position_greeks", lambda *args: real(*args) | {"gamma": float("nan")})
+    res = risk.value_at_risk(S.build_template("Short Straddle", 100, 5), DG_MARKET, risk.VaRConfig(n_paths=10_000))
+    assert res.delta_gamma is None and res.var > 0
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"delta": float("nan")}, "delta must be a finite number"),
+        ({"gamma": float("inf")}, "gamma must be a finite number"),
+        ({"theta": "12"}, "theta must be a number"),
+        ({"delta": np.array([1.0, 2.0])}, "delta must be a single number"),
+        ({"spot": 0.0}, "spot must be positive"),
+        ({"vol": -0.2}, "vol must be positive"),
+        ({"horizon_days": 0}, "horizon_days must be positive"),
+        ({"es_rtol": 0.0}, "es_rtol must be positive"),
+        ({"confidence": 0.5}, "confidence must be between 0.5 and 1"),
+        ({"confidence": 1.0}, "confidence must be between 0.5 and 1"),
+        ({"delta": 1e308, "spot": 1e10}, "overflows"),
+    ],
+)
+def test_delta_gamma_var_rejects_invalid_input(kwargs, message):
+    args = {"delta": 1.0, "gamma": 1.0, "theta": 0.0, "spot": 100.0, "vol": 0.2, "horizon_days": 1, "confidence": 0.99}
+    with pytest.raises(ValueError, match=message):
+        risk.delta_gamma_var(**(args | kwargs))
+
+
+def test_delta_gamma_var_options_are_keyword_only():
+    with pytest.raises(TypeError):
+        risk.delta_gamma_var(1.0, 1.0, 0.0, 100.0, 0.2, 1, 0.99, 1e-8)
+
+
+def test_the_delta_gamma_var_examples_run():
+    # The docstring's examples are the documentation's numbers ($70.55 and $92.79 for the straddle, $293.09 without
+    # gamma): run them, since the suite does not collect doctests.
+    runner = doctest.DocTestRunner()
+    for test in doctest.DocTestFinder().find(risk.delta_gamma_var, globs={"delta_gamma_var": risk.delta_gamma_var}):
+        runner.run(test)
+    assert runner.tries >= 6 and runner.failures == 0
+
+
+def test_the_methodology_quotes_the_comparator_on_the_index_straddle():
+    # The Methodology's numbers for the 45-day index straddle with implied vol frozen (one day, 99 %, 100,000 paths,
+    # seed 7, the app's default): full revaluation $2,833, delta-gamma-theta $2,882, delta-normal $1,016.
+    res = risk.value_at_risk(STRADDLE, SPX, risk.VaRConfig(0.99, 1, 100_000, seed=7), 100)
+    assert (
+        rf"the one-day 99 % VaR is \${res.delta_gamma.var:,.0f} delta-gamma-theta and \${res.var:,.0f} by full "
+        rf"revaluation (\${res.delta_normal_var:,.0f} delta-normal)" in _methodology()
+    )

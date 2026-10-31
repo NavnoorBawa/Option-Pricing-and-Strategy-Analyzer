@@ -29,6 +29,16 @@ VaR and ES are read off the simulated P&L distribution:
 Horizons are in trading days (252 per year) because volatility scales with
 trading time; a horizon of ``h`` days removes ``h / 252`` years from each
 option's life.
+
+Beside the simulation, :func:`delta_gamma_var` gives the exact VaR and ES of
+the position's delta-gamma-theta P&L, quadratic in a Normal spot move: the
+analytic comparator that :func:`value_at_risk` stores on :class:`VaRResult`.
+Its gap to the full revaluation is what the quadratic leaves out: the spot
+terms beyond the second order, the change in time decay and gamma as expiry
+nears (theta enters to first order only, so beyond a few days this can
+dominate: over 20 trading days of a 30-day long straddle the comparator's VaR
+is 40 % below the full revaluation's), legs that expire within the horizon,
+implied-vol moves and the fatter tails of the Student-t and GARCH models.
 """
 
 from __future__ import annotations
@@ -42,7 +52,15 @@ from scipy.special import ndtri
 from .scenarios import DEFAULT_VOL_TENOR_DECAY
 from .strategies import Market, Strategy, position_greeks, position_value
 
-__all__ = ["DISTRIBUTIONS", "VaRConfig", "VaRResult", "simulate_horizon", "value_at_risk"]
+__all__ = [
+    "DISTRIBUTIONS",
+    "DeltaGammaVaR",
+    "VaRConfig",
+    "VaRResult",
+    "delta_gamma_var",
+    "simulate_horizon",
+    "value_at_risk",
+]
 
 TRADING_DAYS = 252
 DISTRIBUTIONS = {"normal": "Normal", "student_t": "Student-t (fat tails)", "garch": "GARCH(1,1)"}
@@ -112,6 +130,31 @@ class VaRConfig:
 
 
 @dataclass(frozen=True)
+class DeltaGammaVaR:
+    """Exact VaR and ES of the delta-gamma-theta P&L, from :func:`delta_gamma_var`.
+
+    Both are losses in $ (for the Greeks of a whole position): positive when the position loses money, like
+    :attr:`VaRResult.var`, and negative when even the worst ``1 - confidence`` of outcomes is a gain (long gamma
+    with little time decay).
+
+    Attributes
+    ----------
+    var : float
+        Minus the ``1 - confidence`` quantile of the quadratic P&L ($).
+    expected_shortfall : float
+        Minus the mean P&L over the worst ``1 - confidence`` of outcomes ($); at least ``var``.
+    es_error : float
+        QUADPACK's estimate of the error of the numerical integration in ``expected_shortfall`` ($). Against mpmath,
+        the ES's whole error (this integration's, the quantile's that bounds the loss region, and rounding) was below
+        3e-13 of the P&L's size (see :func:`delta_gamma_var`).
+    """
+
+    var: float
+    expected_shortfall: float
+    es_error: float
+
+
+@dataclass(frozen=True)
 class VaRResult:
     var: float
     expected_shortfall: float
@@ -128,6 +171,11 @@ class VaRResult:
     #: Number of option legs that expire before the horizon and are settled on their expiry day.
     settled_legs: int
     config: VaRConfig
+    #: Exact VaR and ES of the delta-gamma-theta P&L (in $ after ``multiplier``, positive = loss), the analytic
+    #: comparator of ``var`` and ``expected_shortfall``: :func:`delta_gamma_var` of today's position Greeks with the
+    #: market volatility and the configured horizon and confidence, so a Normal spot move with implied vol frozen
+    #: whatever the configured return model and vol of vol. None if a position Greek is not a finite number.
+    delta_gamma: DeltaGammaVaR | None = None
 
 
 def _unit_variance_t(rng: np.random.Generator, dof: float, size) -> np.ndarray:
@@ -233,6 +281,190 @@ def _settlement_days(strategy: Strategy, market: Market, horizon_days: int) -> d
     return days
 
 
+#: Share of the tail probability that :func:`delta_gamma_var` may leave out on the far side of the parabola's vertex
+#: when it reads the quantile off the Normal distribution: 2^-56, below the rounding of the tail probability itself.
+_FAR_TAIL = 2.0**-56
+_INV_SQRT_2PI = 1.0 / math.sqrt(2.0 * math.pi)
+
+
+def _finite(name: str, value: float) -> float:
+    """``value`` as a float; ``ValueError`` naming the argument ``name`` unless it is a single finite number."""
+    if np.ndim(value) != 0:
+        raise ValueError(f"{name} must be a single number, got {value!r}")
+    try:
+        finite = math.isfinite(value)
+    except TypeError:  # a string, None, ...
+        raise ValueError(f"{name} must be a number, got {value!r}") from None
+    if not finite:
+        raise ValueError(f"{name} must be a finite number, got {value!r}")
+    return float(value)
+
+
+def delta_gamma_var(
+    delta: float,
+    gamma: float,
+    theta: float,
+    spot: float,
+    vol: float,
+    horizon_days: float,
+    confidence: float,
+    *,
+    es_rtol: float = 1e-10,
+) -> DeltaGammaVaR:
+    """Exact VaR and ES of the delta-gamma-theta P&L under a Normal spot move.
+
+    Over a horizon of ``h = horizon_days`` trading days the position's P&L is taken to second order in the spot move
+    ``x`` and to first order in time,
+
+        ``P&L = θ h/252 + Δ x + ½ Γ x²``,  ``x ~ N(0, s²)``,  ``s = S σ √(h/252)``,
+
+    the analytic comparator of the full revaluation in :func:`value_at_risk`, which stores it on
+    :attr:`VaRResult.delta_gamma`. With ``x = s z`` and ``δ = Δ / (Γ s)``, completing the square gives
+
+        ``P&L = θ h/252 − Δ²/(2Γ) + ½ Γ s² Y``,  ``Y = (z + δ)² ~ χ'²(1, λ = δ²)``,
+
+    a shifted and scaled non-central chi-square with one degree of freedom. VaR is minus the P&L at the quantile of
+    ``Y`` from ``scipy.stats.ncx2``: its lower tail (``ppf``) when Γ > 0, since long gamma loses most near the
+    vertex of the parabola, and its upper tail (``isf``) when Γ < 0.
+
+    As Γ → 0 the vertex moves out without bound (λ → ∞), where ``ncx2`` loses digits in ``Y − λ`` (5e-13 of
+    the P&L at λ = 1e8) and fails beyond about λ = 1e12 (NaN in SciPy 1.18; RuntimeWarnings, 0.25 s and an error of
+    5e-7 in 1.11; measured). So once the loss region's part beyond the vertex holds less than 2^-56 of the tail
+    probability (``|δ| ≥ (z_α + z_f) / 2`` with ``Φ(−z_f) = 2^-56 (1 − α)``: |δ| above 5.7 at 99 %, λ above 32),
+    the P&L is monotone wherever the probability is and VaR is read off the Normal quantile ``z_α`` directly:
+    ``VaR = |Δ| s z_α − ½ Γ s² z_α² − θ h/252``. That is the limit of the chi-square form, so VaR is continuous in
+    Γ, and at Γ = 0 it is the delta-normal VaR minus the time decay ``θ h/252``.
+
+    ES is minus the mean P&L over the loss region (an interval around the vertex when Γ > 0, the two tails beyond
+    it when Γ < 0, one tail in the monotone case): the same distribution, integrated against the Normal density of
+    ``z`` by ``scipy.integrate.quad``, whose error estimate is returned as ``es_error`` (at most 1.6e-9 of the
+    P&L's size on 20,000 random positions with the default ``es_rtol``).
+
+    Against 50-digit mpmath (bisection on the Normal probability of the loss region for the quantile, the closed form
+    of the ES integral), the VaR is within about 2e-14 and the ES within 3e-13 of the P&L's size
+    ``|θ| h/252 + |Δ| s + ½ |Γ| s²`` (worst 1.9e-14 and 2.7e-13, the latter the integration's, within ``es_error``)
+    on 3,000 random positions and 400 extreme ones (delta or gamma down to 1e-300, either side of the switch to the
+    Normal quantile, confidence up to 99.9999 %), in SciPy 1.11 and 1.18. A call takes 0.1 to 0.2 ms, most of it in
+    ``ncx2``, after the first, which imports ``scipy.stats`` (0.3 s).
+
+    Parameters
+    ----------
+    delta : float
+        Position delta dV/dS, in shares.
+    gamma : float
+        Position gamma d²V/dS², in shares per $1 of spot.
+    theta : float
+        Position theta dV/dt, in $ per year: the raw units of :func:`~.strategies.position_greeks` (positive for a
+        short option). The horizon takes ``horizon_days / 252`` years of it, as :func:`value_at_risk` removes that
+        much of each option's life: one trading day is 365/252 of a calendar day's theta.
+    spot : float
+        Spot price ($ per share), positive.
+    vol : float
+        Annualised volatility of the spot (0.2 = 20 %), positive.
+    horizon_days : float
+        Horizon in trading days (252 a year), positive; fractions are allowed.
+    confidence : float
+        Confidence level α, strictly between 0.5 and 1.
+    es_rtol : float, default 1e-10
+        Accuracy asked of the ES integration, relative to the larger of the integral and the P&L's size; positive.
+
+    Returns
+    -------
+    DeltaGammaVaR
+        VaR and ES in $ (positive = loss) and the integration's error estimate for the ES.
+
+    Raises
+    ------
+    ValueError
+        If an argument is not a single finite number, ``spot``, ``vol``, ``horizon_days`` or ``es_rtol`` is not
+        positive, or ``confidence`` is not between 0.5 and 1.
+
+    Examples
+    --------
+    One contract (100 shares) of a 30-day short straddle at the money, spot 100, volatility 20 %, rate 4 %: delta
+    −6.85 shares, gamma −13.86 shares per $1, theta +$2,782 a year. Its one-day 99 % delta-normal VaR is $20.09;
+    with gamma and theta the VaR is $70.55, where full revaluation (:func:`value_at_risk`, 400,000 paths, seed 7)
+    gives $70.29.
+
+    >>> from options_analyzer.strategies import Market, build_template, position_greeks
+    >>> greeks = position_greeks(build_template("Short Straddle", 100, 5), Market(100, 0.04, 0.2, 30 / 365))
+    >>> delta, gamma, theta = (100 * greeks[name] for name in ("delta", "gamma", "theta"))
+    >>> dg = delta_gamma_var(delta, gamma, theta, 100, 0.2, 1, 0.99)
+    >>> round(dg.var, 2), round(dg.expected_shortfall, 2)
+    (70.55, 92.79)
+
+    Without gamma it is the delta-normal VaR, |Δ| S σ √(h/252) z_α = $293.09 for 100 shares, less the time decay:
+
+    >>> round(delta_gamma_var(100, 0, 0, 100, 0.2, 1, 0.99).var, 2)
+    293.09
+    >>> round(delta_gamma_var(100, 0, 252, 100, 0.2, 1, 0.99).var, 2)  # theta $252 a year: $1 a trading day
+    292.09
+    """
+    delta, gamma, theta = _finite("delta", delta), _finite("gamma", gamma), _finite("theta", theta)
+    positive = {"spot": spot, "vol": vol, "horizon_days": horizon_days, "es_rtol": es_rtol}
+    for name, value in positive.items():
+        if not _finite(name, value) > 0:
+            raise ValueError(f"{name} must be positive, got {value!r}")
+    spot, vol, horizon_days, es_rtol = (float(value) for value in positive.values())
+    confidence = _finite("confidence", confidence)
+    if not 0.5 < confidence < 1.0:
+        raise ValueError("confidence must be between 0.5 and 1")
+    # Imported here: scipy.stats takes 0.3-0.4 s to import (measured), which the app would otherwise pay at every
+    # start, on every tab; only the Risk tab's VaR calls this.
+    from scipy.integrate import quad
+    from scipy.stats import ncx2
+
+    tau = horizon_days / TRADING_DAYS
+    s = spot * vol * math.sqrt(tau)
+    # P&L(z) = c + a z + b z², z ~ N(0, 1).
+    c, a, b = theta * tau, delta * s, 0.5 * gamma * s * s
+    if not math.isfinite(abs(c) + abs(a) + abs(b)):
+        raise ValueError("the delta, gamma and theta P&L over the horizon overflows; check the units of the Greeks")
+    tail = 1.0 - confidence
+    z_alpha = float(ndtri(confidence))
+    # Beyond z_far the Normal tail holds 2^-56 of the tail probability. When 2 |δ| = |a / b| is at least
+    # z_alpha + z_far, the part of the loss region on the far side of the vertex z = -δ starts beyond z_far.
+    z_far = -float(ndtri(_FAR_TAIL * tail))
+    if abs(a) >= (z_alpha + z_far) * abs(b):
+        # Monotone where the probability is: the loss tail is the Normal tail on the side delta points away from
+        # (the lower one for a constant P&L, a = b = 0).
+        z_loss = -z_alpha if a >= 0 else z_alpha
+        quantile = c + a * z_loss + b * z_loss * z_loss
+        # The ES integral runs over t = z, where the P&L is c0 + a0 t + b t².
+        shift, c0, a0 = 0.0, c, a
+        regions = [(-math.inf, z_loss)] if a >= 0 else [(z_loss, math.inf)]
+    else:
+        d = a / (2.0 * b)  # δ: below (z_alpha + z_far) / 2 in size here, 6.6 at 99.99 %, so λ = δ² is moderate
+        lam = d * d
+        # A non-centrality below 1e-30 moves the quantile by less than 1e-30 of itself, but a subnormal one throws
+        # ncx2.isf off by up to tens of percent of it (74 % at λ = 3.5e-323 and a 30 % tail, 1.5 % at λ = 2e-321 and
+        # 25 %; SciPy 1.11 and 1.18, measured): read the central quantile.
+        nc = lam if lam >= 1e-30 else 0.0
+        y = float(ncx2.ppf(tail, 1, nc) if b > 0 else ncx2.isf(tail, 1, nc))
+        quantile = c + b * (y - lam)
+        # The ES integral runs over t = z + δ = ±√Y, where the P&L is c - b λ + b t²: the bounds of the loss region
+        # are then ±√y exactly, without the cancellation in its bounds -δ ± √y in z.
+        shift, c0, a0 = d, c - b * lam, 0.0
+        u = math.sqrt(y)
+        regions = [(-u, u)] if b > 0 else [(-math.inf, -u), (u, math.inf)]
+
+    def weighted_pnl(t: float) -> float:
+        z = t - shift
+        # The Normal density underflows to zero beyond |z| = 38.6; stopping at 40 keeps a P&L that overflows far out
+        # from making inf * 0 = NaN.
+        return (a0 * t + b * t * t) * math.exp(-0.5 * z * z) * _INV_SQRT_2PI if abs(z) < 40.0 else 0.0
+
+    # The loss region holds the tail probability by construction, so its constant term c0 adds c0 (1 - α) exactly;
+    # integrating it too cost up to 2e-11 of the ES for a P&L of theta alone (measured).
+    size = abs(c) + abs(a) + abs(b)  # the P&L's size: each term at one standard deviation of the spot move
+    total, error = c0 * tail, 0.0
+    for lo, hi in regions:
+        value, err = quad(weighted_pnl, lo, hi, epsabs=es_rtol * size * tail, epsrel=es_rtol, limit=200)
+        total += value
+        error += err
+    return DeltaGammaVaR(var=-quantile, expected_shortfall=-total / tail, es_error=error / tail)
+
+
 def value_at_risk(strategy: Strategy, market: Market, config: VaRConfig, multiplier: float = 1.0) -> VaRResult:
     """Full-revaluation Monte Carlo VaR/ES of ``strategy`` (in $ after ``multiplier``)."""
     h = int(config.horizon_days)
@@ -265,9 +497,16 @@ def value_at_risk(strategy: Strategy, market: Market, config: VaRConfig, multipl
     pnl = multiplier * (later - today)
     var, es, ci = _var_es(pnl, config.confidence)
 
-    delta = position_greeks(strategy, market)["delta"]
+    greeks = position_greeks(strategy, market)
     sigma_h = market.volatility * np.sqrt(horizon_years)
-    delta_normal = float(abs(multiplier * delta * market.spot) * sigma_h * ndtri(config.confidence))
+    delta_normal = float(abs(multiplier * greeks["delta"] * market.spot) * sigma_h * ndtri(config.confidence))
+    # The analytic comparator from the same Greeks, volatility, horizon and confidence.
+    dollar_greeks = [float(multiplier * greeks[name]) for name in ("delta", "gamma", "theta")]
+    delta_gamma = (
+        delta_gamma_var(*dollar_greeks, market.spot, market.volatility, h, config.confidence)
+        if all(math.isfinite(greek) for greek in dollar_greeks)
+        else None
+    )
 
     mean = float(pnl.mean())
     std = float(pnl.std(ddof=1))
@@ -290,4 +529,5 @@ def value_at_risk(strategy: Strategy, market: Market, config: VaRConfig, multipl
         best=float(pnl.max()),
         settled_legs=len(settle),
         config=config,
+        delta_gamma=delta_gamma,
     )

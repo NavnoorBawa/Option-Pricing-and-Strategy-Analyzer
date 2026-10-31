@@ -53,8 +53,11 @@ def _link_asof(value: str) -> datetime | None:
     """A valuation time typed in a link, as New York wall time on its 5-minute step: ``2026-10-23T16:00`` (the
     widget's own form), with seconds or a time zone, or a date alone (``2026-10-23``: that day's close, or the close
     of the trading day before it). None when it is not a date or is out of range."""
+    text = value.strip().replace(" ", "T")
+    if text[-1:] in ("Z", "z"):  # UTC, which Python 3.10's fromisoformat reads only as "+00:00"
+        text = text[:-1] + "+00:00"
     try:
-        moment = datetime.fromisoformat(value.strip().replace(" ", "T"))
+        moment = datetime.fromisoformat(text)
     except ValueError:
         return None
     if len(value.strip()) == 10:  # a date alone

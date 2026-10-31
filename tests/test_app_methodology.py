@@ -160,6 +160,16 @@ def test_subsections_lists_and_maths_stay_in_the_body():
     assert section.body == "### One\n#### Detail\n* item\n\n### Two\nText $x$."
 
 
+def test_no_two_headings_share_an_anchor():
+    # Streamlit gives every Markdown heading an id made from its text, and all sections are on one page: "Backtesting"
+    # in both Risk and References made two elements with the id "backtesting" (found by tests/test_theme.py in
+    # Chromium). Checked here without a browser, against the section anchors too.
+    headings = [line.lstrip("#").strip() for s in SECTIONS for line in s.body.splitlines() if line.startswith("###")]
+    anchors = [re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-") for text in headings]
+    anchors += [section.anchor for section in SECTIONS]
+    assert len(anchors) == len(set(anchors)), sorted(a for a in anchors if anchors.count(a) > 1)
+
+
 def test_the_methodology_files_are_package_data():
     # The installed app reads them from the package: the wheel must ship them (setuptools package-data), and the
     # validation results that the report writes next to them.
@@ -484,7 +494,7 @@ def _links() -> list[tuple[str, str]]:
 
 def test_every_reference_has_authors_a_year_and_a_link():
     entries = _entries()
-    assert len(entries) == 20
+    assert len(entries) == 29
     for entry in entries:
         assert re.match(r"^[A-Z][^()]+ \((19|20)\d\d\)\. ", entry), entry
         assert _LINK.search(entry), f"no link: {entry}"
@@ -495,13 +505,14 @@ def test_doi_and_arxiv_links_say_where_they_go():
     # abstract; any other link names its host.
     links = _links()
     dois = [(text, url) for text, url in links if text.startswith("doi:")]
-    assert len(dois) == 14
+    assert len(dois) == 20
     for text, url in dois:
         doi = text.removeprefix("doi:")
         assert _DOI.fullmatch(doi) and url == f"https://doi.org/{doi}", text
     arxiv = [(text, url) for text, url in links if text.startswith("arXiv:")]
     assert arxiv == [
         ("arXiv:cond-mat/0104295", "https://arxiv.org/abs/cond-mat/0104295"),
+        ("arXiv:1707.05108", "https://arxiv.org/abs/1707.05108"),
         ("arXiv:1204.0646", "https://arxiv.org/abs/1204.0646"),
     ]
     for text, url in links:
@@ -519,6 +530,12 @@ CITED = {
     "Gatheral & Jacquier": "Gatheral, J. and Jacquier, A.", "Gatheral's": "Gatheral, J. (2006)",
     "Lee's": "Lee, R. W.", "Zeliade": "De Marco, S. and Martini, C.", "Fritsch–Butland": "Fritsch, F. N.",
     "2026 severely adverse": "Federal Reserve System (2026)",
+    "Kupiec": "Kupiec, P. H.", "Christoffersen": "Christoffersen, P. F.",
+    "MAR32": "Basel Committee on Banking Supervision (2020)",
+    "Basel Committee's 1996": "Basel Committee on Banking Supervision (1996)",
+    "Acerbi and Szekely": "Acerbi, C. and Szekely, B.", "Patton, Ziegel and Chen": "Patton, A. J., Ziegel, J. F.",
+    "Diebold and Mariano": "Diebold, F. X. and Mariano, R. S.", "Newey–West": "Newey, W. K. and West, K. D.",
+    "Hull and White": "Hull, J. and White, A.",
 }  # fmt: skip
 
 
@@ -548,6 +565,11 @@ SITES = {
     "https://openlibrary.org/isbn/9780071389976": (
         "https://openlibrary.org/isbn/9780071389976.json", "The Complete Guide to Option Pricing Formulas"
     ),
+    "https://www.bis.org/publ/bcbs22.htm": (None, "Supervisory framework for the use of"),
+    "https://www.bis.org/basel_framework/chapter/MAR/32.htm?inforce=20230101&published=20200327": (
+        None, "Backtesting zones"
+    ),
+    "https://www.msci.com/documents/10199/22aa9922-f874-4060-b77a-0f0e267a489b": (None, "%PDF-"),
 }  # fmt: skip
 #: When the last request to the arXiv API was sent: its terms ask for at most one request every 3 seconds.
 _ARXIV_LAST = [0.0]
