@@ -583,7 +583,7 @@ def test_the_spot_only_run_keeps_every_setting_but_the_vol_moves(monkeypatch):
     at.slider(key="var_corr").set_value(-0.5)
     at.number_input(key="var_seed").set_value(11)
     at.slider(key="var_dof").set_value(4)
-    at.segmented_control(key="var_model").set_value("Student-t MC").run()
+    at.segmented_control(key="var_model").set_value("Student-t").run()
     _ok(at)
     config = risk.VaRConfig(
         0.99, 5, 10_000, distribution="student_t", dof=4.0, seed=11, vol_of_vol=1.5, spot_vol_correlation=-0.5

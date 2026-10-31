@@ -71,11 +71,12 @@ VAR_CONFIDENCE, ES_CONFIDENCE = 0.99, 0.975
 PATH_CHOICES = (10_000, 25_000, 50_000, 100_000, 250_000, 500_000)
 #: The VaR report's models: the Monte Carlo return models of :mod:`options_analyzer.risk` (historical simulation and
 #: filtered historical simulation, RK-5, are not on this branch).
+#: Short names, so that the four fit one line of a 390 px phone ("GARCH-t MC" ran out of it); the tiles say MC.
 VAR_MODELS: dict[str, tuple[str, bool]] = {
-    "Normal MC": ("normal", False),
-    "Student-t MC": ("student_t", False),
-    "GARCH MC": ("garch", False),
-    "GARCH-t MC": ("garch", True),
+    "Normal": ("normal", False),
+    "Student-t": ("student_t", False),
+    "GARCH": ("garch", False),
+    "GARCH-t": ("garch", True),
 }
 
 #: The desk grid (UI spec 3.3, Scenarios): spot moves in percent by vol shocks in each vol mode.
@@ -959,7 +960,13 @@ def _var_card(label: str, value: float | str, help_text: str, delta: str | None 
 
 def _var(book: Book) -> None:
     row = _controls("var_controls")
-    model = _segmented(row, "Model", VAR_MODELS, "var_model", "The Monte Carlo return model.")
+    model = _segmented(
+        row,
+        "Model",
+        VAR_MODELS,
+        "var_model",
+        "The Monte Carlo model of spot returns: Normal, Student-t, GARCH(1,1) with Normal or Student-t shocks.",
+    )
     with row.popover("Vol dynamics"):
         moves = st.toggle(
             "Simulate implied-vol moves",
@@ -1028,7 +1035,7 @@ def _var(book: Book) -> None:
             int(horizon),
             ES_CONFIDENCE,
         ).expected_shortfall
-    basis = f"{model}, {int(paths):,} paths, seed {int(seed)}"
+    basis = f"{model} Monte Carlo, {int(paths):,} paths, seed {int(seed)}"
     vol_text = "spot and implied vol moving" if with_vol else "implied vol frozen"
     cards = [
         _var_card(
@@ -1080,9 +1087,10 @@ def _var(book: Book) -> None:
             f"spot only {MINUS} DGT" if with_vol else None,
         ),
     ]
-    # The full simulation, then its spot-only twin, then the analytic comparator and the gap: 3 + 3 with implied vol
-    # moving, 2 + 2 with it frozen.
-    card_row("var_cards", ("var_cards_full", "var_cards_comparators"), cards)
+    # Pairs, VaR beside its ES: the full simulation, its spot-only twin (with implied vol moving), then the analytic
+    # comparator and the gap. Two groups of three went 2 + 1 and 2 + 1 on a phone.
+    pairs = ("var_cards_full", "var_cards_spot", "var_cards_comparator")
+    card_row("var_cards", pairs if with_vol else pairs[::2], cards)
     left, right = st.columns([1, 2], gap="medium")
     stats = pd.DataFrame(
         [

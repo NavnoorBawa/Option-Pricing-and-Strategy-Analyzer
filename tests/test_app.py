@@ -68,7 +68,7 @@ def test_every_strategy_template(new_app):
 
 def test_var_models(new_app):
     app = new_app(tab="Risk", report="VaR").run()
-    for model in ("Student-t MC", "GARCH MC", "GARCH-t MC", "Normal MC"):
+    for model in ("Student-t", "GARCH", "GARCH-t", "Normal"):
         app.segmented_control(key="var_model").set_value(model).run()
         _ok(app)
     assert any(m.label.startswith("VaR") for m in app.metric)
@@ -385,14 +385,14 @@ def test_the_date_slider_starts_again_when_the_expiry_changes(new_app):
 def test_risk_settings_survive_a_visit_to_another_tab(new_app):
     at = new_app(tab="Risk", report="VaR").run()
     at.select_slider(key="var_paths").set_value(25_000)
-    at.segmented_control(key="var_model").set_value("Student-t MC").run()
+    at.segmented_control(key="var_model").set_value("Student-t").run()
     at.slider(key="var_dof").set_value(4)
     at.number_input(key="var_seed").set_value(11).run()
     _ok(at)
     before = {m.label: m.value for m in at.metric}
     _away_and_back(at, "Risk")
     assert at.pills(key="report").value == "VaR" and at.select_slider(key="var_paths").value == 25_000
-    assert at.segmented_control(key="var_model").value == "Student-t MC" and at.slider(key="var_dof").value == 4
+    assert at.segmented_control(key="var_model").value == "Student-t" and at.slider(key="var_dof").value == 4
     assert at.number_input(key="var_seed").value == 11
     assert {m.label: m.value for m in at.metric} == before  # the same simulation: same seed, paths and model
     at.pills(key="report").set_value("Scenarios").run()
