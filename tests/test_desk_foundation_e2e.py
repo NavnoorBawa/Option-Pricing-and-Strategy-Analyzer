@@ -71,9 +71,20 @@ def _open(chromium, url: str, *, width: int = 1440, scheme: str = "dark", touch:
     page.goto(url)
     page.wait_for_selector(".st-key-whatif", timeout=120_000)
     page.wait_for_function(f"() => !({_RUNNING})", timeout=120_000)
+    # The desk stylesheet reaches the page as an st.html element of its own, measured 0.6 to 1.0 s after the script
+    # state reads idle on a loaded machine: wait for its rules rather than for a fixed time, or the amber rule and
+    # the fonts are read before they apply.
+    page.wait_for_function(_STYLED, timeout=60_000)
     page.evaluate("document.fonts.ready.then(() => true)")
-    page.wait_for_timeout(1000)
+    page.wait_for_timeout(300)  # a settle for layout only; nothing below depends on it for correctness
     return context, page
+
+
+#: True once the desk stylesheet's rules are in the document (its what-if rule is the marker).
+_STYLED = """() => [...document.styleSheets].some(sheet => {
+  try { return [...sheet.cssRules].some(r => (r.selectorText || '').includes('st-key-whatif_scenario')); }
+  catch (e) { return false; }
+})"""
 
 
 #: The strip's widgets (each a flex item of the strip), their tops and bottoms, and every label's cut-off text.

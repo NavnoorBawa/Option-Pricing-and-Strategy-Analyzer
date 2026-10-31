@@ -271,10 +271,12 @@ GOLDEN_CELLS = [
     ("pnl", [-0.004, 12.0], "X ($)", "0.00"),  # rounds to zero: no sign
     ("dollar_delta", [-19525.3], "X ($)", "-19,525"),
     ("futures", [-0.0673], "X (ES)", "-0.07"),  # −$19,525 of delta at S 5,800 is −0.07 ES
-    ("gamma_pnl", [-68.2], "X ($)", "-68.20"),
-    ("vega", [-306.4, 1200.0], "X ($/vp)", "-306"),
-    ("theta", [41.2], "X ($/day)", "41.20"),
-    ("rho", [31.0], "X ($/1%)", "31.00"),
+    # A position's Greeks in whole dollars, spec 2.5's examples; a contract's vega per share in cents.
+    ("gamma_pnl", [-68.2], "X ($)", "-68"),
+    ("vega", [-306.4], "X ($/vp)", "-306"),
+    ("theta", [41.2], "X ($/day)", "41"),
+    ("rho", [31.0], "X ($/1%)", "31"),
+    ("vega_share", [6.3712], "X ($/vp)", "6.37"),
     ("vol", [15.4612], "X (%)", "15.46"),
     ("vol_change", [-0.0701], "X (vp)", "-0.07"),
     ("rate", [4.75], "X (%)", "4.75"),
@@ -285,7 +287,11 @@ GOLDEN_CELLS = [
     ("gamma", [0.093612], "X", "0.0936"),
     ("greek", [1.23456e-4], "X", "0.000123"),
     ("probability", [73.49], "X (%)", "73.5"),
+    ("probability", [99.96], "X (%)", "99.9"),  # never a certainty: spec 2.5's ">99.9%"
+    ("probability", [0.03], "X (%)", "0.1"),  # "<0.1%"
+    ("probability", [100.0], "X (%)", "100.0"),  # an exact certainty stays
     ("share", [99.04], "X (%)", "99.0"),
+    ("share", [99.97], "X (%)", "99.9"),
     ("moneyness", [97.502], "X (%)", "97.5"),
     ("log_moneyness", [-0.02525], "X", "-0.025"),
     ("quantity", [-2.0], "X", "-2"),
@@ -306,10 +312,20 @@ def test_golden_cells_of_every_column_kind(monkeypatch):
         assert _sprintf(config["type_config"]["format"], data["X"].iloc[0]) == cell, (kind, values)
 
 
-def test_the_gamma_pnl_column_can_show_whole_dollars(monkeypatch):
-    # Spec 2.5 shows a position's Γ P&L 1% as −$68: a caller may fix the precision of a data-dependent column.
-    data, options = _drawn(monkeypatch, pd.DataFrame({"G": [-68.2, 12.4]}), {"G": "gamma_pnl"}, digits={"G": 0})
+def test_a_data_dependent_column_can_take_a_fixed_precision(monkeypatch):
+    # Money is in cents below $1,000; a caller may fix whole dollars for a column of small amounts.
+    data, options = _drawn(monkeypatch, pd.DataFrame({"G": [-68.2, 12.4]}), {"G": "pnl"}, digits={"G": 0})
     assert _sprintf(options["column_config"]["G"]["type_config"]["format"], data["G"].iloc[0]) == "-68"
+
+
+def test_a_probability_short_of_certainty_says_so_in_its_help(monkeypatch):
+    # Spec 2.5: ">99.9%" and "<0.1%" at the ends. A number column cannot write them, so the cell is held at 99.9 or
+    # 0.1 and the help explains it; a column with nothing held keeps its help as written.
+    frame = pd.DataFrame({"P": [99.96, 0.03, 50.0, 0.0, 100.0], "Q": [73.49, 26.51, 50.0, 0.0, 100.0]})
+    data, options = _drawn(monkeypatch, frame, {"P": "probability", "Q": "probability"})
+    assert list(data["P"]) == [99.9, 0.1, 50.0, 0.0, 100.0]
+    assert "Above 99.9% shows as 99.9" in options["column_config"]["P"]["help"]
+    assert options["column_config"]["Q"]["help"] == "About Q."
 
 
 def test_the_sprintf_model_reads_streamlits_formats():
@@ -389,9 +405,26 @@ def test_significant_digit_columns_round_to_three_digits(monkeypatch):
 
 # --- the lint the tabs will pass once they adopt the standard --------------------------------------------------------
 
-#: Hand formatting in a tab: an f-string or str.format precision (``:.2f``, ``:,.0f``, ``:+.1%``), a printf column
-#: format typed in place (``format="%.4f"``), or a hand-made minus sign (``.replace("-", "−")``).
-HAND_FORMAT = re.compile(r"\{[^{}]*:[+ ]?,?\.\d+[fe%]\}|format=\"%[^\"]*\"|\.replace\(\"-\", \"(−|\\\\u2212)\"\)")
+#: Hand formatting in a tab, any of:
+#:
+#: * an f-string or str.format spec with grouping, a precision, a width or a number type (``:.2f``, ``:,.0f``,
+#:   ``:+.1%``, ``:.2g``, ``:,``, ``:5d``); a date's ``:%d %b`` is not one. No space may follow the colon, so that
+#:   a dict literal (ruff writes ``{"a": 1.5}``) is not read as one;
+#: * ``format(x, ",.2f")`` and the printf operator (``"%.2f" % x``);
+#: * a printf column format typed in place (``format="%.4f"``);
+#: * a hand-made minus sign (``.replace("-", "−")``).
+HAND_FORMAT = re.compile(
+    "|".join(
+        (
+            r"\{[^{}:]*:[+\-]?#?0?\d*[,_.][^{}]*\}",  # grouping or a precision
+            r"\{[^{}:]*:[+\-]?#?0?\d*[bdeEfFgGnoxX%]\}",  # a width, a sign or a number type alone
+            r"\bformat\([^()]*,\s*[\"'][^\"']*[\"']\)",  # the format() builtin
+            r"[\"'][^\"']*%[+\- #0,]*\d*(?:\.\d+)?[dfeEgGi][^\"']*[\"']\s*%\s*[\w(]",  # "%.2f" % x
+            r"format=\"%[^\"]*\"",
+            r"\.replace\(\"-\", \"(−|\\\\u2212)\"\)",
+        )
+    )
+)
 
 
 @pytest.mark.xfail(strict=True, reason="tabs adopt the number standard (DK-4)")
@@ -405,9 +438,36 @@ def test_no_tab_formats_numbers_by_hand():
 
 
 def test_the_lint_catches_hand_formatting():
-    for line in ('f"{x:.2f}"', 'f"{x:,.0f} cr"', 'f"{p:.1%}"', 'NumberColumn(format="%.4f")', 's.replace("-", "−")'):
+    caught = (
+        'f"{x:.2f}"',
+        'f"{x:,.0f} cr"',
+        'f"{p:.1%}"',
+        'NumberColumn(format="%.4f")',
+        's.replace("-", "−")',
+        'f"{res.last_step:.2g}"',  # tab_pricing's PDE step, before the standard
+        'f"{n:,} paths"',  # a count: format.number(n, 0)
+        'f"{n:5d}"',
+        'f"{x:+d}"',
+        'f"{rows[i].iv:.4f}"',
+        'format(x, ",.2f")',
+        '"%.2f" % x',
+        '"%d paths" % (n,)',
+    )
+    for line in caught:
         assert HAND_FORMAT.search(line), line
-    for line in ("fmt.vol(x)", 'col("vol", "IV", help="h")', 'f"{name}"', 'f"{as_of:%d %b %Y}"'):
+    passed = (
+        "fmt.vol(x)",
+        'col("vol", "IV", help="h")',
+        'f"{name}"',
+        'f"{as_of:%d %b %Y}"',
+        'f"{t:%H:%M}"',
+        'f"{name!r}"',
+        '{"Strike": 5800.0, "IV": 15.5}',  # a dict literal
+        "{k: 0.5 for k in keys}",
+        'st.number_input("Strike", format=fmt.STRIKE)',
+        '"Spot moved 5% today"',
+    )
+    for line in passed:
         assert not HAND_FORMAT.search(line), line
 
 

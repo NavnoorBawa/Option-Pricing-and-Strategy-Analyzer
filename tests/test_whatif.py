@@ -124,7 +124,8 @@ def _page():
         tenor=55.7 / 365,
         rate=0.0475,
         as_of=datetime(2026, 10, 23, 16, 0),
-        horizon=datetime(2026, 12, 18, 9, 30),
+        # The position's front settlement; a test moves it nearer (a front leg closed) with ?front=YYYY-MM-DD.
+        horizon=datetime.fromisoformat(st.query_params.get("front", "2026-12-18") + "T09:30"),
     )
     st.text(f"shifts={shifts.spot},{shifts.vol},{shifts.mode},{shifts.sessions},{shifts.rate}")
 
@@ -237,3 +238,58 @@ def test_out_of_range_links_read_as_zero():
     at.query_params["wvmode"] = "sqrt"
     at.run()
     assert at.text[0].value == repr(Shifts())
+
+
+# --- the labels state what the widgets return (never a shift that is not applied) -----------------------------------
+
+
+def _agree(at) -> None:
+    # Each label's shift is the value its widget returns this run, and the badge shows exactly while one is set.
+    spot, vol, mode, sessions, rate = at.text[0].value.removeprefix("shifts=").split(",")
+    shifts = Shifts(float(spot), float(vol), mode, int(sessions), float(rate))
+    labels = _labels(at)
+    assert labels["wd"].startswith(f"T+{shifts.sessions} · "), (labels["wd"], shifts)
+    sign = "" if not shifts.vol else ("+" if shifts.vol > 0 else "\u2212")
+    assert labels["wv"].startswith(f"Vol {sign}{abs(shifts.vol):.{2 if shifts.mode == 'absolute' else 1}f}"), labels
+    assert _scenario(at) is shifts.active
+
+
+def test_a_link_past_the_horizon_reads_as_today():
+    # T+100 is past the front settlement (T+39, Fri 18-Dec): the slider ignores the link, so the label reads T+0.
+    at = _app(wd=100)
+    assert at.slider(key="wd").value == 0
+    assert _labels(at)["wd"] == "T+0 · Fri 23\u2011Oct\u201126 (55d left)"
+    assert not _scenario(at)
+    _agree(at)
+
+
+def test_a_nearer_horizon_takes_the_date_back_to_today():
+    # A date set to T+30 (Mon 7-Dec), then the front settlement moves to Fri 20-Nov (T+20): a slider would keep 30
+    # above its new maximum, so the strip takes the date back to T+0, the label with it, in the same run.
+    at = _app(wd=30)
+    assert at.slider(key="wd").value == 30
+    at.query_params["front"] = "2026-11-20"
+    at.run()
+    assert at.slider(key="wd").value == 0 and _labels(at)["wd"].startswith("T+0 · ")
+    _agree(at)
+
+
+@pytest.mark.parametrize(
+    ("start", "value", "to"),
+    [
+        ("relative", -80, "absolute"),
+        ("relative", 200, "absolute"),
+        ("absolute", 3, "relative"),
+        ("absolute", 3, "1M-scaled"),
+    ],
+)
+def test_a_new_vol_mode_sets_the_vol_shift_to_zero(start, value, to):
+    # −80% and +200% are inside the relative limits but outside the absolute ones; +3 vp is a valid +3%, but not the
+    # same shift. Either way the new mode starts from zero, in the label as in the value, in the same run.
+    at = _app(wv=value, wvmode=start)
+    assert at.number_input(key="wv").value == value and _scenario(at)
+    at.button_group(key="wvmode").set_value(to).run()
+    assert at.number_input(key="wv").value == 0.0
+    assert at.text[0].value == f"shifts=0.0,0.0,{to},0,0.0"
+    assert _labels(at)["wv"].startswith("Vol 0.0")
+    _agree(at)

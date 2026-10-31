@@ -375,10 +375,12 @@ COLUMN_KINDS: dict[str, ColumnKind] = {
     "pnl": ColumnKind("$", "%,.{d}f", None, "money"),  # P&L and losses, negative
     "dollar_delta": ColumnKind("$", "%,.{d}f", 0),  # $Δ
     "futures": ColumnKind("ES", "%.{d}f", 2),  # position delta in E-mini contracts; label "Δ (MES)" for micros
-    "gamma_pnl": ColumnKind("$", "%,.{d}f", None, "money"),  # Γ P&L 1%: ½Γ(0.01S)² × units
-    "vega": ColumnKind("$/vp", "%,.{d}f", None, "money"),
-    "theta": ColumnKind("$/day", "%,.{d}f", None, "money"),
-    "rho": ColumnKind("$/1%", "%,.{d}f", None, "money"),
+    # A position's Greeks in whole dollars (spec 2.5: −$68, −$306, +$41, +$31); a contract's vega per share in cents.
+    "gamma_pnl": ColumnKind("$", "%,.{d}f", 0),  # Γ P&L 1%: ½Γ(0.01S)² × units
+    "vega": ColumnKind("$/vp", "%,.{d}f", 0),  # per position
+    "theta": ColumnKind("$/day", "%,.{d}f", 0),  # per position, per calendar day
+    "rho": ColumnKind("$/1%", "%,.{d}f", 0),  # per position
+    "vega_share": ColumnKind("$/vp", "%.{d}f", 2),  # per share, in a contract table: 6.37
     "vol": ColumnKind("%", "%.{d}f", 2),  # implied vol: 15.46
     "vol_change": ColumnKind("vp", "%.{d}f", 2),  # vol changes, RR, BF, mid vs fit, edges
     "rate": ColumnKind("%", "%.{d}f", 2),  # rates and yields: 4.75
@@ -386,8 +388,8 @@ COLUMN_KINDS: dict[str, ColumnKind] = {
     "delta": ColumnKind("", "%.{d}f", 3),  # per option, spot convention: 0.508
     "gamma": ColumnKind("", "%.{d}g", 3, significant=True),  # Γ 1% per option: 0.0936
     "greek": ColumnKind("", "%.{d}g", 3, significant=True),  # vanna, volga, charm, veta and third order
-    "probability": ColumnKind("%", "%.{d}f", 1),
-    "share": ColumnKind("%", "%.{d}f", 1),  # a share of a whole: in band, confidence
+    "probability": ColumnKind("%", "%.{d}f", 1),  # never 100.0 or 0.0 unless exact: see table()
+    "share": ColumnKind("%", "%.{d}f", 1),  # a share of a whole: in band, confidence; as probability
     "moneyness": ColumnKind("%", "%.{d}f", 1),  # K/F
     "log_moneyness": ColumnKind("", "%.{d}f", 3),  # k = ln(K/F)
     "quantity": ColumnKind("", "%+d", 0),  # a leg's signed size; a zero quantity is refused before it shows
@@ -452,7 +454,7 @@ def col(
     >>> col("vol", "IV", help="Implied vol at the mid.")["label"]
     'IV (%)'
     >>> col("vega", "Vega", help="$ per vol point.")["type_config"]["format"]
-    '%,.2f'
+    '%,.0f'
     >>> col("pnl", "P&L ($)", help="At expiry.", digits=0)["type_config"]["format"]
     '%,.0f'
     """
@@ -503,6 +505,18 @@ def _rounded(kind: ColumnKind, values: np.ndarray, places: int) -> np.ndarray:
     return rounded + 0.0  # -0.0 + 0.0 is +0.0
 
 
+#: The kinds in percent of a certainty: one strictly between 0% and 100% must not round to either (spec 2.5).
+_PERCENT_OF_CERTAINTY = ("probability", "share")
+
+
+def _short_of_certainty(values: np.ndarray) -> tuple[np.ndarray, bool]:
+    """``values`` (percent) with those strictly between 0 and 100 kept within [0.1, 99.9], so that at the kind's one
+    decimal none reads as a certainty; and whether any moved. An exact 0 or 100 (a count) stays."""
+    inside = (values > 0.0) & (values < 100.0)
+    kept = np.where(inside, np.clip(values, 0.1, 99.9), values)
+    return kept, bool(np.any(kept[inside] != values[inside]))
+
+
 def table(
     data: pd.DataFrame,
     kinds: Mapping[str, str],
@@ -518,7 +532,9 @@ def table(
     ``max_rows`` rows (then a fixed height of that many rows, which scrolls).
 
     Numeric columns are rounded to their precision before they are sent, so that no cell shows ``-0.00``; data are
-    in the units of the kind (see :class:`ColumnKind`). Missing values show the en dash.
+    in the units of the kind (see :class:`ColumnKind`). Missing values show the en dash. A probability or share
+    strictly between 0% and 100% never shows as a certainty: above 99.9% it is sent as 99.9, below 0.1% as 0.1, and
+    the column's help says so (spec 2.5's ``>99.9%`` and ``<0.1%``, which a number column cannot write).
 
     Parameters
     ----------
@@ -531,8 +547,8 @@ def table(
     labels : mapping of str to str, optional
         Headers other than the column names (without their units, which :func:`col` adds).
     digits : mapping of str to int, optional
-        A precision other than the one chosen from the data, for a column whose kind leaves it to the data (whole
-        dollars in a position's Γ P&L column whose largest value is below $1,000, as the spec's ``−$68``).
+        A precision other than the one chosen from the data, for a column whose kind leaves it to the data (strikes,
+        money, bp): whole dollars in a column of fees below $1,000, say.
     max_rows : int, default 15
         Rows shown before the table scrolls.
     **kwargs
@@ -565,19 +581,24 @@ def table(
         kind = COLUMN_KINDS.get(kinds[name])
         if kind is None:
             raise ValueError(f"unknown column kind {kinds[name]!r} for column {name!r}")
-        places = None
+        places, clipped = None, False
         if kind.format is not None:
             values = pd.to_numeric(data[name], errors="coerce").to_numpy(float)
             places = _auto_digits(kind, values)
             if kind.digits is None and digits and name in digits:
                 places = int(digits[name])
+            if kinds[name] in _PERCENT_OF_CERTAINTY:
+                values, clipped = _short_of_certainty(values)
             if kind.format.endswith("d"):  # whole numbers: printf's %d drops a fraction instead of rounding it
                 whole = np.round(values) + 0.0
                 shown[name] = pd.array(whole, dtype="Int64") if np.isnan(values).any() else whole
             else:
                 shown[name] = _rounded(kind, values, places)
+        text = help[name]
+        if kinds[name] in _PERCENT_OF_CERTAINTY and clipped:
+            text = f"{text.rstrip()} Above 99.9% shows as 99.9, below 0.1% as 0.1: only an exact 100% or 0% shows so."
         config[name] = col(
-            kinds[name], labels.get(name, str(name)), help=help[name], digits=places, pinned=True if i == 0 else None
+            kinds[name], labels.get(name, str(name)), help=text, digits=places, pinned=True if i == 0 else None
         )
     rows = len(data)
     height: int | str = "content" if rows <= max_rows else table_height(max_rows)

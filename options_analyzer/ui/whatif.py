@@ -254,16 +254,24 @@ def _number(text: object, default: float) -> float:
 
 
 def _value(key: str, default: float, limits: tuple[float, float]) -> float:
-    """A shift's value before its widget is drawn this run, for the widget's label: the session's, else the link's
-    (which the bound widget reads on the session's first run; outside the limits it ignores it, so this does too)."""
-    if key in st.session_state:
-        return float(st.session_state[key])
-    value = _number(st.query_params.get(key), default)
+    """A shift's value before its widget is drawn this run, for the widget's label: the session's, else the link's.
+    Outside the widget's limits it is the default, as the widget makes it: a bound widget ignores such a link, and one
+    whose limits changed under its value (a new horizon, a new vol mode) goes back to its default. The labels must
+    state what the widgets return, never a shift that is not applied."""
+    raw = st.session_state[key] if key in st.session_state else st.query_params.get(key)
+    value = _number(raw, default)
     return value if limits[0] <= value <= limits[1] else default
 
 
-def current() -> Shifts:
-    """The shifts in the session (else in the link), for a tab that shows the market but notes the scenario."""
+def current(last: int | None = None) -> Shifts:
+    """The shifts in the session (else in the link), for a tab that shows the market but notes the scenario.
+
+    Parameters
+    ----------
+    last : int, optional
+        The date control's last session (T+``last``, the position's front settlement), where the strip is drawn; a
+        later T+N reads as T+0, as the slider takes it. Without it any T+N up to 10,000 is read.
+    """
     mode = st.session_state.get("wvmode") or st.query_params.get("wvmode") or "absolute"
     mode = mode if mode in VOL_MODES else "absolute"
     vol_limits = VP_LIMITS if mode == "absolute" else PCT_LIMITS
@@ -271,7 +279,7 @@ def current() -> Shifts:
         spot=_value("ws", 0.0, SPOT_LIMITS),
         vol=_value("wv", 0.0, vol_limits),
         mode=mode,
-        sessions=max(0, int(_value("wd", 0, (0, 10_000)))),
+        sessions=max(0, int(_value("wd", 0, (0, 10_000 if last is None else last)))),
         rate=float(_value("wr", 0, BP_LIMITS)),
     )
 
@@ -279,6 +287,12 @@ def current() -> Shifts:
 def _reset() -> None:
     for key in SHIFT_KEYS:
         st.session_state[key] = 0 if key in ("wd", "wr") else 0.0
+
+
+def _new_mode() -> None:
+    # A number of vol points is not a percent: keeping +3 under a new mode would silently turn +3 vp into +3%, and a
+    # value outside the new mode's limits would show in the label for a run while the widget returns zero.
+    st.session_state["wv"] = 0.0
 
 
 def _vol_label(shifts: Shifts, atm_vol: float, tenor: float) -> str:
@@ -323,7 +337,13 @@ def strip(
     Shifts
         The shifts as set.
     """
-    shifts = current()
+    last = max(1, sessions_to(as_of.date(), horizon.date()))
+    dates = session_dates(as_of.date(), last)
+    if not 0 <= st.session_state.get("wd", 0) <= last:
+        # The front settlement moved nearer than the date set (a front leg closed): a slider keeps a value above its
+        # new maximum, so take the date back to T+0 here, as a link past the horizon reads.
+        st.session_state["wd"] = 0
+    shifts = current(last)
     # One line in the 1,038 px main column of a 1,440 px window with the sidebar open, at rest and with a scenario
     # set: the vol mode is a popover named by the shift's unit, and the SCENARIO badge takes the label row above Reset
     # rather than a place of its own (tests/test_desk_foundation_e2e.py measures it in IBM Plex). It wraps on narrower
@@ -362,26 +382,25 @@ def strip(
     mode = row.popover(
         MODE_UNITS[shifts.mode],
         help=f"Vol mode: {shifts.mode}. How the vol shift reads: vol points added to every leg's vol (absolute), "
-        "percent of each leg's vol (relative), or percent of one-month vol, damped with tenor (1M-scaled).",
+        "percent of each leg's vol (relative), or percent of one-month vol, damped with tenor (1M-scaled). A new mode "
+        "sets the vol shift back to zero.",
     ).segmented_control(
         "Vol mode",
         list(VOL_MODES),
         default="absolute",
         required=True,
         key="wvmode",
+        on_change=_new_mode,
         bind="query-params",
         persist_state="session",
     )
-    last = max(1, sessions_to(as_of.date(), horizon.date()))
-    dates = session_dates(as_of.date(), last)
 
     # A slider of whole sessions, not a select_slider of dated labels: a bound select_slider writes its options' labels
     # to the URL, and the link must hold the integer (?wd=5). The label names the date.
-    shown = min(shifts.sessions, last)
-    day = dates[shown]
+    day = dates[shifts.sessions]
     left = time_left(clock.year_fraction(datetime.combine(day, as_of.time()), horizon) * clock.MINUTES_PER_YEAR)
     wd = row.slider(
-        session_label(shown, day) + (f" ({left} left)" if left != "expired" else ""),
+        session_label(shifts.sessions, day) + (f" ({left} left)" if left != "expired" else ""),
         min_value=0,
         max_value=last,
         value=0,
