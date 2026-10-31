@@ -432,6 +432,10 @@ def test_the_explain_report_explains_the_what_if_move(index):
     )
     full = _frame(quiet, "Term").set_index("Term").loc["Full revaluation", "P&L"]
     assert full == pytest.approx(decay, abs=0.005)  # the column's cents
+    # Only time moves, so every other term is zero and carries no label; the time decay by repricing is exact.
+    labels = _chart(quiet, "explain_waterfall")["data"][0]["text"]
+    assert decay < 0 and [label for label in labels if label] == [f"−${-decay:.2f}"] * 2  # Θ and the total
+    assert any("unexplained (0.0% of the P&L)" in c.value for c in quiet.caption)
 
 
 @pytest.mark.parametrize("report", tab_risk.REPORTS)

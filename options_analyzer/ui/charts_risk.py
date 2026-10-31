@@ -280,7 +280,8 @@ def waterfall(names: Sequence[str], values, total: float, *, palette: dict[str, 
     """
     colors = palette or desk_theme.palette()
     values = [float(v) for v in values]
-    labels = [signed(v, 0 if abs(v) >= 100 else 2, "$") for v in [*values, total]]
+    # A term that is zero to the cent (Δ with spot unchanged) has no label: a row of "$0.00" read as noise.
+    labels = [signed(v, 0 if abs(v) >= 100 else 2, "$") if abs(v) >= 0.005 else "" for v in [*values, total]]
     fig = go.Figure(
         go.Waterfall(
             x=[*names, "Total"],

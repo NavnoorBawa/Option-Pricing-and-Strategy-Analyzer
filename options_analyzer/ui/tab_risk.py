@@ -1256,11 +1256,14 @@ def _explain(book: Book) -> None:
             frame,
             {"Term": "text", "P&L": "pnl"},
             {"Term": "Term of the explain.", "P&L": "Its P&L ($)."},
+            widths={"Term": "medium"},  # "Full revaluation" comes last, after the Greek letters the grid sizes from
             key="tbl_explain",
         )
+    # attribution's quality: |unexplained| over the P&L, floored at a tenth of the terms' gross (0 is a perfect fit).
+    share = MISSING if not math.isfinite(taylor.quality) else f"{taylor.quality:.1%} of the P&L"
     st.caption(
         md(
-            f"Taylor leaves {dollars(taylor.unexplained)} unexplained (quality {taylor.quality:.3f}); Shapley splits "
+            f"Taylor leaves {dollars(taylor.unexplained)} unexplained ({share}); Shapley splits "
             f"{dollars(shapley.total)} exactly, spot {dollars(shapley.spot)} against Δ + Γ "
             f"{dollars(taylor.delta + taylor.gamma)}."
         )
