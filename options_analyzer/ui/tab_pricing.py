@@ -431,11 +431,13 @@ def _day(day: date) -> str:
 
 def last_trade(expiry: date, settlement: str) -> str:
     """When the contract last trades, and how it settles: an AM monthly stops trading on the business day before
-    its expiry and settles at the special opening quotation (SOQ); a PM weekly trades to 16:00 ET on its expiry
-    day and settles at the close (Cboe SPX and SPXW specifications).
+    its expiry and settles at the special opening quotation (SOQ); a PM weekly trades to the close on its expiry
+    day, 16:00 ET or 13:00 on an early close, and settles at the close (Cboe SPX and SPXW specifications).
 
-    >>> last_trade(date(2026, 11, 20), "AM"), last_trade(date(2026, 11, 27), "PM")
-    ('last trade Thu 19‑Nov · settles at the SOQ', 'last trade Fri 27‑Nov 16:00 ET · settles at the close')
+    >>> last_trade(date(2026, 11, 20), "AM"), last_trade(date(2026, 11, 25), "PM")
+    ('last trade Thu 19‑Nov · settles at the SOQ', 'last trade Wed 25‑Nov 16:00 ET · settles at the close')
+    >>> last_trade(date(2026, 11, 27), "PM")  # the day after Thanksgiving closes early
+    'last trade Fri 27‑Nov 13:00 ET · settles at the close'
     """
     if settlement == "AM":
         return f"last trade {_day(clock.previous_trading_day(expiry - timedelta(days=1)))} · settles at the SOQ"
