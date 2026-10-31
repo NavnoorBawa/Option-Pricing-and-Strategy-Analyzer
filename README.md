@@ -29,8 +29,9 @@ the Streamlit app is a thin interface on top of it.
   and delta bucket, one-month-weighted vega, and strikes chosen by delta.
 - **Market time done properly**: a New York clock with the NYSE calendar, AM and PM settlement, minute-based year
   fractions and event variance, plus a realistic synthetic option chain and adapters for downloaded chains.
-- **A fast, linkable desk interface**: a compact header with the contract ticker and model, tabs bound to the URL that
-  compute only when opened (the page settles in half the time and sends a sixth of the data), and a Methodology reference that opens beside any
+- **A desk interface on one synthetic market**: every tab prices from one published, arbitrage-free surface fitted to
+  a synthetic SPX chain at a pinned valuation time; listed legs at their own smile vols; a risk console with six
+  reports; tabs bound to the URL that compute only when opened; and a Methodology reference that opens beside any
   tab.
 
 The [scorecard](docs/scorecard.md) lists every before-and-after measurement and the free resources the project is
@@ -52,19 +53,39 @@ built from.
 - Theta per calendar day beside the one-day decay by full revaluation, which leads when the two differ by more than
   10 %: inside three days to expiry theta / 365 is off by up to 2×, and for a 1-day at-the-money put it shows −10.66 on
   a 21.56 premium that the day takes whole.
-- All 14 Greeks (delta … ultima, plus rho and dividend rho) for calls and puts, with explicit units, a sensitivity
-  explorer and spot × volatility price heatmaps.
+- All 14 Greeks (delta … ultima, plus rho and dividend rho) for calls and puts, with explicit units.
+- The Pricing tab: six tiles (call, put, straddle, vol, forward with the strike's own pair-implied forward against
+  the parity forward, time to settlement), the contract's bid, ask, mid and their implied vols against the fit, a
+  value or Greek profile against spot, vol or time, the chain ladder (a row click sets the strike), the Greeks to
+  third order with P(ITM) from the smile (Breeden–Litzenberger) beside N(d₂), and engine diagnostics (the trees and
+  Monte Carlo against the closed form, computed only while open).
 
 **Strategy**
 - 26 templates (verticals, straddles and strangles, iron butterfly and condor, butterflies, ratio backspreads,
   collars, jade lizard, synthetics, calendars and diagonals) or any custom combination of calls, puts and stock.
-- Every leg is editable (side, size, strike, expiry, implied volatility and fill price), and edits survive tab
-  switches and input changes. Contract multiplier and commissions are included.
-- P&L at expiry, today and at any date in between, with an implied-volatility shift, exact breakevens, unlimited-risk
-  detection, probability of profit, expected P&L and position and per-leg Greeks.
+- Under the synthetic index the legs are listed contracts: an expiry date and settlement, short strikes chosen by
+  their own delta on the smile and snapped to listed strikes (16Δ by default), wings in index points, each leg's vol
+  read from the fitted surface at its strike and expiry (or typed over it, marked), and its bid and ask from the
+  chain. The default is the iron condor a desk would open on (at 23-Oct-26 16:00: 5,300 / 5,400 / 6,150 / 6,250 on
+  18-Dec-26).
+- Six tiles: net premium, the package's natural market against its theoretical value, max profit and loss,
+  breakevens and the probability of profit on the risk-neutral smile (log-normal at the flat vol in the Textbook
+  market), each with its basis.
+- One P&L chart with expiry, today and dated curves, the risk-neutral 68 % and 95 % ranges to the front expiry from
+  the surface's distribution, and a Greek strip; a date × spot table view; a what-if strip shared with Risk (spot,
+  vol in points, relative or one-month scaled, trading-session date and rate) that marks the screen as a scenario
+  while any shift is on.
+- A blotter that edits every leg (side, size, strike, expiry, vol and fill), structure steppers (shift, width, roll,
+  flip), and edits that survive tab switches. Contract multiplier and commissions are included.
 
 **Risk** (for the position built on the Strategy tab, or the template named in the link)
-- P&L heatmaps of spot × implied vol and spot × date, and time-decay curves, all from full revaluation.
+- A position line and six pinned tiles: dollar delta (and its E-mini equivalent), the gamma P&L of a 1 % move, vega
+  per vol point beside the one-month-weighted vega, theta per day with the breakeven daily move against the implied
+  move, and the worst loss on the scenario grid and in the stress tests.
+- Six reports, each computed only when chosen: a Greek ladder by full revaluation; scenario grids of spot × vol and
+  spot × trading date, and an illustrative FINRA 4210(g)-style portfolio-margin array (ten points from −8 % to
+  +6 % for a broad-based index); stress tests; VaR; vega by expiry and delta bucket; and an explain of the what-if
+  move (a second-order Greek waterfall and the exact Shapley split over spot, vol, time and rate).
 - Stress tests calibrated to Black Monday, the dot-com bust, 2008, Volmageddon, the COVID crash, the 2022 rate shock,
   the April 2025 tariff shock and the Fed's 2026 severely adverse scenario, plus custom shocks. Each vol shock is the
   ratio of the sourced closing levels (FRED VIXCLS and VXOCLS; the Fed's 72.0 / 26.4), checked by a test against a
@@ -72,13 +93,18 @@ built from.
 - Monte Carlo VaR and Expected Shortfall with Normal, Student-t or GARCH(1,1) returns and implied-vol dynamics on by
   default (index-like: vol of vol 100 %, spot–vol correlation −0.7), shown beside the spot-only VaR and ES with implied
   vol frozen, which understates a 45-day short straddle's 99 % VaR by 27 % ($2,833 against $3,862), and delta-normal
-  VaR and the exact delta-gamma-theta VaR (the non-central chi-square quantile) for comparison.
+  VaR and the exact delta-gamma-theta VaR (the non-central chi-square quantile) for comparison. The VaR model's
+  backtest is quoted on a synthetic GARCH-t history and tagged as such.
 - In the library: VaR and ES backtests (Kupiec, Christoffersen, the Basel traffic light, Acerbi–Szekely Z2, FZ0 and
-  Diebold–Mariano, MAR32's P&L attribution test, each with its power at the sample size) run on a synthetic GARCH-t
-  history, and P&L explain by a second-order Greek waterfall and by the exact Shapley split over spot, vol, time and
-  rate.
+  Diebold–Mariano, MAR32's P&L attribution test, each with its power at the sample size), and P&L explain by a
+  second-order Greek waterfall and by the exact Shapley split.
 
 **Surface and IV**
+- The Surface tab: a data panel whose counts reconcile (quoted, used, and each exclusion by reason), filters and
+  calibration settings (a changed setting is marked in the header), six tiles (30-day ATMF vol beside a VIX-style
+  model-free figure, 25Δ risk reversal and butterfly, term slope, fit error against the half-spread, arbitrage
+  counts), smile, quotes, term, grid and 3D views, an expiry table that sets the focus expiry, and CSV and Excel
+  exports that carry their provenance (source, valuation time, model, fit and version).
 - Surfaces from quotes as a desk builds them: each expiry's forward and discount factor from put–call parity (a
   weighted fit of C − P = DF·(F − K) near the money, outliers trimmed), prices inverted with Black-76 at them, and an
   SVI smile per expiry fitted to the bid/ask with spread weights and held free of butterfly and calendar arbitrage,
@@ -96,14 +122,17 @@ built from.
 **Desk shell**
 - The app opens on a synthetic SPX index at a valuation time (by default the last completed cash close, so every
   visitor sees the same numbers all day): the chain is priced by the app's generator, labelled synthetic everywhere,
-  and read back like real quotes, with parity forwards and the arbitrage-free SVI surface. The sidebar picks a listed
-  expiry (AM or PM settlement, time to it in minutes) and a strike on the listed 5-point grid; the vol is the
-  surface's at that strike (or a typed override, marked), and the rate and dividend yield are those implied by the
-  expiry's forward and discount factor, so every tab prices Black-76 on them. A Textbook market keeps the typed
-  inputs of version 2 (S = K = 100, one year), and links from version 2 open it.
-- A header with the valuation time and the index (or, in the Textbook market, the contract ticker), the contract,
-  the model in use and a Share link that reproduces the exact view: the market and its valuation time, the open tab,
-  the sidebar inputs and the strategy template.
+  and read back like real quotes, with parity forwards and the arbitrage-free SVI surface that every tab prices
+  from. The sidebar picks a listed expiry (AM or PM settlement, time to it in minutes) and a strike on the listed
+  5-point grid; the vol is the surface's at that strike (or a typed override, marked), and the rate and dividend
+  yield are those implied by the expiry's forward and discount factor, so every tab prices Black-76 on them. A
+  Textbook market keeps the typed inputs of version 2 (S = K = 100, one year), and links from version 2 open it.
+- A one-row header with the valuation time and the index level, state badges (synthetic data, a vol override, a
+  changed fit), the engine in use and a Share link that reproduces the exact view: the market and its valuation
+  time, the open tab, the sidebar inputs, the strategy and its what-if shifts, and each tab's view.
+- One number standard everywhere (U+2212 minus, no negative zero, one precision per column, units in every header),
+  enforced by a lint in the tests; amber marks user state only (an override, a changed fit, a what-if scenario);
+  and layouts checked in Chromium at 1,440 px and on 360 to 440 px phones.
 - Only the open tab computes, so switching tabs and changing inputs stays fast. Old links keep working.
 - The Methodology tab documents every model, formula and assumption with verified references, and opens as a drawer
   beside whichever tab is open.
@@ -226,11 +255,12 @@ The public app uses synthetic data and files you upload; it never scrapes market
 
 ## Limitations
 
-- Strategy valuation uses Black–Scholes–Merton at each leg's implied volatility (no smile dynamics, European
-  exercise), and probabilities are log-normal.
-- Strategy legs and risk scenarios still use one vol and one carry for every leg (the Pricing contract's); legs at
-  other expiries do not yet read the surface.
-- Transaction costs beyond a flat commission, margin and discrete dividends are not modelled.
+- Strategy and Risk value every leg with Black–Scholes–Merton at its own surface vol and expiry, sticky strike: the
+  smile does not move with spot in scenarios, and exercise is European (the textbook market's American engine prices
+  the Pricing and IV tabs only, and the Strategy tab says what early exercise adds).
+- The portfolio-margin array is illustrative (FINRA 4210(g)-style), not a broker's requirement. Transaction costs
+  beyond a flat commission and discrete dividends are not modelled.
+- The VaR model's backtest runs on a synthetic history: there is no market history in the public app.
 
 [ROADMAP.md](ROADMAP.md) lists what is done and what remains, and
 [docs/improvement-guide.md](docs/improvement-guide.md) says how to take it further. This project is for education and analysis only and is
