@@ -1188,14 +1188,18 @@ def _greeks(inputs: Inputs, prices: Prices, market: Contract) -> None:
             help="Show the closed-form European Greeks beside the American engine's.",
         )
     frame, caption = greeks_frame(inputs, prices, market, order=ORDERS.index(order) + 1, bsm_ref=bsm_ref)
-    engine = inputs.model.label
+    engine = f"{inputs.model.label}, per share."
+    if _alo(inputs):
+        engine = alo_greeks_note(inputs, prices)
+        if any(prices.alo_greeks[k].basis != "differences" or prices.alo_greeks[k].one_sided for k in cache.KINDS):
+            caption = f"{caption} Some ALO Greeks are exact or one-sided here: see the column's help.".strip()
     config = {
         "Greek": st.column_config.TextColumn("Greek", help="The sensitivity.", pinned=True),
         "Unit": st.column_config.TextColumn("Unit", help="What one unit of the figure is, per share."),
     }
     for column in frame.columns[2:]:
-        source = "Closed-form European (Black-Scholes-Merton)" if "BSM ref" in column else engine
-        config[column] = st.column_config.TextColumn(column, help=f"{source}, per share.", alignment="right")
+        source = "Closed-form European (Black-Scholes-Merton), per share." if "BSM ref" in column else engine
+        config[column] = st.column_config.TextColumn(column, help=md(source), alignment="right")
     st.dataframe(
         frame,
         key="tbl_pricing_greeks",
@@ -1206,6 +1210,62 @@ def _greeks(inputs: Inputs, prices: Prices, market: Contract) -> None:
     )
     if caption:
         st.caption(caption)
+
+
+#: How the American engine's Greeks are computed (american.GREEK_BUMPS).
+ALO_GREEKS_NOTE = (
+    "American Greeks of the sidebar engine, per share in the units shown: central differences of its value with the "
+    "spot and the time to expiry moved by ±0.01%, the vol by ±0.01 vol point and the rate and dividend yield by ±1 "
+    "bp, the scheme and the boundary equation held fixed."
+)
+#: At a rate and dividend yield of zero both options are European, at the edge of early exercise (american.greeks).
+ALO_ZERO_CARRY_NOTE = (
+    "At a rate and dividend yield of zero, a 1\xa0bp move one way makes early exercise pay (a lower rate or a higher "
+    "dividend yield for the call, a higher rate or a lower dividend yield for the put), so rho and dividend rho are "
+    "one-sided here: the slopes on the side where it does not."
+)
+#: The Greeks as the note names them.
+_GREEK_WORDS = {"epsilon": "dividend rho"}
+
+
+def _join(words: list[str]) -> str:
+    return " and ".join(words) if len(words) < 3 else ", ".join(words[:-1]) + " and " + words[-1]
+
+
+def alo_greeks_note(inputs: Inputs, prices: Prices) -> str:
+    """How the American engine's Greeks are computed, and for which option each exception holds
+    (``AmericanGreeks.basis`` and ``one_sided``, and the fallback to the tree): the help of the Greeks table's
+    engine columns."""
+    greeks, details = prices.alo_greeks, prices.alo
+    notes = [ALO_GREEKS_NOTE]
+    closed = [kind for kind in cache.KINDS if greeks[kind].basis == "closed form"]
+    if len(closed) == 2:
+        notes.append(
+            "The call and the put equal their Black-Scholes-Merton values, so their Greeks are the closed-form ones."
+        )
+    elif closed:
+        notes.append(f"The {closed[0]} equals its Black-Scholes-Merton value, so its Greeks are the closed-form ones.")
+    if len(closed) == 2 and inputs.rate == 0.0 and inputs.dividend_yield == 0.0:
+        notes.append(ALO_ZERO_CARRY_NOTE)
+    for kind in cache.KINDS:
+        if greeks[kind].basis == "exercise value":
+            side, payoff, delta = ("above", "S − K", "1") if kind == "call" else ("below", "K − S", "−1")
+            notes.append(
+                f"The {kind} is exercised at once at this spot (at or {side} its critical spot), so its Greeks are "
+                f"those of its exercise value {payoff}: delta {delta}, the others zero."
+            )
+        if sided := [_GREEK_WORDS.get(name, name) for name in greeks[kind].one_sided]:
+            notes.append(
+                f"The {kind}'s {_join(sided)} {'is' if len(sided) == 1 else 'are'} one-sided: a bump one way would "
+                "change how the option is valued (a different exercise regime, the tree instead of the engine or "
+                "the reverse, or exercise at once), so the difference is taken on the other side alone."
+            )
+        if details[kind].fallback:
+            notes.append(
+                f"The {kind}'s are differences of tree values (see the warning above), far less smooth than the "
+                "engine's."
+            )
+    return " ".join(notes)
 
 
 # --- Engine diagnostics -----------------------------------------------------------------------------------------

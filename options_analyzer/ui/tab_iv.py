@@ -179,8 +179,19 @@ def render(inputs: Inputs) -> None:
         st.error(f"{_TREE_LIMIT} ({exc}).")
         return
     listed = market.listed
+    lower, upper = (
+        american_bounds(S, K, T, r, q, option_type) if american else no_arbitrage_bounds(S, K, T, r, q, option_type)
+    )
+    # Without a quote the price starts at the model value to the cent, never below the floor in cents: a deep
+    # in-the-money option with no time value (a call at 60 on 100 two days out, floor 40.0131) would otherwise start
+    # at 40.01, below the bound, an error on opening the tab.
+    floor_cents = math.ceil(lower * 100 - 1e-9) / 100
+
+    def cents(value: float) -> float:
+        return max(round(value, 2), floor_cents)
+
     if single:
-        start = round(model_value, 2) if quote is None else quote.mid if quote.bid > 0 else quote.ask
+        start = cents(model_value) if quote is None else quote.mid if quote.bid > 0 else quote.ask
         price = row.number_input(
             "Price",
             min_value=0.0,
@@ -192,8 +203,8 @@ def render(inputs: Inputs) -> None:
         )
         prices = [("Price", float(price))]
     else:
-        bid0 = quote.bid if quote is not None else max(round(model_value * 0.99, 2), 0.0)
-        ask0 = quote.ask if quote is not None else round(model_value * 1.01, 2)
+        bid0 = quote.bid if quote is not None else cents(model_value * 0.99)
+        ask0 = quote.ask if quote is not None else max(cents(model_value * 1.01), bid0)
         bid = row.number_input(
             "Bid",
             min_value=0.0,
@@ -214,9 +225,6 @@ def render(inputs: Inputs) -> None:
         )
         prices = [("Bid", float(bid)), ("Mid", 0.5 * (float(bid) + float(ask))), ("Ask", float(ask))]
 
-    lower, upper = (
-        american_bounds(S, K, T, r, q, option_type) if american else no_arbitrage_bounds(S, K, T, r, q, option_type)
-    )
     floor_name = "the intrinsic value" if american else "the discounted intrinsic value"
     solved = [
         _solve(label, p, (S, K, T, r, q, option_type), american, alo, model.scheme, lower, upper) for label, p in prices
