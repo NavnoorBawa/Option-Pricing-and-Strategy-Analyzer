@@ -221,7 +221,7 @@ def _settings(**changes) -> dg.FitSettings:
 
 @pytest.mark.parametrize("tab", ["Pricing", "Strategy", "Risk", "Surface", "IV", "Methodology"])
 def test_an_unconstrained_calibration_shows_the_fit_chip_on_every_tab_and_moves_no_price(new_app, tab):
-    default = new_app(preset=None, asof=ASOF, tab="Pricing").run()
+    default = new_app(preset=None, asof=ASOF, tab=tab).run()
     at = new_app(preset=None, asof=ASOF, tab=tab)
     at.session_state["sf_cal"] = "Unconstrained"
     at.run()
@@ -229,8 +229,8 @@ def test_an_unconstrained_calibration_shows_the_fit_chip_on_every_tab_and_moves_
     chip = next(b for b in at.markdown if b.value == ":yellow-badge[FIT]")
     assert chip is not None
     # The default chain's arbitrage-free fit never binds, so the unconstrained fit is the same surface: no number on
-    # the price cards moves (UI spec 3.4: "changes no number on Pricing").
-    assert [m.value for m in at.metric[:4]] == [m.value for m in default.metric[:4]]
+    # the tab's tiles moves (UI spec 3.4: "changes no number on Pricing"), on Pricing or any other tab.
+    assert [(m.label, m.value) for m in at.metric] == [(m.label, m.value) for m in default.metric]
     assert not any(b.value == ":yellow-badge[FIT]" for b in default.markdown)
 
 
