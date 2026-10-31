@@ -24,6 +24,10 @@ under skew (UI spec 2.7 item 6). Its derivative is the density, Gatheral's g(y) 
 g(y) >= 0 (no butterfly arbitrage) exactly where the density is non-negative. No finite difference is taken, so the
 CDF carries no step-size error: it is exact for the fitted smile.
 
+An expiry is a date and a settlement: the SPX AM monthly and the SPXW PM weekly both expire on each third Friday,
+six and a half hours apart. Every method takes the date alone where one settlement is listed on it, and an
+:class:`Expiry` (date and settlement) where both are.
+
 The class holds no Streamlit code, so the library and its tests use it without the app (``ui/surface_state.py``
 builds and caches the app's one).
 """
@@ -43,7 +47,7 @@ from ..lets_be_rational import implied_black_volatility
 from .quotes import MATURITY_TOLERANCE
 from .surface import VolSurface
 
-__all__ = ["ONE_SD", "TWO_SD", "PublishedSurface", "Quote", "SurfaceVol"]
+__all__ = ["ONE_SD", "TWO_SD", "Expiry", "PublishedSurface", "Quote", "SurfaceVol"]
 
 #: Probability inside one and two standard deviations of a normal: the "68%" and "95%" ranges, 68.27% and 95.45%.
 ONE_SD = math.erf(1.0 / math.sqrt(2.0))
@@ -55,6 +59,14 @@ _GRID_SDS, _GRID_POINTS, _TAIL = 12.0, 801, 1e-12
 #: Steps of :meth:`PublishedSurface.quantile`'s safeguarded Newton solver: 6 to 8 reach 1e-15 from the grid's
 #: bracket; bisection alone would need about 40.
 _SOLVER_STEPS = 50
+
+
+class Expiry(NamedTuple):
+    """A listed expiry: its date and its settlement, ``"AM"`` (at the open's settlement quotation, SPX monthlies)
+    or ``"PM"`` (at the close, SPXW). Needed where both are listed on one date; a date alone names the other ones."""
+
+    day: date
+    settlement: str
 
 
 class SurfaceVol(NamedTuple):
@@ -105,10 +117,11 @@ class PublishedSurface:
     surface : VolSurface
         The fitted market surface (SVI slices, forwards and discount factors).
     expiries : pandas.DataFrame
-        One row per listed expiry in date order: ``expiry`` (date), ``root``, ``settlement`` (AM or PM),
-        ``settles_at``, ``maturity`` (years to the settlement, minutes / 525,600), ``forward``, ``discount_factor``
-        and the surface slices it is read from (``lower``, ``upper``, ``weight``: total variance
-        ``(1 − weight) · w_lower + weight · w_upper`` at fixed y; one slice when the expiry was fitted itself).
+        One row per listed expiry in order of settlement (by date, an AM before a PM): ``expiry`` (date), ``root``,
+        ``settlement`` (AM or PM), ``settles_at``, ``maturity`` (years to the settlement, minutes / 525,600),
+        ``forward``, ``discount_factor`` and the surface slices it is read from (``lower``, ``upper``, ``weight``:
+        total variance ``(1 − weight) · w_lower + weight · w_upper`` at fixed y; one slice when the expiry was fitted
+        itself).
     quotes : pandas.DataFrame
         The chain in the canonical schema with ``mid``, ``iv_bid``, ``iv_ask`` and ``iv_mid`` added.
     spot : float
@@ -165,15 +178,16 @@ class PublishedSurface:
         Raises
         ------
         ValueError
-            If the surface has no SVI slices (an SSVI surface is not a market fit), or an expiry date is listed
-            twice (two roots on one date: the expiry would be ambiguous).
+            If the surface has no SVI slices (an SSVI surface is not a market fit), or an expiry is listed twice with
+            one settlement (two roots settling at the same time on one date: a quote would be ambiguous). An AM and a
+            PM expiry on one date are two expiries.
         """
         if not surface.svi or surface.log_forward_ratio is None:
             raise ValueError("only a market surface (SVI slices with their forwards) can be published")
         table = expiries[["expiry", "root", "settlement", "settles_at", "maturity", "forward", "discount_factor"]]
-        table = table.assign(expiry=[_date(d) for d in table["expiry"]]).sort_values("expiry", kind="stable")
-        if table["expiry"].duplicated().any():
-            raise ValueError("an expiry date is listed under two roots; publish one root per date")
+        table = table.assign(expiry=[_date(d) for d in table["expiry"]]).sort_values("maturity", kind="stable")
+        if table[["expiry", "settlement"]].duplicated().any():
+            raise ValueError("an expiry is listed twice with one settlement; publish one root per date and settlement")
         Ts = surface.maturities
         lower, upper, weight = [], [], []
         for T in table["maturity"].to_numpy(float):
@@ -189,12 +203,13 @@ class PublishedSurface:
 
         quotes = chain.copy()
         quotes["expiry"] = [_date(d) for d in quotes["expiry"]]
-        rows = table.set_index("expiry")
-        listed = quotes["expiry"].isin(rows.index)
-        quotes = quotes[listed].reset_index(drop=True)
-        forward = quotes["expiry"].map(rows["forward"]).to_numpy(float)
-        discount = quotes["expiry"].map(rows["discount_factor"]).to_numpy(float)
-        maturity = quotes["expiry"].map(rows["maturity"]).to_numpy(float)
+        rows = table.set_index(["expiry", "settlement"])
+        keys = pd.MultiIndex.from_frame(quotes[["expiry", "settlement"]])
+        quotes = quotes[keys.isin(rows.index)].reset_index(drop=True)
+        keys = pd.MultiIndex.from_frame(quotes[["expiry", "settlement"]])
+        forward, discount, maturity = (
+            rows[c].reindex(keys).to_numpy(float) for c in ("forward", "discount_factor", "maturity")
+        )
         theta = np.where(quotes["type"].to_numpy() == "call", 1.0, -1.0)
         strikes = quotes["strike"].to_numpy(float)
         bid, ask = quotes["bid"].to_numpy(float), quotes["ask"].to_numpy(float)
@@ -214,11 +229,39 @@ class PublishedSurface:
 
     # --- per expiry -------------------------------------------------------------------------------------------------
 
+    def _key(self, expiry) -> tuple[date, str]:
+        """``(date, settlement)`` of a listed expiry named by an :class:`Expiry` (or a pair) or by its date alone.
+
+        Raises
+        ------
+        KeyError
+            If nothing is listed on that date with that settlement.
+        ValueError
+            If a date alone is given and both an AM and a PM expiry are listed on it.
+        """
+        if "settlements" not in self._cache:
+            by_day: dict[date, list[str]] = {}
+            for day, style in zip(self.expiries["expiry"], self.expiries["settlement"], strict=True):
+                by_day.setdefault(day, []).append(str(style))
+            self._cache["settlements"] = by_day
+        if isinstance(expiry, tuple) and len(expiry) == 2 and isinstance(expiry[1], str):
+            day, style = _date(expiry[0]), expiry[1].upper()
+            if style not in self._cache["settlements"].get(day, ()):
+                raise KeyError(f"{day} {style} is not a listed expiry")
+            return day, style
+        day = _date(expiry)
+        styles = self._cache["settlements"].get(day)
+        if not styles:
+            raise KeyError(f"{day} is not a listed expiry")
+        if len(styles) > 1:
+            raise ValueError(f"{day} lists {' and '.join(sorted(styles))} expiries: name one, as Expiry(day, 'PM')")
+        return day, styles[0]
+
     def _row(self, expiry) -> _Expiry:
         """The expiry's row as plain numbers (a dictionary look-up: a pandas filter per call cost 0.2 ms)."""
         if "rows" not in self._cache:
             self._cache["rows"] = {
-                row.expiry: _Expiry(
+                (row.expiry, str(row.settlement)): _Expiry(
                     float(row.forward),
                     float(row.discount_factor),
                     float(row.maturity),
@@ -229,10 +272,7 @@ class PublishedSurface:
                 )
                 for row in self.expiries.itertuples(index=False)
             }
-        found = self._cache["rows"].get(_date(expiry))
-        if found is None:
-            raise KeyError(f"{_date(expiry)} is not a listed expiry")
-        return found
+        return self._cache["rows"][self._key(expiry)]
 
     def forward(self, expiry) -> float:
         """The expiry's forward F (put-call parity, as fitted)."""
@@ -252,10 +292,10 @@ class PublishedSurface:
 
     def strikes(self, expiry) -> np.ndarray:
         """The expiry's listed strikes, ascending."""
-        key = ("strikes", _date(expiry))
+        day, style = self._key(expiry)
+        key = ("strikes", day, style)
         if key not in self._cache:
-            self._row(expiry)
-            mine = self.quotes["expiry"] == _date(expiry)
+            mine = (self.quotes["expiry"] == day) & (self.quotes["settlement"] == style)
             self._cache[key] = np.unique(self.quotes.loc[mine, "strike"].to_numpy(float))
         return self._cache[key]
 
@@ -306,8 +346,8 @@ class PublishedSurface:
         ----------
         strike : float or array_like
             Strikes K; 0 for K <= 0.
-        expiry : date
-            A listed expiry.
+        expiry : date or Expiry
+            A listed expiry: its date, or an :class:`Expiry` where AM and PM are both listed on it.
 
         Returns
         -------
@@ -339,7 +379,7 @@ class PublishedSurface:
         """The CDF tabulated in y for :meth:`quantile`'s brackets: from ±12 ATM standard deviations, each end pushed
         out (doubled, at most four times) until the CDF there is below :data:`_TAIL` from 0 or 1. SVI's wings are
         linear in y, so the left tail is fat: at a two-year expiry 12 standard deviations leave 1e−5 below."""
-        key = ("grid", _date(expiry))
+        key = ("grid", *self._key(expiry))
         if key not in self._cache:
             sd = math.sqrt(float(self._variance(expiry, np.zeros(1))[0][0]))
             lo, hi = -_GRID_SDS * sd, _GRID_SDS * sd
@@ -366,8 +406,8 @@ class PublishedSurface:
         ----------
         p : float or array_like
             Probabilities in (0, 1).
-        expiry : date
-            A listed expiry.
+        expiry : date or Expiry
+            A listed expiry: its date, or an :class:`Expiry` where AM and PM are both listed on it.
 
         Returns
         -------
@@ -403,8 +443,9 @@ class PublishedSurface:
 
     def _quote_index(self) -> dict:
         if "quotes" not in self._cache:
-            keys = zip(self.quotes["expiry"], self.quotes["strike"].astype(float), self.quotes["type"], strict=True)
-            self._cache["quotes"] = {key: i for i, key in enumerate(keys)}
+            columns = (self.quotes[c] for c in ("expiry", "settlement", "strike", "type"))
+            keys = zip(*columns, strict=True)
+            self._cache["quotes"] = {(day, style, float(k), kind): i for i, (day, style, k, kind) in enumerate(keys)}
         return self._cache["quotes"]
 
     def quote(self, expiry, strike: float, kind: str) -> Quote:
@@ -415,9 +456,10 @@ class PublishedSurface:
         KeyError
             If the contract is not listed.
         """
-        i = self._quote_index().get((_date(expiry), float(strike), kind))
+        day, style = self._key(expiry)
+        i = self._quote_index().get((day, style, float(strike), kind))
         if i is None:
-            raise KeyError(f"no {kind} at {strike:g} on {_date(expiry)} in the chain")
+            raise KeyError(f"no {kind} at {strike:g} on {day} {style} in the chain")
         row = self.quotes.iloc[i]
         return Quote(*(float(row[c]) for c in ("bid", "ask", "mid", "iv_bid", "iv_ask", "iv_mid")))
 
@@ -441,8 +483,8 @@ class PublishedSurface:
 
         Parameters
         ----------
-        expiry : date
-            A listed expiry.
+        expiry : date or Expiry
+            A listed expiry: its date, or an :class:`Expiry` where AM and PM are both listed on it.
         target : float
             The delta wanted, spot convention: positive for a call (0.16), negative for a put (−0.16).
         kind : {"call", "put"}
@@ -460,12 +502,12 @@ class PublishedSurface:
         """
         if (kind == "call" and not 0 < target < 1) or (kind == "put" and not -1 < target < 0):
             raise ValueError(f"a {kind} delta lies in {'(0, 1)' if kind == 'call' else '(-1, 0)'}, got {target!r}")
-        key = ("deltas", _date(expiry), kind)
+        key = ("deltas", *self._key(expiry), kind)
         if key not in self._cache:
             strikes = self.strikes(expiry)
             self._cache[key] = (strikes, np.asarray(self.delta(strikes, expiry, kind)))
         strikes, deltas = self._cache[key]
         distance = np.abs(deltas - target)
         if not np.isfinite(distance).any():
-            raise ValueError(f"no listed strike on {_date(expiry)} has a surface vol")
+            raise ValueError(f"no listed strike on {' '.join(map(str, self._key(expiry)))} has a surface vol")
         return float(strikes[int(np.nanargmin(distance))])

@@ -275,6 +275,45 @@ def test_unlisted_expiries_and_contracts_are_refused(default):
         published.quote(DEC, 5801.0, "call")
 
 
+def test_an_am_and_a_pm_expiry_on_one_date_are_two_expiries(default):
+    # A real SPX chain lists the AM monthly (SPX) and the PM weekly (SPXW) on each third Friday. Here the 18-Dec
+    # SPXW PM is added beside the SPX AM: its own quotes (the AM's, offered 0.05 wider), 6.5 hours more to run.
+    chain, published = default
+    am = chain.quotes[pd.to_datetime(chain.quotes["expiry"]).dt.date == DEC]
+    pm = am.assign(
+        root="SPXW", settlement="PM", symbol=am["symbol"].str.replace("SPX", "SPXW", n=1), ask=am["ask"] + 0.05
+    )
+    row = published.expiries[published.expiries["expiry"] == DEC].iloc[0]
+    late = 6.5 * 60 / 525_600  # 09:30 to 16:00 in years (minutes / 525,600)
+    expiries = pd.concat(
+        [published.expiries, row.to_frame().T.assign(root="SPXW", settlement="PM", maturity=row["maturity"] + late)]
+    )
+    both = PublishedSurface.build(
+        published.surface, expiries, pd.concat([chain.quotes, pm]), spot=SPOT, as_of=ASOF, source=published.source
+    )
+    am_key, pm_key = vs.published.Expiry(DEC, "AM"), vs.published.Expiry(DEC, "PM")
+    assert both.settlement(am_key) == "AM" and both.settlement(pm_key) == "PM"
+    assert both.maturity(pm_key) - both.maturity(am_key) == pytest.approx(late, abs=1e-15)
+    np.testing.assert_array_equal(both.strikes(am_key), both.strikes(pm_key))
+    for strike, kind in ((5800.0, "call"), (5400.0, "put")):
+        quote_am, quote_pm = both.quote(am_key, strike, kind), both.quote(pm_key, strike, kind)
+        assert quote_am == published.quote(DEC, strike, kind)  # the AM is untouched by the PM beside it
+        assert quote_pm.ask == pytest.approx(quote_am.ask + 0.05, abs=1e-12) and quote_pm.bid == quote_am.bid
+    assert both.delta_strike(pm_key, -0.16, "put") in both.strikes(pm_key)
+    assert 0 < both.cdf(5800.0, pm_key) < 1
+    # A date alone is ambiguous on 18-Dec and names its one expiry on any other date.
+    with pytest.raises(ValueError, match="AM and PM"):
+        both.quote(DEC, 5800.0, "call")
+    assert both.forward(date(2026, 11, 20)) == published.forward(date(2026, 11, 20))
+    with pytest.raises(KeyError, match="not a listed expiry"):
+        published.forward(pm_key)  # the chain without the PM
+    with pytest.raises(ValueError, match="listed twice with one settlement"):
+        PublishedSurface.build(
+            published.surface, pd.concat([published.expiries, row.to_frame().T]), chain.quotes,
+            spot=SPOT, as_of=ASOF, source=published.source,
+        )  # fmt: skip
+
+
 def test_the_vol_is_flagged_beyond_the_quotes(default):
     _, published = default
     F = published.forward(DEC)
