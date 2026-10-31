@@ -625,6 +625,31 @@ LADDER_HELP = {
 }
 
 
+#: Units of the whole-dollar kinds, for :func:`small_dollars`.
+_DOLLAR_UNITS = {"dollar_delta": "$", "gamma_pnl": "$", "vega": "$/vp", "theta": "$/day"}
+
+
+def small_dollars(frame: pd.DataFrame, kinds: Mapping[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+    """``(kinds, labels)`` for :func:`.components.table` with cents in a whole-dollar column (the registry's $Δ, Γ P&L,
+    vega and Θ) whose amounts all stay below $10 and are not all zero, as the tiles write them (:func:`dollars`): on
+    the textbook market's single contract the Γ P&L 1% column (−$0.05) and Θ (−$0.14) read 0 to the dollar. Such a
+    column takes the P&L kind (cents below $1,000) under a label that keeps its unit.
+
+    >>> frame = pd.DataFrame({"Θ": [-0.14, -0.2], "Vega": [-12.0, 3.0]})
+    >>> small_dollars(frame, {"Θ": "theta", "Vega": "vega"})
+    ({'Θ': 'pnl', 'Vega': 'vega'}, {'Θ': 'Θ ($/day)'})
+    """
+    kinds, labels = dict(kinds), {}
+    for name, kind in kinds.items():
+        if kind not in _DOLLAR_UNITS or name not in frame:
+            continue
+        values = pd.to_numeric(frame[name], errors="coerce").to_numpy(float)
+        values = values[np.isfinite(values)]
+        if values.size and 0 < round(float(np.max(np.abs(values))), 2) < 10:  # an empty bucket stays ``0``
+            kinds[name], labels[name] = "pnl", f"{name} ({_DOLLAR_UNITS[kind]})"
+    return kinds, labels
+
+
 def _ladder(book: Book) -> None:
     row = _controls("ladder_controls")
     axis = _segmented(row, "Steps", ("%", "σ"), "lad_axis", "Spot moves in percent, or in daily σ at the leg vol.")
@@ -635,7 +660,8 @@ def _ladder(book: Book) -> None:
     frame = ladder_frame(book, axis, roll, order == "+2nd")
     left, right = st.columns([1.45, 1], gap="medium")
     with left:
-        table(frame, LADDER_KINDS, LADDER_HELP, key="tbl_ladder")
+        kinds, labels = small_dollars(frame, {name: LADDER_KINDS[name] for name in frame.columns})
+        table(frame, kinds, LADDER_HELP, labels=labels, key="tbl_ladder")
     with right:
         metric = _segmented(
             st, "Chart", LADDER_METRICS, "lad_metric", "The ladder column the chart draws.", width="stretch"
@@ -705,11 +731,16 @@ def _scenarios(book: Book) -> None:
             alt="The position's P&L ($) at the ten valuation points of FINRA 4210(g)",
         )
         low, high = margin.PRODUCT_CLASSES[product]
+        at_worst = f"{dollars(result.worst)} at {shock_label(result.worst_point)}"
+        loss = (
+            f"the largest loss over the {margin.VALUATION_POINTS} points, {at_worst},"
+            if result.worst < 0
+            else f"no loss at any of the {margin.VALUATION_POINTS} points (the least gain {at_worst}),"
+        )
         st.markdown(
             md(
-                f"Requirement (illustrative, not a broker's): {money(result.requirement, 0)}, the greater of the worst "
-                f"of {margin.VALUATION_POINTS} points, {dollars(result.worst)} at {shock_label(result.worst_point)}, "
-                f"and the minimum $0.375 × {book.position.multiplier:g} per contract, {money(result.minimum, 2)} "
+                f"Requirement (illustrative, not a broker's): {money(result.requirement, 0)}, the greater of {loss} "
+                f"and the minimum of $0.375 × {book.position.multiplier:g} a contract, {money(result.minimum, 2)} "
                 f"(FINRA 4210(g)(7)(B))."
             )
         )
@@ -1005,27 +1036,34 @@ def _var(book: Book) -> None:
             ),
             _var_card(f"Spot-only ES 97.5% {h}", -spot_es, f"Implied vol frozen: {money(-spot_es, 2, True)}."),
         ]
-    gap = None if dg is None else -var + dg.var
+    # The comparator's like: the delta-gamma-theta VaR moves spot alone, Normally, at the leg vol, so its gap is taken
+    # to the spot-only run (the full VaR when implied vol is frozen), which differs from it by the full revaluation
+    # alone (and by fatter tails under a Student-t or GARCH model). Against the spot-plus-vol VaR the gap would mix
+    # in the vega risk: on the default call spread at the pinned valuation time (ASOF in tests/_apptest.py), +$248
+    # against the full VaR (−$1,729, implied vol moving) but +$56 against the spot-only one (−$1,922; DGT −$1,978).
+    # The amounts shown are subtracted, so that the tile adds up on screen.
+    gap = None if dg is None else shown(-spot_var) - shown(-dg.var)
+    comparator = f"Spot-only VaR {MINUS} DGT VaR" if with_vol else f"VaR {MINUS} DGT VaR"
     cards += [
         _var_card(
             f"DGT VaR 99% {h}",
             MISSING if dg is None else -dg.var,
-            "Exact VaR of Δ·x + ½Γ·x² + Θ·h for a Normal spot move at the leg vol, vol frozen (the analytic "
+            "Exact VaR of Δ·x + ½Γ·x² + Θ·h for a Normal spot move at the leg vol, implied vol frozen (the analytic "
             f"comparator): {MISSING if dg is None else money(-dg.var, 2, True)}; its ES 97.5%: "
             f"{MISSING if dg_es is None else money(-dg_es, 2, True)}.",
         ),
         _var_card(
             "Non-linearity",
             MISSING if gap is None else gap,
-            "Full-revaluation VaR minus the delta-gamma-theta VaR, both as P&L: negative when the full revaluation "
-            "loses more (spot beyond gamma, decay as expiry nears, vega, fat tails).",
+            f"{comparator}, both as P&L and both with implied vol frozen: negative when the full revaluation loses "
+            "more than the second-order expansion (spot beyond gamma, decay as expiry nears, legs that expire within "
+            "the horizon, the model's fatter tails).",
+            f"spot only {MINUS} DGT" if with_vol else None,
         ),
     ]
-    if with_vol:  # the full simulation and its gap to the comparator, then the comparators: 3 + 3
-        cards = [cards[0], cards[1], cards[5], cards[2], cards[3], cards[4]]
-        card_row("var_cards", ("var_cards_full", "var_cards_comparators"), cards)
-    else:
-        card_row("var_cards", ("var_cards_full", "var_cards_comparators"), cards)
+    # The full simulation, then its spot-only twin, then the analytic comparator and the gap: 3 + 3 with implied vol
+    # moving, 2 + 2 with it frozen.
+    card_row("var_cards", ("var_cards_full", "var_cards_comparators"), cards)
     left, right = st.columns([1, 2], gap="medium")
     stats = pd.DataFrame(
         [
@@ -1057,6 +1095,9 @@ def _var(book: Book) -> None:
     )
     settled = f" {result.settled_legs} leg(s) settle before the horizon." if result.settled_legs else ""
     st.caption(f"{basis}; vol of vol {100 * config.vol_of_vol:g}%, correlation {signed(corr)}.{settled}")
+    # No statistic here comes from a history: the models simulate from the leg vol. Their backtests on the RK-4
+    # synthetic history are in the Methodology tab, tagged as such.
+    st.caption("Backtests of these models on a synthetic history (SYN HIST): Methodology tab, Risk, Backtesting.")
 
 
 def vega_frame(book: Book, axis: str = "Δ") -> pd.DataFrame:
@@ -1135,7 +1176,8 @@ def _vega(book: Book) -> None:
         c: f"Vega ($/vp) of the legs in the {c} strike bucket." for c in frame.columns[1:]
     }
     helps["Total"] = "Vega ($/vp) of the expiry bucket."
-    table(frame, kinds, helps, key="tbl_vega")
+    kinds, labels = small_dollars(frame, kinds)
+    table(frame, kinds, helps, labels=labels, key="tbl_vega")
 
 
 def explain_target(book: Book, target: str) -> dict | None:
@@ -1188,8 +1230,10 @@ def _explain(book: Book) -> None:
     method = _segmented(row, "Method", ("Taylor", "Shapley"), "ex_method", "Greek waterfall, or an exact split.")
     move = explain_target(book, target)
     if move is None:
-        st.info("Set a spot, vol, date or rate shift in the what-if strip, or explain a stress or the next session.")
-        return
+        # The what-if with every shift at zero has no move to explain: the report explains the next session instead
+        # of opening empty, and says so.
+        move = explain_target(book, NEXT_SESSION)
+        st.caption("No what-if shift is set: this explains the move to the next session's close, nothing else moving.")
     args = (book.position.strategy, book.position.market)
     taylor = attribution.taylor_explain(*args, multiplier=book.units, **move)
     shapley = attribution.shapley_explain(*args, multiplier=book.units, **move)

@@ -273,6 +273,25 @@ def test_the_ladder_zero_row_equals_the_tiles_and_rolls_to_the_next_session(inde
     assert zero["P&L"] == pytest.approx(decay, abs=1.0)  # the column's whole dollars
 
 
+def test_small_greek_columns_keep_their_cents_as_the_tiles_do():
+    # The textbook market's single contract of a 100/110 call spread: Γ P&L 1% −$0.05 and Θ −$0.14 a day, which
+    # whole dollars would show as 0 beside tiles that read −$0.05 and −$0.14.
+    at = _risk(preset="Textbook")
+    tiles = _tiles(at)
+    ladder = next(d for d in at.dataframe if "Move" in d.value.columns)
+    zero = ladder.value[ladder.value["Move"].str.startswith("0")].iloc[0]
+    for column, label in (("Γ P&L 1%", "Γ P&L 1%"), ("Θ", "Θ ($/day)")):
+        assert tab_risk.dollars(zero[column]) == tiles[label].value, column
+    config = json.loads(ladder.proto.columns)
+    # A column has one precision: vega reaches −$14 at +20%, so it stays in whole dollars (−2 beside −$2.05).
+    assert ladder.value["Vega"].abs().max() >= 10 and config["Vega"]["type_config"]["format"] == "%,.0f"
+    assert config["Γ P&L 1%"]["label"] == "Γ P&L 1% ($)" and config["Θ"]["label"] == "Θ ($/day)"
+    assert config["Θ"]["type_config"]["format"] == "%,.2f" and config["$Δ"]["type_config"]["format"] == "%,.0f"
+    # Under the index the same columns stay in whole dollars.
+    index_ladder = next(d for d in _risk().dataframe if "Move" in d.value.columns)
+    assert json.loads(index_ladder.proto.columns)["Θ"]["type_config"]["format"] == "%,.0f"
+
+
 def test_the_ladder_in_sigma_and_second_order():
     ladder = _frame(_risk(lad_axis="σ", lad_order="+2nd"), "Move")
     assert len(ladder) == len(tab_risk.LADDER_SIGMA)
@@ -289,6 +308,12 @@ def test_the_stress_table_is_sorted_worst_first_with_readable_labels():
     assert set(table.columns) == {"Scenario", "Source", "Spot", "1M vol", "Rate", "Days", "P&L"}
     bars = _chart(at, "stress_chart")["data"][0]
     assert list(bars["y"]) == table["Scenario"].tolist()
+    # A label sits inside its bar only on a bar that spans a third of the axis or more; a short bar's label goes
+    # outside it, in the text colour, rather than running out of the bar in the bar's label colour.
+    pnl = table["P&L"].to_numpy(float)
+    third = (pnl.max() - pnl.min()) / 3
+    assert bars["textposition"] == ["inside" if abs(v) >= third else "outside" for v in pnl]
+    assert "inside" in bars["textposition"] and "outside" in bars["textposition"]
 
 
 def test_the_desk_grid_axes_and_its_zero_cell():
@@ -336,12 +361,25 @@ def test_the_var_report(index):
     cards = {m.label: m for m in at.metric}
     for label in ("VaR 99% 1D · MC", "ES 97.5% 1D · MC", "Spot-only VaR 99% 1D", "Spot-only ES 97.5% 1D"):
         assert cards[label].value.startswith("−"), label
-    assert "DGT VaR 99% 1D" in cards and "Non-linearity" in cards
+    # The comparator's gap is taken like for like, to the spot-only run (implied vol frozen in both), and from the
+    # amounts shown, so that the three tiles add up on screen: −$1,922 − (−$1,978) = +$56.
+    gap = tab_risk.shown(_amount(cards["Spot-only VaR 99% 1D"].value)) - _amount(cards["DGT VaR 99% 1D"].value)
+    assert cards["Non-linearity"].value == tab_risk.dollars(gap)
+    assert cards["Non-linearity"].delta == "spot only − DGT"
+    # The models simulate from the leg vol: no statistic of a history, so none is tagged SYN HIST; the line under
+    # the report points to the backtests on the synthetic history.
+    assert not any("SYN HIST" in label for label in cards)
+    assert any("SYN HIST" in c.value and "Methodology" in c.value for c in at.caption)
     # The VaR, ES and spot-only numbers are read off the cached simulations with the Milestone 1 defaults.
     assert "vs spot only" in cards["VaR 99% 1D · MC"].delta
     # The bars are shares of all outcomes in percent: they add up to the share inside the plotted range.
     bars = _bars(hist)
     assert 99.0 < bars.sum() <= 100.0 + 1e-9
+
+
+def _amount(text: str) -> float:
+    """A tile's dollar amount as a number: ``−$1,922`` is −1,922."""
+    return float(text.replace("−", "-").replace("$", "").replace(",", ""))
 
 
 def _bars(fig: dict) -> np.ndarray:
@@ -385,8 +423,15 @@ def test_the_explain_report_explains_the_what_if_move(index):
     assert terms.sum() == pytest.approx(full, abs=len(terms) * 0.5)  # each row rounded to the dollar
     shapley = _frame(_risk(report="Explain", ws=-2, wv=3, wd=5, ex_method="Shapley"), "Term")
     assert shapley["Term"].tolist() == ["Spot", "Vol", "Time", "Rate", "Full revaluation"]
-    quiet = _risk(report="Explain")  # no shift set: the what-if has nothing to explain
-    assert any("what-if strip" in i.value for i in quiet.info)
+    # No shift set: the what-if has nothing to explain, so the report explains the next session (Friday 16:00 to
+    # Monday 16:00, three calendar days, nothing else moving) and says so.
+    quiet = _risk(report="Explain")
+    assert any(c.value.startswith("No what-if shift is set") for c in quiet.caption)
+    decay = _book(index.s, index.t - 3 / 365, index.r, index.q, index.vol) - _book(
+        index.s, index.t, index.r, index.q, index.vol
+    )
+    full = _frame(quiet, "Term").set_index("Term").loc["Full revaluation", "P&L"]
+    assert full == pytest.approx(decay, abs=0.005)  # the column's cents
 
 
 @pytest.mark.parametrize("report", tab_risk.REPORTS)

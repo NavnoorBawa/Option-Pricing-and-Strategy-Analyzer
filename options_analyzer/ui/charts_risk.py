@@ -243,6 +243,10 @@ def stress_bars(names: Sequence[str], values, *, palette: dict[str, str] | None 
     """
     colors = palette or desk_theme.palette()
     values = [float(v) for v in values]
+    # A label goes inside its bar only when the bar spans at least a third of the axis: about 85 px of a phone's
+    # 250 px plot, room for "−$4,096" at 12 px. Plotly's "auto" kept a label inside a short bar and let it run out
+    # of the bar in the background colour, where it vanished (Vol crush, −$47, on the default call spread).
+    span = (max(values, default=0.0) - min(values, default=0.0)) or 1.0
     fig = go.Figure(
         go.Bar(
             x=values,
@@ -250,7 +254,7 @@ def stress_bars(names: Sequence[str], values, *, palette: dict[str, str] | None 
             orientation="h",
             marker_color=[colors["profit"] if v >= 0 else colors["loss"] for v in values],
             text=[signed(v, 0 if abs(v) >= 100 else 2, "$") for v in values],
-            textposition="auto",
+            textposition=["inside" if abs(v) >= span / 3 else "outside" for v in values],
             insidetextfont=dict(color=colors["surface"], size=LABEL_SIZE + 1),
             outsidetextfont=dict(color=colors["text"], size=LABEL_SIZE + 1),
             cliponaxis=False,
