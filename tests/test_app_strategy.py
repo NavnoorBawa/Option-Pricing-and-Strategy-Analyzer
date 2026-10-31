@@ -1,30 +1,47 @@
-"""Strategy and Risk tabs: app behaviour (streamlit.testing) and their display helpers."""
+"""Strategy and Risk tabs: app behaviour (streamlit.testing) and their display helpers.
+
+The Strategy tab in the desk layout (UI spec 3.2; roadmap BK-2, BK-3, RK-9a, UI-4, UI-8, UI-9, UI-13): its acceptance
+tests run on the synthetic index at the pinned valuation time (``_apptest.ASOF``), the others on the textbook market
+the tests pin by default (S = K = 100, one year, σ 20%, r 5%, q 0). The legs without Streamlit are tested in
+``tests/test_strategy_legs.py``.
+"""
 
 import base64
 import dataclasses
 import json
 import re
+import time
 import urllib.parse
+from datetime import date, datetime
 from decimal import Decimal
 
 import numpy as np
 import pyarrow as pa
 import pytest
-from _apptest import TEXTBOOK, make_app
+from _apptest import ASOF, TEXTBOOK, make_app
 from scipy.stats import lognorm, norm
 from streamlit.proto.WidgetStates_pb2 import WidgetState
 from streamlit.testing.v1 import AppTest
 
 from options_analyzer import black_scholes as bs
-from options_analyzer import risk, scenarios
+from options_analyzer import clock, risk, scenarios
 from options_analyzer import strategies as strat
-from options_analyzer.ui import cache, charts, tab_risk, tab_strategy
+from options_analyzer.ui import cache, charts, surface_state, tab_risk, tab_strategy
+from options_analyzer.ui import format as fmt
+from options_analyzer.ui import legs as lg
+from options_analyzer.ui import market as mk
 from options_analyzer.ui.app import TABS
 from options_analyzer.ui.format import MINUS, md, money
+from options_analyzer.vol_surface.published import ONE_SD, TWO_SD, Expiry
 
 NO_EDITS = {"edited_rows": {}, "added_rows": [], "deleted_rows": []}
 #: The Risk tab's default implied-vol dynamics in the VaR simulation, an index's (VIX-like).
 INDEX_VOL = {"vol_of_vol": 1.0, "spot_vol_correlation": -0.7}
+#: The synthetic index at the pinned valuation time: the app's default market.
+INDEX = {"preset": None, "asof": ASOF}
+DEC = Expiry(date(2026, 12, 18), "AM")
+#: The default condor on the index (spec 3.2, default state).
+CONDOR_LEGS = [("put", 1, 5300.0), ("put", -1, 5400.0), ("call", -1, 6150.0), ("call", 1, 6250.0)]
 
 
 def _ok(at: AppTest) -> None:
@@ -36,6 +53,18 @@ def _app(tab: str = "Strategy", **query) -> AppTest:
     """The app opened at ``?tab=<tab>`` and the other query parameters (only the open tab runs)."""
     at = make_app(tab=tab, **query)
     at.run()
+    _ok(at)
+    return at
+
+
+def _index(tab: str = "Strategy", **query) -> AppTest:
+    """The app on the synthetic index at the pinned valuation time."""
+    return _app(tab, **INDEX, **query)
+
+
+def _edit(at: AppTest) -> AppTest:
+    """Switch the blotter to Edit, where the legs editor is."""
+    at.segmented_control(key="st_blotter").set_value("Edit").run()
     _ok(at)
     return at
 
@@ -62,7 +91,8 @@ def _open(at: AppTest, tab: str, *also: WidgetState) -> AppTest:
 
 
 def _editor_id(at: AppTest) -> str | None:
-    """The element id of the legs editor on the page, or None when it is not there (another tab is open)."""
+    """The element id of the legs editor on the page, or None when it is not there (another tab is open, or the
+    blotter is in View)."""
     ids = [
         node.proto.id
         for node in _nodes(at._tree)
@@ -76,8 +106,8 @@ class LegsEditor:
     """Edits the legs table the way the browser does (AppTest has no data-editor API).
 
     The browser keeps an editor's edits and re-sends them with every rerun for as long as the editor stays on the
-    page with the same identity. When a run leaves it out (another tab is open) or gives it a new identity, the
-    edits are gone: every run of the app, also one that opens another tab, is watched for that.
+    page with the same identity. When a run leaves it out (another tab is open, the blotter is in View) or gives it a
+    new identity, the edits are gone: every run of the app, also one that opens another tab, is watched for that.
     """
 
     def __init__(self, at: AppTest):
@@ -129,14 +159,18 @@ def _metric(at: AppTest, label: str):
     return next(m for m in at.metric if m.label == label)
 
 
-def _summary_line(at: AppTest, raw: bool = False) -> str:
-    """The breakevens and reward / risk line, with its no-break spaces as plain spaces unless ``raw``."""
-    line = next(m.value for m in at.markdown if "Reward / risk" in m.value)
-    return line if raw else line.replace("\N{NO-BREAK SPACE}", " ")
+def _tiles(at: AppTest) -> dict[str, tuple[str, str]]:
+    """The Strategy tiles: label to (value, delta slot)."""
+    labels = ("Net premium", "Package", "Max profit", "Max loss", "Breakevens", "P(profit)")
+    return {m.label: (m.value, m.proto.delta) for m in at.metric if m.label in labels}
 
 
 def _chart(at: AppTest, key: str) -> dict:
     return next(json.loads(c.proto.spec) for c in at.get("plotly_chart") if c.proto.id.endswith(key))
+
+
+def _trace(spec: dict, name: str) -> dict:
+    return next(t for t in spec["data"] if (t.get("name") or "").startswith(name))
 
 
 def _array(value) -> np.ndarray:
@@ -150,32 +184,531 @@ def _array(value) -> np.ndarray:
     return np.asarray(value)
 
 
-# --- Leg edits are never silently lost (review finding: the editor was recreated on sidebar changes) -------------
+def _blotter(at: AppTest):
+    """The blotter (View): its data frame element."""
+    return next(d for d in at.dataframe if d.proto.id.endswith("tbl_blotter"))
+
+
+def _legs(at: AppTest) -> list[tuple]:
+    """The blotter's legs as (type, quantity, strike, expiry), the subtotal and Total rows left out."""
+    frame = _blotter(at).value
+    rows = frame[frame["Type"].notna()]
+    return [
+        (t.lower(), int(q), float(k), e)
+        for t, q, k, e in rows[["Type", "Qty", "Strike", "Expiry"]].itertuples(index=False)
+    ]
+
+
+def _caption(at: AppTest, text: str) -> str:
+    return next(c.value for c in at.caption if text in c.value)
+
+
+@pytest.fixture(scope="module")
+def published():
+    """The published surface the index preset shows at the pinned valuation time."""
+    return surface_state.publish(mk.index_market(datetime.fromisoformat(ASOF)))
+
+
+def _quote_value(published, legs, units: float = 100.0) -> float:
+    """Σ q·mid × units of ``legs`` (kind, quantity, strike) on 18-Dec-26 AM: their value at the chain's mids."""
+    return units * sum(q * published.quote(DEC, k, kind).mid for kind, q, k in legs)
+
+
+# --- The index: the spec's default state and its acceptance tests (UI spec 3.2) ------------------------------------
+
+
+def test_the_default_position_is_the_16_delta_condor_with_100_point_wings():
+    at = _index()
+    assert at.selectbox(key="strategy").value == "Range-bound · Iron Condor"
+    assert at.selectbox(key="strategy_expiry").value == DEC
+    assert (at.selectbox(key="strategy_short_delta").value, at.selectbox(key="strategy_wing_pts").value) == (16, 100)
+    assert _legs(at) == [(kind, q, k, "18‑Dec‑26 AM") for kind, q, k in CONDOR_LEGS]
+    # The defaults stay out of the link (a bound control at its default writes nothing).
+    assert at.query_params == {"tab": "Strategy", "asof": ASOF}
+
+
+def test_the_default_tiles(published):
+    # Spec 3.2's goldens on the generator before SF-4 were $2,240 credit, 20.80 / 24.00, −$7,760, 5,378 / 6,172 and
+    # 73.5%. On today's fit the code gives the numbers below, each checked here from the chain's quotes (mids, bids
+    # and asks); P(profit) against an independent CDF in tests/test_strategy_legs.py.
+    at = _index()
+    credit = -_quote_value(published, CONDOR_LEGS)
+    assert credit == pytest.approx(2235.0, abs=1e-6)
+    tiles = _tiles(at)
+    assert tiles["Net premium"] == ("$2,235", "credit")
+    assert tiles["Package"] == ("20.80 / 23.90", "cr · theo 22.48")
+    assert tiles["Max profit"] == ("$2,235", "")
+    assert tiles["Max loss"] == (f"{MINUS}$7,765", "")  # 100 points less the credit, × 100: −$7,765
+    low, high = 5400 - credit / 100, 6150 + credit / 100  # 5,377.65 and 6,172.35
+    assert tiles["Breakevens"] == ("5,378 / 6,172", f"{MINUS}7.3% / +6.4%")
+    assert f"{low:,.2f} ({MINUS}7.3%), {high:,.2f} (+6.4%)" in _metric(at, "Breakevens").proto.help
+    value, basis = tiles["P(profit)"]
+    assert basis == "RN smile" and abs(float(value.rstrip("%")) - 73.5) <= 1.0 and value == "74.0%"
+    # The tiles' help states the exact amounts and the theo: entry at mid is −$12.77 against theo (spec: −$24).
+    help_text = _metric(at, "Net premium").proto.help
+    assert "22.35 per share at mid" in help_text and "\\$2,235.00 for the position" in help_text
+    assert f"entry at mid is {MINUS}\\$12.77 against theo" in help_text
+    assert "mid vs fit −0.04 vp in the package vega" in _metric(at, "Package").proto.help
+    assert "\\$155.00 per side" in _metric(at, "Package").proto.help  # half the 3.10 spread, × 100
+
+
+def test_the_blotter_has_a_row_per_leg_and_a_total(published):
+    at = _index()
+    blotter = _blotter(at)
+    frame = blotter.value
+    assert len(frame) == len(CONDOR_LEGS) + 1 and frame["On"].tolist()[-1] == "Total"
+    quantities = frame["Qty"].dropna().tolist()
+    assert all(float(q).is_integer() for q in quantities) and quantities == [1, -1, -1, 1]
+    config = json.loads(blotter.proto.columns)
+    assert config["Qty"]["type_config"]["format"] == "%+d"  # signed whole numbers, never 1.00
+    assert list(frame.columns) == [
+        "On", "Qty", "Type", "Expiry", "Strike", "Bid", "Ask", "Mid", "IV", "IV src", "Mid vs fit", "$Δ", "Γ P&L 1%",
+        "Vega", "Θ", "Decay",
+    ]  # fmt: skip
+    assert frame["IV src"].tolist()[:4] == ["surface"] * 4
+    # Bid, ask and mid are the chain's; IV the surface's at each strike.
+    for row, (kind, _, k) in enumerate(CONDOR_LEGS):
+        quote = published.quote(DEC, k, kind)
+        assert (frame["Bid"][row], frame["Ask"][row], frame["Mid"][row]) == (quote.bid, quote.ask, round(quote.mid, 2))
+        assert frame["IV"][row] == round(published.vol(k, DEC).vol * 100, 2)
+    # The Total's $Δ is the position's that the Risk tab analyses (position_risk of build_position), to the dollar:
+    # −$18,871 (the spec's −$19,525 was the generator before SF-4); Γ P&L 1% −$69, vega −$306 per vp, Θ +$41 a day.
+    position = _built(**INDEX)
+    total = strat.position_risk(position.strategy, position.market, multiplier=position.units)
+    assert frame["$Δ"].tolist()[-1] == round(total.dollar_delta) == -18871
+    assert (frame["Γ P&L 1%"].tolist()[-1], frame["Vega"].tolist()[-1], frame["Θ"].tolist()[-1]) == (-69, -306, 41)
+    assert config["Decay"]["label"] == "1d decay ($)"  # Milestone 1's one-day decay, beside theta
+    # The footer names the engine, the dynamics, the entry, the probability's basis and expired legs.
+    assert _caption(at, "BSM European legs") == (
+        "BSM European legs at surface IVs · sticky strike · entry at mid · P(profit) RN from the smile at 18‑Dec · "
+        "expired legs out of every number"
+    )
+
+
+def test_a_leg_switched_off_leaves_every_number_and_the_chart():
+    at = _edit(_index())
+    lines = len(_strike_lines(at))
+    editor = LegsEditor(at)
+    at = editor.edit({"0": {"On": False}})  # the long 5,300 put, bought at its mid of 25.80
+    assert _tiles(at)["Net premium"] == ("$4,815", "credit")  # 2,235 + 2,580: exactly that leg's premium
+    assert len(_strike_lines(at)) == lines - 1 == 3
+    at.segmented_control(key="st_blotter").set_value("View").run()
+    assert _blotter(at).value["On"].tolist()[:4] == ["off", "on", "on", "on"]
+
+
+def _strike_lines(at: AppTest) -> list[float]:
+    """The chart's dotted strike lines."""
+    shapes = _chart(at, "payoff_chart")["layout"]["shapes"]
+    return [s["x0"] for s in shapes if s.get("type") == "line" and s.get("line", {}).get("dash") == "dot"]
+
+
+def test_the_structure_steppers():
+    at = _index()
+    at.button(key="step_shift_up").click().run()
+    assert [leg[2] for leg in _legs(at)] == [5350.0, 5450.0, 6200.0, 6300.0]
+    at.button(key="step_shift_down").click().run()
+    at.button(key="step_width_out").click().run()
+    assert [leg[2] for leg in _legs(at)] == [5250.0, 5400.0, 6150.0, 6300.0]  # the body stays
+    for _ in range(10):
+        at.button(key="step_width_in").click().run()
+    assert [leg[2] for leg in _legs(at)] == [5350.0, 5400.0, 6150.0, 6200.0]  # never crossed
+    at.button(key="step_roll_next").click().run()
+    assert {leg[3] for leg in _legs(at)} == {"15‑Jan‑27 AM"}
+    at.button(key="step_flip").click().run()
+    assert [leg[1] for leg in _legs(at)] == [-1, 1, 1, -1]
+    _ok(at)
+    # Moved legs are kept as they are, with a note, until reset.
+    assert _kept(at)
+    _edit(at).button(key="reset_legs").click().run()
+    at.segmented_control(key="st_blotter").set_value("View").run()
+    assert not _kept(at)
+    assert _legs(at) == [(kind, q, k, "18‑Dec‑26 AM") for kind, q, k in CONDOR_LEGS]
+
+
+def test_the_row_actions_apply_to_the_selected_leg():
+    at = _index()
+    at.selectbox(key="blotter_row").set_value(2).run()  # −1 6,150C
+    at.button(key="row_duplicate").click().run()
+    assert [leg[2] for leg in _legs(at)] == [5300.0, 5400.0, 6150.0, 6150.0, 6250.0]
+    at.selectbox(key="blotter_row").set_value(3).run()
+    at.button(key="row_flip").click().run()
+    assert [leg[1] for leg in _legs(at)] == [1, -1, -1, 1, 1]
+    at.button(key="row_remove").click().run()
+    assert [leg[1] for leg in _legs(at)] == [1, -1, -1, 1]
+    _ok(at)
+
+
+def test_the_what_if_vol_shift_labels_the_t0_curve():
+    at = _index(wv=3)
+    assert any("SCENARIO" in m.value for m in at.markdown)
+    assert _trace(_chart(at, "payoff_chart"), "T+0")["name"] == "T+0 · vol +3.00 vp"
+    # The tiles are today's market, which no what-if shift moves.
+    assert _tiles(at) == _tiles(_index())
+    at.button(key="whatif_reset").click().run()
+    _ok(at)
+    assert [at.number_input(key=k).value for k in ("ws", "wv", "wr")] == [0.0, 0.0, 0] and at.slider(
+        key="wd"
+    ).value == 0
+    assert not any("SCENARIO" in m.value for m in at.markdown)
+    assert _trace(_chart(at, "payoff_chart"), "T+0")["name"] == "T+0"
+    assert not {"ws", "wv", "wd", "wr"} & set(at.query_params)
+
+
+def test_a_scenario_link_reproduces(published):
+    query = {"ws": -2, "wv": 3, "wd": 5}
+    at = _index(**query)
+    assert at.slider(key="wd").label.startswith("T+5 · Fri 30‑Oct‑26")
+    spec = _chart(at, "payoff_chart")
+    t5 = _trace(spec, "T+5")
+    assert t5["name"] == "T+5 · 30‑Oct · vol +3.00 vp"
+    # The scenario point: spot 5,684 on the T+5 curve, every leg at its surface vol + 3 vp, 7 calendar days later.
+    scenario = _trace(spec, "Scenario")
+    as_of = datetime.fromisoformat(ASOF)
+    tau = clock.time_to_expiry(as_of, DEC.day, style="AM") - clock.year_fraction(as_of, datetime(2026, 10, 30, 16))
+    market = lg.price_index(lg.index_template("Iron Condor", published, DEC), published, as_of).market
+    value = sum(
+        q * (bs.price(5684.0, k, tau, market.rate, published.vol(k, DEC).vol + 0.03, market.dividend_yield, kind)
+             - published.quote(DEC, k, kind).mid)
+        for kind, q, k in CONDOR_LEGS
+    ) * 100  # fmt: skip
+    assert scenario["y"] == [pytest.approx(value, abs=1e-6)] and scenario["x"] == [5684.0]
+    again = _index(**query)
+    assert _chart(again, "payoff_chart")["data"] == spec["data"]
+
+
+def test_the_view_and_the_scenario_leave_the_link_while_another_tab_is_open():
+    # The share note says the link holds the Strategy view and the what-if shifts while the Strategy tab is open: their
+    # widgets are drawn only there, and Streamlit drops the URL parameter of a widget it does not draw. The session
+    # keeps them, and opening the tab again puts them back in the link.
+    from options_analyzer.ui import header
+
+    held = {"st_view", "st_units", "wv"}
+    at = _index(st_view="Table", st_units="% of max loss", wv=3)
+    assert held <= set(at.query_params)
+    _open(at, "Pricing")
+    assert not held & set(at.query_params)
+    assert "while the Strategy tab is open, its view" in header.SHARE_NOTE
+    _open(at, "Strategy")
+    assert held <= set(at.query_params)
+    assert at.segmented_control(key="st_view").value == "Table" and at.number_input(key="wv").value == 3.0
+
+
+def test_the_table_view(published):
+    # UI-9: the date x spot table. The cell at today's spot and date is the T+0 P&L there (−$12.77, theo less mid;
+    # the spec's −$24 was the generator before SF-4), and the expiry column is the expiry curve.
+    at = _index()
+    at.segmented_control(key="st_view").set_value("Table").run()
+    _ok(at)
+    heat = _chart(at, "pnl_table")["data"][0]
+    spots = np.array([float(y.split(" ")[0].replace(",", "")) for y in heat["y"]])
+    z = _array(heat["z"])
+    # Weekly on the last session of each week, then the last five sessions daily: every fifth session drifted to
+    # Mondays after Thanksgiving (Mon 30-Nov, Mon 07-Dec, then Fri 11-Dec four sessions later).
+    assert [x.replace("<br>", " ") for x in heat["x"]] == [
+        "Fri 23‑Oct", "Fri 30‑Oct", "Fri 06‑Nov", "Fri 13‑Nov", "Fri 20‑Nov", "Fri 27‑Nov", "Fri 04‑Dec",
+        "Fri 11‑Dec", "Mon 14‑Dec", "Tue 15‑Dec", "Wed 16‑Dec", "Thu 17‑Dec", "Exp 18‑Dec",
+    ]  # fmt: skip
+    row = int(np.flatnonzero(spots == 5800.0)[0])
+    as_of = datetime.fromisoformat(ASOF)
+    market = lg.price_index(lg.index_template("Iron Condor", published, DEC), published, as_of).market
+    T = market.expiry
+    theo = sum(
+        q * bs.price(5800.0, k, T, market.rate, published.vol(k, DEC).vol, market.dividend_yield, kind)
+        for kind, q, k in CONDOR_LEGS
+    )
+    assert z[row, 0] == pytest.approx(100 * theo - _quote_value(published, CONDOR_LEGS), abs=0.01)
+    assert z[row, 0] == pytest.approx(-12.77, abs=0.01)
+    payoff = sum(q * np.maximum(spots - k if kind == "call" else k - spots, 0.0) for kind, q, k in CONDOR_LEGS)
+    assert z[:, -1] == pytest.approx(100 * payoff - _quote_value(published, CONDOR_LEGS), abs=1e-6)
+    at.segmented_control(key="st_units").set_value("% of max loss").run()
+    z_pct = _array(_chart(at, "pnl_table")["data"][0]["z"])
+    assert z_pct[:, -1] == pytest.approx(z[:, -1] / 7765.0 * 100, rel=1e-9)
+    assert z_pct.min() == pytest.approx(-100.0, abs=1e-9)  # the worst cell at expiry is the max loss
+
+
+def test_the_chart_draws_the_rn_ranges_the_straddle_move_and_the_reference_lines(published):
+    at = _index()
+    spec = _chart(at, "payoff_chart")
+    names = [t.get("name") for t in spec["data"]]
+    lo68, hi68 = published.rn_range(DEC, ONE_SD)
+    lo95, hi95 = published.rn_range(DEC, TWO_SD)
+    # UI-13: the legend names the basis; the bounds are the smile's quantiles at 15.87% and 84.13% (5,491 and 6,162;
+    # the spec's 5,492 and 6,167 were the fit before SF-4).
+    assert names[:2] == [
+        f"RN 68% to 18‑Dec: {lo68:,.0f}–{hi68:,.0f} (smile)",
+        f"RN 95% to 18‑Dec: {lo95:,.0f}–{hi95:,.0f} (smile)",
+    ]
+    assert names[0] == "RN 68% to 18‑Dec: 5,491–6,162 (smile)"
+    assert published.cdf(lo68, DEC) == pytest.approx((1 - ONE_SD) / 2, abs=1e-12)
+    rects = [s for s in spec["layout"]["shapes"] if s["type"] == "rect"]
+    assert [(r["x0"], r["x1"]) for r in rects] == [(lo68, hi68), (lo95, hi95)]
+    # The straddle-implied move: the 5,830 straddle at mid over spot, two ticks on the x-axis, named in the legend
+    # (a label beside the ticks overprinted the curves' end labels on a phone).
+    move = 279.65 / 5800
+    texts = [a["text"] for a in spec["layout"]["annotations"]]
+    assert "straddle ±4.82%" in names and "straddle ±4.82%" not in texts
+    ticks = [s["x0"] for s in spec["layout"]["shapes"] if s.get("line", {}).get("width") == 2]
+    assert ticks == [pytest.approx(5800 * (1 - move)), pytest.approx(5800 * (1 + move))]
+    # The expiry, T+0 and two dated curves (⅓ and ⅔ of the 38 sessions to expiry), each named at its right end.
+    assert names[4:8] == ["Expiry 18‑Dec", "T+0", "T+13 · 11‑Nov", "T+26 · 01‑Dec"]
+    assert {"exp 18‑Dec", "T+0", "T+13 · 11‑Nov", "T+26 · 01‑Dec"} <= set(texts)
+    # Strikes 100 points apart in a range of about 2,200 share a label, which a phone's 230 px plot needs.
+    assert {"K 5,300/5,400", "K 6,150/6,250", "S 5,800", " F"} <= set(texts)
+    assert sorted(_strike_lines(at)) == [5300.0, 5400.0, 6150.0, 6250.0]
+    assert _trace(spec, "Breakeven")["text"] == [f"BE 5,378 ({MINUS}7.3%)", "BE 6,172 (+6.4%)"]
+    # The breakeven labels: two lines, outward, on the surface colour (strike lines ran through them).
+    labels = {a["text"]: a for a in spec["layout"]["annotations"] if a["text"].startswith("BE ")}
+    assert set(labels) == {f"BE 5,378<br>{MINUS}7.3%", "BE 6,172<br>+6.4%"}
+    assert [labels[t]["xanchor"] for t in sorted(labels)] == ["right", "left"]
+    assert all("bgcolor" in a for a in labels.values())
+    # The note: the same days as the builder's expiry menu, on the third line under S and F.
+    [note] = [a for a in spec["layout"]["annotations"] if a["text"] == "18‑Dec‑26 AM · 55d · RN smile"]
+    assert note["yshift"] == -28
+    menu = at.selectbox(key="strategy_expiry")
+    assert menu.format_func(menu.value) == "18‑Dec‑26 AM · 55d"  # 55.73 days, floored as the what-if strip does
+
+
+def test_the_range_control_and_the_greek_strip():
+    at = _index()
+    at.segmented_control(key="st_range").set_value("±5%").run()
+    assert _chart(at, "payoff_chart")["layout"]["xaxis"]["range"] == [pytest.approx(5510.0), pytest.approx(6090.0)]
+    at.segmented_control(key="st_range").set_value("RN 95%").run()
+    rect = [s for s in _chart(at, "payoff_chart")["layout"]["shapes"] if s["type"] == "rect"][1]
+    assert _chart(at, "payoff_chart")["layout"]["xaxis"]["range"] == [rect["x0"], rect["x1"]]
+    at.segmented_control(key="st_greek").set_value("Θ").run()
+    _ok(at)
+    spec = _chart(at, "payoff_chart")
+    strip = _trace(spec, "Θ ($/day)")
+    spots, theta = _array(strip["x"]), _array(strip["y"])
+    position = _built(**INDEX)
+    i = int(np.argmin(np.abs(spots - 5800.0)))
+    at_spot = strat.position_risk(position.strategy, replace_spot(position.market, spots[i]), multiplier=100).theta
+    assert theta[i] == pytest.approx(at_spot, rel=1e-9)
+    assert spec["layout"]["yaxis2"]["title"]["text"] == "Θ ($/day)"
+
+
+def replace_spot(market: strat.Market, spot: float) -> strat.Market:
+    return dataclasses.replace(market, spot=float(spot))
+
+
+def test_a_calendar_reads_its_maximum_at_the_front_expiry_with_subtotals_per_expiry():
+    at = _index(strategy="Long Call Calendar")
+    loss, profit = _metric(at, "Max loss"), _metric(at, "Max profit")
+    assert profit.proto.delta == "front expiry"
+    assert "front expiry" in loss.proto.help and "their losses can exceed it" in loss.proto.help
+    frame = _blotter(at).value
+    assert frame["On"].tolist() == ["on", "on", "Σ 18‑Dec‑26", "Σ 19‑Feb‑27", "Total"]
+    assert frame["$Δ"].tolist()[-1] == frame["$Δ"].tolist()[2] + frame["$Δ"].tolist()[3]
+    # A dividend yield makes the long back call gain less than $1 per $1 rise: the loss far above is unbounded, but
+    # only past about 3.4 x spot. The tile reads the worst P&L within the RN 99.9% range to the front expiry, the debit
+    # (the back call is worth nothing at its low end), with that basis in its delta slot; the caption keeps the rest.
+    as_of = datetime.fromisoformat(ASOF)
+    published = surface_state.publish(mk.index_market(as_of))
+    lo, hi = published.rn_range(DEC, 0.999)
+    assert loss.value == f"{MINUS}$8,500" and loss.proto.delta == "RN 99.9% range"
+    assert f"{lo:,.0f}–{hi:,.0f}" in loss.proto.help and "grows without bound" in loss.proto.help
+    assert "the loss is unbounded" in _caption(at, "long back call")
+    # The table's % of max loss divides by that loss: the worst cell at expiry is −100%, not a column of blanks.
+    at.segmented_control(key="st_view").set_value("Table").run()
+    at.segmented_control(key="st_units").set_value("% of max loss").run()
+    _ok(at)
+    z = _array(_chart(at, "pnl_table")["data"][0]["z"])
+    assert np.isfinite(z).all() and -100.0 <= z[:, -1].min() < -99.0  # the 95% range's low end: -99.74%
+
+
+def test_leg_edits_survive_a_visit_to_the_risk_tab_on_the_index():
+    at = _edit(_index())
+    editor = LegsEditor(at)
+    at = editor.edit({"1": {"IV (%)": 25.0}, "3": {"Strike": 6300.0}})
+    _open(at, "Risk")
+    assert "+1 6,300C 18‑Dec‑26 AM" in _analysed(at)
+    _open(at, "Strategy")
+    at.segmented_control(key="st_blotter").set_value("View").run()
+    frame = _blotter(at).value
+    assert frame["Strike"].tolist()[3] == 6300.0 and frame["IV src"].tolist()[1] == "override"
+    assert frame["IV"].tolist()[1] == 25.0
+
+
+def test_index_legs_keep_their_dates_when_the_valuation_time_moves(published):
+    # Appendix A item 14: legs hold a listed date and settlement and are converted to years with
+    # clock.time_to_expiry on each run. Edited legs are kept, so a later valuation time shortens them.
+    at = _edit(_index())
+    LegsEditor(at).edit({"0": {"Qty": 2}})
+    later = datetime(2026, 10, 30, 16, 0)
+    at.sidebar.datetime_input(key="asof").set_value(later).run()
+    _ok(at)
+    _open(at, "Risk")
+    assert "+2 5,300P 18‑Dec‑26 AM" in _analysed(at)
+    expected = clock.time_to_expiry(later, DEC.day, style="AM")
+    assert expected == pytest.approx(published.maturity(DEC) - 7 / 365, abs=1e-12)  # a week of calendar time
+    built = _built(preset=None, asof="2026-10-30T16:00")
+    assert {leg.expiry for leg in built.strategy.legs} == {clock.time_to_expiry(later, DEC.day, style="AM")}
+
+
+def test_the_empty_and_invalid_states():
+    at = _edit(_index())
+    editor = LegsEditor(at)
+    at = editor.edit({str(i): {"On": False} for i in range(4)})
+    assert all(value == "–" for value, _ in _tiles(at).values())
+    assert any("No legs are on" in i.value for i in at.info)
+    # A zero quantity: one line under the editor naming the row; the other legs are analysed.
+    editor = LegsEditor(_edit(_index()))
+    editor.id = _editor_id(editor.at)
+    editor.state = {**NO_EDITS, "edited_rows": {"0": {"Qty": 0}}}
+    states = editor.at._tree.get_widget_states()
+    states.widgets.append(WidgetState(id=editor.id, string_value=json.dumps(editor.state)))
+    at = editor.at._run(states)
+    assert [e.value for e in at.error] == [
+        "Row 1: the quantity is zero; type a signed whole number, or switch the leg off."
+    ]
+    assert _tiles(at)["Net premium"] == ("$4,815", "credit")
+
+
+def test_a_stock_template_under_the_index_is_replaced_with_a_note():
+    at = _index(strategy="Covered Call")
+    assert at.selectbox(key="strategy").value == "Range-bound · Iron Condor"
+    assert [w.value for w in at.warning] == [
+        "This link asks for Covered Call, which holds stock: SPX itself cannot be traded, so the Iron Condor is shown."
+    ]
+    assert "Range-bound · Covered Call" not in at.selectbox(key="strategy").options
+
+
+def test_the_builder_sets_the_shorts_wings_and_expiry_and_the_link_keeps_them():
+    at = _index()
+    at.selectbox(key="strategy_short_delta").set_value(25)
+    at.selectbox(key="strategy_wing_pts").set_value(50)
+    at.selectbox(key="strategy_expiry").set_value(Expiry(date(2026, 11, 20), "AM")).run()
+    _ok(at)
+    assert [leg[3] for leg in _legs(at)] == ["20‑Nov‑26 AM"] * 4
+    # The expiry menu writes its date to the link by hand; the browser writes the bound menus' options as shown,
+    # plain numbers, so a link reopens the same legs.
+    assert at.query_params["strategy_expiry"] == "2026-11-20 AM"
+    assert at.selectbox(key="strategy_short_delta").proto.query_param_key == "strategy_short_delta"
+    again = _index(strategy_expiry="2026-11-20 AM", strategy_short_delta=25, strategy_wing_pts=50)
+    assert _legs(again) == _legs(at)
+    # Strikes by width: ATMF ± n × the width, snapped to listed strikes.
+    at.selectbox(key="strategy_strikes_by").set_value("Width").run()
+    at.number_input(key="strategy_width_pct").set_value(2.0).run()
+    _ok(at)
+    assert len({leg[2] for leg in _legs(at)}) == 4
+
+
+def test_risk_neutral_off_reads_probability_under_the_view():
+    at = _index()
+    at.toggle(key="risk_neutral").set_value(False).run()
+    _ok(at)
+    assert _tiles(at)["P(profit)"][1] == "view"
+    assert "P(profit) view (your drift, flat ATMF vol) at 18‑Dec" in _caption(at, "BSM European legs")
+
+
+def test_a_what_if_step_reruns_quickly():
+    # Spec 2.12 budgets a what-if step on Strategy at 0.5 s; on a laptop the server run takes about 0.22 s. A loose
+    # guard against a tenfold slowdown, not a benchmark (shared runners are 2 to 3 times slower).
+    at = _index()
+    start = time.perf_counter()
+    at.number_input(key="wv").set_value(1.0).run()
+    assert time.perf_counter() - start < 5.0
+    _ok(at)
+
+
+def test_tab_captions_are_short():
+    # Principle 10: every caption in the tab body is at most 140 characters.
+    at = _index(strategy="Long Call Calendar")
+    body = [c.value for c in at.main.caption if not c.value.startswith(("The link holds", "Add this"))]
+    assert body and max(len(c) for c in body) <= 140, [c for c in body if len(c) > 140]
+
+
+# --- build_position: the Risk tab's view of the position without the controls ------------------------------------
+
+#: A script that builds the position without drawing the Strategy tab's controls, as another page or a report would.
+WITHOUT_CONTROLS = """
+import streamlit as st
+from options_analyzer.ui import inputs, tab_strategy
+st.session_state["position"] = tab_strategy.build_position(inputs.sidebar())
+"""
+
+
+def _built(**query) -> tab_strategy.Position:
+    """The position build_position makes from a link, without the controls."""
+    page = AppTest.from_string(WITHOUT_CONTROLS)
+    page.query_params.update({k: str(v) for k, v in query.items() if v is not None})
+    page.run()
+    assert not page.exception, [e.value for e in page.exception]
+    assert not page.main.children  # nothing drawn in the main area
+    return page.session_state["position"]
+
+
+CONDOR_LINK = {"strategy_category": "Range-bound", "strategy_Range-bound": "Iron Condor"}
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        {},
+        {**CONDOR_LINK, "contracts": "2", "multiplier": "50", "commission": "0.65", "strategy_width_pct": "5"},
+        {"strategy": "Custom", "contracts": "2.5"},
+        {"strategy_category": "Time spread", "strike": "120", "days": "200"},
+        # Values the controls would not take: each is replaced by the control's default.
+        {"strategy": "Range-bound · Bull Call Spread", "contracts": "0"},
+        {"strategy_category": "range-bound", "multiplier": "x", "commission": "-1", "strategy_width_pct": "50"},
+        {"strategy_width_pct": "nan", "contracts": "1e9", "commission": "inf"},
+        # The index: the template's expiry, strikes by delta or width, and an expiry no longer listed.
+        {**INDEX},
+        {**INDEX, "strategy": "Short Strangle", "strategy_short_delta": "25", "strategy_expiry": "2026-11-20 AM"},
+        {**INDEX, "strategy": "iron butterfly", "strategy_wing_pts": "150", "contracts": "3"},
+        {**INDEX, "strategy_strikes_by": "Width", "strategy_width_pct": "2", "strategy_expiry": "2026-11-19 AM"},
+        {**INDEX, "strategy_category": "Time spread", "strategy_short_delta": "17", "strategy_wing_pts": "7"},
+        # 25-point wings, no longer offered (they landed on the short where SPX lists every 50): the default wing.
+        {**INDEX, "strategy_wing_pts": "25"},
+    ],
+    ids=[
+        "defaults", "condor", "custom", "calendar", "out of range", "invalid", "not finite", "index", "index strangle",
+        "index butterfly", "index width", "index legacy", "index old wing",
+    ],
+)  # fmt: skip
+def test_build_position_reads_a_link_as_the_controls_do(monkeypatch, query):
+    # Without controls() in the run, build_position reads the controls' URL parameters itself; the position must be
+    # the one the app builds (with the controls drawn) for the same link.
+    analysed = []
+    real = tab_risk.render
+    monkeypatch.setattr(tab_risk, "render", lambda position: analysed.append(position) or real(position))
+    query = TEXTBOOK | query
+    _app("Risk", **query)
+    built = _built(**query)
+    assert built == analysed[-1]
+    assert analysed[-1] is not None
+
+
+# --- Leg edits are never silently lost (textbook market) -----------------------------------------------------------
 
 
 @pytest.mark.parametrize(
     ("key", "value"), [("vol", 25.0), ("vol", 30.0), ("days", 200), ("spot", 105.0), ("rate", 3.0)]
 )
 def test_leg_edits_survive_sidebar_changes(key, value):
-    editor = LegsEditor(_app())
-    editor.edit({"0": {"Quantity": 3}})
+    editor = LegsEditor(_edit(_app()))
+    editor.edit({"0": {"Qty": 3}})
     assert "Long 3 × 100 Call" in _position(editor.at)
     editor.at.sidebar.number_input(key=key).set_value(value)
     at = editor.run()
     assert "**Bull Call Spread (modified)** — Long 3 × 100 Call, Short 1 × 110 Call" in _position(at)
 
 
+def _kept(at: AppTest) -> bool:
+    return any(c.value.startswith("Edited legs: kept") for c in at.caption)
+
+
 def test_edited_template_is_kept_on_a_strike_change_until_reset():
-    editor = LegsEditor(_app())
-    editor.edit({"0": {"Quantity": 3}})
+    editor = LegsEditor(_edit(_app()))
+    editor.edit({"0": {"Qty": 3}})
     editor.at.sidebar.number_input(key="strike").set_value(95.0)
     at = editor.run()
     assert "Long 3 × 100 Call, Short 1 × 110 Call" in _position(at)
-    assert any("kept" in info.value for info in at.info)
+    assert _kept(at)
     at.button(key="reset_legs").click()
     at = editor.run()
     assert "**Bull Call Spread** — Long 1 × 95 Call, Short 1 × 105 Call" in _position(at)
-    assert not any("kept" in info.value for info in at.info)
+    assert not _kept(at)
 
 
 def test_unedited_template_follows_the_sidebar_strike():
@@ -187,9 +720,9 @@ def test_unedited_template_follows_the_sidebar_strike():
 
 def test_custom_position_survives_volatility_and_strike_changes():
     at = _app()
-    at.selectbox(key="strategy_category").set_value("Custom").run()
-    editor = LegsEditor(at)
-    editor.edit(added_rows=[{"Type": "put", "Quantity": -1, "Strike": 90}, {"Type": "stock", "Quantity": 1}])
+    at.selectbox(key="strategy").set_value("Custom").run()
+    editor = LegsEditor(_edit(at))
+    editor.edit(added_rows=[{"Type": "put", "Qty": -1, "Strike": 90}, {"Type": "stock", "Qty": 1}])
     built = "**Custom** — Long 1 × 100 Call, Short 1 × 90 Put, Long 1 share"
     assert built in _position(editor.at)
     for key, value in (("vol", 30.0), ("strike", 101.0)):
@@ -198,17 +731,17 @@ def test_custom_position_survives_volatility_and_strike_changes():
 
 
 def test_edits_survive_switching_to_another_template_and_back():
-    editor = LegsEditor(_app())
-    editor.edit({"0": {"Quantity": 3}})
-    editor.at.selectbox(key="strategy_Vertical spread").set_value("Bear Call Spread")
+    editor = LegsEditor(_edit(_app()))
+    editor.edit({"0": {"Qty": 3}})
+    editor.at.selectbox(key="strategy").set_value("Vertical spread · Bear Call Spread")
     assert "**Bear Call Spread** —" in _position(editor.run())
-    editor.at.selectbox(key="strategy_Vertical spread").set_value("Bull Call Spread")
+    editor.at.selectbox(key="strategy").set_value("Vertical spread · Bull Call Spread")
     assert "Long 3 × 100 Call, Short 1 × 110 Call" in _position(editor.run())
 
 
 def test_blank_strike_means_the_sidebar_strike():
-    editor = LegsEditor(_app())
-    at = editor.edit(added_rows=[{"Type": "put", "Quantity": 1}])
+    editor = LegsEditor(_edit(_app()))
+    at = editor.edit(added_rows=[{"Type": "put", "Qty": 1}])
     assert "Long 1 × 100 Put" in _position(at)
     # Like a blank expiry or IV, a blank strike follows the sidebar.
     editor.at.sidebar.number_input(key="strike").set_value(90.0)
@@ -218,15 +751,15 @@ def test_blank_strike_means_the_sidebar_strike():
 def test_reverted_edit_on_kept_legs_is_not_moved_by_a_later_rerun():
     # Round-1 verifier: after a strike change kept the edited legs, editing them back to the old template values
     # left them on the old strikes, and the next rerun from any widget silently moved them to the new template.
-    editor = LegsEditor(_app())
-    editor.edit({"0": {"Quantity": 3}})
+    editor = LegsEditor(_edit(_app()))
+    editor.edit({"0": {"Qty": 3}})
     editor.at.sidebar.number_input(key="strike").set_value(95.0)
     editor.run()
-    editor.state = {**NO_EDITS, "edited_rows": {"0": {"Quantity": 1}}}
+    editor.state = {**NO_EDITS, "edited_rows": {"0": {"Qty": 1}}}
     at = editor.run()
     kept = "**Bull Call Spread (modified)** — Long 1 × 100 Call, Short 1 × 110 Call"
     assert kept in _position(at)
-    assert any("kept" in info.value for info in at.info)
+    assert _kept(at)
     at.number_input(key="contracts").set_value(2)
     at = editor.run()
     assert f"{kept} · 2 × 100 multiplier" in _position(at)
@@ -234,23 +767,23 @@ def test_reverted_edit_on_kept_legs_is_not_moved_by_a_later_rerun():
     at.sidebar.number_input(key="strike").set_value(100.0)
     at = editor.run()
     assert "**Bull Call Spread** — Long 1 × 100 Call, Short 1 × 110 Call" in _position(at)
-    assert not any("kept" in info.value for info in at.info)
+    assert not _kept(at)
     at.sidebar.number_input(key="strike").set_value(90.0)
     assert "**Bull Call Spread** — Long 1 × 90 Call, Short 1 × 100 Call" in _position(editor.run())
 
 
 def test_an_edit_that_arrives_with_a_strike_change_is_kept():
     # The browser sends both in one rerun when the strike changes while the edit's own rerun is still running.
-    editor = LegsEditor(_app())
+    editor = LegsEditor(_edit(_app()))
     editor.at.sidebar.number_input(key="strike").set_value(95.0)
-    at = editor.edit({"0": {"Quantity": 3}})
+    at = editor.edit({"0": {"Qty": 3}})
     assert "**Bull Call Spread (modified)** — Long 3 × 100 Call, Short 1 × 110 Call" in _position(at)
-    assert any("kept" in info.value for info in at.info)
+    assert _kept(at)
 
 
 def test_editor_identity_does_not_depend_on_sidebar_values():
     # Root cause of the lost edits: the column help quoted the sidebar values and so changed the editor's identity.
-    at = _app(strategy_width_pct=10)  # a fixed width keeps the template itself unchanged
+    at = _edit(_app(strategy_width_pct=10))  # a fixed width keeps the template itself unchanged
     before = _editor_id(at)
     for key, value in (("vol", 30.0), ("days", 90), ("spot", 120.0)):
         at.sidebar.number_input(key=key).set_value(value).run()
@@ -258,8 +791,6 @@ def test_editor_identity_does_not_depend_on_sidebar_values():
 
 
 # --- The Risk tab's position while the Strategy tab is closed (tab_strategy.build_position) ----------------------
-
-CONDOR_LINK = {"strategy_category": "Range-bound", "strategy_Range-bound": "Iron Condor"}
 
 
 def _legs_value(units: float, legs, spot: float, vol: float) -> float:
@@ -277,7 +808,7 @@ def _assert_heatmap_of(at: AppTest, units: float, legs) -> None:
 
 def test_a_link_to_the_risk_tab_analyses_the_linked_template():
     # A cold deep link: the Strategy tab never opens in this session, so its legs editor never runs and the Risk tab
-    # builds the position from the link's parameters.
+    # builds the position from the link's parameters (here the two menus of a version 3.0 link).
     at = _app("Risk", contracts=2, commission=0.65, **CONDOR_LINK)
     assert _analysed(at) == (
         "Analysing **Iron Condor** — Long 1 × 80 Put, Short 1 × 90 Put, Short 1 × 110 Call, Long 1 × 120 Call · 2 × "
@@ -296,6 +827,8 @@ def test_a_link_to_the_risk_tab_analyses_the_linked_template():
         var = risk.value_at_risk(strategy, strat.Market(100, 0.05, 0.2, 1.0), config, 200)
         assert _metric(at, var_label).value == tab_strategy.money_short(var.var)
         assert _metric(at, es_label).value == tab_strategy.money_short(var.expected_shortfall)
+    # The link now holds the menu's one parameter.
+    assert at.query_params["strategy"] == "Range-bound · Iron Condor" and "strategy_category" not in at.query_params
 
 
 CONDOR = "**Iron Condor** — Long 1 × 80 Put, Short 1 × 90 Put, Short 1 × 110 Call, Long 1 × 120 Call"
@@ -309,12 +842,11 @@ def test_the_short_link_to_a_template_analyses_it_on_the_risk_tab():
     assert _analysed(at) == f"Analysing {CONDOR} · 1 × 100 multiplier"
     assert _editor_id(at) is None and _chart(at, "var_hist")
     _assert_heatmap_of(at, 100, [("put", 1, 80), ("put", -1, 90), ("call", -1, 110), ("call", 1, 120)])
-    # The link now holds the parameters the Strategy tab's menus are bound to, so a copy of it reopens the same view.
-    assert at.query_params == {"tab": "Risk", **CONDOR_LINK} | TEXTBOOK
+    # The link now holds the parameter the Strategy tab's menu is bound to, so a copy of it reopens the same view.
+    assert at.query_params == {"tab": "Risk", "strategy": "Range-bound · Iron Condor"} | TEXTBOOK
     assert not at.warning
     _open(at, "Strategy")
-    assert at.selectbox(key="strategy_category").value == "Range-bound"
-    assert at.selectbox(key="strategy_Range-bound").value == "Iron Condor"
+    assert at.selectbox(key="strategy").value == "Range-bound · Iron Condor"
 
 
 @pytest.mark.parametrize(
@@ -323,7 +855,8 @@ def test_the_short_link_to_a_template_analyses_it_on_the_risk_tab():
         ("iron-condor", {}, f"{CONDOR} · 1 × 100 multiplier"),
         ("JADE LIZARD", {"contracts": 3}, "**Jade Lizard** — Short 1 × 90 Put, Short 1 × 110 Call, Long 1 × 120 Call"),
         ("custom", {}, "**Custom** — Long 1 × 100 Call · 1 × 100 multiplier"),
-        # The short form wins over the two-parameter form, which it replaces.
+        ("Range-bound · Iron Condor", {}, CONDOR),  # the menu's own label
+        # The short form wins over the two-parameter form of earlier links.
         (
             "Iron Condor",
             {"strategy_category": "Vertical spread", "strategy_Vertical spread": "Bear Put Spread"},
@@ -334,8 +867,16 @@ def test_the_short_link_to_a_template_analyses_it_on_the_risk_tab():
 def test_the_short_link_names_a_template_without_case_or_punctuation(name, query, analysed):
     at = _app("Risk", strategy=name, **query)
     assert analysed in _analysed(at)
-    assert "strategy" not in at.query_params and "strategy_Vertical spread" not in at.query_params
+    assert "strategy_category" not in at.query_params and "strategy_Vertical spread" not in at.query_params
     assert not at.warning
+
+
+def test_the_two_menus_of_an_earlier_link_still_open_their_template():
+    at = _app("Risk", strategy_category="Volatility", strategy_Volatility="Short Strangle")
+    assert "**Short Strangle** —" in _analysed(at)
+    assert at.query_params == {"tab": "Risk", "strategy": "Volatility · Short Strangle"} | TEXTBOOK
+    # A category alone opens its first template.
+    assert "**Long Straddle** —" in _analysed(_app("Risk", strategy_category="Volatility"))
 
 
 @pytest.mark.parametrize(
@@ -357,47 +898,9 @@ def test_a_short_link_to_a_strategy_that_is_not_a_template_is_ignored_with_a_not
     assert not at.warning
 
 
-#: A script that builds the position without drawing the Strategy tab's controls, as another page or a report would.
-WITHOUT_CONTROLS = """
-import streamlit as st
-from options_analyzer.ui import inputs, tab_strategy
-st.session_state["position"] = tab_strategy.build_position(inputs.sidebar())
-"""
-
-
-@pytest.mark.parametrize(
-    "query",
-    [
-        {},
-        {**CONDOR_LINK, "contracts": "2", "multiplier": "50", "commission": "0.65", "strategy_width_pct": "5"},
-        {"strategy_category": "Custom", "contracts": "2.5"},
-        {"strategy_category": "Time spread", "strike": "120", "days": "200"},
-        # Values the controls would not take: each is replaced by the control's default.
-        {"strategy_category": "Range-bound", "strategy_Range-bound": "Bull Call Spread", "contracts": "0"},
-        {"strategy_category": "range-bound", "multiplier": "x", "commission": "-1", "strategy_width_pct": "50"},
-        {"strategy_width_pct": "nan", "contracts": "1e9", "commission": "inf"},
-    ],
-    ids=["defaults", "condor", "custom", "calendar", "out of range", "invalid", "not finite"],
-)
-def test_build_position_reads_a_link_as_the_controls_do(monkeypatch, query):
-    # Without controls() in the run, build_position reads the controls' URL parameters itself; the position must be
-    # the one the app builds (with the controls drawn) for the same link.
-    analysed = []
-    real = tab_risk.render
-    monkeypatch.setattr(tab_risk, "render", lambda position: analysed.append(position) or real(position))
-    _app("Risk", **query)
-    page = AppTest.from_string(WITHOUT_CONTROLS)
-    page.query_params.update(query | TEXTBOOK)
-    page.run()
-    assert not page.exception, [e.value for e in page.exception]
-    assert not page.main.children  # nothing drawn in the main area
-    assert page.session_state["position"] == analysed[-1]
-    assert analysed[-1] is not None
-
-
 def test_leg_edits_survive_a_visit_to_the_risk_tab():
-    editor = LegsEditor(_app())
-    at = editor.edit({"1": {"Strike": 115.0}}, added_rows=[{"Type": "put", "Quantity": -1, "Strike": 90}])
+    editor = LegsEditor(_edit(_app()))
+    at = editor.edit({"1": {"Strike": 115.0}}, added_rows=[{"Type": "put", "Qty": -1, "Strike": 90}])
     cards = {m.label: m.value for m in at.metric}
     _open(at, "Risk")
     edited = "**Bull Call Spread (modified)** — Long 1 × 100 Call, Short 1 × 115 Call, Short 1 × 90 Put"
@@ -419,8 +922,8 @@ def test_an_edit_sent_with_the_click_on_another_tab_is_kept(tab, strike_change):
     # the edit arrives with the run that opens that tab, where the editor is not drawn to apply it, and Streamlit
     # drops the editor's state at the end of that run. Every tab keeps it, not only the Risk tab that analyses it;
     # once kept, the edited legs stay as they are when the sidebar strike changes (unedited legs would follow it).
-    at = _app()
-    edit = {**NO_EDITS, "edited_rows": {"0": {"Quantity": 3}}}
+    at = _edit(_app())
+    edit = {**NO_EDITS, "edited_rows": {"0": {"Qty": 3}}}
     _open(at, tab, WidgetState(id=_editor_id(at), string_value=json.dumps(edit)))
     assert _editor_id(at) is None
     modified = "**Bull Call Spread (modified)** — Long 3 × 100 Call, Short 1 × 110 Call"
@@ -431,9 +934,9 @@ def test_an_edit_sent_with_the_click_on_another_tab_is_kept(tab, strike_change):
         _ok(at)
     _open(at, "Strategy")
     shown = next(d.value for d in at.dataframe if "legs::" in d.proto.id)
-    assert shown["Quantity"].tolist() == [3.0, -1.0] and shown["Strike"].tolist() == [100.0, 110.0]
+    assert shown["Qty"].tolist() == [3.0, -1.0] and shown["Strike"].tolist() == [100.0, 110.0]
     # Net premium: 3 x 100 call - 1 x 110 call at their Black-Scholes-Merton values (one year, 5 %, 20 %), for 100
-    # shares; the card shows whole dollars from $1,000 and the exact amount in its help.
+    # shares; the tile shows whole dollars from $1,000 and the exact amount in its help.
     call = {strike: bs.price(100.0, strike, 1.0, 0.05, 0.2, 0.0, "call") for strike in (100.0, 110.0)}
     premium = _metric(at, "Net premium")
     assert premium.value == f"${100 * (3 * call[100.0] - call[110.0]):,.0f}" == "$2,531"
@@ -444,13 +947,13 @@ def test_an_edit_sent_with_the_click_on_another_tab_is_kept(tab, strike_change):
 @pytest.mark.parametrize(
     "edits",
     [
-        {"edited_rows": {"0": {"Quantity": 2, "Strike": None}, "3": {"IV (%)": 25.0, "Premium": 1.5}}},
+        {"edited_rows": {"0": {"Qty": 2, "Strike": None}, "3": {"IV (%)": 25.0, "Entry": 1.5}}},
         {"deleted_rows": [1, 2]},
-        {"added_rows": [{"Type": "stock", "Quantity": 1}, {"Type": "put", "Strike": 95.5, "Days": 30}]},
+        {"added_rows": [{"Type": "stock", "Qty": 1}, {"Type": "put", "Strike": 95.5, "Days": 30}]},
         {
             "edited_rows": {"2": {"Type": "put"}},
             "deleted_rows": [0, 3],
-            "added_rows": [{"Type": "call", "Quantity": -2}],
+            "added_rows": [{"Type": "call", "Qty": -2}],
         },
     ],
     ids=["cells", "deletions", "additions", "all"],
@@ -460,15 +963,15 @@ def test_an_edit_sent_with_the_click_on_another_tab_is_kept(tab, strike_change):
 def test_edits_are_applied_as_the_legs_editor_applies_them(edits):
     # tab_strategy._apply_edits stands in for the editor when an edit arrives with a switch to another tab: it must
     # give the legs that st.data_editor itself returns for the same edits.
-    editor = LegsEditor(_app(**CONDOR_LINK))
+    editor = LegsEditor(_edit(_app(strategy="Iron Condor")))
     editor.edit(edits.get("edited_rows"), edits.get("added_rows", ()), edits.get("deleted_rows", ()))
-    legs = editor.at.session_state["strategy_legs"]["Iron Condor"]
+    legs = editor.at.session_state["strategy_legs"]["Textbook::Range-bound · Iron Condor"]
     assert not tab_strategy._same(legs["edited"], legs["seed"])
     assert tab_strategy._same(tab_strategy._apply_edits(legs["seed"], {**NO_EDITS, **edits}), legs["edited"])
 
 
 def _condor_frame():
-    return tab_strategy._template_frame(strat.build_template("Iron Condor", 100.0, 10.0, 1.0))
+    return lg.textbook_template("Iron Condor", 100.0, 10.0, 1.0)
 
 
 def _changed(**cells):
@@ -483,15 +986,26 @@ def _changed(**cells):
     ("other", "same"),
     [
         (lambda f: f.astype(object), True),
-        (lambda f: f.astype({"Quantity": int, "Days": "Int64", "Type": "string"}), True),
+        (lambda f: f.astype({"Qty": int, "Days": "Int64", "Type": "string"}), True),
         (lambda f: f.set_axis([5, 6, 7, 8]), True),  # the editor's index does not matter
-        (lambda f: f[["Type", "Quantity", "Strike"]], True),  # missing columns are blank, as Days, IV and Premium
+        (lambda f: f[["On", "Type", "Qty", "Strike"]], True),  # missing columns are blank, as Days, IV and Entry
         (lambda f: _changed(Type=(1, None)), False),
         (lambda f: _changed(Strike=(0, np.nan)), False),
-        (lambda f: _changed(Premium=(2, 1.5)), False),
+        (lambda f: _changed(Entry=(2, 1.5)), False),
+        (lambda f: _changed(On=(2, False)), False),
         (lambda f: f.iloc[:3], False),
     ],
-    ids=["object", "other dtypes", "index", "missing blank columns", "blank type", "blank strike", "premium", "row"],
+    ids=[
+        "object",
+        "other dtypes",
+        "index",
+        "missing blank columns",
+        "blank type",
+        "blank strike",
+        "entry",
+        "off",
+        "row",
+    ],
 )
 def test_legs_compare_equal_whatever_dtypes_the_editor_returns(other, same):
     # tab_strategy._same decides whether legs follow the template; it runs on every run of the app.
@@ -501,16 +1015,14 @@ def test_legs_compare_equal_whatever_dtypes_the_editor_returns(other, same):
 
 def test_blank_cells_and_signed_zeros_compare_equal():
     assert tab_strategy._same(_changed(Type=(1, None)), _changed(Type=(1, np.nan)))
-    assert tab_strategy._same(_changed(Quantity=(0, -0.0)), _changed(Quantity=(0, 0.0)))
+    assert tab_strategy._same(_changed(Qty=(0, -0.0)), _changed(Qty=(0, 0.0)))
 
 
-# --- Strike width and defaults --------------------------------------------------------------------------------
+# --- Strike width and defaults (textbook market) -----------------------------------------------------------------
 
 
 def test_strike_width_follows_the_sidebar_strike():
-    at = _app(spot=8, strike=8)
-    at.selectbox(key="strategy_Vertical spread").set_value("Bull Put Spread").run()
-    _ok(at)
+    at = _app(spot=8, strike=8, strategy="Bull Put Spread")
     assert "Short 1 × 8 Put, Long 1 × 7 Put" in _position(at)
     at.number_input(key="strategy_width_pct").set_value(10.0).run()
     assert "Short 1 × 8 Put, Long 1 × 7.2 Put" in _position(at)
@@ -541,87 +1053,66 @@ def test_round_width_keeps_strikes_on_a_price_tick(width, rounded):
     assert tab_strategy.round_width(width) == rounded
 
 
-def _caption(at: AppTest, text: str) -> str:
-    return next(c.value for c in at.caption if text in c.value)
-
-
-def test_percent_width_is_rounded_to_the_cent_and_shown_as_used():
-    # Round-1 verifier: 10% of a 101.37 strike gave a 111.507 call while the caption said w = $10.14.
+def test_percent_width_is_rounded_to_the_cent():
+    # Round-1 verifier: 10% of a 101.37 strike gave a 111.507 call.
     at = _app(spot=101.37, strike=101.37, strategy_width_pct=10)
     assert "Long 1 × 101.37 Call, Short 1 × 111.51 Call" in _position(at)
-    assert "w = \\$10.14 (10.00% of the strike, set by you)" in _caption(at, "Width")
 
 
 def test_sub_cent_strikes_are_shown_in_full():
-    # Round-1 verifier: a penny condor's 0.975/1.025 strikes showed as 0.97/1.02 and its width as $0.03.
-    at = _app(spot=1, strike=1, days=30, strategy_category="Range-bound")
-    at.selectbox(key="strategy_Range-bound").set_value("Iron Condor").run()
-    _ok(at)
+    # Round-1 verifier: a penny condor's 0.975/1.025 strikes showed as 0.97/1.02.
+    at = _app(spot=1, strike=1, days=30, strategy="Iron Condor")
     assert "Long 1 × 0.95 Put, Short 1 × 0.975 Put, Short 1 × 1.025 Call, Long 1 × 1.05 Call" in _position(at)
-    assert "w = \\$0.025 (2.50% of the strike, automatic)" in _caption(at, "Width")
-    editor = next(n.proto for n in _nodes(at._tree) if "legs::" in getattr(getattr(n, "proto", None), "id", ""))
+    blotter = _blotter(at)
+    assert json.loads(blotter.proto.columns)["Strike"]["type_config"]["format"] == "%,.3f"
+    assert blotter.value["Strike"].tolist()[:4] == [0.95, 0.975, 1.025, 1.05]
+    editor = next(n.proto for n in _nodes(_edit(at)._tree) if "legs::" in getattr(getattr(n, "proto", None), "id", ""))
     assert json.loads(editor.columns)["Strike"]["type_config"]["format"] == tab_strategy.STRIKE_FORMAT
     # The format is printf-style and the browser applies it the way Python's % operator does.
     shown = [tab_strategy.STRIKE_FORMAT % k for k in (0.95, 0.975, 1.025, 1.05, 100.0, 111.51, 1 - 2 * 0.025)]
     assert shown == ["0.95", "0.975", "1.025", "1.05", "100", "111.51", "0.95"]
 
 
-def _legs_table(at: AppTest):
-    return next(df for df in at.dataframe if "Model value" in df.value.columns)
-
-
 def test_large_strikes_are_shown_in_full():
     # Round-2 verifier: labels used 6 significant digits, so the Risk header read 'Long 1 × 12345.7 Put' and
     # 'Long 1 × 1.23457e+06 Call', and the legs table cut 1234567.89 to 1234567.9.
-    at = _app(spot=12345.67, strike=12345.67, strategy_category="Single option")
-    at.selectbox(key="strategy_Single option").set_value("Long Put").run()
-    _ok(at)
+    at = _app(spot=12345.67, strike=12345.67, strategy="Long Put")
     assert "Long Put** — Long 1 × 12,345.67 Put ·" in _position(at)
     at = _app(spot=1234567.89, strike=1234567.89)
     assert "Long 1 × 1,234,567.89 Call, Short 1 × 1,334,567.89 Call" in _position(at)
-    table = _legs_table(at)
-    assert json.loads(table.proto.columns)["Strike"]["type_config"]["format"] == tab_strategy.STRIKE_FORMAT
-    shown = [tab_strategy.STRIKE_FORMAT % k for k in table.value["Strike"]]
-    assert shown == ["1234567.89", "1334567.89"]
-    assert [tab_strategy.STRIKE_FORMAT % k for k in (12345.67, 9999999.99, 9999999.99 * 1.9)] == [
-        "12345.67",
-        "9999999.99",
-        "18999999.98",
-    ]
+    blotter = _blotter(at)
+    assert json.loads(blotter.proto.columns)["Strike"]["type_config"]["format"] == "%,.2f"
+    assert blotter.value["Strike"].tolist()[:2] == [1234567.89, 1334567.89]
 
 
-def test_index_sized_legs_table_fits_a_laptop_screen():
-    # Round-2 verifier: at 1,280 px the legs table of a 100-lot SPX iron condor was 13 px wider than the page and
-    # cut its last column. Entry prices equal to the model values are no longer repeated, and dollar columns of
-    # $10,000 or more show whole dollars, rounded rather than truncated by the browser.
-    at = _app(spot=4500, strike=4500, contracts=100, strategy_category="Range-bound")
-    at.selectbox(key="strategy_Range-bound").set_value("Iron Condor").run()
-    _ok(at)
-    table = _legs_table(at)
-    assert "Entry price" not in table.value.columns
-    config = json.loads(table.proto.columns)
-    for col in ("Cost", "Vega/pt"):
-        values = table.value[col].to_numpy(dtype=float)
-        assert np.abs(values).max() >= 1e4
-        assert config[col]["type_config"] == {"type": "number", "format": "dollar", "step": 1}
-        assert np.array_equal(values, np.round(values))
-    assert table.value["Vega/pt"].tolist() == [49391.0, -115530.0, -176740.0, 145020.0]
-    assert config["Theta/day"]["type_config"].get("step") is None  # below $10,000: cents
-    assert config["Delta"]["type_config"]["format"] == "%.2f" and config["Gamma"]["type_config"]["format"] == "%.4f"
-    at = LegsEditor(at).edit({"0": {"Premium": 2.5}})
-    table = _legs_table(at)
-    assert table.value["Entry price"].tolist()[:2] == [2.5, pytest.approx(92.55996, abs=1e-5)]
+def test_the_textbook_blotter_keeps_days_and_the_flat_vol_and_shows_cents():
+    # The textbook market: legs keep days to expiry and the sidebar vol, with no quote columns; its one-lot Greeks
+    # are below $10 a column, so they show cents (whole dollars read a theta of $2 and a Total of 0).
+    at = _app()
+    blotter = _blotter(at)
+    frame = blotter.value
+    assert list(frame.columns) == [
+        "On", "Qty", "Type", "Expiry", "Strike", "IV", "IV src", "$Δ", "Γ P&L 1%", "Vega", "Θ", "Decay",
+    ]  # fmt: skip
+    assert frame["Expiry"].tolist()[:2] == ["365d", "365d"] and frame["IV src"].tolist()[:2] == ["flat", "flat"]
+    assert frame["IV"].tolist()[:2] == [20.0, 20.0]
+    config = json.loads(blotter.proto.columns)
+    assert config["Θ"]["type_config"]["format"] == "%,.2f" and config["Vega"]["type_config"]["format"] == "%,.0f"
+    market = strat.Market(100, 0.05, 0.2, 1.0)
+    legs = strat.build_template("Bull Call Spread", 100, 10).legs
+    thetas = [strat.position_risk(strat.Strategy("l", (leg,)), market, multiplier=100).theta for leg in legs]
+    assert frame["Θ"].tolist() == [round(thetas[0], 2), round(thetas[1], 2), round(sum(thetas), 2)]
+    assert _tiles(at)["Package"] == ("–", "theo 4.41")
+    assert _tiles(at)["P(profit)"][1] == "flat vol"
 
 
 def test_short_dated_condor_is_not_degenerate_by_default():
     # Review finding: a 10%-of-strike width put a 7-day condor's short strikes 3.6 standard deviations away.
-    at = _app(days=7, strategy_category="Range-bound")
-    at.selectbox(key="strategy_Range-bound").set_value("Iron Condor").run()
-    _ok(at)
-    pop = float(_metric(at, "Probability of profit").value.rstrip("%")) / 100
+    at = _app(days=7, strategy="Iron Condor")
+    pop = float(_tiles(at)["P(profit)"][0].rstrip("%")) / 100
     assert 0.2 < pop < 0.8
     at.number_input(key="strategy_width_pct").set_value(10.0).run()
-    assert _metric(at, "Probability of profit").value == ">99.9%"
+    assert _tiles(at)["P(profit)"][0] == ">99.9%"
 
 
 def test_probability_text_never_rounds_to_a_certainty():
@@ -639,54 +1130,19 @@ def test_probability_text_never_rounds_to_a_certainty():
 def test_probability_of_profit_is_not_a_certainty_when_the_position_can_lose_or_profit():
     # Round-1 verifier: a 7-day short 60 put has a probability of exactly 1.0 in floating point but can lose
     # $6,000, and a far out-of-the-money call spread showed 0.0% with a $200 maximum profit.
-    at = _app(days=7, strike=60, strategy_category="Single option")
-    at.selectbox(key="strategy_Single option").set_value("Short Put").run()
-    _ok(at)
-    assert _metric(at, "Max loss").value == "$6,000"  # whole dollars from $1,000 on a card
-    assert _metric(at, "Probability of profit").value == ">99.9%"
+    at = _app(days=7, strike=60, strategy="Short Put")
+    assert _tiles(at)["Max loss"][0] == f"{MINUS}$6,000"  # the strike less a premium below half a cent
+    assert _tiles(at)["P(profit)"][0] == ">99.9%"
     at = _app(days=7, strike=150)
-    assert _metric(at, "Max profit").value.startswith("$")
-    assert _metric(at, "Probability of profit").value == "<0.1%"
-
-
-# --- Metrics -----------------------------------------------------------------------------------------------------
-
-
-def test_reward_to_risk_is_never_an_absurd_number():
-    # Review finding: a $0.00 maximum loss produced a 50-digit ratio.
-    assert "**Reward / risk:** 1.27 : 1" in _summary_line(_app())
-    at = _app(strike=150, days=7, strategy_width_pct=10)
-    assert _metric(at, "Max loss").value == "$0.00"
-    assert "**Reward / risk:** –" in _summary_line(at)
-    at = _app(strike=125, days=30, strategy_width_pct=10)
-    assert _metric(at, "Max loss").value == "$0.01"
-    assert "**Reward / risk:** > 1,000 : 1" in _summary_line(at)
-
-
-def test_tiny_reward_to_risk_is_not_shown_as_zero():
-    # Final review: a 1-day covered call's $42.45 maximum profit against a $9,958 maximum loss (a ratio of 0.0043)
-    # read "0.00 : 1", as if the position could not profit.
-    at = _app(strategy_category="Stock + option", days=1)
-    assert _metric(at, "Max profit").value == "$42.45"
-    assert _metric(at, "Max loss").value == "$9,958"
-    assert "**Reward / risk:** < 0.01 : 1" in _summary_line(at)
-    # No-break spaces keep the ratio on one line: on a phone it wrapped after the "<".
-    nbsp = "\N{NO-BREAK SPACE}"
-    assert f"**Reward / risk:** <{nbsp}0.01{nbsp}:{nbsp}1" in _summary_line(at, raw=True)
-    assert "**Reward / risk:** 0.03 : 1" in _summary_line(_app(strategy_category="Stock + option", days=30))
+    assert _tiles(at)["Max profit"][0].startswith("$")
+    assert _tiles(at)["P(profit)"][0] == "<0.1%"
 
 
 def test_zero_net_premium_is_neither_a_debit_nor_a_credit():
     # Final review: an at-the-money synthetic at a zero rate costs exactly nothing (C - P = S - K e^{-rT} = 0) but its
     # card read "$0.00 credit (received)".
-    at = _app(rate=0, strategy_category="Synthetic")
-    premium = _metric(at, "Net premium")
-    assert premium.value == "$0.00"
-    assert premium.proto.delta == "no net premium"
-    # The label follows the amount as shown: a sub-cent residue is $0.00 either way.
-    assert tab_strategy.premium_label(0.004) == tab_strategy.premium_label(-0.004) == "no net premium"
-    assert tab_strategy.premium_label(0.005) == "debit (paid)"
-    assert tab_strategy.premium_label(-0.005) == "credit (received)"
+    at = _app(rate=0, strategy="Synthetic Long Stock")
+    assert _tiles(at)["Net premium"] == ("$0.00", "no premium")
 
 
 @pytest.mark.parametrize("vol", [20, 100, 200])
@@ -699,21 +1155,23 @@ def test_payoff_band_is_the_one_sigma_range_of_the_price_at_expiry(vol):
     band = next(shape for shape in spec["layout"]["shapes"] if shape["type"] == "rect")
     assert band["x0"] == pytest.approx(price.ppf(norm.cdf(-1.0)), rel=1e-9)
     assert band["x1"] == pytest.approx(price.ppf(norm.cdf(1.0)), rel=1e-9)
+    assert _trace(spec, "68% at expiry")["name"].endswith("(flat vol)")
     # The chart's probability range starts 2.5 standard deviations below the median (it ends capped at 3 x 110).
-    spots = _array(next(t for t in spec["data"] if t.get("name", "").startswith("At expiry"))["x"])
+    spots = _array(_trace(spec, "Expiry 365d")["x"])
     assert spots[0] == pytest.approx(price.ppf(norm.cdf(-2.5)), rel=1e-9)
 
 
 @pytest.mark.parametrize("spot", [1.0, 1.5, 5.0, 100.0])
-def test_breakeven_dollars_agree_with_their_percentage(spot):
+def test_breakeven_levels_agree_with_their_percentage(spot):
     # Final review: at a $1 spot the condor's breakevens read "$0.96 (-3.8%)", although $0.96 is 4.0% below the spot.
-    market = strat.Market(spot, 0.05, 0.2, 30 / 365)
-    condor = strat.build_template("Iron Condor", spot, tab_strategy.auto_width(spot, 0.2, 30 / 365))
-    text = tab_strategy.breakeven_text(strat.analyze(condor, market).breakevens, spot)
-    pairs = re.findall(r"\$([\d,.]+) \(([+-][\d.]+%)\)", text)
-    assert len(pairs) == 2, text
-    for dollars, percent in pairs:
-        assert f"{float(dollars.replace(',', '')) / spot - 1:+.1%}" == percent, text
+    at = _app(spot=spot, strike=spot, days=30, strategy="Iron Condor")
+    value, delta = _tiles(at)["Breakevens"]
+    for level, percent in zip(value.split(" / "), delta.split(" / "), strict=True):
+        assert f"{float(level.replace(',', '')) / spot - 1:+.1%}".replace("-", MINUS) == percent, (value, delta)
+    pairs = re.findall(r"([\d,.]+) \(([+−][\d.]+%)\)", _metric(at, "Breakevens").proto.help)
+    assert len(pairs) == 2
+    for level, percent in pairs:
+        assert f"{float(level.replace(',', '')) / spot - 1:+.1%}".replace("-", MINUS) == percent
 
 
 @pytest.mark.parametrize("spot", [1e-4, 0.01, 0.5, 0.999, 1.0, 5.0, 9.99, 10.0, 100.0, 4500.0, 1e6])
@@ -725,28 +1183,25 @@ def test_breakeven_decimals_resolve_a_tenth_of_a_percent(spot):
 
 
 def test_breakevens_of_a_one_dollar_underlying_show_a_tenth_of_a_cent():
-    at = _app(spot=1, strike=1, days=30, strategy_category="Range-bound")
-    at.selectbox(key="strategy_Range-bound").set_value("Iron Condor").run()
-    _ok(at)
-    assert "Breakevens at expiry:** \\$0.962 (-3.8%) and \\$1.038 (+3.8%)" in _summary_line(at)
-    marker = next(t for t in _chart(at, "payoff_chart")["data"] if t.get("name") == "Breakeven")
-    assert marker["hovertemplate"].startswith("Breakeven %{x:$,.3f}")
+    at = _app(spot=1, strike=1, days=30, strategy="Iron Condor")
+    assert _tiles(at)["Breakevens"] == ("0.962 / 1.038", f"{MINUS}3.8% / +3.8%")
+    marker = _trace(_chart(at, "payoff_chart"), "Breakeven")
+    assert marker["text"] == [f"BE 0.962 ({MINUS}3.8%)", "BE 1.038 (+3.8%)"]
 
 
 def test_both_breakevens_are_shown_in_full():
     # Review finding: the second breakeven was cut off in a narrow metric card.
-    at = _app(strategy_category="Range-bound")
-    at.selectbox(key="strategy_Range-bound").set_value("Iron Condor").run()
-    assert re.search(
-        r"Breakevens at expiry:\*\* \\\$85\.58 \(-14\.4%\) and \\\$114\.42 \(\+14\.4%\)", _summary_line(at)
-    )
+    at = _app(strategy="Iron Condor")
+    # In cents on a $100 underlying, as the help and the chart write them (the tile read 85.6).
+    assert _tiles(at)["Breakevens"] == ("85.58 / 114.42", f"{MINUS}14.4% / +14.4%")
+    assert f"85.58 ({MINUS}14.4%), 114.42 (+14.4%)" in _metric(at, "Breakevens").proto.help
 
 
 def test_large_amounts_are_shortened_with_the_exact_value_in_the_help():
     at = _app(spot=4500, strike=4500, contracts=10)
     premium = _metric(at, "Net premium")
     assert premium.value == "$215,715"
-    assert "Exact: \\$215,715" in premium.proto.help
+    assert "\\$215,715.16 for the position" in premium.proto.help
 
 
 #: Advance widths (px) of the metric-card value font (the theme's IBM Plex Sans Medium at 22.75 px), measured in
@@ -755,6 +1210,7 @@ def test_large_amounts_are_shortened_with_the_exact_value_in_the_help():
 CARD_GLYPHS = {
     **dict.fromkeys("0123456789$+<>", 13.650),
     "-": 9.124,
+    MINUS: 13.650,
     ",": 6.598,
     ".": 6.598,
     "%": 21.545,
@@ -840,7 +1296,7 @@ def test_money_short_fits_a_metric_card(value, signed, text):
     # 1,280 px a vega of -$97,858.24 was already wider than its card. Round-3 verifier: a theta of '+$2,737.18' and
     # '+$1.00e+15' were still cut, as '+' is as wide as a digit. Cents stop at $1,000 and scientific notation has one
     # decimal, so every amount is at most nine characters with its sign and fits the card.
-    assert tab_strategy.money_short(value, signed) == text
+    assert fmt.money_short(value, signed) == text
     assert len(text) <= 9
     assert _card_width(text) <= CARD_WIDTH
 
@@ -853,10 +1309,10 @@ def test_every_card_amount_fits_at_laptop_width(sign, signed):
     for exponent in range(-3, 18):
         for mantissa in mantissas:
             value = sign * mantissa * 10.0**exponent
-            text = tab_strategy.money_short(value, signed)
+            text = fmt.money_short(value, signed)
             assert _card_width(text) <= CARD_WIDTH, (value, text)
             for decimals in (2, 4):
-                text = tab_strategy.number_short(value, decimals)
+                text = fmt.number_short(value, decimals)
                 assert _card_width(text) <= CARD_WIDTH, (value, decimals, text)
 
 
@@ -903,215 +1359,95 @@ def test_worded_card_values_fit_at_laptop_width():
     ],
 )
 def test_number_short_fits_a_metric_card(value, decimals, text):
-    assert tab_strategy.number_short(value, decimals) == text
+    assert fmt.number_short(value, decimals) == text
     assert len(text) <= 9
     assert _card_width(text) <= CARD_WIDTH
 
 
-def test_index_sized_short_premium_cards_fit_at_laptop_width():
-    # Round-3 verifier: a 100-lot SPX iron condor showed Theta / day '+$2,737.…' at 1,280 px.
-    at = _app(spot=4500, strike=4500, contracts=100, strategy_category="Range-bound")
-    at.selectbox(key="strategy_Range-bound").set_value("Iron Condor").run()
-    _ok(at)
-    theta = _metric(at, "Theta / day")
-    assert theta.value == "+$2,737"
-    assert "Theta / day: +\\$2,737.18" in theta.proto.help
-    for label in ("Net premium", "Max profit", "Max loss", "Delta (shares)", "Gamma", "Theta / day", "Vega / vol pt"):
-        assert _card_width(_metric(at, label).value) <= CARD_WIDTH, (label, _metric(at, label).value)
-
-
-@pytest.mark.parametrize(
-    ("category", "name"),
-    [("Vertical spread", "Bull Call Spread"), ("Volatility", "Long Straddle"), ("Volatility", "Short Straddle")],
-)
-def test_cards_stay_readable_at_the_input_limits(category, name):
+@pytest.mark.parametrize("name", ["Bull Call Spread", "Long Straddle", "Short Straddle"])
+def test_tiles_stay_readable_at_the_input_limits(name):
     # Round-2 verifier, at spot and strike 9,999,999, 100,000 contracts and 10,000 shares per contract (all within
-    # the input limits): every dollar card and the share delta were cut off with an ellipsis. Round-3 verifier: the
-    # straddles' theta, '-$1.03e+15' and '+$1.03e+15', were still cut.
+    # the input limits): every dollar card was cut off with an ellipsis. The dollar tiles are shortened to at most
+    # nine characters with the exact amount in their help; card_row sizes the row by its widest tile (the
+    # breakevens), and wraps it (tests/test_app_components.py).
     at = _app(
-        spot=9999999,
-        strike=9999999,
-        contracts=100000,
-        multiplier=10000,
-        vol=500,
-        days=1,
-        strategy_category=category,
-        **{f"strategy_{category}": name},
-    )
-    shortened = ["Net premium", "Max profit", "Max loss", "Delta (shares)", "Vega / vol pt"]
-    for label in [*shortened, "Decay to expiry", "Gamma", "Probability of profit"]:
+        spot=9999999, strike=9999999, contracts=100000, multiplier=10000, vol=500, days=1, strategy=name
+    )  # fmt: skip
+    for label in ("Net premium", "Max profit", "Max loss", "P(profit)"):
         value = _metric(at, label).value
         assert len(value) <= 9 and _card_width(value) <= CARD_WIDTH, (label, value)
-    for label in shortened:
-        value = _metric(at, label).value
-        assert value in ("Unlimited", "No loss", "No profit") or "Exact:" in _metric(at, label).proto.help, label
-    if name == "Short Straddle":
-        # The decay to expiry is the whole value of the straddle, about twice theta / 365.
-        decay = _metric(at, "Decay to expiry")
-        assert decay.value == "+$2.1e+15"
-        assert "Decay to expiry: +\\$2,082,072,717,212,0" in decay.proto.help
-        assert "Theta / day: +\\$1,034,965,609,384,7" in decay.proto.help
-
-
-def test_shortened_amounts_at_the_input_limits_keep_the_exact_value_in_the_help():
-    at = _app(spot=9999999, strike=9999999, contracts=100000, multiplier=10000)
-    assert _metric(at, "Net premium").value == "$441.0T"
-    assert "Exact: \\$441,049,535," in _metric(at, "Net premium").proto.help
-    delta = _metric(at, "Delta (shares)")
-    assert delta.value == "187.2M"
-    assert "Exact: 187,182,738.53" in delta.proto.help
+    for label in ("Net premium", "Max profit", "Max loss"):
+        metric = _metric(at, label)
+        assert metric.value in ("Unlimited", "No loss", "No profit") or re.search(
+            r"\\\$[\d,]+\.\d\d", metric.proto.help
+        )
 
 
 def test_no_loss_and_no_profit_wording_and_no_arrows():
-    # Round-3 verifier: 'Cannot lose' (178 px) was cut to 'Cannot l…' at 1,280 px; the card now says 'No loss', like
+    # Round-3 verifier: 'Cannot lose' (178 px) was cut to 'Cannot l…' at 1,280 px; the tile says 'No loss', like
     # 'No profit', and its help keeps the full sentence.
     box = [
-        {"Type": "call", "Quantity": -1, "Strike": 110},
-        {"Type": "put", "Quantity": 1, "Strike": 110},
-        {"Type": "put", "Quantity": -1, "Strike": 90},
+        {"Type": "call", "Qty": -1, "Strike": 110},
+        {"Type": "put", "Qty": 1, "Strike": 110},
+        {"Type": "put", "Qty": -1, "Strike": 90},
     ]
-    at = _app(strategy_category="Custom")
+    at = _edit(_app(strategy="Custom"))
     at = LegsEditor(at).edit({"0": {"Strike": 90}}, added_rows=box)
     loss = _metric(at, "Max loss")
     assert loss.value == "No loss"
-    assert "The position cannot lose: it makes at least \\$" in loss.proto.help
-    assert _metric(at, "Delta (shares)").value == "0.00"
+    assert "The position cannot lose at the front expiry." in loss.proto.help
     premium = _metric(at, "Net premium")
-    assert premium.proto.delta == "debit (paid)"
+    assert premium.proto.delta == "debit"
     assert premium.proto.direction == premium.proto.MetricDirection.NONE  # no up arrow on a label
-    short_box = [{**row, "Quantity": -row["Quantity"]} for row in box]
-    at = LegsEditor(_app(strategy_category="Custom")).edit({"0": {"Strike": 90, "Quantity": -1}}, added_rows=short_box)
+    short_box = [{**row, "Qty": -row["Qty"]} for row in box]
+    at = LegsEditor(_edit(_app(strategy="Custom"))).edit({"0": {"Strike": 90, "Qty": -1}}, added_rows=short_box)
     assert _metric(at, "Max profit").value == "No profit"
-    assert "No profit is possible" in _metric(at, "Max profit").proto.help
+    assert "The position cannot profit" in _metric(at, "Max profit").proto.help
 
 
-def test_legs_table_has_no_negative_zeros():
-    # Round-1 verifier: far out-of-the-money legs showed Cost -$0.00, Delta -0.00, Gamma -0.0000 and so on.
+def test_the_blotter_has_no_negative_zeros():
+    # Round-1 verifier: far out-of-the-money legs showed -0.00 in the legs table. The blotter's values are rounded to
+    # their column's precision before they are sent (components.table), so no cell shows a negative zero.
     at = _app(strike=150, days=7)
-    table = next(df.value for df in at.dataframe if "Model value" in df.value.columns)
+    frame = _blotter(at).value
     rounded = 0
-    shown_decimals = {
-        "Model value": 4,
-        "Entry price": 4,
-        "Cost": 2,
-        "Delta": 2,
-        "Gamma": 4,
-        "Theta/day": 2,
-        "1-day decay": 2,
-        "Vega/pt": 2,
-    }
-    for col, decimals in shown_decimals.items():
-        if col not in table:  # the entry price is left out when every leg is entered at model value
-            continue
-        values = table[col].to_numpy(dtype=float)
-        shown = [f"{v:.{decimals}f}" for v in values]
-        assert not [s for s in shown if re.fullmatch(r"-0\.0+", s)], (col, shown)
-        rounded += int(np.sum(np.abs(values) < 0.5 * 10**-decimals))
+    for column in ("$Δ", "Γ P&L 1%", "Vega", "Θ", "Decay"):
+        values = frame[column].to_numpy(dtype=float)
+        assert not np.any((values == 0) & np.signbit(values)), column
+        rounded += int(np.sum(values == 0))
     assert rounded >= 5  # the case has values that round to zero
-    assert shown_decimals == tab_strategy.LEGS_TABLE_DECIMALS
-
-
-def test_whole_dollar_columns_have_no_negative_zeros():
-    market = strat.Market(4500, 0.05, 0.2, 7 / 365)
-    # The short put's vega is about -$0.20 for the position, which rounds to a whole-dollar -0.
-    strategy = strat.Strategy("x", (strat.Leg("call", 1, 4500), strat.Leg("put", -1, 3940, premium=0.0)))
-    table, decimals = tab_strategy.legs_table(strategy, market, 10_000)
-    assert decimals["Cost"] == decimals["Vega/pt"] == 0 and decimals["Gamma"] == 4
-    assert table["Vega/pt"].iloc[1] == 0.0 and not np.signbit(table["Vega/pt"].iloc[1])
-    assert table["Entry price"].tolist()[1] == 0.0  # a fill price was entered, so the column is shown
-    # Share counts shorten the same way as the Delta and Gamma cards: two decimals from 1,000, none from 10,000.
-    assert (decimals["Delta"], decimals["Gamma"]) == (2, 4)
-    table, decimals = tab_strategy.legs_table(strategy, market, 1_000_000)
-    assert (decimals["Delta"], decimals["Gamma"], decimals["Theta/day"]) == (0, 2, 0)
-
-
-def test_number_has_no_negative_zero():
-    assert tab_strategy.number(-1e-12, 2) == "0.00"
-    assert tab_strategy.number(-0.004, 2) == "0.00"
-    assert tab_strategy.number(-0.006, 2) == "-0.01"
 
 
 # --- One-day decay beside theta / 365 (docs/reviews/panel-v3.0.md, market maker, finding 3) --------------------
 
 #: The panel's SPX-like market (rates and volatility in percent, as the sidebar takes them).
 SPX = {"spot": 5800, "strike": 5800, "rate": 4.3, "div": 1.3}
-DECAY_LABELS = ("Theta / day", "1-day decay", "Decay to expiry")
 
 
-def _decay_card(at: AppTest):
-    """The time-decay card, whichever of its labels it has."""
-    (card,) = [m for m in at.metric if m.label in DECAY_LABELS]
-    return card
-
-
-def _single(name: str, **query) -> AppTest:
-    return _app(strategy_category="Single option", **{"strategy_Single option": name}, **query)
-
-
-def test_a_one_day_put_shows_its_decay_to_expiry():
-    # The panel: a 1-day at-the-money put worth $21.56 a share shows theta -$10.66 a day and loses all of it.
-    at = _single("Long Put", vol=18, days=1, **SPX)
-    card = _decay_card(at)
+def test_a_one_day_put_shows_its_decay_to_expiry_beside_theta():
+    # The panel: a 1-day at-the-money put worth $21.56 a share shows theta -$10.66 a day and loses all of it. The
+    # blotter's decay column, right of theta, is the decay to expiry then.
+    at = _app(strategy="Long Put", vol=18, days=1, **SPX)
+    blotter = _blotter(at)
     market = strat.Market(5800, 0.043, 0.18, 1 / 365, 0.013)
     premium = 100 * bs.price(5800, 5800, 1 / 365, 0.043, 0.18, 0.013, "put")
-    assert (card.label, card.value) == ("Decay to expiry", "-$2,156")
     assert premium == pytest.approx(2156.11, abs=0.005)
-    assert f"Decay to expiry: −\\${premium:,.2f}" in card.proto.help  # minus the whole premium
     theta = strat.position_risk(strat.Strategy("p", (strat.Leg("put", 1, 5800),)), market, multiplier=100).theta
     assert theta == pytest.approx(-1066.05, abs=0.005)
-    assert "Theta / day: −\\$1,066.05" in card.proto.help
-    assert "An option expires within the day" in card.proto.help
-    # The legs table names its column as the card is named.
-    table = _legs_table(at)
-    assert "1-day decay" not in table.value.columns
-    assert table.value["Decay to expiry"].tolist() == [pytest.approx(-premium, rel=1e-12)]
-    assert (
-        "A leg that expires within the day is worth its intrinsic value"
-        in (json.loads(table.proto.columns)["Decay to expiry"]["help"])
-    )
+    assert blotter.value["Decay"].tolist() == [round(-premium), round(-premium)]  # the leg and the Total
+    assert blotter.value["Θ"].tolist() == [round(theta), round(theta)]
+    config = json.loads(blotter.proto.columns)
+    assert config["Decay"]["label"] == "To expiry ($)"
+    names = list(blotter.value.columns)
+    assert names.index("Decay") == names.index("Θ") + 1
 
 
-def test_the_legs_table_keys_its_decimals_by_the_decay_column():
-    market = strat.Market(100, 0.05, 0.2, 1 / 365)
-    strategy = strat.Strategy("x", (strat.Leg("call", 1, 100), strat.Leg("put", -1, 95, expiry=30 / 365)))
-    table, decimals = tab_strategy.legs_table(strategy, market, 100)
-    # The front leg expires within the day, so the column is the decay to expiry, though the back leg's figure is
-    # its decay over one day: the card says the same (tab_strategy.decay_card).
-    assert "Decay to expiry" in table.columns and "1-day decay" not in table.columns
-    assert decimals["Decay to expiry"] == 2 and "1-day decay" not in decimals
-    expected = [100 * strat.time_decay(strat.Strategy("leg", (leg,)), market) for leg in strategy.legs]
-    assert table["Decay to expiry"].tolist() == pytest.approx(expected, abs=0.005)
-    table, decimals = tab_strategy.legs_table(strategy, strat.Market(100, 0.05, 0.2, 2 / 365), 100)
-    assert "1-day decay" in table.columns and decimals["1-day decay"] == 2
-
-
-@pytest.mark.parametrize(("days", "label"), [(45, "Theta / day"), (3, "Theta / day"), (2, "1-day decay")])
-def test_the_card_shows_the_decay_beyond_ten_percent(days, label):
-    # Spot = strike = 100, 20 % volatility, 5 % rate: the put's theta / 365 and 1-day decay differ by 0.7 % at
-    # 45 days, 9.7 % at 3 days and 15.2 % at 2 days. The card's help gives both figures either way.
-    at = _single("Long Put", days=days)
-    card = _decay_card(at)
-    T = days / 365
-    decay = 100 * (bs.price(100, 100, T - 1 / 365, 0.05, 0.2, 0, "put") - bs.price(100, 100, T, 0.05, 0.2, 0, "put"))
-    theta = 100 * bs.greeks(100, 100, T, 0.05, 0.2, 0, "put")["theta"] / 365
-    assert card.label == label
-    assert card.value == tab_strategy.money_short(theta if label == "Theta / day" else decay, signed=True)
-    assert f"1-day decay: −\\${-decay:,.2f}" in card.proto.help
-    assert f"Theta / day: −\\${-theta:,.2f}" in card.proto.help
-
-
-def test_the_panels_seven_day_condor_keeps_theta_with_the_decay_in_its_help():
-    # The panel's 7-day condor: theta / 365 +$137.50 against +$151.97 by repricing, 9.5 % of the larger apart, so
-    # theta stays the headline under the 10 % rule; the legs table's decays add up to the card's.
-    at = _app(strategy_category="Range-bound", **{"strategy_Range-bound": "Iron Condor"}, vol=16, days=7, **SPX)
-    card = _decay_card(at)
-    assert (card.label, card.value) == ("Theta / day", "+$137.50")
-    assert "1-day decay: +\\$151.97" in card.proto.help
-    assert "They differ by 10% of the larger or less" in card.proto.help
-    table = _legs_table(at).value
-    assert table["1-day decay"].sum() == pytest.approx(151.97, abs=0.005)
-    names = list(table.columns)
-    assert names.index("1-day decay") == names.index("Theta/day") + 1
+def test_the_panels_seven_day_condor_shows_theta_and_its_one_day_decay():
+    # The panel's 7-day condor: theta / 365 +$137.50 against +$151.97 by repricing, side by side in the Total row.
+    at = _app(strategy="Iron Condor", vol=16, days=7, **SPX)
+    frame = _blotter(at).value
+    assert (frame["Θ"].tolist()[-1], frame["Decay"].tolist()[-1]) == (138, 152)
+    assert json.loads(_blotter(at).proto.columns)["Decay"]["label"] == "1d decay ($)"
 
 
 def test_the_risk_tab_gives_the_decay_beside_theta():
@@ -1171,20 +1507,18 @@ def test_the_theta_profile_reprices_each_date_one_day_later():
 
 
 def test_a_position_of_shares_alone_has_no_decay_to_expiry():
-    # No option expires, whatever the sidebar's days: the card keeps its usual names.
+    # No option expires, whatever the sidebar's days.
     market = strat.Market(100, 0.05, 0.2, 1 / 365, 0.02)
     shares = strat.Strategy("s", (strat.Leg("stock", 100),))
     assert not tab_strategy.expires_within_a_day(shares, market)
     assert tab_strategy.expires_within_a_day(strat.Strategy("c", (strat.Leg("call", 1, 100),)), market)
-    label, value, _ = tab_strategy.decay_card(0.5, 0.5, tab_strategy.expires_within_a_day(shares, market))
-    assert (label, value) == ("Theta / day", "+$0.50")
 
 
 # --- Descriptions and valuation notes --------------------------------------------------------------------------
 
 
 def test_calendar_is_described_with_its_expiries():
-    at = _app(strategy_category="Time spread")
+    at = _app(strategy="Long Call Calendar")
     assert "Short 1 × 100 Call (365d), Long 1 × 100 Call (730d)" in _position(at)
 
 

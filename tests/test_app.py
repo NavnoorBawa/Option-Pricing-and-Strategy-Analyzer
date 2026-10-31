@@ -4,7 +4,7 @@ import json
 import re
 
 import pytest
-from _apptest import TEXTBOOK
+from _apptest import ASOF, TEXTBOOK
 from streamlit.proto.WidgetStates_pb2 import WidgetState
 from streamlit.testing.v1 import AppTest
 
@@ -61,14 +61,20 @@ def test_extreme_expiries(app, days):
     _ok(app)
 
 
-def test_every_strategy_template(new_app):
-    app = new_app(tab="Strategy").run()
-    for category in strategies.TEMPLATE_CATEGORIES:
-        app.selectbox(key="strategy_category").set_value(category).run()
-        names = [t.name for t in strategies.TEMPLATES.values() if t.category == category]
-        for name in names:
-            app.selectbox(key=f"strategy_{category}").set_value(name).run()
-            _ok(app)
+@pytest.mark.parametrize("market", [{}, {"preset": None, "asof": ASOF}], ids=["textbook", "index"])
+def test_every_strategy_template(new_app, market):
+    # Every template of the menu: all of them in the textbook market, the option-only ones under the index (SPX
+    # itself cannot be traded, so the stock templates are not offered there).
+    app = new_app(tab="Strategy", **market).run()
+    options = app.selectbox(key="strategy").options
+    names = [
+        n for n, t in strategies.TEMPLATES.items() if not market or all(leg.is_option for leg in t.build(100, 5, 1))
+    ]
+    assert options == [f"{strategies.TEMPLATES[n].category} · {n}" for n in names] + ["Custom"]
+    for label in options:
+        app.selectbox(key="strategy").set_value(label).run()
+        _ok(app)
+        assert len(app.metric) >= 6
 
 
 def test_var_models(new_app):
@@ -106,17 +112,17 @@ def _trace(at: AppTest, prefix: str) -> dict:
     raise AssertionError(f"no trace named {prefix!r}")
 
 
-def test_iv_shift_leaves_the_expiry_curve_and_metrics_alone(new_app):
-    # A calendar's back leg is alive at the front expiry; the slider must not move the at-expiry curve away
-    # from the breakevens and maxima computed without the shift.
+def test_a_vol_shift_leaves_the_expiry_curve_and_tiles_alone(new_app):
+    # A calendar's back leg is alive at the front expiry; the what-if vol shift must not move the expiry curve away
+    # from the breakevens and maxima of the tiles, which are computed without it.
     app = new_app(tab="Strategy").run()
     app.sidebar.number_input(key="days").set_value(30).run()
-    app.selectbox(key="strategy_category").set_value("Time spread").run()
-    before = _trace(app, "At expiry")["y"]
-    app.slider(key="pnl_iv_shift").set_value(10).run()
+    app.selectbox(key="strategy").set_value("Time spread · Long Call Calendar").run()
+    before = _trace(app, "Expiry")["y"], [m.value for m in app.metric]
+    app.number_input(key="wv").set_value(10.0).run()
     _ok(app)
-    assert _trace(app, "At expiry")["y"] == before
-    assert _trace(app, "Today")["name"] == "Today, IV +10 pts"
+    assert (_trace(app, "Expiry")["y"], [m.value for m in app.metric]) == before
+    assert _trace(app, "T+0")["name"] == "T+0 · vol +10.00 vp"
 
 
 #: Every chart of the app, by key; the closed form and the American engine, with Engine diagnostics open, draw
@@ -164,7 +170,7 @@ TAB_CHARTS = {
 }  # fmt: skip
 #: The Strategy tab's controls (at the default URL), which are drawn on every run: they are bound to the URL.
 STRATEGY_CONTROLS = {
-    "strategy_category", "strategy_Vertical spread", "strategy_width_pct", "contracts", "multiplier", "commission",
+    "strategy_builder", "strategy", "strategy_width_pct", "strategy_settings", "contracts", "multiplier", "commission",
     "risk_neutral", "carry",
 }  # fmt: skip
 
@@ -204,8 +210,7 @@ def _assert_only_open(at: AppTest, tab: str) -> None:
             assert nodes, tab
         elif block.label == "Strategy":
             assert {n.key for n in nodes if getattr(n, "key", None)} == STRATEGY_CONTROLS
-            assert {n.type for n in nodes} <= {"caption", "column", "flex_container", "number_input", "popover",
-                                               "selectbox", "toggle"}  # fmt: skip
+            assert {n.type for n in nodes} <= {"flex_container", "number_input", "popover", "selectbox", "toggle"}
         else:
             assert not nodes, block.label
 
@@ -277,8 +282,7 @@ def test_a_link_is_read_once_per_session(new_app, monkeypatch):
     at = new_app(tab="risk", strategy="Iron Condor").run()
     assert len(runs) == 2  # the first run stopped before the sidebar
     _open(at, "IV")
-    assert len(runs) == 3 and at.query_params == {"tab": "IV", "strategy_category": "Range-bound",
-                                                  "strategy_Range-bound": "Iron Condor"} | TEXTBOOK  # fmt: skip
+    assert len(runs) == 3 and at.query_params == {"tab": "IV", "strategy": "Range-bound · Iron Condor"} | TEXTBOOK
 
 
 def test_switching_tabs_runs_each_tab_in_turn(app):
@@ -334,7 +338,7 @@ def test_value_at_risk_is_not_simulated_while_the_pricing_tab_is_open(app, monke
     for key, value in (("spot", 105.0), ("vol", 30.0), ("days", 90)):
         app.sidebar.number_input(key=key).set_value(value).run()
         _ok(app)
-    app.selectbox(key="strategy_category").set_value("Range-bound").run()  # the Strategy controls are on every run
+    app.selectbox(key="strategy").set_value("Range-bound · Iron Condor").run()  # drawn on every run
     _ok(app)
     assert calls == []
     _open(app, "Risk")  # the counter does see the simulations once the Risk tab opens
@@ -362,29 +366,19 @@ def test_strategy_values_survive_a_visit_to_the_risk_tab(new_app):
     at.toggle(key="risk_neutral").set_value(False).run()
     at.number_input(key="drift").set_value(12.0)
     at.toggle(key="carry").set_value(True)
-    at.slider(key="pnl_iv_shift").set_value(10)
-    at.slider(key="pnl_date_364").set_value(90).run()
+    at.number_input(key="wv").set_value(3.0)
+    at.segmented_control(key="st_range").set_value("±10%")
+    at.segmented_control(key="st_greek").set_value("Vega").run()
     _ok(at)
     before = {m.label: m.value for m in at.metric}
     _away_and_back(at, "Strategy", "Risk")
     assert {w.key: w.value for w in at.number_input}.items() >= {
-        "contracts": 3, "multiplier": 50, "commission": 1.25, "strategy_width_pct": 7.5, "drift": 12.0,
+        "contracts": 3, "multiplier": 50, "commission": 1.25, "strategy_width_pct": 7.5, "drift": 12.0, "wv": 3.0,
     }.items()  # fmt: skip
     assert at.toggle(key="risk_neutral").value is False and at.toggle(key="carry").value is True
-    assert at.slider(key="pnl_iv_shift").value == 10 and at.slider(key="pnl_date_364").value == 90
+    assert at.segmented_control(key="st_range").value == "±10%" and at.segmented_control(key="st_greek").value == "Vega"
     assert {m.label: m.value for m in at.metric} == before
-    assert before["Drift used"] == "12.00%"
-
-
-def test_the_date_slider_starts_again_when_the_expiry_changes(new_app):
-    # Its range follows the front expiry: a value is kept for one range only, as before the tabs ran lazily.
-    at = new_app(tab="Strategy").run()
-    at.slider(key="pnl_date_364").set_value(90).run()
-    at.sidebar.number_input(key="days").set_value(200).run()
-    assert at.slider(key="pnl_date_199").value == 100  # the default, the middle of the range
-    at.sidebar.number_input(key="days").set_value(365).run()
-    assert at.slider(key="pnl_date_364").value == 183
-    _ok(at)
+    assert next(m for m in at.metric if m.label == "P(profit)").proto.delta == "view"
 
 
 def test_risk_settings_survive_a_visit_to_another_tab(new_app):

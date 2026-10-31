@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 import pytest
+from _apptest import ASOF
 from streamlit.testing.v1 import AppTest
 
 from options_analyzer import vol_surface
@@ -84,12 +85,20 @@ def _app_states(new_app) -> dict[str, list[AppTest]]:
         multiplier=10000,
         vol=500,
         days=1,
-        strategy_category="Volatility",
-        strategy_Volatility="Short Straddle",
+        strategy="Short Straddle",
     )
     default = pages()
     with_quotes = [quotes if tab == "Surface" else page for tab, page in zip(CARD_TABS, default, strict=True)]
-    states = {"default": default, "quotes": with_quotes, "large": pages(contracts=100000), "limits": limits}
+    # The app's own default market, the synthetic index, whose Strategy tiles hold the widest default values (the
+    # package market "20.80 / 23.90"); the other states are on the textbook market the tests pin.
+    index = [new_app(tab="Strategy", preset=None, asof=ASOF).run()]
+    states = {
+        "default": default,
+        "index": index,
+        "quotes": with_quotes,
+        "large": pages(contracts=100000),
+        "limits": limits,
+    }
     for page in (page for state in states.values() for page in state):
         _ok(page)
     return states
@@ -114,7 +123,8 @@ def _layout(style: str, row: float) -> tuple[int, float] | None:
     None at full size (no query applies)."""
     layout = None
     for block in style.split("@container ")[1:]:
-        if row < int(re.match(r"[\w-]+ \(width < (\d+)px\)", block).group(1)):
+        narrower = re.match(r"[\w-]+ \(width < (\d+)px\)", block)  # (a one-line row's ``width >=`` query sets no grid)
+        if narrower and row < int(narrower.group(1)):
             columns = int(re.search(r"grid-template-columns: repeat\((\d+), minmax\(0, 1fr\)\)", block).group(1))
             share, padding, em = re.search(r"calc\(\(([\d.]+)cqw - ([\d.]+)px\) / ([\d.]+)\)", block).groups()
             font = min(max(16.0, (float(share) * row / 100 - float(padding)) / float(em)), 22.75)
@@ -290,9 +300,7 @@ def test_card_row_draws_bordered_metrics_in_their_groups():
 #: surface cards).
 ROWS = {
     "pricing_tiles": [["Call", "Put"], ["Straddle", "Vol"], ["Forward", "Time"]],
-    "strategy_cards": [["Net premium", "Max profit"], ["Max loss", "Probability of profit"]],
-    "greek_cards": [["Delta (shares)", "Gamma"], ["Theta / day", "Vega / vol pt"]],
-    "expectation_cards": [["Expected P&L at expiry", "P&L standard deviation", "Drift used"]],
+    "strategy_tiles": [["Net premium", "Package"], ["Max profit", "Max loss"], ["Breakevens", "P(profit)"]],
     "var_cards": [["VaR 99.0%", "Expected Shortfall 99.0%"], ["Spot-only VaR 99.0%", "Spot-only ES 99.0%"]],
     "surface_cards": [["Grid", "Calendar arbitrage"], ["Butterfly arbitrage", "Local vol defined"]],
     "iv_tiles": [["IV bid", "IV ask"], ["IV", "Surface"], ["Vega", "Bounds"]],
@@ -309,31 +317,31 @@ def states():
 def test_every_metric_of_every_tab_is_in_a_card_row(states):
     # The Strategy, Risk and Surface tabs drew their metrics in st.columns, which stack one card per row on a phone.
     found = {}
-    for state, at in states.items():
+    for at in states.values():
         for row, groups in _card_rows(at).items():
             assert all(m.proto.show_border for group in groups for m in group), row
             assert any(f".st-key-{row} {{ container:" in s for s in _styles(at)), f"{row} has no stylesheet"
-            labels = [[m.label for m in group] for group in groups]
-            if state == "limits" and row == "greek_cards":
-                # One day to expiry: the decay to expiry takes theta's place (tab_strategy.decay_card).
-                assert labels == [["Delta (shares)", "Gamma"], ["Decay to expiry", "Vega / vol pt"]]
-                continue
-            found[row] = labels
+            found[row] = [[m.label for m in group] for group in groups]
     assert found == ROWS
 
 
-def test_the_four_card_rows_stay_two_by_two_on_a_phone(states):
-    # On a 360 px phone each pair of a four-card row fits the row side by side (the cards do not stack). At the input
-    # limits this holds for the strategy cards, whose amounts are shortened to at most nine characters.
+def test_the_rows_of_pairs_stay_two_across_on_a_phone(states):
+    # On a 360 px phone each pair of a row of pairs fits the row side by side (the cards do not stack): the four-card
+    # rows and the Strategy tab's six tiles in three pairs (the Pricing and IV tiles have their own test below). At
+    # the input limits the Strategy tiles show the breakevens of a straddle struck at 9,999,999 ("9,215,931 /
+    # 10,784,067"): those stack there.
     checked = set()
     for state, at in states.items():
         for row, groups in _card_rows(at).items():
-            if len(groups) != 2 or len(groups[0]) != 2:
+            if any(len(g) != 2 for g in groups) or row in ("pricing_tiles", "iv_tiles"):
+                continue
+            if state == "limits" and row == "strategy_tiles":
                 continue
             style = next(s for s in _styles(at) if f".st-key-{row} {{ container:" in s)
-            assert _layout(style, PHONE_ROW)[0] == 2, (state, row)
+            # No query at all: every pair fits at full size, side by side (each group is one flex line of two).
+            assert (_layout(style, PHONE_ROW) or (2, 22.75))[0] == 2, (state, row)
             checked.add(row)
-    assert checked == {"strategy_cards", "greek_cards", "var_cards", "surface_cards"}
+    assert checked == {"strategy_tiles", "var_cards", "surface_cards"}
 
 
 @pytest.mark.parametrize("row", ["pricing_tiles", "iv_tiles"])
@@ -345,52 +353,27 @@ def test_the_six_tile_rows_go_pair_by_pair_on_a_phone(states, row):
         assert _layout(style, phone - 2 * 14) in (None, (2, 22.75)), phone
 
 
-@pytest.mark.parametrize(
-    ("phone", "expected"),
-    # Cards per line of the three-card row at the default URL on common phone widths (360 px Android, 375 and 390
-    # px iPhone, 412, 430 and 440 px large phones). The expected-P&L cards go 3 across from a 409 px row (phones of
-    # 437 px and up), where each card has room for its value at full size and "EXPECTED P&L" over "AT EXPIRY" in
-    # the labels' small capitals. (The VaR cards were a row of three, 2 + 1 on every phone; they are two pairs now,
-    # the spot-only VaR and ES beside the VaR and ES with implied-vol moves.)
-    [
-        (360, {"expectation_cards": 2}),
-        (375, {"expectation_cards": 2}),
-        (390, {"expectation_cards": 2}),
-        (412, {"expectation_cards": 2}),
-        (430, {"expectation_cards": 2}),
-        (440, {"expectation_cards": 3}),
-    ],
-)
-def test_the_three_card_rows_on_a_phone(states, phone, expected):
-    # At 375 and 390 px the expected-P&L cards were 3 across with values shrunk to 19.6 and 20.9 px under labels on
-    # three lines, next to rows of 22.75 px values on the same screen.
-    row = phone - 2 * 14  # the page's side margins on a phone
-    for key, per_line in expected.items():
-        style = next(s for s in _styles(states["default"]) if f".st-key-{key} {{ container:" in s)
-        assert _layout(style, row) == (per_line, 22.75), key
+#: The index's Strategy tiles' value size (px) on the phones where it is below the theme's 22.75 px.
+INDEX_TILES = {360: 20.0, 375: 21.14, 390: 22.28}
 
 
 @pytest.mark.parametrize("phone", [360, 375, 390, 412, 430, 440])
 def test_every_card_value_of_a_phone_screen_has_one_size(states, phone):
     # Every row of every tab at the default URL shows its values at the theme's full size on a phone, so the type
     # does not change from row to row on one screen (no query applies: full size). On a 320 px phone the price
-    # cards' values shrink to 21.4 px so that each pair stays side by side.
+    # cards' values shrink to 21.4 px so that each pair stays side by side. The exception is the index's Strategy
+    # tiles below a 412 px phone: two values of 13 characters ("20.80 / 23.90", the package market, and "5,378 /
+    # 6,172", the breakevens) set the width of every tile, and keep their pairs side by side at 20.0, 21.1 and 22.3 px
+    # on 360, 375 and 390 px phones (spec 2.11 does not gate tile positions on phones).
     row = phone - 2 * 14
-    for key, style in ((k, s) for s in _styles(states["default"]) for k in ROWS if f".st-key-{k} {{ container:" in s):
-        assert (_layout(style, row) or (0, 22.75))[1] == 22.75, (key, _layout(style, row))
-
-
-def test_the_strategy_summary_and_greek_rows_wrap_together(states):
-    # The two rows sit one above the other on the Strategy tab, so each is sized with the other's cards: their
-    # stylesheets are the same but for the keys, and they wrap at the same widths with their cards lined up.
-    for state, at in states.items():
-        summary, greeks = (
-            next(s for s in _styles(at) if f".st-key-{key} {{ container:" in s)
-            for key in ("strategy_cards", "greek_cards")
-        )
-        assert greeks == summary.replace("strategy_cards", "greek_cards").replace("strategy-cards", "greek-cards"), (
-            state
-        )
+    for state in ("default", "index"):
+        styles = _styles(states[state])
+        for key, style in ((k, s) for s in styles for k in ROWS if f".st-key-{k} {{ container:" in s):
+            size = (_layout(style, row) or (0, 22.75))[1]
+            if state == "index" and key == "strategy_tiles" and phone in INDEX_TILES:
+                assert size == pytest.approx(INDEX_TILES[phone], abs=0.05)
+                continue
+            assert size == 22.75, (state, key, _layout(style, row))
 
 
 def _advances(weight: str) -> dict[str, float]:

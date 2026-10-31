@@ -21,6 +21,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from _apptest import ASOF
 
 from options_analyzer.ui import charts, tab_methodology, theme
 
@@ -822,7 +823,7 @@ _RUNNING = "document.querySelector('[data-test-script-state]')?.getAttribute('da
 #: has run it. (The script-state mark does not do: a fast run can come and go between two frames.)
 TAB_READY = {
     "Pricing": ".st-key-pricing_tiles",
-    "Strategy": ".st-key-strategy_cards",
+    "Strategy": ".st-key-strategy_tiles",
     "Risk": ".st-key-var_cards",
     "Surface": ".st-key-surface_cards",
     "IV": ".st-key-iv_tiles",
@@ -884,9 +885,7 @@ _CARD_VALUES = """() => {
 #: The tab of every card row.
 CARD_ROW_TABS = {
     "pricing_tiles": "Pricing",
-    "strategy_cards": "Strategy",
-    "greek_cards": "Strategy",
-    "expectation_cards": "Strategy",
+    "strategy_tiles": "Strategy",
     "var_cards": "Risk",
     "surface_cards": "Surface",
     "iv_tiles": "IV",
@@ -956,25 +955,26 @@ def _lines(cards: list[dict]) -> list[list[dict]]:
 @pytest.mark.e2e
 @pytest.mark.slow
 @pytest.mark.parametrize(
-    ("width", "query", "three_up"),
-    # Phones (Android and iPhone widths) and a laptop with the sidebar open (the strategy, Greek and VaR rows 2 + 2,
-    # the three-card row 3 across), and on a phone a 100,000-lot position, whose amounts are in millions ("$46.62M").
+    ("width", "query"),
+    # Phones (Android and iPhone widths) and a laptop with the sidebar open (the VaR row 2 + 2, the Strategy tiles
+    # 2 + 2 + 2), and on a phone a 100,000-lot position, whose amounts are in millions ("$223.5M"); on the synthetic
+    # index at the pinned valuation time, the app's default market.
     [
-        pytest.param(360, "", False, id="360"),
-        pytest.param(390, "", False, id="390"),
-        pytest.param(1024, "", True, id="1024"),
-        pytest.param(390, "?contracts=100000", False, id="390-100000-lots"),
+        pytest.param(360, "", id="360"),
+        pytest.param(390, "", id="390"),
+        pytest.param(1024, "", id="1024"),
+        pytest.param(390, "&contracts=100000", id="390-100000-lots"),
     ],
 )
-def test_card_rows_line_up(chromium, app_url, width, query, three_up):
-    # The cards of each line of a row have one width, one height and one value baseline; a card is as wide on a
-    # line of its own (2 + 1) as above it; and no value or label runs out of its card's content box. Every value is
-    # at the theme's full size, and on a line of three cards no label takes more than two lines. The row of three
-    # goes 2 + 1 on phones, the rows of two pairs (the VaR row among them: implied vol moving, and frozen) 2 + 2,
-    # and the Strategy summary and Greek rows wrap together with their cards lined up.
+def test_card_rows_line_up(chromium, app_url, width, query):
+    # The cards of each line of a row have one width, one height and one value baseline; and no value or label runs
+    # out of its card's content box. Every value is at the theme's full size but the Strategy tiles' on the
+    # narrowest phones (their package market and breakevens set every tile's width: 20.0 px at 360 px, 22.3 at 390,
+    # tests/test_app_components.py), and on a line of three cards no label takes more than two lines. The rows of
+    # two pairs (the VaR row among them: implied vol moving, and frozen) go 2 + 2, the six tiles 2 + 2 + 2.
     # (The subgrid and stretch rules of ui/components.py depend on Streamlit's DOM: the bordered stMetric box, the
     # padded box inside it and the element container around it.)
-    page = _open(chromium, app_url + query, "light", width)
+    page = _open(chromium, f"{app_url}/?asof={ASOF}{query}", "light", width)
     try:
         rows = {}
         for key, tab in CARD_ROW_TABS.items():
@@ -982,7 +982,7 @@ def test_card_rows_line_up(chromium, app_url, width, query, three_up):
                 _tab(page, tab)
             rows[key] = page.evaluate(_CARD_ROW, key)
         for key, cards in rows.items():
-            assert len(cards) in (3, 4, 6), key
+            assert len(cards) in (4, 6), key
             for line in _lines(cards):
                 for measure in ("width", "height", "valueTop"):
                     values = [card[measure] for card in line]
@@ -992,21 +992,18 @@ def test_card_rows_line_up(chromium, app_url, width, query, three_up):
             widths = [card["width"] for card in cards]
             assert max(widths) - min(widths) <= 1, (key, widths)
             for card in cards:
-                assert card["font"] == pytest.approx(22.75, abs=0.01), (key, card["label"], card["font"])
+                if key == "strategy_tiles":
+                    assert 20.0 - 0.01 <= card["font"] <= 22.75 + 0.01, (key, card["label"], card["font"])
+                else:
+                    assert card["font"] == pytest.approx(22.75, abs=0.01), (key, card["label"], card["font"])
                 assert card["valueLeft"] >= card["contentLeft"] - 0.5, (key, card["label"])
                 assert max(card["valueRight"], card["labelRight"]) <= card["contentRight"] + 0.5, (key, card)
                 # The help icon follows the label's last word, on its line, also where the label wraps (Streamlit
                 # set it at the card's right edge then: 46 to 54 px after "Call ITM probability" at 360-375 px).
                 if card["iconGap"] is not None:
                     assert 0 <= card["iconGap"] <= 8 and card["iconOnLastLine"], (key, card)
-        assert [len(line) for line in _lines(rows["expectation_cards"])] == ([3] if three_up else [2, 1])
-        for key in ("strategy_cards", "greek_cards", "var_cards"):
-            assert [len(line) for line in _lines(rows[key])] == [2, 2], key
-
-        def boxes(key: str) -> list[list[tuple[int, int]]]:
-            return [[(round(c["x"]), round(c["width"])) for c in line] for line in _lines(rows[key])]
-
-        assert boxes("strategy_cards") == boxes("greek_cards")
+        assert [len(line) for line in _lines(rows["var_cards"])] == [2, 2]
+        assert [len(line) for line in _lines(rows["strategy_tiles"])] == [2, 2, 2]
     finally:
         page.close()
 
@@ -1079,7 +1076,8 @@ def test_a_click_on_a_tab_runs_that_tab_and_puts_it_in_the_link(chromium, app_ur
             assert _query(page).get("tab") == (None if tab == TABS[0] else [tab])
             assert not page.locator("[data-testid=stException]").count(), tab
         _tab(page, "Strategy")
-        contracts = page.locator("[data-testid=stMain] input[aria-label=Contracts]")
+        page.locator(".st-key-strategy_settings button").first.click()  # the Position settings popover
+        contracts = page.locator("[data-testid=stPopoverBody] input[aria-label=Contracts]")
         contracts.fill("3")
         contracts.press("Enter")
         _settle(page)
@@ -1112,8 +1110,7 @@ def test_a_hand_typed_link_opens_the_tab_and_template_it_names(chromium, app_url
         assert page.locator("[role=tab][aria-selected=true]").inner_text().strip() == "Risk"
         condor = "Iron Condor — Long 1 × 80 Put, Short 1 × 90 Put, Short 1 × 110 Call, Long 1 × 120 Call"
         assert condor in page.get_by_text("Analysing").inner_text()
-        assert _query(page) == {"tab": ["Risk"], "preset": ["Textbook"], "strategy_category": ["Range-bound"],
-                                "strategy_Range-bound": ["Iron Condor"]}  # fmt: skip
+        assert _query(page) == {"tab": ["Risk"], "preset": ["Textbook"], "strategy": ["Range-bound · Iron Condor"]}
         assert page.evaluate("history.length") == entries + 1
         assert not page.locator("[data-testid=stAlertContentWarning]").count()
     finally:
@@ -1143,12 +1140,15 @@ def test_a_leg_edit_is_kept_when_another_tab_is_clicked_before_enter(chromium, a
     page = _open(chromium, f"{app_url}/?tab=Strategy&preset=Textbook", "light", 1440)
     try:
         assert _net_premium(page) == "$441.05"  # long the 100 call, short the 110 call, for 100 shares
+        page.locator(".st-key-st_blotter button", has_text="Edit").click()  # the legs editor is in Edit
+        _settle(page)
         grid = page.locator("[data-testid=stMain] [data-testid=stDataFrame]").first
         box = grid.bounding_box()
-        # The grid draws on a canvas: click the first row's Type cell (the header and each row are 35 px high),
-        # step to Quantity and type into it, which opens the cell's editor (an input over the grid) a moment later.
-        page.mouse.click(box["x"] + 40, box["y"] + 35 + 17)
-        page.keyboard.press("ArrowRight")
+        # The grid draws on a canvas: click the first row's Type cell (its columns On, Qty, Type, ... share the
+        # 1,038 px row, about 143 px each after the row gutter; the header and each row are 32 to 35 px high), step
+        # to Qty and type into it, which opens the cell's editor (an input over the grid) a moment later.
+        page.mouse.click(box["x"] + 400, box["y"] + 35 + 16)
+        page.keyboard.press("ArrowLeft")
         page.keyboard.type("3")
         page.wait_for_function(
             "() => document.activeElement?.matches('input.gdg-input') && document.activeElement.value === '3'"

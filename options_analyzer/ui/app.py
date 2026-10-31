@@ -82,8 +82,8 @@ def _read_link() -> None:
     matched without case or punctuation, also by its longer names (:data:`TAB_ALIASES`), and a repeated ``tab`` gives
     its last value, as ``st.query_params`` reads it. The pricing model and the American engine's scheme are matched
     the same way, the model also by the header badge's short names (:data:`.model_config.MODEL_ALIASES`, so
-    ``?model=ALO`` works). The short form ``strategy=<template name>`` becomes the two
-    parameters of the Strategy tab's menus (:func:`.tab_strategy.link_selection`). A value that matches nothing is
+    ``?model=ALO`` works). The Strategy tab's template, as ``strategy=<template name>`` or the two menus of
+    earlier links, becomes the parameter of its menu (:func:`.tab_strategy.read_link`). A value that matches nothing is
     dropped, with a note. The new link replaces the old one in one step (one browser history entry, as Streamlit's
     own corrections of a link make) and takes effect in a rerun, since a widget reads the URL its run started with.
     Later runs carry the URL that the app itself writes, so they are left alone (nor could a parameter that is
@@ -175,18 +175,8 @@ def _read_link() -> None:
                 f"This link asks for a valuation time {_shown(value)}, which is not a date and time between 2000 "
                 "and 2097 (2026-10-23T16:00), so the last close is used."
             )
-    if "strategy" in params:
-        name = params.pop("strategy")[-1]
-        selection = tab_strategy.link_selection(name)
-        if selection is not None:
-            for key in tab_strategy.SELECTION_PARAMS:
-                params.pop(key, None)  # what the short form replaces
-            params.update({key: [value] for key, value in selection.items()})
-        elif name.strip():
-            notes.append(
-                f"This link asks for a strategy named {_shown(name)}, which is not one of the templates, so it was "
-                "ignored."
-            )
+    # The Strategy tab's template: ?strategy=<name> and the two menus of earlier links (tab_strategy.read_link).
+    notes += tab_strategy.read_link(params)
     state[_LINK_NOTES] = notes
     if params != link:
         st.query_params.from_dict(params)
