@@ -1,6 +1,6 @@
 """A page of the desk foundation's shared pieces, for the browser tests of tests/test_desk_foundation_e2e.py: the
 what-if strip, desk tables of 15 and 20 rows and one chart, in the app's theme and stylesheet. Run from the
-repository root (``python -m streamlit run tests/desk_foundation_page.py``), so that the package imports and the
+repository root (``python -m streamlit run tests/_desk_foundation_page.py``), so that the package imports and the
 theme in .streamlit/config.toml applies."""
 
 from datetime import datetime

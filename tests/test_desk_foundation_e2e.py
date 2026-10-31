@@ -1,7 +1,7 @@
 """The desk foundation's shared pieces in Chromium (UI spec 2.6, 2.7 item 10, 2.8, 3.2 item 3): the what-if strip's
 layout and amber state, the table helper's heights, input borders and the chart toolbars on a touch screen.
 
-They run on tests/desk_foundation_page.py, served from a temporary folder next to a link to the repository's
+They run on tests/_desk_foundation_page.py, served from a temporary folder next to a link to the repository's
 static/ folder (so that IBM Plex loads, as in the app: the strip's one-line budget is measured in that font), with
 the repository as the working directory (so that the package imports and .streamlit/config.toml applies).
 """
@@ -22,7 +22,7 @@ from test_theme import _hex, chromium  # noqa: F401  (chromium is a fixture)
 from options_analyzer.ui import components, theme
 
 ROOT = Path(__file__).resolve().parents[1]
-PAGE = Path(__file__).with_name("desk_foundation_page.py")
+PAGE = Path(__file__).with_name("_desk_foundation_page.py")
 _RUNNING = "document.querySelector('[data-test-script-state]')?.getAttribute('data-test-script-state') === 'running'"
 
 pytestmark = [pytest.mark.e2e, pytest.mark.slow]

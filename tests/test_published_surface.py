@@ -180,8 +180,9 @@ def test_the_risk_neutral_ranges(default):
 
 
 def test_one_cdf_evaluation_and_the_ranges_are_fast(default):
-    # Loose guards (shared CI runners are 2-3 times slower): measured 15 µs per CDF evaluation and 0.2 ms for the
-    # 68% and 95% ranges together once the expiry's grid is built (1.5 ms with it).
+    # Loose guards (shared CI runners are 2-3 times slower): measured on a shared 4-core machine, 15 µs per CDF
+    # evaluation (43 µs for 301 strikes), and 0.4 ms for the 68% and 95% ranges together once the expiry's grid is
+    # built (0.75 ms with it).
     _, published = default
     published.cdf(5800.0, DEC)
     start = time.perf_counter()

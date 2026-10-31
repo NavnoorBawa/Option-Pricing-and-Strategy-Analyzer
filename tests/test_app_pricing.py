@@ -948,17 +948,19 @@ def test_price_heatmap_keeps_every_row_and_column_for_low_prices_and_volatilitie
 def test_price_heatmaps_give_their_cells_the_full_width(app):
     # Side by side, each with a colour scale, the 9-column grids left the cell text at 5 px on a phone, 7 px at
     # 1,280 px and 9 px at 1,400 px (Plotly shrinks it to fit the cell). They are now stacked, without the scale.
-    def parent(node, key):
+    def ancestors(node, key):
         for child in getattr(node, "children", {}).values():
             if str(getattr(getattr(child, "proto", None), "id", "")).endswith(f"-{key}"):
-                return node
-            if (found := parent(child, key)) is not None:
-                return found
+                return [node]
+            if (found := ancestors(child, key)) is not None:
+                return [*found, node]
         return None
 
     for kind in ("call", "put"):
         assert _chart(app, f"heatmap_{kind}")["data"][0]["showscale"] is False
-        assert parent(app.main, f"heatmap_{kind}").type == "expander"  # not one of two columns
+        # charts.show draws each chart in its own chart_<key> container; the block around that is the expander.
+        box, around = ancestors(app.main, f"heatmap_{kind}")[:2]
+        assert len(box.children) == 1 and around.type == "expander"  # not one of two columns
     assert charts.price_heatmap([1.0, 2.0], [0.1, 0.2], np.ones((2, 2)), "Call").data[0].showscale is False
 
 

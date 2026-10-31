@@ -68,7 +68,7 @@ from .. import black_scholes as bs
 from ..implied_vol import ImpliedVolError, implied_volatility
 from .forwards import FORWARD_SOURCES, carry_gaps, implied_forwards
 from .local_vol import EXTRAPOLATION, _local_vol, _market_values, _MarketValues, _time_derivative, durrleman_g
-from .published import PublishedSurface
+from .published import PublishedSurface  # importable here, but not in __all__: SF-2 froze the star-import names
 from .quotes import (
     _ALIAS_KEYS,
     _ALIASES,
@@ -141,7 +141,6 @@ __all__ = [
     "EXERCISE_STYLES",
     "FORWARD_METHODS",
     "FORWARD_SOURCES",
-    "PublishedSurface",
     "QuoteParseError",
     "QuoteWarning",
     "SSVIParams",
