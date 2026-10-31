@@ -1167,10 +1167,14 @@ def _var(book: Book) -> None:
     legs_vol = "each leg re-priced at its own vol" + (", times the 1M multiplier damped by tenor" if with_vol else "")
     ci = 2 if abs(var) < 1000 else 0  # the interval to the cent on a small position (−$54.30: −$54.08 to −$54.55)
     # The cards compare amounts a few dollars apart: on the textbook contract the VaR read −$54 beside a spot-only
-    # VaR of −$55 and "+$0.58 vs spot only". Below $1,000 every card is to the cent, so that each gap is the
-    # difference of the amounts on screen (−$54.30 − (−$54.88)).
-    tail = [var, es, spot_var, spot_es] + ([] if dg is None else [dg.var])
-    cents = max(abs(v) for v in tail if math.isfinite(v)) < 1000
+    # VaR of −$55 and "+$0.58 vs spot only". Where a gap the cards show is below $10, which whole dollars cannot
+    # write so that it adds up, every card is to the cent and each gap is the difference of the amounts on screen
+    # (−$54.30 − (−$54.88)). Otherwise whole dollars: a 100,000-path VaR is not known to the cent (the default iron
+    # condor's −$479.95 has the 95% interval −$471.51 to −$487.45), and to the cent its cards ("+$234.00 vs spot
+    # only") needed 163 px each, so the six went 4 + 2 in the 1,038 px main column of a 1,440 px window with the
+    # sidebar open. The rule was every card to the cent below $1,000.
+    gaps = ([var - spot_var, es - spot_es] if with_vol else []) + ([] if dg is None else [spot_var - dg.var])
+    cents = any(abs(g) < 10 for g in gaps if math.isfinite(g))
     cards = [
         _var_card(
             f"VaR 99% {h} · MC",
@@ -1203,9 +1207,8 @@ def _var(book: Book) -> None:
     # The comparator's like: the delta-gamma-theta VaR moves spot alone, Normally, at the spot vol, so its gap is taken
     # to the spot-only run (the full VaR when implied vol is frozen), which differs from it by the full revaluation
     # alone (and by fatter tails under a Student-t or GARCH model). Against the spot-plus-vol VaR the gap would mix
-    # in the vega risk: on the default iron condor at the pinned valuation time (ASOF in tests/_apptest.py), +$245.45
-    # against the full VaR (−$479.95, implied vol moving) but +$11.45 against the spot-only one (−$713.95; DGT
-    # −$725.40).
+    # in the vega risk: on the default iron condor at the pinned valuation time (ASOF in tests/_apptest.py), +$245
+    # against the full VaR (−$480, implied vol moving) but +$11 against the spot-only one (−$714; DGT −$725).
     # The amounts shown are subtracted (whole dollars, or cents below $1,000), so that the cards add up on screen.
     gap = None if dg is None else difference(-spot_var, -dg.var, cents)
     comparator = f"Spot-only VaR {MINUS} DGT VaR" if with_vol else f"VaR {MINUS} DGT VaR"

@@ -655,9 +655,8 @@ def test_the_var_report(index):
     cards = {m.label: m for m in at.metric}
     for label in ("VaR 99% 1D · MC", "ES 97.5% 1D · MC", "Spot-only VaR", "Spot-only ES"):
         assert cards[label].value.startswith("−"), label
-    # The condor's one-day amounts are below $1,000, so every card is to the cent. The simulations are the
-    # library's (tests/test_risk.py checks the engine) on the four legs built here at their own surface vols, the
-    # spot paths at the ATMF vol; the DGT VaR is solved here from the Normal distribution.
+    # The simulations are the library's (tests/test_risk.py checks the engine) on the four legs built here at their
+    # own surface vols, the spot paths at the ATMF vol; the DGT VaR is solved here from the Normal distribution.
     legs = tuple(strat.Leg(kind, n, k, index.t, v) for (n, kind, k), v in zip(LEGS, index.vols, strict=True))
     condor = strat.Strategy("Iron Condor", legs)
     market = strat.Market(index.s, index.r, index.atm, index.t, index.q)
@@ -668,20 +667,26 @@ def test_the_var_report(index):
     delta, gamma, _, theta = index.greeks()
     dgt = _dgt_var(delta, gamma, theta, index.s, index.atm)
     expected = {
-        "VaR 99% 1D · MC": tab_risk.exact(-full.var),
-        "ES 97.5% 1D · MC": tab_risk.exact(-es[0]),
-        "Spot-only VaR": tab_risk.exact(-spot.var),
-        "Spot-only ES": tab_risk.exact(-es[1]),
-        "DGT VaR 99% 1D": tab_risk.exact(-dgt),
+        "VaR 99% 1D · MC": -full.var,
+        "ES 97.5% 1D · MC": -es[0],
+        "Spot-only VaR": -spot.var,
+        "Spot-only ES": -es[1],
+        "DGT VaR 99% 1D": -dgt,
     }
-    assert {label: cards[label].value for label in expected} == expected
-    assert list(expected.values()) == ["−$479.95", "−$492.32", "−$713.95", "−$727.60", "−$725.40"]
-    # The gaps from the amounts shown, to the cent, so that the cards add up on screen: −$479.95 − (−$713.95) and
-    # −$713.95 − (−$725.40), the comparator taken like for like (implied vol frozen in both).
-    assert cards["VaR 99% 1D · MC"].delta == "+\\$234.00 vs spot only"
-    assert cards["ES 97.5% 1D · MC"].delta == "+\\$235.28 vs spot only"
-    gap = round(-spot.var, 2) - round(-dgt, 2)
-    assert cards["Non-linearity"].value == signed(gap, 2, "$") == "+$11.45"
+    # Every gap between the cards is $10 or more, so they are in whole dollars (the VaR's 95% simulation interval
+    # is −$471.51 to −$487.45: no cent of it is known), each amount to the cent in its help.
+    assert [round(v, 2) for v in expected.values()] == [-479.95, -492.32, -713.95, -727.60, -725.40]
+    assert {label: cards[label].value for label in expected} == {k: tab_risk.dollars(v) for k, v in expected.items()}
+    assert [cards[label].value for label in expected] == ["−$480", "−$492", "−$714", "−$728", "−$725"]
+    for label, amount in expected.items():
+        assert tab_risk.exact(amount).replace("$", "\\$") in cards[label].help, label
+    assert "95% simulation interval −\\$471.51 to −\\$487.45" in cards["VaR 99% 1D · MC"].help
+    # The gaps from the amounts shown, so that the cards add up on screen: −$480 − (−$714), −$492 − (−$728) and
+    # −$714 − (−$725), the comparator taken like for like (implied vol frozen in both).
+    assert cards["VaR 99% 1D · MC"].delta == "+\\$234 vs spot only"
+    assert cards["ES 97.5% 1D · MC"].delta == "+\\$236 vs spot only"
+    gap = tab_risk.shown(-spot.var) - tab_risk.shown(-dgt)
+    assert cards["Non-linearity"].value == tab_risk.dollars(gap) == "+$11"
     assert cards["Non-linearity"].delta == "spot only − DGT"
     # The spot vol is named where it is used: the front expiry's ATMF vol, not a leg's.
     assert "at 15.52%, the 18‑Dec‑26 AM ATMF vol" in cards["DGT VaR 99% 1D"].help
