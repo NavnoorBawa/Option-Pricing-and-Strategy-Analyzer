@@ -75,7 +75,7 @@ def _app_states(new_app) -> dict[str, list[AppTest]]:
         return [new_app(tab=tab, **query).run() for tab in CARD_TABS]
 
     quotes = new_app(tab="Surface").run()
-    quotes.segmented_control(key="surface_source").set_value("Market quotes (CSV)").run()
+    quotes.segmented_control(key="surface_source").set_value("Upload").run()
     csv = vol_surface.sample_quotes().to_csv(index=False).encode()
     quotes.file_uploader(key="quotes_file").upload("quotes.csv", csv, "text/csv").run()
     limits = pages(
@@ -302,7 +302,7 @@ ROWS = {
     "pricing_tiles": [["Call", "Put"], ["Straddle", "Vol"], ["Forward", "Time"]],
     "strategy_tiles": [["Net premium", "Package"], ["Max profit", "Max loss"], ["Breakevens", "P(profit)"]],
     "var_cards": [["VaR 99.0%", "Expected Shortfall 99.0%"], ["Spot-only VaR 99.0%", "Spot-only ES 99.0%"]],
-    "surface_cards": [["Grid", "Calendar arbitrage"], ["Butterfly arbitrage", "Local vol defined"]],
+    "surface_tiles": [["ATMF 30D", "25Δ RR 30D"], ["25Δ BF 30D", "TERM 30→365D"], ["FIT vs ½‑spr (vp)", "ARB"]],
     "iv_tiles": [["IV bid", "IV ask"], ["IV", "Surface"], ["Vega", "Bounds"]],
 }
 
@@ -338,10 +338,13 @@ def test_the_rows_of_pairs_stay_two_across_on_a_phone(states):
             if state == "limits" and row == "strategy_tiles":
                 continue
             style = next(s for s in _styles(at) if f".st-key-{row} {{ container:" in s)
-            # No query at all: every pair fits at full size, side by side (each group is one flex line of two).
-            assert (_layout(style, PHONE_ROW) or (2, 22.75))[0] == 2, (state, row)
+            layout = _layout(style, PHONE_ROW)
+            if layout is None:
+                # No query applies: every pair is at full size, its two cards side by side (one flex line of two).
+                layout = (2, None)
+            assert layout[0] == 2, (state, row)
             checked.add(row)
-    assert checked == {"strategy_tiles", "var_cards", "surface_cards"}
+    assert checked == {"strategy_tiles", "var_cards", "surface_tiles"}
 
 
 @pytest.mark.parametrize("row", ["pricing_tiles", "iv_tiles"])

@@ -1,21 +1,36 @@
-"""Surface tab, end to end with streamlit.testing (headless)."""
+"""Surface tab, end to end with streamlit.testing (headless): UI spec 3.4's acceptance tests that AppTest can run, the
+callbacks of the expiry table (which AppTest cannot fire, so they are unit-tested), and uploads.
+
+The index tests pin the valuation time (``_apptest.ASOF``, Friday 23 October 2026 at the cash close); the textbook
+market is the default of ``new_app``.
+"""
+
+from __future__ import annotations
 
 import base64
 import io
 import json
+import math
 import re
 import zipfile
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pyarrow as pa
 import pytest
+from _apptest import ASOF, make_app
 from streamlit.testing.v1 import AppTest
+from test_format_standard import HAND_FORMAT
 
-from options_analyzer import black_scholes, implied_vol, vol_surface
-from options_analyzer.market_data import sample_chain, to_quotes
-from options_analyzer.ui import charts, exports, tab_surface
+from options_analyzer import vol_surface
+from options_analyzer.market_data import sample_chain
+from options_analyzer.ui import exports, surface_state, tab_surface, theme
+from options_analyzer.ui import market as mk
+from options_analyzer.ui.format import date as short_date
+from options_analyzer.vol_surface import diagnostics as dg
+
+AS_OF = datetime(2026, 10, 23, 16, 0)
 
 
 def _ok(at: AppTest) -> None:
@@ -23,69 +38,417 @@ def _ok(at: AppTest) -> None:
     assert not at.error, [e.value for e in at.error]
 
 
+@pytest.fixture(scope="module")
+def index() -> AppTest:
+    """The Surface tab of the synthetic index at the pinned valuation time, after its first run (read only)."""
+    at = make_app(preset=None, asof=ASOF, tab="Surface").run()
+    _ok(at)
+    return at
+
+
 @pytest.fixture
 def app(new_app) -> AppTest:
-    """The app with the Surface tab open (only the open tab runs)."""
+    """The Surface tab of the textbook market (the parametric SSVI surface)."""
     at = new_app(tab="Surface").run()
     _ok(at)
     return at
 
 
-def _picker(at: AppTest):
-    return next(w for w in at.multiselect if w.label == "Maturities")
+def _metric(at: AppTest, label: str):
+    return next(m for m in at.metric if m.label == label)
 
 
-def _trace_names(at: AppTest) -> list[str]:
-    return [t.get("name") or "" for c in at.get("plotly_chart") for t in json.loads(c.proto.spec)["data"]]
+def _panel(at: AppTest) -> str:
+    """The data panel's line: a chain's ``quoted → used``, a table of quotes' ``rows → used``."""
+    lines = (m.value for m in at.markdown if m.value.startswith(":small["))
+    return next(line for line in lines if re.search(r" (quoted|rows) → ", line))
 
 
-def _array(value) -> np.ndarray:
-    """A trace's data array; Plotly sends numeric NumPy arrays as base64 ``bdata``, and NaN in a list as None."""
-    if isinstance(value, dict) and "bdata" in value:
-        return np.frombuffer(base64.b64decode(value["bdata"]), dtype=value["dtype"])
-    return np.array([np.nan if v is None else v for v in value], dtype=float)
+def _expiries(at: AppTest) -> pd.DataFrame:
+    return next(d.value for d in at.dataframe if {"Expiry", "Flags", "Used"} <= set(d.value.columns))
 
 
-def _metric(at: AppTest, label: str) -> str:
-    return next(m.value for m in at.metric if m.label == label)
+def _charts(at: AppTest) -> list[dict]:
+    return [json.loads(c.proto.spec) for c in at.get("plotly_chart")]
 
 
-def _upload(at: AppTest, frame: pd.DataFrame) -> AppTest:
-    at.segmented_control(key="surface_source").set_value("Market quotes (CSV)").run()
-    at.file_uploader(key="quotes_file").upload("quotes.csv", frame.to_csv(index=False).encode(), "text/csv").run()
+def _array(values) -> np.ndarray:
+    """A trace's array as sent: a list, or plotly's typed array (base64 bytes and a dtype)."""
+    if isinstance(values, dict):
+        return np.frombuffer(base64.b64decode(values["bdata"]), dtype=np.dtype(values["dtype"]))
+    return np.asarray(values, dtype=float)
+
+
+def _contract(at: AppTest) -> str:
+    """The header's contract line (its spaces are no-break spaces, its hyphens no-break hyphens)."""
+    lines = (m.value.replace("\xa0", " ").replace("\u2011", "-") for m in at.markdown)
+    return next(line for line in lines if line.startswith("SPX ") and "· F " in line)
+
+
+def _smile(at: AppTest) -> dict:
+    return next(c for c in _charts(at) if any("bid–ask" in (t.get("name") or "") for t in c["data"]))
+
+
+def _widget_keys(node) -> list[str]:
+    """The keys of every element of an AppTest's tree that has one."""
+    keys = [str(node.key)] if getattr(node, "key", None) else []
+    for child in (getattr(node, "children", None) or {}).values():
+        keys += _widget_keys(child)
+    return keys
+
+
+def _upload(at: AppTest, data: bytes, name: str = "quotes.csv") -> AppTest:
+    at.segmented_control(key="surface_source").set_value(tab_surface.QUOTES).run()
+    at.file_uploader(key="quotes_file").upload(name, data, "text/csv").run()
     return at
 
 
-def _ssvi_quotes(days, moneyness, rate=0.05) -> pd.DataFrame:
-    params = vol_surface.SSVIParams()
-    rows = []
-    for d in days:
-        t = d / 365
-        for m in moneyness:
-            iv = np.sqrt(params.total_variance(np.log(m) - rate * t, t)[0] / t)
-            rows.append({"Strike": round(100 * m, 4), "Days": d, "ImpliedVol": round(float(iv), 6)})
-    return pd.DataFrame(rows)
+def _csv(frame: pd.DataFrame) -> bytes:
+    return frame.to_csv(index=False).encode()
 
 
-def test_smile_picker_falls_back_to_default_slices_when_the_maturity_grid_changes(app):
-    assert _picker(app).value == [0, 15, 29]
-    app.slider(key="ssvi_t").set_value((0.5, 3.0)).run()
-    _ok(app)
-    # The keyed picker used to keep labels of the old grid, which no longer existed: empty selection, no chart.
-    assert _picker(app).value == [0, 15, 29]
-    assert sum(name.startswith("Implied · ") for name in _trace_names(app)) == 3
+# --- The default: the synthetic chain's published surface ------------------------------------------------------------
 
 
-def test_smile_picker_labels_tell_close_expiries_apart(app):
-    days = (1, 2, 3, 4, 7, 8, 9, 10, 30, 60)
-    _upload(app, _ssvi_quotes(days, np.linspace(0.9, 1.1, 9)))
-    _ok(app)
-    picker = _picker(app)
-    assert picker.options == [f"{d}d" for d in days]  # were '0.00y', '0.01y', '0.01y', '0.01y', ...
-    picker.set_value([2, 3, 6]).run()
-    _ok(app)
-    names = _trace_names(app)
-    assert {"Implied · 3d", "Implied · 4d", "Implied · 9d"} <= set(names)
+def test_the_data_panel_names_the_synthetic_source_and_its_counts_reconcile(index):
+    panel = _panel(index)
+    assert "Synthetic — not market data" in panel
+    counts = {name: int(n.replace(",", "")) for n, name in re.findall(r"([\d,]+) (quoted|used)\b", panel)}
+    inside = re.search(r"used \(([^)]*)\)", panel).group(1)  # the exclusions, by reason
+    reasons = {name.strip(): int(n.replace(",", "")) for n, name in re.findall(r"([\d,]+) ([a-zA-Z ]+)", inside)}
+    # The spec's example reads 5,020 → 2,363 (2,510 ITM side · 147 zero bid · 0 wide) at its commit; the code's
+    # numbers, checked against parse_quotes in tests/test_surface_diagnostics.py, are these.
+    assert counts == {"quoted": 5012, "used": 2357}
+    assert reasons == {"zero bid": 149, "ITM side": 2506, "wide": 0}
+    assert counts["quoted"] == counts["used"] + sum(reasons.values())
+    assert "forward: parity · SVI arb‑free · mid" in panel
+
+
+def test_the_tiles_are_the_desk_measures_of_the_published_surface(index):
+    context = mk.index_market(AS_OF)
+    surface = context.surface
+    atmf = dg.atmf_vol(surface, 30 / 365)
+    rr, bf = dg.risk_reversal(surface, 30 / 365, rate=mk.INDEX_CARRY[0])
+    vix, _ = dg.vix_style_vol(context.fit, 30)
+    tile = _metric(index, "ATMF 30D")
+    assert tile.value == "15.38%" and tile.value == f"{atmf * 100:.2f}%"
+    assert tile.delta == f"VIX‑style {vix * 100:.2f}%" == "VIX‑style 16.42%"
+    assert _metric(index, "25Δ RR 30D").value == "−4.20 vp" == f"−{abs(rr) * 100:.2f} vp"
+    assert _metric(index, "25Δ BF 30D").value == "+0.23 vp" == f"+{bf * 100:.2f} vp"
+    assert _metric(index, "TERM 30→365D").value == "+1.62 vp"
+    fit = _metric(index, tab_surface.FIT_LABEL)
+    assert fit.value == "0.04 / 0.10" and fit.delta == "100% in band"
+    assert _metric(index, "ARB").value == "0 / 0" and "0 / 0: passes" in _metric(index, "ARB").help
+    assert len([m for m in index.metric if m.label in ("ATMF 30D", "ARB")]) == 2  # six tiles, the row of the spec
+
+
+def test_the_expiry_table_has_the_twelve_columns_dates_with_settlement_and_no_years(index):
+    table = _expiries(index)
+    assert list(table.columns) == list(tab_surface.EXPIRY_HELP)
+    assert len(table) == 16
+    context = mk.index_market(AS_OF)
+    names = [f"{short_date(d)} {s}" for d, s in context.expiries[["expiry", "settlement"]].itertuples(index=False)]
+    assert list(table["Expiry"]) == names
+    assert all(re.fullmatch(r"\d\d-[A-Z][a-z]{2}-\d\d (AM|PM)", e) for e in table["Expiry"])
+    # The ATMF column is the surface at each expiry's parity forward, which the sidebar prices with.
+    # (sent at the column's two decimals)
+    np.testing.assert_allclose(table["ATMF"].to_numpy(), context.expiries["atm_vol"].to_numpy() * 100, atol=0.005)
+    # Used: the screen's used quotes per expiry, which sum to the data panel's.
+    assert table["Used"].sum() == 2357
+
+
+def _texts_of_every_view(at: AppTest) -> list[str]:
+    texts = [m.label for m in at.metric]
+    for view in tab_surface.VIEWS:
+        at.segmented_control(key="sf_view").set_value(view).run()
+        _ok(at)
+        for frame in at.dataframe:
+            texts += [str(c) for c in frame.value.columns]
+            texts += [str(c.get("label", "")) for c in json.loads(frame.proto.columns or "{}").values()]
+            text = [c for c in frame.value.columns if not pd.api.types.is_numeric_dtype(frame.value[c])]
+            texts += [str(v) for v in frame.value[text].to_numpy().ravel()]  # the text cells (SF-1: never "None")
+        for chart in _charts(at):
+            layout = chart["layout"]
+            for key, axis in layout.items():
+                if key.startswith(("xaxis", "yaxis")):
+                    texts.append(str((axis.get("title") or {}).get("text", "")))
+            for scene_axis in ("xaxis", "yaxis", "zaxis"):
+                texts.append(str(((layout.get("scene") or {}).get(scene_axis) or {}).get("title", {}).get("text", "")))
+    at.segmented_control(key="sf_view").set_value("Smile").run()
+    return texts
+
+
+def test_no_column_axis_title_or_tile_label_says_years(new_app):
+    for at in (new_app(preset=None, asof=ASOF, tab="Surface").run(), new_app(tab="Surface").run()):
+        _ok(at)
+        texts = _texts_of_every_view(at)
+        assert texts and not [t for t in texts if "year" in t.lower()], [t for t in texts if "year" in t.lower()]
+        # SF-1: no literal None or nan in a cell, a label or a title (a missing value is the standard's –).
+        assert not [t for t in texts if t.strip() in ("None", "nan", "NaN")]
+        # Removed (UI spec 3.4): the colour-scale menu, two side-by-side 3-D charts and 3-D local vol, and "ATM means
+        # K = S" (the desk's ATM is the forward).
+        assert not [w for w in at.selectbox if "colour" in (w.label or "").lower()]
+        assert not any("K = S" in c.value for c in at.caption)
+
+
+def test_the_3d_view_is_one_opt_in_chart_of_implied_vol(new_app):
+    at = new_app(preset=None, asof=ASOF, tab="Surface").run()
+    assert not [c for c in _charts(at) if c["data"][0]["type"] == "surface"]  # not on the default view
+    at.segmented_control(key="sf_view").set_value("3D").run()
+    _ok(at)
+    surfaces = [c for c in _charts(at) if c["data"][0]["type"] == "surface"]
+    assert len(surfaces) == 1 and surfaces[0]["layout"]["scene"]["zaxis"]["title"]["text"] == "IV (%)"
+
+
+def test_lowering_the_spread_limit_lowers_used_and_shows_the_fit_chip_everywhere(new_app):
+    at = new_app(preset=None, asof=ASOF, tab="Surface").run()
+    at.selectbox(key="sf_spread").set_value(1.0).run()
+    _ok(at)
+    panel = _panel(at)
+    used = int(re.search(r"→ ([\d,]+) used", panel).group(1).replace(",", ""))
+    wide = int(re.search(r"([\d,]+) wide", panel).group(1).replace(",", ""))
+    assert used < 2357 and used + 2506 + 149 + wide == 5012 and wide == 1146
+    assert any(m.value == ":yellow-badge[FIT]" for m in at.markdown)
+    # The published surface follows the settings: the sidebar's contract reads the refitted surface.
+    published = mk.index_market(AS_OF, _settings(spread=1.0))
+    assert published.fit.counts()["used"] == used
+
+
+def _settings(**changes) -> dg.FitSettings:
+    filters = dg.QuoteFilters(max_spread=changes.get("spread", 4.0))
+    return dg.FitSettings(filters, calibration=changes.get("calibration", "arbitrage_free"))
+
+
+@pytest.mark.parametrize("tab", ["Pricing", "Strategy", "Risk", "Surface", "IV", "Methodology"])
+def test_an_unconstrained_calibration_shows_the_fit_chip_on_every_tab_and_moves_no_price(new_app, tab):
+    default = new_app(preset=None, asof=ASOF, tab="Pricing").run()
+    at = new_app(preset=None, asof=ASOF, tab=tab)
+    at.session_state["sf_cal"] = "Unconstrained"
+    at.run()
+    _ok(at)
+    chip = next(b for b in at.markdown if b.value == ":yellow-badge[FIT]")
+    assert chip is not None
+    # The default chain's arbitrage-free fit never binds, so the unconstrained fit is the same surface: no number on
+    # the price cards moves (UI spec 3.4: "changes no number on Pricing").
+    assert [m.value for m in at.metric[:4]] == [m.value for m in default.metric[:4]]
+    assert not any(b.value == ":yellow-badge[FIT]" for b in default.markdown)
+
+
+def test_the_pricing_vol_is_the_published_surface_at_the_contract(index):
+    context = mk.index_market(AS_OF)
+    published = surface_state.publish(context)
+    row = context.expiry_row(context.default_expiry())
+    K, expiry = context.atm_strike(row["expiry"]), row["expiry"]
+    sidebar = context.surface.implied_vol_at(K / context.spot, float(row["maturity"]), extrapolate=True)
+    assert published.vol(K, expiry).vol == pytest.approx(sidebar, abs=1e-10)
+    # The contract line under the header shows it, and the readout on this tab reads the same surface.
+    readout = next(c.value for c in index.caption if c.value.startswith("Pricing contract K"))
+    assert f"σ {sidebar * 100:.2f}%" in readout and "inside quotes" in readout
+    assert not [k for k in _widget_keys(index._tree) if "publish" in k]
+
+
+def test_the_call_delta_axis_runs_from_90_to_10_delta(new_app):
+    at = new_app(preset=None, asof=ASOF, tab="Surface").run()
+    at.segmented_control(key="sf_x").set_value("Call Δ").run()
+    _ok(at)
+    layout = _smile(at)["layout"]
+    axes = [v for k, v in layout.items() if k.startswith("xaxis")]
+    assert any((a.get("title") or {}).get("text") == "Call delta" for a in axes)
+    assert all(a.get("range") == [0.9, 0.1] for a in axes)
+    # The vol axis spans what that window shows: every point drawn between 0.90 and 0.10 delta, with the headroom
+    # for the note (24% of the span above, 5% below). It ran to over 30% for the far wings' offers, out of view.
+    smile = _smile(at)
+    points = [
+        (_array(t["x"]), _array(t["y"]) + sign * _array(t.get("error_y", {}).get(arm, [0.0])))
+        for t in smile["data"]
+        if t.get("yaxis", "y") == "y"
+        for sign, arm in ((1, "array"), (-1, "arrayminus"))
+    ]
+    y = np.concatenate([v[(x >= 0.1) & (x <= 0.9)] for x, v in points])
+    y = y[np.isfinite(y)]
+    lo, hi = y.min(), y.max()
+    span = hi - lo
+    np.testing.assert_allclose(layout["yaxis"]["range"], [lo - 0.05 * span, hi + 0.24 * span], rtol=1e-9)
+    assert hi < 25  # the 20-Nov-26 smile between 0.90 and 0.10 delta (about 12% to 21% at the mids)
+
+
+def test_the_smile_draws_one_bid_ask_bar_per_used_quote_and_dashes_the_extrapolated_fit(index):
+    smile = _smile(index)
+    bars = [t for t in smile["data"] if "bid–ask" in (t.get("name") or "")]
+    count = sum(len(_array(t["x"])) for t in bars)
+    table = _expiries(index)
+    assert count == table.loc[3, "Used"] == 138
+    extrapolated = next(t for t in smile["data"] if t.get("name") == "Fit, extrapolated")
+    assert extrapolated["line"]["dash"] != "solid"
+    note = next(a["text"] for a in smile["layout"]["annotations"] if "used" in a["text"])
+    assert note.startswith("20-Nov-26 AM · 27d 17h<br>RMSE ") and note.endswith("100% in band · 138 used")
+
+
+def test_every_status_of_the_quotes_view_is_used_or_a_reason(new_app):
+    at = new_app(preset=None, asof=ASOF, tab="Surface").run()
+    at.segmented_control(key="sf_view").set_value("Quotes").run()
+    at.toggle(key="sf_all_quotes").set_value(True).run()
+    _ok(at)
+    quotes = next(d.value for d in at.dataframe if "Status" in d.value.columns and "IV mid" in d.value.columns)
+    assert set(quotes["Status"]) <= {dg.USED, *dg.REASONS}
+    assert (quotes["Status"] == dg.USED).sum() == _expiries(at).loc[3, "Used"]
+    assert "Edge" not in " ".join(quotes.columns)  # against the fit it is Mid vs fit (spec 2.5)
+
+
+def test_a_focus_expiry_from_the_table_moves_the_smile_and_the_contract(new_app):
+    """The row click's callback writes the sidebar's expiry (tested below); here the run after it: the smile, the
+    table's marker and the header's contract line follow."""
+    at = new_app(preset=None, asof=ASOF, tab="Surface")
+    at.session_state["expiry"] = "2026-12-18"
+    at.run()
+    _ok(at)
+    note = next(a["text"] for a in _smile(at)["layout"]["annotations"] if "used" in a["text"])
+    assert note.startswith("18-Dec-26 AM · 55d")
+    assert _contract(at).startswith("SPX 18-Dec-26 AM ")
+
+
+def test_the_row_click_and_the_step_buttons_set_the_focus_expiry(monkeypatch):
+    state = {"tbl": {"selection": {"rows": [2], "columns": [], "cells": []}}, "expiry": "2026-11-20"}
+    monkeypatch.setattr(tab_surface.st, "session_state", state)
+    targets = ["2026-10-30", "2026-11-06", "2026-11-13", "2026-11-20"]
+    tab_surface.on_expiry_select("tbl", targets, "expiry")
+    assert state["expiry"] == "2026-11-13"
+    state["tbl"] = {"selection": {"rows": [], "columns": [], "cells": []}}  # a click that clears the selection
+    tab_surface.on_expiry_select("tbl", targets, "expiry")
+    assert state["expiry"] == "2026-11-13"
+    tab_surface.on_expiry_step(targets, "expiry", 3, +1)  # the last one: stays
+    assert state["expiry"] == "2026-11-20"
+    tab_surface.on_expiry_step(targets, "sf_focus", 0, -1)  # the first: stays
+    assert state["sf_focus"] == "2026-10-30"
+    tab_surface.on_expiry_step(list(range(8)), "sf_focus", 2, +1)
+    assert state["sf_focus"] == 3
+
+
+def test_the_term_view_has_forward_vols_and_the_grid_is_by_delta(new_app):
+    at = new_app(preset=None, asof=ASOF, tab="Surface").run()
+    at.segmented_control(key="sf_view").set_value("Term").run()
+    _ok(at)
+    strip = next(d.value for d in at.dataframe if "30→60d" in d.value.columns)
+    windows = ["7→14d", "14→30d", "30→60d", "60→91d", "91→182d", "182→365d", "365→730d"]
+    assert list(strip.columns) == ["Between", *windows]
+    assert math.isnan(strip["365→730d"].iloc[0])  # beyond the last expiry (692 days): no extrapolation in time
+    # The 25-delta lines are neither calls nor puts: not in the call or put colour (they were, put and call).
+    term = next(c for c in _charts(at) if any(t.get("name") == "25Δ RR" for t in c["data"]))
+    sides = {theme.SEMANTIC[mode][side] for mode in ("light", "dark") for side in ("call", "put")}
+    assert not [t["name"] for t in term["data"] if t.get("name", "").startswith("25Δ") and t["line"]["color"] in sides]
+    at.segmented_control(key="sf_view").set_value("Grid").run()
+    _ok(at)
+    grid = next(d.value for d in at.dataframe if "50Δ" in d.value.columns)
+    columns = list(grid.columns)
+    assert columns[0] == "Maturity" and columns[1] == "10Δp" and columns[9] == "50Δ" and columns[-1] == "10Δc"
+    assert list(grid["Maturity"]) == ["7d", "14d", "30d", "60d", "91d", "182d", "365d"]  # 730 d: none
+
+
+def _diagnostics(**state) -> AppTest:
+    """The index's Surface tab with the Arbitrage and forwards expander open (and any other session state)."""
+    at = make_app(preset=None, asof=ASOF, tab="Surface")
+    at.session_state["surface_diag"] = True
+    for key, value in state.items():
+        at.session_state[key] = value
+    at.run()
+    _ok(at)
+    return at
+
+
+def test_the_forwards_read_by_the_expiry_tables_names_and_times_and_the_gap_by_tenths_of_a_bp():
+    at = _diagnostics()
+    expiries, forwards = _expiries(at), next(d.value for d in at.dataframe if "SE of F" in d.value.columns)
+    assert list(forwards.columns[:2]) == ["Expiry", "DTE"]
+    # One row per expiry, named and timed as the expiry table (they read 28 against 27d 17h for 20-Nov-26 AM).
+    assert list(forwards["Expiry"]) == list(expiries["Expiry"]) and list(forwards["DTE"]) == list(expiries["DTE"])
+    assert expiries["DTE"].iloc[3] == "27d 17h" and expiries["Expiry"].iloc[3] == "20-Nov-26 AM"
+    # Carry gaps to 0.1 bp: the forwards' standard errors are 0.02 to 0.17 bp of the forward.
+    for gaps in (expiries["Carry gap"], forwards["Gap"]):
+        values = gaps.to_numpy(float)
+        np.testing.assert_array_equal(values, np.round(values, 1))
+    np.testing.assert_array_equal(expiries["Carry gap"].to_numpy(float), forwards["Gap"].to_numpy(float))
+
+
+def test_forwards_from_the_rate_and_yield_have_no_carry_gap():
+    """With Forwards = Rate and yield each forward is S·e^((r − q)T) at the reference carry the gap is measured
+    against (the Treasury rate plus the box spread, 4.45%, and q 1.30%): every gap is 0 and none is flagged. They took
+    the Treasury rate before, and read −1 to −7 bp on the first expiries against a help that called the reference
+    their own."""
+    at = _diagnostics(sf_fwd="Rate and yield")
+    expiries = _expiries(at)
+    assert (expiries["Carry gap"] == 0).all() and not expiries["Flags"].str.contains("carry").any()
+    context = mk.index_market(AS_OF, dg.FitSettings(forward="rates"))
+    r, q = mk.INDEX_CARRY
+    T = context.expiries["maturity"].to_numpy(float)
+    np.testing.assert_allclose(context.expiries["forward"], mk.INDEX_SPOT * np.exp((r - q) * T), rtol=1e-12)
+    np.testing.assert_allclose(context.expiries["discount_factor"], np.exp(-r * T), rtol=1e-12)
+    assert "4.45%" in tab_surface.EXPIRY_HELP["Carry gap"] and "1.30%" in tab_surface.EXPIRY_HELP["Carry gap"]
+
+
+def test_durrlemans_g_covers_every_quoted_strike_of_the_focus_expiry():
+    """The g(k) chart spans the focus expiry's quoted range as the smile does: it stopped at 4 ATM deviations, and
+    left out K/F 79.1% to 84.3% of 20-Nov-26's quoted put wing."""
+    at = _diagnostics()
+    chart = next(c for c in _charts(at) if c["layout"]["yaxis"]["title"]["text"] == "g(k)")
+    x = np.concatenate([_array(t["x"]) for t in chart["data"]])
+    surface = mk.index_market(AS_OF).surface
+    j = int(np.argmin(np.abs(surface.maturities * 365 - 27.7)))  # 20-Nov-26 AM, the focus
+    lo, hi = surface.quoted_y[j]
+    assert lo < -surface.reach_at(surface.maturities[j])  # the case: quotes beyond the reach
+    assert x.min() <= lo and x.max() >= hi
+    inside = next(t for t in chart["data"] if t["name"] == "g(k)")
+    g = _array(inside["y"])
+    assert np.nanmin(g) > 0  # the arbitrage-free fit: no butterfly arbitrage across the quotes
+
+
+def test_the_tab_formats_numbers_only_through_the_standard_and_keeps_captions_short(index):
+    lines = Path(tab_surface.__file__).read_text("utf-8").splitlines()
+    assert not [n for n, line in enumerate(lines, 1) if HAND_FORMAT.search(line)]
+    own = [c.value for c in index.main.caption if not c.value.startswith(("**Outlook", "Add this", "The link holds"))]
+    assert own and all(len(c) <= 140 for c in own), [c for c in own if len(c) > 140]
+
+
+def test_the_exports_carry_their_provenance(index, monkeypatch):
+    context = mk.index_market(AS_OF)
+    rows = tab_surface._chain_rows(context.fit, *mk.INDEX_CARRY, iso=True)
+    prov = exports.Provenance(exports.SYNTHETIC, exports.SYNTHETIC_SOURCE, AS_OF, "Black-76", seed=0)
+    shown = tab_surface.Shown(
+        tab_surface.CHAIN, context.surface, context.fit, rows, *mk.INDEX_CARRY, AS_OF, "", (), prov, True
+    )
+    used = tab_surface._used_quotes(shown)
+    assert len(used) == 2357 and "days" in used and "maturity" not in used
+    payload = json.loads(tab_surface._svi_json(shown, prov))
+    assert payload["provenance"]["source"].startswith("SYNTHETIC") and len(payload["expiries"]) == 16
+    first = payload["expiries"][0]
+    svi = context.surface.svi[0]
+    assert first["expiry"] == "2026-10-30" and first["svi"]["a"] == svi.a and first["svi"]["sigma"] == svi.s
+    grids = tab_surface._grid_frames(context.surface)
+    assert grids["ImpliedVol"].index.name == "Days to expiry \\ Strike"
+    labels = {b.label for b in index.get("download_button")}
+    assert {"Implied vol grid (CSV)", "Used quotes (CSV)", "SVI parameters (JSON)", "The chain (CSV)"} <= labels
+
+
+# --- The textbook market: the parametric SSVI surface ----------------------------------------------------------------
+
+
+def test_the_textbook_surface_is_parametric_ssvi_on_constant_maturities(app):
+    assert app.segmented_control(key="surface_source").value == tab_surface.SSVI
+    assert app.segmented_control(key="surface_source").options == [tab_surface.SSVI, tab_surface.QUOTES]
+    table = _expiries(app)
+    assert list(table["Expiry"]) == [f"{d}d" for d in dg.CONSTANT_MATURITIES]
+    assert "DTE" not in table.columns  # the name is the time to expiry ("7d" next to "7d 0h" before)
+    # Forwards in index points, S·e^((r − q)T) at the sidebar's S 100, r 5% and q 0 (they read 1.00 to 1.11, in K/S,
+    # before the surface carried the spot); sent at the column's two decimals.
+    days = np.array(dg.CONSTANT_MATURITIES, dtype=float)
+    np.testing.assert_allclose(table["F"].to_numpy(), 100 * np.exp(0.05 * days / 365), atol=0.005)
+    params = vol_surface.SSVIParams(0.24, 0.20, 1.5, -0.6, 1.0, 0.5)  # the defaults at the sidebar's 20% vol
+    assert _metric(app, "ATMF 30D").value == f"{math.sqrt(params.theta(30 / 365) / (30 / 365)) * 100:.2f}%"
+    assert _metric(app, tab_surface.FIT_LABEL).value == "–"  # no quotes to fit
+    # The footer and the readout describe a parametric surface: no SVI fit, no quotes (both said so before).
+    captions = [c.value for c in app.caption]
+    assert tab_surface.FOOTER_SSVI in captions and tab_surface.FOOTER not in captions
+    readout = next(c for c in captions if c.startswith("Pricing contract K"))
+    assert "inside its strike grid" in readout and "quotes" not in readout
 
 
 def test_ssvi_atm_vols_follow_the_sidebar_volatility(app):
@@ -96,57 +459,52 @@ def test_ssvi_atm_vols_follow_the_sidebar_volatility(app):
     app.number_input(key="ssvi_long").set_value(30.0).run()
     app.slider(key="ssvi_rho").set_value(-0.5).run()
     assert app.number_input(key="ssvi_long").value == 30.0  # an edit sticks until the sidebar volatility moves
-    app.segmented_control(key="surface_source").set_value("Market quotes (CSV)").run()
-    app.segmented_control(key="surface_source").set_value("Parametric (SSVI)").run()
+
+
+# --- Uploads ----------------------------------------------------------------------------------------------------------
+
+
+def test_the_empty_upload_state_lists_the_layouts_and_offers_the_synthetic_chain(new_app):
+    """UI spec 3.4's empty state: the uploader, the accepted layouts one line each, a Use synthetic button and tiles
+    that read –."""
+    at = new_app(preset=None, asof=ASOF, tab="Surface").run()
+    at.segmented_control(key="surface_source").set_value(tab_surface.QUOTES).run()
+    _ok(at)
+    text = next(m.value for m in at.markdown if m.value.startswith(":small[Upload a chain:"))
+    assert text.count("\n- ") == len(tab_surface.LAYOUTS) + 1 == 4
+    assert at.file_uploader(key="quotes_file") is not None
+    assert {m.label: m.value for m in at.metric if m.label in ("ATMF 30D", "ARB")} == {"ATMF 30D": "–", "ARB": "–"}
+    at.button(key="surface_use_synthetic").click().run()
+    _ok(at)
+    assert at.segmented_control(key="surface_source").value == tab_surface.CHAIN
+    assert _metric(at, "ATMF 30D").value == "15.38%"
+
+
+def test_an_uploaded_chain_is_screened_quote_by_quote_and_not_published(new_app):
+    """A chain in the app's long layout (read_chain), at another level: parity gives its spot and forwards, the screen
+    reconciles, and the other tabs keep the synthetic chain."""
+    chain = sample_chain(6000.0, 0.04, 0.013, as_of=AS_OF, seed=5)
+    at = new_app(preset=None, asof=ASOF, tab="Surface").run()
+    _upload(at, _csv(chain.quotes), "my_chain.csv")
+    _ok(at)
+    panel = _panel(at)
+    assert "Upload · `my_chain.csv`" in panel and "not published" in panel and "from parity" in panel
+    quoted = int(re.search(r"([\d,]+) quoted", panel).group(1).replace(",", ""))
+    assert quoted == len(chain.quotes)
+    table = _expiries(at)
+    np.testing.assert_allclose(table["F"].to_numpy(), chain.expiries["forward"].to_numpy(), rtol=2e-4)
+    assert not any(m.value == ":yellow-badge[FIT]" for m in at.markdown)
+    # The header's contract is still the synthetic chain's.
+    assert _contract(at).endswith("F 5,813.91")
+
+
+def test_a_table_of_quotes_still_builds_a_surface(app):
+    _upload(app, _csv(vol_surface.sample_quotes(100, 0.05, 0.0, prices=True)))
     _ok(app)
-    assert app.number_input(key="ssvi_short").value == 48.0  # re-seeded, not reset to the 0.5% minimum
-    assert not app.warning
-
-
-def test_option_prices_build_a_surface_with_quote_markers_and_fit_quality(app):
-    _upload(app, vol_surface.sample_quotes(100, 0.05, 0.0, prices=True))
-    _ok(app)
-    captions = " ".join(c.value for c in app.caption)
-    assert "Inverted 104 option price(s)" in captions
-    assert "spot (100.00) and each expiry's forward and discount factor from put-call parity" in captions
-    assert "else from the sidebar rate (5.00%) and dividend yield (0.00%)" in captions
-    # Only out-of-the-money options are quoted, so no strike has a call and a put: every forward is the sidebar's.
-    assert any("put-call parity needs a call and a put quoted at 6+ common strikes" in c for c in captions.split("  "))
-    assert _metric(app, "Calendar arbitrage") == "0" and _metric(app, "Local vol defined") == "100%"
-    names = _trace_names(app)
-    assert {"Quotes · 30d", "Quotes · 273d", "Quotes · 2.00y"} <= set(names)
-    summary = next(d.value for d in app.dataframe if "Fit RMSE (vol pts)" in d.value.columns)
-    assert summary["Fit RMSE (vol pts)"].between(0.03, 0.4).all()
-    assert any("the surface's implied vol is" in i.value for i in app.info)
-
-
-def test_local_vol_defined_is_a_share_of_the_quoted_points(app):
-    narrow = _ssvi_quotes((30, 60), np.linspace(0.95, 1.05, 7))
-    wide = _ssvi_quotes((91, 182, 365), np.linspace(0.6, 1.5, 19))
-    frame = pd.concat([narrow, wide])
-    _upload(app, frame)
-    _ok(app)
-    clean, _ = vol_surface.parse_quotes(frame)
-    surface = vol_surface.fit_market_surface(clean, 100, 0.05, 0.0)
-    valid = int(np.isfinite(surface.local_vol).sum())
-    assert _metric(app, "Local vol defined") == tab_surface._local_vol_share(valid, surface.quoted_points)
-    assert valid / surface.quoted_points > 0.6  # the old denominator (the whole grid) gave a misleadingly low share
-    assert any("outside each maturity's quoted strikes" in c.value for c in app.caption)
-
-
-def test_interior_calendar_arbitrage_is_reported(app):
-    quotes = vol_surface.sample_quotes(100, 0.05, 0.0)
-    maturities = np.sort(quotes["Maturity"].unique())
-    quotes.loc[quotes["Maturity"] == maturities[4], "ImpliedVol"] *= 0.8
-    _upload(app, quotes)
-    _ok(app)
-    # The default arbitrage-free calibration holds the arbitrage out of the surface and says so.
-    assert _metric(app, "Calendar arbitrage") == "0"
-    assert any("held free of static arbitrage" in w.value for w in app.warning)
-    app.segmented_control(key="surface_calibration").set_value("Unconstrained").run()
-    _ok(app)
-    assert int(_metric(app, "Calendar arbitrage")) > 0  # was 0, with a local vol of exactly 0%
-    assert _metric(app, "Local vol defined") == "75.0%"  # two of the eight maturities are left undefined
+    panel = _panel(app)
+    assert "the user's table of quotes" in panel and "104 used" in panel
+    assert _metric(app, "ARB").value == "0 / 0"
+    assert list(_expiries(app)["Expiry"]) == ["30d", "60d", "91d", "182d", "273d", "365d", "547d", "730d"]
 
 
 def test_parse_messages_stay_visible_when_the_fit_fails(app):
@@ -157,55 +515,55 @@ def test_parse_messages_stay_visible_when_the_fit_fails(app):
             "ImpliedVol": ["25%", "23%", "22%", "22%", "23%", "n/a"],
         }
     )
-    _upload(app, frame)
+    _upload(app, _csv(frame))
     assert not app.exception
     assert any("two maturities" in e.value for e in app.error)
     captions = " ".join(c.value for c in app.caption)
     assert "Dropped 1 row(s)" in captions and "% signs" in captions
+    assert all(m.value == "–" for m in app.metric if m.label in ("ATMF 30D", "ARB"))
+
+
+def test_a_malformed_file_names_the_columns_found_and_needed(app):
+    _upload(app, b"Price,When\n1,2\n")
+    assert not app.exception
+    assert any("found columns: Price, When" in e.value for e in app.error)
 
 
 def test_quotes_far_from_the_sidebar_spot_are_flagged(app):
-    # SPX-level strikes read against the default spot of 100; the header is the one the uploader's help names.
     quotes = vol_surface.sample_quotes(5000, 0.05, 0.0).rename(columns={"Maturity": "Maturity (years)"})
-    _upload(app, quotes)
+    _upload(app, _csv(quotes))
     _ok(app)
     assert any("far from the spot 100.00" in w.value for w in app.warning)
 
 
-def test_sidebar_contract_at_the_first_expiry_of_the_sample_file_gets_an_implied_vol(app):
-    # The sample stores 30 days as 0.0822 years; the sidebar's 30 days used to land just before it and the tab
-    # said the surface gave no implied vol there.
-    app.sidebar.number_input(key="days").set_value(30).run()
-    _upload(app, vol_surface.sample_quotes(100, 0.05, 0.0))
+def test_a_guessed_maturity_unit_is_a_visible_warning(app):
+    params = vol_surface.SSVIParams()
+    rows = []
+    for value in (6.65, 13.65, 20.65, 27.65):
+        t = value / 365
+        for m in np.linspace(0.8, 1.2, 9):
+            iv = np.sqrt(params.total_variance(np.log(m) - 0.05 * t, t)[0] / t)
+            rows.append({"Strike": round(100 * m, 4), "Maturity": value, "ImpliedVol": round(float(iv), 6)})
+    _upload(app, _csv(pd.DataFrame(rows)))
     _ok(app)
-    readout = [i.value for i in app.info if "the surface's implied vol is" in i.value]
-    assert readout and "expiry 30 days" in readout[0] and "extrapolated" not in readout[0]
-    assert not any("gives no implied vol" in c.value for c in app.caption)
+    assert any("go up to 27.65, read as years; name the column 'Days'" in w.value for w in app.warning)
 
 
-def test_a_sidebar_strike_beyond_the_quotes_reads_an_extrapolated_vol(app):
-    """The sample quotes run from K/S 0.7 to 1.3; a strike of 140 is read off the SVI wing and labelled."""
-    app.sidebar.number_input(key="days").set_value(91).run()
-    app.sidebar.number_input(key="strike").set_value(140.0).run()
-    _upload(app, vol_surface.sample_quotes(100, 0.05, 0.0))
-    _ok(app)
-    readout = [i.value for i in app.info if "the surface's implied vol is" in i.value]
-    assert readout and "extrapolated beyond the quoted strikes" in readout[0]
-
-
-def test_an_expiration_date_column_next_to_days_to_expiry_builds_a_surface(app):
+def test_an_arbitrage_free_calibration_holds_arbitrage_out_and_unconstrained_shows_it(app):
     quotes = vol_surface.sample_quotes(100, 0.05, 0.0)
-    quotes["DTE"] = (quotes.pop("Maturity") * 365).round().astype(int)
-    quotes["Expiration"] = (pd.Timestamp("2026-10-13") + pd.to_timedelta(quotes["DTE"], unit="D")).dt.strftime(
-        "%Y-%m-%d"
-    )
-    _upload(app, quotes)
+    maturities = np.sort(quotes["Maturity"].unique())
+    quotes.loc[quotes["Maturity"] == maturities[4], "ImpliedVol"] *= 0.8
+    _upload(app, _csv(quotes))
     _ok(app)
-    assert _metric(app, "Grid") == "8 × 41"
-    assert any("Ignored 'Expiration'" in c.value for c in app.caption)
+    assert _metric(app, "ARB").value.startswith("0 / ")
+    assert any("held free of static arbitrage" in w.value for w in app.warning)
+    app.segmented_control(key="sf_cal").set_value("Unconstrained").run()
+    _ok(app)
+    assert int(_metric(app, "ARB").value.split(" / ")[0]) > 0
+    assert any(m.value == ":yellow-badge[FIT]" for m in app.markdown)
 
 
-def test_the_excel_workbook_is_only_built_when_downloaded(app, monkeypatch):
+def test_the_excel_workbook_is_only_built_when_downloaded(new_app, monkeypatch):
     # Writing every quote into the workbook on every rerun made each click on a large upload take seconds.
     built = []
     writer = pd.ExcelWriter
@@ -215,280 +573,22 @@ def test_the_excel_workbook_is_only_built_when_downloaded(app, monkeypatch):
         return writer(*args, **kwargs)
 
     monkeypatch.setattr(pd, "ExcelWriter", counting_writer)
-    _upload(app, vol_surface.sample_quotes(100, 0.05, 0.0))
-    app.selectbox(key="surface_colors").set_value("Plasma").run()
-    _ok(app)
+    at = new_app(preset=None, asof=ASOF, tab="Surface").run()
+    at.segmented_control(key="sf_view").set_value("Term").run()
+    _ok(at)
     assert not built
-    surface = vol_surface.fit_market_surface(vol_surface.parse_quotes(vol_surface.sample_quotes())[0], 100, 0.04, 0.0)
-    provenance = exports.Provenance(exports.UPLOAD, "UPLOAD · quotes.csv — the user's file", None, "Black-76")
-    workbook = tab_surface._workbook(surface, vol_surface.surface_summary(surface), 100.0, provenance)
+    context = mk.index_market(AS_OF)
+    rows = tab_surface._chain_rows(context.fit, *mk.INDEX_CARRY, iso=True)
+    prov = exports.Provenance(exports.SYNTHETIC, exports.SYNTHETIC_SOURCE, AS_OF, "Black-76", seed=0)
+    shown = tab_surface.Shown(
+        tab_surface.CHAIN, context.surface, context.fit, rows, *mk.INDEX_CARRY, AS_OF, "", (), prov, True
+    )
+    workbook = tab_surface._workbook(shown, prov)
     assert built
     with zipfile.ZipFile(io.BytesIO(workbook)) as archive:
         sheets = archive.read("xl/workbook.xml").decode()
-        # The Quotes sheet's headers, read from the file itself (pd.read_excel needs openpyxl, which the app does
-        # not depend on): xlsxwriter writes them as shared strings, one copy of each across the workbook.
-        strings = re.findall(r"<t[^>]*>([^<]*)</t>", archive.read("xl/sharedStrings.xml").decode())
-    assert all(f'name="{name}"' in sheets for name in ("ImpliedVol", "LocalVol", "Summary", "Quotes"))
-    # Its provenance first (UI spec 2.13): the source of the numbers travels with the file.
-    assert re.findall(r'<sheet name="([^"]+)"', sheets)[0] == "Provenance"
-    assert {"source", "UPLOAD · quotes.csv — the user's file"} <= set(strings)
-    headers = [
-        "Strike",
-        "Maturity (years)",
-        "Quoted implied vol",
-        "Moneyness K/S",
-        "SVI implied vol",
-        "Half bid/ask spread in vol",  # was the raw name vol_half_spread
-    ]
-    assert set(headers) <= set(strings) and "vol_half_spread" not in strings
-
-
-def _maturity_column(header: str, values, as_years: bool) -> pd.DataFrame:
-    params = vol_surface.SSVIParams()
-    rows = []
-    for value in values:
-        t = value if as_years else value / 365
-        for m in np.linspace(0.8, 1.2, 9):
-            iv = np.sqrt(params.total_variance(np.log(m) - 0.05 * t, t)[0] / t)
-            rows.append({"Strike": round(100 * m, 4), header: value, "ImpliedVol": round(float(iv), 6)})
-    return pd.DataFrame(rows)
-
-
-def test_whole_year_tenors_without_a_unit_ask_for_one_instead_of_becoming_days(app):
-    # 1-10 years under 'Maturity' were read as 1-10 days and a ten-day surface was drawn.
-    _upload(app, _maturity_column("Maturity", (1, 2, 3, 5, 7, 10), as_years=True))
-    assert not app.exception
-    assert any("could be years or days" in e.value and "'Maturity (years)'" in e.value for e in app.error)
-    assert not any(m.label == "Grid" for m in app.metric)  # no surface
-    _upload(app, _maturity_column("Maturity (years)", (1, 2, 3, 5, 7, 10), as_years=True))
-    _ok(app)
-    assert _metric(app, "Grid").startswith("6 × ")
-    readout = [i.value for i in app.info if "the surface's implied vol is" in i.value]
-    assert readout  # the sidebar's one-year contract lies inside a 1-10 year surface
-
-
-def test_a_guessed_maturity_unit_is_a_visible_warning(app):
-    # Fractional days (6.65 to 27.65) were read as years with nothing but a caption saying "(years)".
-    _upload(app, _maturity_column("Maturity", (6.65, 13.65, 20.65, 27.65), as_years=False))
-    for _ in range(2):  # the second run reads the parse messages back from the cache
-        _ok(app)
-        warnings = [w.value for w in app.warning]
-        assert any("go up to 27.65, read as years; name the column 'Days'" in w for w in warnings)
-        assert not any("27.65, read as years" in c.value for c in app.caption)
-        app.selectbox(key="surface_colors").set_value("Plasma").run()
-
-
-def test_fractional_days_up_to_ten_get_a_units_warning_and_a_fit_note_that_names_the_unit(app):
-    # 2.65 to 9.65 days under 'Maturity' were read as years with no units hint, and the only message was a
-    # poor-fit note blaming noisy quotes or a shape SVI cannot follow.
-    _upload(app, _maturity_column("Maturity", (2.65, 4.65, 9.65), as_years=False))
-    _ok(app)
-    warnings = [w.value for w in app.warning]
-    assert any("go up to 9.65, read as years; name the column 'Days'" in w for w in warnings)
-    fit_notes = [w for w in warnings if w.startswith("The SVI smile")]
-    assert fit_notes and all("the maturity unit" in w and "noisy" not in w for w in fit_notes)
-    _upload(app, _maturity_column("Days", (2.65, 4.65, 9.65), as_years=False))
-    _ok(app)
-    assert not app.warning, [w.value for w in app.warning]
-
-
-def test_flat_total_variance_at_the_last_expiry_is_not_reported_as_calendar_arbitrage(app):
-    params = vol_surface.SSVIParams()
-    rows = []
-    for days in (30, 60, 91, 182, 365, 366):
-        t = min(days, 365) / 365  # the 366-day quotes repeat the 365-day total variance at each forward moneyness
-        for m in np.linspace(0.8, 1.2, 9):
-            y = np.log(m) - 0.05 * t
-            iv = np.sqrt(params.total_variance(y, t)[0] / (days / 365))
-            rows.append({"Strike": 100 * np.exp(y + 0.05 * days / 365), "Days": days, "IV": iv})
-    _upload(app, pd.DataFrame(rows).round(4))
-    _ok(app)
-    assert _metric(app, "Calendar arbitrage") == "0"  # was 31
-    assert any("changes by less than the quotes' precision" in w.value for w in app.warning)
-
-
-@pytest.mark.parametrize(
-    "valid, quoted, shown",
-    [
-        (649, 652, "99.5%"),  # was "100%" next to a note that local vol is blank at three points
-        (1229, 1230, "99.9%"),
-        (1224, 1230, "99.5%"),
-        (1, 1000, "0.1%"),
-        (246, 328, "75.0%"),
-        (652, 652, "100%"),
-        (0, 652, "0%"),
-        (0, 0, "–"),
-    ],
-)
-def test_local_vol_share_reads_100_or_0_only_when_exact(valid, quoted, shown):
-    assert tab_surface._local_vol_share(valid, quoted) == shown
-
-
-def test_local_vol_defined_is_not_rounded_up_to_100_next_to_blank_points(app):
-    # 1,224 of 1,230 points showed "100%" next to 6 butterfly-arbitrage points and a caption saying local vol
-    # is left blank where the surface has static arbitrage.
-    app.slider(key="ssvi_rho").set_value(-0.8).run()
-    app.slider(key="ssvi_eta").set_value(2.55).run()
-    app.slider(key="ssvi_m").set_value((0.3, 2.5)).run()
-    _ok(app)
-    assert _metric(app, "Butterfly arbitrage") == "6"
-    assert _metric(app, "Local vol defined") == "99.5%"
-    assert "1,224 of 1,230" in next(m.help for m in app.metric if m.label == "Local vol defined")
-
-
-def test_surface_card_labels_fit_a_row_of_four_at_1280_px(app):
-    # 'Calendar-arbitrage points' (25 characters, 150 px) was cut to 'Calendar-arbitrage p…' in the 139 px label of
-    # a card in a row of four at 1,280 px with the sidebar open; 'Calendar arbitrage' measures 109 px there.
-    labels = [m.label for m in app.metric if m.label in ("Grid", "Calendar arbitrage", "Butterfly arbitrage")]
-    assert labels == ["Grid", "Calendar arbitrage", "Butterfly arbitrage"]
-    assert all(len(m.label) <= 20 for m in app.metric if "arbitrage" in m.label or m.label == "Local vol defined")
-    help_text = next(m.help for m in app.metric if m.label == "Butterfly arbitrage")
-    assert help_text.startswith("Number of grid points") and "g(y) < 0" in help_text  # g < 0 is the violation
-
-
-def test_quote_surface_cards_say_they_count_the_fitted_surface(app):
-    quotes = vol_surface.sample_quotes(100, 0.05, 0.0, seed=3)
-    _upload(app, quotes)
-    _ok(app)
-    for label in ("Calendar arbitrage", "Butterfly arbitrage"):
-        help_text = next(m.help for m in app.metric if m.label == label)
-        assert "of the fitted surface" in help_text and "quotes themselves is listed in the notes" in help_text
-
-
-def test_butterfly_arbitrage_in_uploaded_quotes_is_a_visible_note(app):
-    # The surface showed 0 butterfly-arbitrage points and no note for quotes with a negative-cost butterfly.
-    rows = []
-    for days in (14, 30, 60, 91):
-        for strike in range(90, 111):
-            t = days / 365
-            iv = np.sqrt(vol_surface.SSVIParams().total_variance(np.log(strike / 100) - 0.05 * t, t)[0] / t)
-            rows.append(
-                {"Strike": strike, "Days": days, "IV": round(float(iv), 4) + 0.02 * ((days, strike) == (30, 100))}
-            )
-    _upload(app, pd.DataFrame(rows))
-    _ok(app)
-    assert _metric(app, "Butterfly arbitrage") == "0"
-    assert any("butterfly of neighbouring strikes costs less than nothing" in w.value for w in app.warning)
-
-
-def test_tick_rounded_bids_and_asks_raise_no_arbitrage_warning(app):
-    # An arbitrage-free chain quoted in 0.05 ticks: the midpoints' rounding was reported as static arbitrage.
-    rows = []
-    for days in (7, 14, 30, 60, 91):
-        t = days / 365
-        for strike in range(70, 131):
-            iv = np.sqrt(vol_surface.SSVIParams().total_variance(np.log(strike / 100) - 0.05 * t, t)[0] / t)
-            kind = "call" if strike >= 100 * np.exp(0.05 * t) else "put"
-            price = black_scholes.price(100.0, strike, t, 0.05, iv, 0.0, kind)
-            half = max(0.05, 0.03 * price)
-            bid, ask = np.floor((price - half) / 0.05) * 0.05, np.ceil((price + half) / 0.05) * 0.05
-            if bid > 0:
-                rows.append({"Strike": strike, "Days": days, "Type": kind, "Bid": round(bid, 2), "Ask": round(ask, 2)})
-    _upload(app, pd.DataFrame(rows))
-    _ok(app)
-    assert _metric(app, "Butterfly arbitrage") == "0"
-    assert not [w.value for w in app.warning if "static arbitrage" in w.value]
-
-
-def test_a_mark_column_next_to_wide_bids_and_asks_raises_no_arbitrage_warning(app):
-    # Mark = (Bid + Ask) / 2 next to the bid and ask was allowed only its 0.025 grid step, not half the spread, so
-    # this arbitrage-free chain (wide spreads around prices off their midpoints) showed a static-arbitrage warning.
-    rng = np.random.default_rng(0)
-    rows = []
-    for days in (7, 14, 30, 60, 91):
-        t = days / 365
-        for strike in range(70, 131):
-            iv = np.sqrt(vol_surface.SSVIParams().total_variance(np.log(strike / 100) - 0.05 * t, t)[0] / t)
-            kind = "call" if strike >= 100 * np.exp(0.05 * t) else "put"
-            price = black_scholes.price(100.0, strike, t, 0.05, iv, 0.0, kind)
-            half = max(0.05, 0.1 * price)
-            centre = price + rng.uniform(-0.9, 0.9) * half  # each spread still brackets the price
-            bid = min(np.floor((centre - half) / 0.05), np.floor(price / 0.05)) * 0.05
-            ask = max(np.ceil((centre + half) / 0.05), np.ceil(price / 0.05)) * 0.05
-            if bid > 0:
-                row = {"Strike": strike, "Days": days, "Type": kind, "Bid": round(bid, 2), "Ask": round(ask, 2)}
-                rows.append(row | {"Mark": round((bid + ask) / 2, 3)})
-    _upload(app, pd.DataFrame(rows))
-    _ok(app)
-    assert any("option price from 'Mark'" in c.value for c in app.caption)
-    assert not [w.value for w in app.warning if "static arbitrage" in w.value]
-
-
-def test_vols_of_tick_rounded_midpoints_raise_no_arbitrage_warning(app):
-    # The unknown price behind a quoted vol was allowed only 0.01% of the forward (0.0037 at spot 37.4): vols of
-    # midpoints of an arbitrage-free chain in 0.05 ticks with $0.50 strikes showed a static-arbitrage warning.
-    rows = []
-    for days in (7, 14, 30, 60, 91):
-        t = days / 365
-        for strike in np.arange(26.5, 48.6, 0.5):
-            iv = np.sqrt(vol_surface.SSVIParams().total_variance(np.log(strike / 37.4) - 0.05 * t, t)[0] / t)
-            kind = "call" if strike >= 37.4 * np.exp(0.05 * t) else "put"
-            price = black_scholes.price(37.4, strike, t, 0.05, iv, 0.0, kind)
-            half = max(0.05, 0.03 * price)
-            bid, ask = np.floor((price - half) / 0.05) * 0.05, np.ceil((price + half) / 0.05) * 0.05
-            if bid > 0:
-                vol = implied_vol.implied_volatility((bid + ask) / 2, 37.4, strike, t, 0.05, 0.0, kind)
-                rows.append({"Strike": strike, "Days": days, "IV": round(vol, 4)})
-    app.sidebar.number_input(key="spot").set_value(37.4).run()
-    _upload(app, pd.DataFrame(rows))
-    _ok(app)
-    assert not [w.value for w in app.warning if "static arbitrage" in w.value]
-
-
-def test_parse_messages_stay_visible_when_the_fit_fails_numerically(app, monkeypatch):
-    # numpy's LinAlgError escaped the cache wrapper, which caught only QuoteParseError: the tab printed the raw
-    # 'Singular matrix' and every parse message was lost.
-    def singular(*args, **kwargs):
-        raise np.linalg.LinAlgError("Singular matrix")
-
-    monkeypatch.setattr(vol_surface, "fit_market_surface", singular)
-    _upload(app, vol_surface.sample_quotes(100, 0.05, 0.0, seed=17))  # a file no other test has cached
-    assert not app.exception
-    assert any("Singular matrix" in e.value for e in app.error)
-    assert any(c.value.startswith(":material/info: Read strike from 'Strike'") for c in app.caption)
-
-
-def test_the_smile_charts_atm_label_sits_inside_the_top_of_the_plot():
-    # At the bottom the label was drawn over the x-axis tick label '1' at every width.
-    fig = charts.smile_chart(np.linspace(0.7, 1.3, 41), [("30d", np.full(41, 0.2), np.full(41, 0.2))], "K/S")
-    (label,) = [a for a in fig.layout.annotations if a.text == "ATM"]
-    assert label.y == 1 and label.yanchor == "top" and label.xanchor == "left"
-
-
-def test_the_3d_surfaces_wrap_instead_of_squeezing_into_narrow_columns(app):
-    # Plotly sizes a 3-D scene by the chart's height: half-width columns of 212-274 px (900-1,024 px with the
-    # sidebar open) or 328-358 px on phones cut off the z axis and its title. The camera now sits 1.3 times as far
-    # out (a scene about 270 px across) and the two charts wrap onto separate rows before they get narrower.
-    eye = charts.surface_3d(np.linspace(0.8, 1.2, 5), [0.5, 1.0], np.full((2, 5), 0.2), "t", "Viridis").layout.scene
-    assert np.hypot(np.hypot(eye.camera.eye.x, eye.camera.eye.y), eye.camera.eye.z) > 3.7  # was 2.9
-    blocks = []
-
-    def surface(node) -> bool:
-        return getattr(node, "type", None) == "plotly_chart" and json.loads(node.proto.spec)["data"][0]["type"] == (
-            "surface"
-        )
-
-    def walk(node):
-        children = getattr(node, "children", None)
-        if isinstance(children, dict):
-            # Each chart sits in its own chart_<key> container (charts.show), a child of the row.
-            surfaces = [
-                c
-                for c in children.values()
-                if surface(c) or any(surface(g) for g in (getattr(c, "children", None) or {}).values())
-            ]
-            if surfaces and not any(surface(c) for c in children.values()):  # the row, not a chart_ container
-                blocks.append((node.proto, len(surfaces)))
-            for child in children.values():
-                walk(child)
-
-    walk(app._tree)
-    ((block, count),) = blocks
-    assert count == 2 and block.flex_container.direction == block.flex_container.HORIZONTAL
-    assert block.flex_container.wrap
-    # Centred: left-aligned, the pair filled only the left half of the row at 1,920 px.
-    assert block.flex_container.justify == block.flex_container.JUSTIFY_CENTER
-    assert 2 * tab_surface.SURFACE_CHART_WIDTH + 16 <= 804  # side by side in the main column at 1,280 px
+    names = re.findall(r'<sheet name="([^"]+)"', sheets)
+    assert names == ["Provenance", "ImpliedVol", "LocalVol", "Expiries", "Quotes"]
 
 
 @pytest.mark.parametrize(
@@ -496,112 +596,17 @@ def test_the_3d_surfaces_wrap_instead_of_squeezing_into_narrow_columns(app):
     [(0, "0.0B"), (500, "500.0B"), (501, "0.5KB"), (1971, "2.0KB"), (500_000, "500.0KB"), (1_400_000, "1.4MB")],
 )
 def test_the_kept_file_size_reads_as_the_uploader_shows_it(n_bytes, shown):
-    # Streamlit's uploader (outside Windows) moves to the next decimal unit above 500 and shows one decimal.
     assert tab_surface._size(n_bytes) == shown
 
 
-def _forwards_table(at: AppTest) -> pd.DataFrame:
-    return next(d.value for d in at.dataframe if "Gap to sidebar (bp)" in d.value.columns)
+@pytest.mark.parametrize(
+    ("valid", "quoted", "shown"),
+    [(649, 652, "99.5%"), (1229, 1230, "99.9%"), (1, 1000, "0.1%"), (652, 652, "100%"), (0, 652, "0%"), (0, 0, "–")],
+)
+def test_local_vol_share_reads_100_or_0_only_when_exact(valid, quoted, shown):
+    assert tab_surface._share(valid, quoted) == shown
 
 
-def _shown_gaps(at: AppTest) -> list[str]:
-    """The Gap to sidebar column as displayed: the text of the table's pandas Styler."""
-    element = next(d for d in at.dataframe if "Gap to sidebar (bp)" in d.value.columns)
-    shown = pa.ipc.open_stream(element.proto.arrow_data.styler.display_values).read_all().to_pandas()
-    return shown["Gap to sidebar (bp)"].tolist()
-
-
-def test_parity_forwards_are_shown_and_a_sidebar_carry_the_quotes_contradict_is_flagged(new_app):
-    """A synthetic SPX chain (box rate 4.45 %, dividend yield 1.3 %) read with a sidebar of 4 % and no yield: each
-    expiry's forward comes from put-call parity, within 0.5 bp of the generator's, and the warning says that the
-    sidebar's carry is contradicted by the quotes. With "Sidebar r, q" the forwards are the sidebar's, no warning."""
-    as_of = datetime(2026, 10, 26, 10, 0)
-    chain = sample_chain(6000.0, 0.04, 0.013, as_of=as_of)
-    at = new_app(tab="Surface", spot=6000, rate=4.0, div=0.0).run()
-    _upload(at, to_quotes(chain.quotes, as_of=as_of))
-    _ok(at)
-    table = _forwards_table(at)
-    assert len(table) == len(chain.expiries) and (table["Source"] == "parity").all()
-    assert table["Forward"].to_numpy() == pytest.approx(chain.expiries["forward"].to_numpy(), rel=5e-5)
-    assert table["Implied rate (%)"].iloc[-1] == pytest.approx(4.45, abs=0.05)
-    assert table["Implied yield (%)"].iloc[-1] == pytest.approx(1.3, abs=0.05)
-    assert any("forward that put-call parity reads from the quotes" in w.value for w in at.warning)
-    assert _metric(at, "Calendar arbitrage") == "0" and _metric(at, "Butterfly arbitrage") == "0"
-    # Signed with the minus sign U+2212, as the generator's forwards sit below the sidebar's (no yield there).
-    assert all(gap.startswith("\u2212") for gap in _shown_gaps(at))
-    assert _shown_gaps(at)[0] == f"\u2212{abs(table['Gap to sidebar (bp)'].iloc[0]):.1f}"
-
-    at.segmented_control(key="surface_forward").set_value("Sidebar r, q").run()
-    _ok(at)
-    table = _forwards_table(at)
-    assert (table["Source"] == "sidebar").all() and table["Gap to sidebar (bp)"].abs().max() < 1e-9
-    assert set(_shown_gaps(at)) == {"0.0"}  # was "+0.0" (and "-0.0" for a rounding-level negative gap)
-    assert not any("put-call parity reads" in w.value for w in at.warning)
-
-
-def test_american_quotes_take_the_sidebar_forwards_and_say_so(new_app):
-    """With an American pricing model in the sidebar, put-call parity is not used for the quotes (it holds only for
-    European options): every forward is the sidebar's, the carry-gap warning stays away, the Forwards control says
-    why, and the parse message says the prices are still inverted as European."""
-    rows = []
-    for days in (30, 91, 182):
-        T = days / 365
-        for strike in np.arange(80.0, 120.01, 2.5):
-            for kind in ("call", "put"):
-                price = black_scholes.price(100.0, strike, T, 0.05, 0.25, 0.02, kind)
-                rows.append({"Strike": strike, "Days": days, "Type": kind, "Bid": price - 0.02, "Ask": price + 0.02})
-    european = new_app(tab="Surface", rate=5.0, div=0.0).run()
-    _upload(european, pd.DataFrame(rows))
-    _ok(european)
-    assert (_forwards_table(european)["Source"] == "parity").all()  # the 2 % yield the sidebar lacks, read by parity
-    assert any("put-call parity reads" in w.value for w in european.warning)
-    assert not any("pricing model is American" in c.value for c in european.caption)
-
-    at = new_app(tab="Surface", rate=5.0, div=0.0, model="American (ALO)").run()
-    _upload(at, pd.DataFrame(rows))
-    _ok(at)
-    assert (_forwards_table(at)["Source"] == "sidebar").all()
-    assert not any("put-call parity reads" in w.value for w in at.warning)
-    captions = [c.value for c in at.caption]
-    assert any(
-        c.startswith("The sidebar's pricing model is American, so put-call parity is not used") for c in captions
-    )
-    assert any("because the quotes are read as American" in c for c in captions)
-    assert any("prices are read as American (the sidebar's pricing model) but still inverted" in c for c in captions)
-    assert at.segmented_control(key="surface_forward").value == "Put-call parity"  # kept, for European quotes
-
-
-def test_a_strike_beyond_the_extrapolation_reach_says_how_far_the_reach_is(app):
-    """30 days, strike 65 on the sample quotes (K/S 0.7 to 1.3): |ln K/F| is 0.435, beyond the 30-day smile's reach of
-    four at-the-money standard deviations, 0.286, though only 0.07 beyond its lowest quote. The caption gives the
-    reach, measured from the forward; it used to say 1.5, the cap."""
-    app.sidebar.number_input(key="days").set_value(30).run()
-    app.sidebar.number_input(key="strike").set_value(65.0).run()
-    _upload(app, vol_surface.sample_quotes(100, 0.05, 0.0))
-    _ok(app)
-    caption = next(c.value for c in app.caption if "gives no implied vol" in c.value)
-    assert "beyond them the surface extrapolates only out to |ln K/F| = 0.29 from that expiry's forward F" in caption
-    app.sidebar.number_input(key="days").set_value(1000).run()
-    _ok(app)
-    caption = next(c.value for c in app.caption if "gives no implied vol" in c.value)
-    assert "lies outside the surface's maturities (30d to 2.00y)" in caption
-
-
-def test_the_smiles_show_their_extrapolated_wings_dotted(app):
-    """Beyond each maturity's quotes, where the grid has room, its smile goes on as a dotted line: the 30-day sample
-    smile is quoted over K/S 0.7-1.3 like the others, so the sample quotes are cut to 0.85-1.15 at 30 days."""
-    quotes = vol_surface.sample_quotes(100, 0.05, 0.0)
-    first = quotes["Maturity"] == quotes["Maturity"].min()
-    quotes = quotes[~first | quotes["Strike"].between(85.0, 115.0)]
-    _upload(app, quotes)
-    _ok(app)
-    traces = [t for c in app.get("plotly_chart") for t in json.loads(c.proto.spec)["data"]]
-    assert [t["name"] for t in traces if t.get("name", "").startswith("Extrapolated")] == ["Extrapolated · 30d"]
-    wing = next(t for t in traces if t.get("name") == "Extrapolated · 30d")
-    assert wing["line"]["dash"] == "dot"
-    implied = next(t for t in traces if t.get("name") == "Implied · 30d")
-    x = _array(implied["x"])
-    shown, inside = np.isfinite(_array(wing["y"])), np.isfinite(_array(implied["y"]))
-    # The wing covers grid points outside the quotes (and the last one inside, to join the smile), never inside.
-    assert shown.any() and (x[shown & ~inside] < 0.85).any() and not (shown & inside & (x > 0.86) & (x < 1.14)).any()
-    assert any("Dotted lines carry an implied-vol smile on beyond its quoted strikes" in c.value for c in app.caption)
+def test_day_labels_tell_close_expiries_apart():
+    assert tab_surface.day_labels(np.array([1, 2, 3, 30.0])) == ["1d", "2d", "3d", "30d"]
+    assert tab_surface.day_labels(np.array([1.0, 1.4, 1.42])) == ["1.00d", "1.40d", "1.42d"]

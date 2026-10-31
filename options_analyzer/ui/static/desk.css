@@ -272,6 +272,17 @@
   font-size: inherit;
 }
 
+/* The data panel's line (a keyed container), between the source and Filters on one row (UI spec 3.4 item 1): it
+   shares the row and wraps its own text (two lines at 1,440 px); as a markdown element of the row it sized from its
+   1,010 px of text and took a row of its own. On a phone it goes last, on a line of its own below the source and the
+   popovers, rather than squeezed into the space beside one of them (200 px beside SSVI parameters). */
+@media (max-width: 640px) {
+  .st-key-surface_data_row > :has(> .st-key-surface_data_line) {
+    order: 1;
+    flex-basis: 100%;
+  }
+}
+
 /* --- Methodology (ui/tab_methodology.py) --------------------------------------------------------------------- */
 
 /* Subsection headings at the size of the text, in the drawer as in the tab: Streamlit draws the headings of a

@@ -87,11 +87,11 @@ def test_var_models(new_app):
 
 def test_volatility_surface_upload(new_app):
     app = new_app(tab="Surface").run()
-    app.segmented_control(key="surface_source").set_value("Market quotes (CSV)").run()
+    app.segmented_control(key="surface_source").set_value("Upload").run()
     csv = vol_surface.sample_quotes().to_csv(index=False).encode()
     app.file_uploader(key="quotes_file").upload("quotes.csv", csv, "text/csv").run()
     _ok(app)
-    assert any(m.label == "Calendar arbitrage" for m in app.metric)
+    assert next(m.value for m in app.metric if m.label == "ARB") == "0 / 0"
     app.file_uploader(key="quotes_file").upload("bad.csv", b"a,b\n1,2\n", "text/csv").run()
     assert not app.exception
     assert any("Strike column" in e.value for e in app.error)
@@ -129,8 +129,8 @@ def test_a_vol_shift_leaves_the_expiry_curve_and_tiles_alone(new_app):
 #: each of them.
 CHART_KEYS = {
     "pricing_profile", "pricing_convergence", "pricing_mc_convergence", "pricing_boundary", "payoff_chart",
-    "risk_heatmap", "date_heatmap", "time_decay", "greek_profiles", "stress_chart", "var_hist", "surf_iv", "surf_lv",
-    "smiles", "term_structure", "iv_price",
+    "risk_heatmap", "date_heatmap", "time_decay", "greek_profiles", "stress_chart", "var_hist", "chart_smile",
+    "iv_price",
 }  # fmt: skip
 
 
@@ -164,7 +164,7 @@ TAB_CHARTS = {
     "Pricing": {"pricing_profile"},
     "Strategy": {"payoff_chart"},
     "Risk": {"risk_heatmap", "date_heatmap", "time_decay", "greek_profiles", "stress_chart", "var_hist"},
-    "Surface": {"surf_iv", "surf_lv", "smiles", "term_structure"},
+    "Surface": {"chart_smile"},
     "IV": {"iv_price"},
     "Methodology": set(),
 }  # fmt: skip
@@ -405,45 +405,51 @@ def test_risk_settings_survive_a_visit_to_another_tab(new_app):
 
 def test_uploaded_quotes_survive_a_visit_to_another_tab(new_app):
     at = new_app(tab="Surface").run()
-    at.segmented_control(key="surface_source").set_value("Market quotes (CSV)").run()
+    at.segmented_control(key="surface_source").set_value("Upload").run()
     csv = vol_surface.sample_quotes().to_csv(index=False).encode()
     at.file_uploader(key="quotes_file").upload("quotes.csv", csv, "text/csv").run()
     _ok(at)
     before = {m.label: m.value for m in at.metric}
-    assert before["Calendar arbitrage"] == "0"
+    assert before["ARB"] == "0 / 0"
+
+    def fitted() -> bool:  # the surface tiles read a fit (with no file they show "–")
+        return next(m.value for m in at.metric if m.label == "ARB") != "–"
+
+    def empty() -> bool:  # the data panel's empty state: the accepted layouts
+        return any(m.value.startswith(":small[Upload a chain:") for m in at.markdown)
+
     _away_and_back(at, "Surface", "IV")
     # The uploader on screen is new and empty; the surface is still the one of the uploaded file, which is named
     # under the uploader with a button that removes it.
     assert {m.label: m.value for m in at.metric} == before
-    kept = f":material/description: `quotes.csv` · {len(csv) / 1000:.1f}KB · uploaded earlier in this session"
+    kept = f":material/description: `quotes.csv` · {len(csv) / 1000:.1f}KB · kept for this session"
     assert any(c.value.startswith(kept) for c in at.caption)
     at.button(key="quotes_remove").click().run()
     _ok(at)
-    assert not any(m.label == "Calendar arbitrage" for m in at.metric)
-    assert any("Upload a quotes file" in i.value for i in at.info)
-    assert not any("uploaded earlier" in c.value for c in at.caption)
+    assert not fitted() and empty()
+    assert not any("kept for this session" in c.value for c in at.caption)
     assert "quotes_remove" not in {b.key for b in at.button}
     _away_and_back(at, "Surface", "IV")  # the removal is kept
-    assert not any(m.label == "Calendar arbitrage" for m in at.metric)
+    assert not fitted()
     # Removing a file with the uploader's own x is kept too.
     at.file_uploader(key="quotes_file").upload("other.csv", csv, "text/csv").run()
     assert {m.label: m.value for m in at.metric} == before
-    assert not any("uploaded earlier" in c.value for c in at.caption)  # the uploader shows this one itself
+    assert not any("kept for this session" in c.value for c in at.caption)  # the uploader shows this one itself
     at.file_uploader(key="quotes_file").clear().run()
-    assert not any(m.label == "Calendar arbitrage" for m in at.metric)
+    assert not fitted()
     _away_and_back(at, "Surface", "IV")
-    assert any("Upload a quotes file" in i.value for i in at.info)
+    assert empty()
 
 
 def test_surface_and_iv_settings_survive_a_visit_to_another_tab(new_app):
     at = new_app(tab="Surface").run()
     at.number_input(key="ssvi_long").set_value(30.0)
     at.slider(key="ssvi_rho").set_value(-0.3)
-    at.selectbox(key="surface_colors").set_value("Cividis").run()
+    at.segmented_control(key="sf_x").set_value("Call Δ").run()
     _ok(at)
     _away_and_back(at, "Surface")
     assert at.number_input(key="ssvi_long").value == 30.0 and at.slider(key="ssvi_rho").value == -0.3
-    assert at.selectbox(key="surface_colors").value == "Cividis"
+    assert at.segmented_control(key="sf_x").value == "Call Δ"
 
     _open(at, "IV")
     quote = next(n for n in at.number_input if n.label == "Price")

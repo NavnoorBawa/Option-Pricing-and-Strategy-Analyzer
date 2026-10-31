@@ -825,7 +825,7 @@ TAB_READY = {
     "Pricing": ".st-key-pricing_tiles",
     "Strategy": ".st-key-strategy_tiles",
     "Risk": ".st-key-var_cards",
-    "Surface": ".st-key-surface_cards",
+    "Surface": ".st-key-surface_tiles",
     "IV": ".st-key-iv_tiles",
     "Methodology": ".st-key-methodology",
 }
@@ -887,7 +887,7 @@ CARD_ROW_TABS = {
     "pricing_tiles": "Pricing",
     "strategy_tiles": "Strategy",
     "var_cards": "Risk",
-    "surface_cards": "Surface",
+    "surface_tiles": "Surface",
     "iv_tiles": "IV",
 }
 
@@ -1004,6 +1004,8 @@ def test_card_rows_line_up(chromium, app_url, width, query):
                     assert 0 <= card["iconGap"] <= 8 and card["iconOnLastLine"], (key, card)
         assert [len(line) for line in _lines(rows["var_cards"])] == [2, 2]
         assert [len(line) for line in _lines(rows["strategy_tiles"])] == [2, 2, 2]
+        if width < 1440:  # the Surface tiles: three pairs, a pair per line at these widths (six across at 1,440)
+            assert [len(line) for line in _lines(rows["surface_tiles"])] == [2, 2, 2]
     finally:
         page.close()
 
@@ -1051,7 +1053,7 @@ def test_the_pricing_tiles_deltas_are_never_cut_off(chromium, app_url, width):
 
 #: A chart that each tab draws (the key given to charts.show), and the number of charts it draws, at the default URL.
 TAB_CHART = {"Pricing": ("pricing_profile", 1), "Strategy": ("payoff_chart", 1), "Risk": ("var_hist", 6),
-             "Surface": ("surf_iv", 4), "IV": ("iv_price", 1), "Methodology": (None, 0)}  # fmt: skip
+             "Surface": ("chart_smile", 1), "IV": ("iv_price", 1), "Methodology": (None, 0)}  # fmt: skip
 
 
 def _query(page) -> dict[str, list[str]]:
@@ -1179,13 +1181,13 @@ def test_the_kept_quotes_file_is_named_at_the_size_of_its_caption(chromium, app_
     from options_analyzer import vol_surface
 
     quotes = tmp_path / "quotes.csv"
-    quotes.write_text(vol_surface.sample_quotes().to_csv(index=False), encoding="utf-8")
+    quotes.write_text(vol_surface.sample_quotes(5800.0).to_csv(index=False), encoding="utf-8")  # at the index level
     page = _open(chromium, f"{app_url}/?tab=Surface", scheme, 1440)
     try:
-        page.get_by_text("Market quotes (CSV)", exact=True).click()
+        page.get_by_text("Upload", exact=True).click()
         _settle(page)
         page.locator("[data-testid=stFileUploader] input[type=file]").set_input_files(quotes)
-        fitted = page.locator("[data-testid=stMetric]").filter(has_text="Calendar arbitrage")  # a card of the fit
+        fitted = page.get_by_text("the user's table of quotes", exact=False)  # the data panel of the fit
         fitted.wait_for(state="visible", timeout=120_000)
         _settle(page)
         _tab(page, "IV")
@@ -1199,24 +1201,34 @@ def test_the_kept_quotes_file_is_named_at_the_size_of_its_caption(chromium, app_
         page.close()
 
 
-#: Colour and background of every visible multiselect chip.
-_CHIPS = """() => [...document.querySelectorAll('[data-testid=stMultiSelect] [data-tag]')]
-  .filter(e => e.getBoundingClientRect().width > 0)
-  .map(e => [e.innerText, getComputedStyle(e).color, getComputedStyle(e).backgroundColor])"""
+#: Colour and background (rgba) of the selected option of the Surface tab's view switch, a segmented control.
+_SELECTED_VIEW = """() => {
+  const e = [...document.querySelectorAll('.st-key-sf_view button')].find(b => b.innerText.trim() === 'Smile');
+  return [getComputedStyle(e).color, getComputedStyle(e).backgroundColor];
+}"""
+
+
+def _over(css: str, base: str) -> str:
+    """``#RRGGBB`` of a computed ``rgba(r, g, b, a)`` colour laid over the opaque ``base``."""
+    *rgb, alpha = ([float(v) for v in re.findall(r"[\d.]+", css)] + [1.0])[:4]
+    under = [int(base[i : i + 2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(f"{round(alpha * c + (1 - alpha) * u):02X}" for c, u in zip(rgb, under, strict=True))
 
 
 @pytest.mark.e2e
 @pytest.mark.parametrize("scheme", ["dark", "light"])
 def test_text_on_the_primary_colour_is_legible_in_the_app(chromium, app_url, scheme):
+    # Streamlit writes white on a fill of the primary colour in a multiselect's chips and in a number input's step
+    # buttons while hovered; the desk stylesheet recolours both (theme.ON_PRIMARY_SELECTORS). No tab has a
+    # multiselect since the Surface tab dropped its maturities picker (SF-1), so the step buttons stand for the rule.
+    # A segmented control's selected option is the other way round: primary text on a 10% tint of it.
     page = _open(chromium, app_url, scheme, 1440)
     try:
+        primary, background = _mode(scheme)["primaryColor"], _mode(scheme)["backgroundColor"]
         _tab(page, "Surface")
-        chips = page.evaluate(_CHIPS)
-        assert chips  # the maturities of the smile chart
-        primary = _mode(scheme)["primaryColor"]
-        for text, color, background in chips:
-            assert _hex(background) == primary, text
-            assert contrast(_hex(color), _hex(background)) >= 4.5, (text, color, background)
+        color, tint = page.evaluate(_SELECTED_VIEW)
+        assert _hex(color) == primary and _hex(tint) == primary, (color, tint)
+        assert contrast(primary, _over(tint, background)) >= 4.5, (color, tint)
         _tab(page, "IV")
         step = page.locator("[data-testid=stMain] [data-testid=stNumberInputStepUp]:visible").first
         step.hover()
