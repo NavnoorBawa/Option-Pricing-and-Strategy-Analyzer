@@ -64,6 +64,9 @@ X_AXES = tuple(charts_surface.X_AXES)
 #: Session key of the focus expiry of an upload or the SSVI surface (a row of the expiry table); the synthetic chain's
 #: is the sidebar's ``expiry``.
 FOCUS_KEY = "sf_focus"
+#: The six tiles in two groups of three: 3 + 3 at 1,440 px with the sidebar open (six across would need about
+#: 1,060 px of the 1,037 there; three pairs went 4 + 2), then one group per line.
+TILE_GROUPS = ("surface_tiles_a", "surface_tiles_b")
 #: The tiles' constant maturities, in calendar days.
 TILE_DAYS, TERM_DAYS = 30, 365
 VOL_LIMITS = (0.5, 500.0)
@@ -185,10 +188,23 @@ def _surface_rows(surface: vs.VolSurface, rate: float, dividend_yield: float) ->
     """The expiry rows of a surface without dated expiries (a table of quotes, or SSVI): named by days to expiry."""
     rows = dg.slice_table(surface, rate=rate, dividend_yield=dividend_yield)
     rows["minutes"] = rows["maturity"] * clock.MINUTES_PER_YEAR
-    rows["name"] = [time_left(m) for m in rows["minutes"]]
+    rows["name"] = day_labels(rows["maturity"].to_numpy(float) * 365.0)
     rows["expiry"], rows["settlement"] = None, None
     rows["target"] = list(range(len(rows)))
     return rows
+
+
+def day_labels(days: np.ndarray) -> list[str]:
+    """Unique labels of times to expiry in calendar days, with as many decimals as tell them apart (never years).
+
+    >>> day_labels(np.array([7.0, 30.0, 730.0])), day_labels(np.array([1.0, 1.4, 1.42]))
+    (['7d', '30d', '730d'], ['1.00d', '1.40d', '1.42d'])
+    """
+    for decimals in range(5):
+        labels = [number(d, decimals) + "d" for d in days]
+        if len(set(labels)) == len(labels):
+            return labels
+    return [number(d, 6) + "d" for d in days]
 
 
 def _chain_source(inputs: Inputs) -> Shown:
@@ -670,8 +686,8 @@ def _tiles(shown: Shown | None) -> None:
     against the spreads and the arbitrage counts; ``–`` with the reason where a value cannot be measured."""
     blank = {"help": "No surface: upload a file or pick another source."}
     if shown is None:
-        labels = ("ATMF 30D", "25Δ RR 30D", "25Δ BF 30D", "TERM 30→365D", "FIT", "ARB")
-        card_row("surface_tiles", ("surface_tiles_a", "surface_tiles_b"), [(lbl, MISSING, blank) for lbl in labels])
+        labels = ("ATMF 30D", "25Δ RR 30D", "25Δ BF 30D", "TERM 30→365D", "FIT / ½‑SPR", "ARB")
+        card_row("surface_tiles", TILE_GROUPS, [(lbl, MISSING, blank) for lbl in labels])
         return
     surface, rate = shown.surface, shown.rate
     T30, T365 = TILE_DAYS / 365.0, TERM_DAYS / 365.0
@@ -687,7 +703,7 @@ def _tiles(shown: Shown | None) -> None:
         if math.isfinite(vix):
             names = [shown.fit.expiries.at[i, "expiry"] for i in pair or ()]
             atmf_options |= {
-                "delta": f"VIX‑style {vol(vix)}",
+                "delta": f"VIX‑style {vol(vix)}",  # UI-26: the model-free 30-day vol
                 "delta_color": "off",
                 "delta_arrow": "off",
                 "help": atmf_options["help"]
@@ -731,7 +747,7 @@ def _tiles(shown: Shown | None) -> None:
             },
         ),
     ]
-    card_row("surface_tiles", ("surface_tiles_a", "surface_tiles_b"), tiles)
+    card_row("surface_tiles", TILE_GROUPS, tiles)
 
 
 def _fit_tile(shown: Shown) -> tuple[str, str, dict]:
@@ -752,19 +768,21 @@ def _fit_tile(shown: Shown) -> tuple[str, str, dict]:
             else math.nan
         )
     else:
-        return ("FIT", MISSING, {"help": "A parametric surface has no quotes to fit."})
+        return ("FIT / ½‑SPR", MISSING, {"help": "A parametric surface has no quotes to fit."})
     median_half = float(np.nanmedian(half)) if np.isfinite(half).any() else math.nan
-    value = f"{number(rmse * 100, 2)} vp" + (
-        f" vs ½‑spr {number(median_half * 100, 2)}" if math.isfinite(median_half) else ""
-    )
     options = {
-        "help": "Median across expiries of the fit's RMSE in vol, against the median half bid/ask spread in vol of "
-        "the quotes used: a fit well inside the spreads is as good as the quotes allow. Below it, the share of used "
+        "help": "Median across expiries of the fit's RMSE in vol / the median half bid/ask spread in vol of "
+        "the quotes used: a fit well inside the spreads is as good as the quotes allow. Then the share of used "
         "quotes whose fitted vol lies within their bid/ask.",
     }
     if math.isfinite(in_band):
         options |= {"delta": f"{number(in_band * 100, 0)}% in band", "delta_color": "off", "delta_arrow": "off"}
-    return ("FIT", value, options)
+    value = (
+        f"{number(rmse * 100, 2)} vp"
+        if not math.isfinite(median_half)
+        else (f"{number(rmse * 100, 2)} / {number(median_half * 100, 2)} vp")
+    )
+    return ("FIT / ½‑SPR", value, options)
 
 
 # --------------------------------------------------------------------------------------------------------------------
@@ -803,24 +821,25 @@ def _view_controls(shown: Shown, focus: int, focus_key: str) -> tuple[str, str]:
     )
     stepper = bar.container(horizontal=True, vertical_alignment="center", gap="xsmall", width="content")
     stepper.button(
-        "◂",
+        "",
+        icon=":material/chevron_left:",
         key="sf_prev",
         on_click=on_expiry_step,
         args=(targets, focus_key, focus, -1),
         disabled=focus == 0,
         help="Previous expiry",
-        type="tertiary",
     )
     row = rows.iloc[focus]
-    stepper.markdown(f"**{row['name']}** · {time_left(row['minutes'])}")
+    dated = row["expiry"] is not None
+    stepper.markdown(f"**{row['name']}**" + (f" · {time_left(row['minutes'])}" if dated else " to expiry"))
     stepper.button(
-        "▸",
+        "",
+        icon=":material/chevron_right:",
         key="sf_next",
         on_click=on_expiry_step,
         args=(targets, focus_key, focus, +1),
         disabled=focus == len(rows) - 1,
         help="Next expiry",
-        type="tertiary",
     )
     axis = X_AXES[0]
     if view == "Smile":
@@ -874,7 +893,8 @@ def _smile_data(shown: Shown, focus: int) -> charts_surface.SmileData:
         other = mine[(mine["status"] != dg.USED) & (mine["status"] != "ITM side")]
         iv = other["iv_mid"].to_numpy(float)
         iv = np.where(np.isfinite(iv), iv, other["iv_ask"].to_numpy(float))
-        keep = np.isfinite(iv)
+        window = (other["strike"] >= forward * math.exp(y[0])) & (other["strike"] <= forward * math.exp(y[-1]))
+        keep = np.isfinite(iv) & window.to_numpy()
         excluded = {
             "strike": other["strike"].to_numpy(float)[keep],
             "iv": iv[keep],
@@ -962,7 +982,15 @@ def _quotes_view(shown: Shown, focus: int) -> None:
         helps = {k: QUOTE_HELP[k] for k in frame.columns}
         table(frame, kinds, helps, key="tbl_surface_quotes")
         return
-    mine = shown.fit.quotes[shown.fit.quotes["label"] == int(row["label"])]
+    every = shown.fit.quotes[shown.fit.quotes["label"] == int(row["label"])]
+    show_all = st.toggle(
+        "Every quote",
+        value=False,
+        key="sf_all_quotes",
+        persist_state="session",
+        help="Off: the quotes the fit used. On: every quote of the expiry, with why the screen left it out.",
+    )
+    mine = every if show_all else every[every["status"] == dg.USED]
     frame = pd.DataFrame(
         {
             "Strike": mine["strike"].to_numpy(float),
@@ -995,8 +1023,8 @@ def _quotes_view(shown: Shown, focus: int) -> None:
     helps = {k: QUOTE_HELP[k] for k in frame.columns}
     table(frame, kinds, helps, key="tbl_surface_quotes")
     st.caption(
-        f"{number(len(mine), 0)} quotes of {row['name']}; the chain's {number(len(shown.fit.quotes), 0)} bids, asks "
-        f"and mids inverted in {number(shown.fit.inversion_ms, 0)} ms (batch LBR)."
+        f"{number(len(mine), 0)} of {number(len(every), 0)} quotes of {row['name']} · the chain's "
+        f"{number(len(shown.fit.quotes), 0)} quotes inverted in {number(shown.fit.inversion_ms, 0)} ms (batch LBR)."
     )
 
 
@@ -1062,9 +1090,13 @@ FORWARD_VOL_HELP = (
 
 def _grid(shown: Shown) -> None:
     grid = dg.delta_grid(shown.surface, rate=shown.rate)
+    grid = grid[grid.notna().any(axis=1)]  # constant maturities beyond the fitted expiries: no row
+    if grid.empty:
+        st.info("No constant maturity lies within the fitted expiries.")
+        return
     labels = [delta_label(d, atm=False) if abs(d) != 0.5 else "50Δ" for d in grid.columns]
     frame = pd.DataFrame(grid.to_numpy() * 100, columns=labels)
-    frame.insert(0, "Maturity", [f"{d}d" for d in grid.index])
+    frame.insert(0, "IV (%)", [f"{d}d" for d in grid.index])
     values = frame[labels].to_numpy(float)
     finite = values[np.isfinite(values)]
     lo, hi = (float(finite.min()), float(finite.max())) if finite.size else (0.0, 1.0)
@@ -1079,13 +1111,26 @@ def _grid(shown: Shown) -> None:
         return f"background-color: {ramp[i]}; color: {text}"
 
     styled = frame.style.map(shade, subset=labels).format(precision=2, na_rep=MISSING, subset=labels)
-    config = {"Maturity": column("text", "Maturity", help="Constant maturity, calendar days.", pinned=True)}
+    config = {
+        "IV (%)": column(
+            "text", "IV (%)", help="Implied vol in %, at a constant maturity in calendar days.", pinned=True
+        )
+    }
     for label, d in zip(labels, grid.columns, strict=True):
         side = "call" if d > 0 else "put"
         config[label] = column(
-            "vol", label, help=f"Implied vol of the {side} at spot delta {number(abs(d), 2)}, at its own vol."
+            "vol", label, help=f"Implied vol (%) of the {side} at spot delta {number(abs(d), 2)}, at its own vol."
         )
-    st.dataframe(styled, column_config=config, hide_index=True, row_height=28, height="content", key="tbl_surface_grid")
+        config[label]["label"] = label  # the unit is in the first column's header: 17 columns fit without it
+    st.dataframe(
+        styled,
+        column_config=config,
+        hide_index=True,
+        row_height=28,
+        height="content",
+        placeholder=MISSING,
+        key="tbl_surface_grid",
+    )
     st.caption("Implied vol by spot delta at constant maturities; – beyond the fitted expiries or the smile's reach.")
 
 
@@ -1319,7 +1364,7 @@ def _contract_readout(shown: Shown, inputs: Inputs) -> None:
         if surface.is_extrapolated(k_over_s, T)
         else "inside quotes"
     )
-    tail = "" if shown.published else " · this surface is not the one Pricing uses"
+    tail = "" if shown.published else f" · Pricing uses {'the synthetic chain' if inputs.context else 'the typed σ'}"
     st.caption(f"{lead} → σ {vol(iv)} (K/F {moneyness(inputs.strike, forward)}, {where}){tail}")
 
 
