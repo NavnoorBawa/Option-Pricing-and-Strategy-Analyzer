@@ -273,8 +273,7 @@ def test_a_link_is_read_once_per_session(new_app, monkeypatch):
     at = new_app(tab="risk", strategy="Iron Condor").run()
     assert len(runs) == 2  # the first run stopped before the sidebar
     _open(at, "IV")
-    # The default template needs no parameter: the menu drops it at its default.
-    assert len(runs) == 3 and at.query_params == {"tab": "IV"} | TEXTBOOK
+    assert len(runs) == 3 and at.query_params == {"tab": "IV", "strategy": "Range-bound · Iron Condor"} | TEXTBOOK
 
 
 def test_switching_tabs_runs_each_tab_in_turn(app):
@@ -330,7 +329,7 @@ def test_value_at_risk_is_not_simulated_while_the_pricing_tab_is_open(app, monke
     for key, value in (("spot", 105.0), ("vol", 30.0), ("days", 90)):
         app.sidebar.number_input(key=key).set_value(value).run()
         _ok(app)
-    app.selectbox(key="strategy").set_value("Vertical spread · Bull Call Spread").run()  # drawn on every run
+    app.selectbox(key="strategy").set_value("Range-bound · Iron Condor").run()  # drawn on every run
     _ok(app)
     assert calls == []
     _open(app, "Risk")  # the counter does see the simulations once the Risk tab opens

@@ -54,8 +54,17 @@ from .format import (
 from .inputs import Inputs
 
 CUSTOM = "Custom"
-#: The template the tab opens on (spec 3.2, default state).
+#: The template the tab opens on: under the index the spec's default state (an iron condor, 3.2), in the textbook
+#: market version 2's (a bull call spread), which that market reproduces.
 DEFAULT_TEMPLATE = "Iron Condor"
+TEXTBOOK_TEMPLATE = "Bull Call Spread"
+
+
+def default_template(index: bool) -> str:
+    """The template the tab opens on under the index (``True``) or in the textbook market."""
+    return DEFAULT_TEMPLATE if index else TEXTBOOK_TEMPLATE
+
+
 DEFAULT_MULTIPLIER = 100
 #: The ranges (smallest, largest) of the position-size inputs: contracts, shares per contract and commission ($).
 CONTRACTS = (1, 100_000)
@@ -190,7 +199,7 @@ def read_link(params: dict[str, list[str]]) -> list[str]:
     elif link_selection(asked, False) is not None:
         notes.append(
             f"This link asks for {_name(link_selection(asked, False)['strategy'])}, which holds stock: the "
-            f"{mk.INDEX} cannot be traded itself, so the {DEFAULT_TEMPLATE} is shown."
+            f"{mk.INDEX} cannot be traded itself, so the {default_template(True)} is shown."
         )
     elif asked.strip():
         notes.append(
@@ -206,18 +215,33 @@ def _shown(value: str) -> str:
     return md_code(value if len(value) <= 40 else value[:39] + "…")
 
 
-def _control(key: str, default: Any, parse: Callable[[str], Any], valid: Callable[[Any], bool]) -> Any:
+def _control(
+    key: str,
+    default: Any,
+    parse: Callable[[str], Any],
+    valid: Callable[[Any], bool],
+    read: Callable[[str], str] = lambda key: st.query_params[key],
+) -> Any:
     """A control's value in this run: its session state once :func:`controls` has drawn it; otherwise (a caller
-    of :func:`build_position` that draws no controls) its URL parameter, read as the control reads it, when that
-    is valid; otherwise the control's default."""
+    of :func:`build_position` that draws no controls) its URL parameter (``read``), read as the control reads it,
+    when that is valid; otherwise the control's default."""
     if key in st.session_state:
         value = st.session_state[key]
         return value if value is None or valid(value) else default
     try:
-        value = parse(st.query_params[key])
+        value = parse(read(key))
     except (KeyError, ValueError, OverflowError):
         return default
     return value if valid(value) else default
+
+
+def _link_template(key: str) -> str:
+    """The template a link asks for, as the app's link reading maps it (:func:`read_link`): a caller of
+    :func:`build_position` without the controls sees the raw link, with a short name or the two menus of earlier
+    links."""
+    params = {name: st.query_params.get_all(name) for name in st.query_params}
+    read_link(params)
+    return params[key][-1]
 
 
 def _within(bounds: tuple[float, float]) -> Callable[[float], bool]:
@@ -311,7 +335,7 @@ def _choice(inputs: Inputs) -> _Choice:
     published = _published(inputs)
     index = published is not None
     labels = template_labels(index)
-    label = _control("strategy", _label(DEFAULT_TEMPLATE), str, labels.__contains__)
+    label = _control("strategy", _label(default_template(index)), str, labels.__contains__, _link_template)
     name = _name(label)
     expiry = None
     if index:
@@ -407,12 +431,12 @@ def controls(inputs: Inputs) -> None:
     index = published is not None
     labels = template_labels(index)
     if st.session_state.get("strategy") not in (None, *labels):
-        st.session_state["strategy"] = _label(DEFAULT_TEMPLATE)  # a stock template under the index
+        st.session_state["strategy"] = _label(default_template(index))  # a stock template under the index
     bar = st.container(horizontal=True, key="strategy_builder", wrap=True, gap="small", vertical_alignment="bottom")
     label = bar.selectbox(
         "Template",
         labels,
-        index=labels.index(_label(DEFAULT_TEMPLATE)),
+        index=labels.index(_label(default_template(index))),
         key="strategy",
         bind="query-params",
         width=270,
