@@ -34,6 +34,48 @@ class Line:
 
 _DASH = {"engine": "solid", "ref": "dot", "decay": "dash"}
 _WIDTH = {"engine": charts.LINE_WIDTH, "ref": charts.REFERENCE_WIDTH + 0.5, "decay": charts.LINE_WIDTH}
+#: What the reference labels are laid out for: the narrowest plot area the Pricing tab draws (about 480 px: the
+#: profile beside the Greeks table at 1440 px with the sidebar open, less the y-axis), and the width of a character
+#: of the labels' 11 px IBM Plex Sans with the gap that keeps two labels apart (about 6.2 px a digit; 7 px is the
+#: cautious side). The server does not know the plot's pixel width (UI spec 2.7 item 3).
+LABEL_PLOT_PX, LABEL_CHAR_PX = 320.0, 7.0
+#: The vertical step between two rows of labels, px.
+LABEL_ROW_PX = 14
+
+
+def label_rows(lines: Sequence[tuple[float, str, bool]], lo: float, hi: float) -> list[tuple[int, bool]]:
+    """Where the labels of vertical reference lines go so that none prints over another: for each ``(x, label,
+    leftwards)``, its row (0 just above the plot, then rows inside its top, one under the other) and whether it reads
+    to the left of its line. A label reads to the side it asks for (``leftwards``: the spot's, so that it keeps clear
+    of a strike just above spot) unless that side runs off the plot. Labels go, in the order of x, on the first row
+    where they clear every label already placed there.
+
+    Examples
+    --------
+    The default contract on a ±10% axis: spot 5,800 (leftwards), the strike 5,815 and the forward 5,813.91, 1.1
+    points from the strike. The forward's label goes beside the spot's on the top row, the strike's under it.
+
+    >>> label_rows([(5800.0, "S 5,800.00", True), (5815.0, "K 5,815", False), (5813.91, "F", False)], 5220.0, 6380.0)
+    [(0, True), (1, False), (0, False)]
+    """
+    span = max(hi - lo, 1e-12)
+    taken: list[list[tuple[float, float]]] = []
+    placed: dict[int, tuple[int, bool]] = {}
+    for i in sorted(range(len(lines)), key=lambda j: lines[j][0]):
+        x, text, leftwards = lines[i]
+        at = (x - lo) / span * LABEL_PLOT_PX
+        width = LABEL_CHAR_PX * (len(text) + 1)
+        left = at - width >= 0 if leftwards else at + width > LABEL_PLOT_PX
+        box = (at - width, at) if left else (at, at + width)
+        row = next(
+            (r for r, boxes in enumerate(taken) if all(box[1] <= a or box[0] >= b for a, b in boxes)), len(taken)
+        )
+        if row == len(taken):
+            taken.append([])
+        taken[row].append(box)
+        placed[i] = (row, left)
+    return [placed[i] for i in range(len(lines))]
+
 
 
 def _text(value: str) -> str:
@@ -65,7 +107,8 @@ def profile_chart(
         The current x and its label (``S 5,800.00``), drawn as a dashed muted line with the label at its top.
     references : sequence of (float, str, str)
         Further vertical lines: ``(x, label, kind)`` with kind ``"strike"`` (dotted, muted) or ``"forward"`` (solid
-        1 px, accent). Lines outside the x range are left out.
+        1 px, accent). Lines outside the x range are left out. Labels that would print over one another go on
+        separate rows (:func:`label_rows`).
     palette : dict, optional
         The mode's colours (default: the current mode's).
 
@@ -115,14 +158,34 @@ def profile_chart(
             )
         )
     lo, hi = float(xs[0]), float(xs[-1])
-    charts._vline(fig, here, _text(label), colors, dash="dash", position="top left")
+    marks = [(here, _text(label), "current")] if lo <= here <= hi else []
     for value, text, kind in references:
-        if not lo <= value <= hi or abs(value - here) <= 1e-9 * max(1.0, abs(here)):
-            continue
-        if kind == "forward":
-            charts._vline(fig, value, _text(text), colors, dash="solid", position="top right", color=colors["accent"])
-        else:
-            charts._vline(fig, value, _text(text), colors, dash="dot", position="top right")
+        if lo <= value <= hi and abs(value - here) > 1e-9 * max(1.0, abs(here)):
+            marks.append((value, _text(text), kind))
+    styles = {
+        "current": ("dash", colors["muted"]),
+        "strike": ("dot", colors["muted"]),
+        "forward": ("solid", colors["accent"]),
+    }
+    # The lines, then their labels as annotations: the default contract's strike (5,815) and forward (5,813.91) are a
+    # pixel apart, and two labels drawn at the top of each line printed "FK 5,815".
+    rows = label_rows([(v, t, kind == "current") for v, t, kind in marks], lo, hi)
+    for (value, text, kind), (row, left) in zip(marks, rows, strict=True):
+        dash, color = styles[kind]
+        fig.add_vline(x=value, line=dict(color=color, dash=dash, width=charts.REFERENCE_WIDTH))
+        fig.add_annotation(
+            x=value,
+            y=1.0,
+            xref="x",
+            yref="paper",
+            text=text,
+            showarrow=False,
+            xanchor="right" if left else "left",
+            yanchor="bottom" if row == 0 else "top",
+            xshift=-3 if left else 3,
+            yshift=-(row - 1) * LABEL_ROW_PX if row else 0,
+            font=dict(size=charts.LABEL_SIZE, color=color),
+        )
     fig = charts.apply_layout(fig, None, x_title, y_title, palette=colors)
     # Plotly groups thousands only from five digits: without this the spot axis reads 5400 beside "S 5,800.00".
     fig.update_xaxes(range=[lo, hi], separatethousands=True)

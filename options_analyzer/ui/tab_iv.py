@@ -39,13 +39,16 @@ from .format import MISSING, md, money, number, premium, vol, vol_change
 from .inputs import Inputs
 from .tab_pricing import DRAWER, context_line, contract
 
-#: The tiles' row and its three pairs, which wrap as the Pricing tab's do (``tab_pricing.TILES``).
-TILES = ("iv_tiles", ("iv_tiles_bid", "iv_tiles_ask", "iv_tiles_context"))
+#: The tiles' row and its two groups of three: the quote's IV BID, IV MID and IV ASK, then SURFACE, VEGA and BOUNDS.
+#: In pairs, as the Pricing tab's, IV ASK went with SURFACE, apart from the other two vols on a phone.
+TILES = ("iv_tiles", ("iv_tiles_quote", "iv_tiles_context"))
 #: The index's tick (Cboe SPX: $0.05 below $3, $0.10 from $3); the textbook market's cent.
 INDEX_TICKS = ((3.0, 0.05), (math.inf, 0.10))
 TEXTBOOK_TICK = 0.01
-#: The quote inputs' format: cents, as the chain quotes them.
+#: The quote inputs' format: cents, as the chain quotes them; and their width, px: a seven-character price
+#: ("1,606.90") with the steppers. Stretched, they ran 300 to 615 px wide on a laptop.
 PRICE_FORMAT = "%.2f"
+PRICE_WIDTH = 150
 #: Half the chart's vol range about the mid's implied vol (:func:`chart_window`): 1 vol point, where an SPX
 #: month's 0.17-point spread puts the bid and the ask about 20 px apart on the 360 px chart.
 WINDOW = 0.01
@@ -159,8 +162,15 @@ def render(inputs: Inputs) -> None:
     )
     american = style == "American" and not market.listed
     quote = market.quotes[option_type]
+    # An offer only (no bid: the chain quotes a zero bid as none, as the Pricing tab's contract table and the
+    # published surface do): the bid starts empty, so there is no mid, and only the ask is inverted. Inverting the
+    # zero bid read "no time value" and a mid of half the ask, 1.78 vp over the fit at the 6,500 call.
+    offer_only = quote is not None and not quote.bid > 0
     # The quote belongs to the contract: its widgets' keys hold it, so a typed quote lasts until the contract changes.
     identity = f"{S!r}|{K!r}|{T!r}|{r!r}|{q!r}|{option_type}"
+    # The prices go before the toggle that picks them: on a phone the row then wraps as Type and Exercise, Bid and
+    # Ask, then the toggle (the toggle sat beside Bid, with Ask alone on the next line).
+    quote_box = row.container(horizontal=True, key="iv_quote", vertical_alignment="bottom", gap="small", width="content")
     single = row.toggle(
         "Single price",
         value=quote is None,
@@ -198,8 +208,8 @@ def render(inputs: Inputs) -> None:
         return min(max(round(value, 2), floor_cents), cap_cents)
 
     if single:
-        start = cents(model_value) if quote is None else quote.mid if quote.bid > 0 else quote.ask
-        price = row.number_input(
+        start = cents(model_value) if quote is None else quote.ask if offer_only else quote.mid
+        price = quote_box.number_input(
             "Price",
             min_value=0.0,
             value=float(start),
@@ -207,21 +217,26 @@ def render(inputs: Inputs) -> None:
             format=PRICE_FORMAT,
             key=current_key("iv_price|", f"iv_price|{identity}"),
             persist_state="session",
+            width=PRICE_WIDTH,
+            help="The chain quotes an offer only: the price starts at the ask." if offer_only else None,
         )
         prices = [("Price", float(price))]
     else:
-        bid0 = quote.bid if quote is not None else cents(model_value * 0.99)
+        bid0 = None if offer_only else quote.bid if quote is not None else cents(model_value * 0.99)
         ask0 = quote.ask if quote is not None else max(cents(model_value * 1.01), bid0)
-        bid = row.number_input(
+        bid = quote_box.number_input(
             "Bid",
             min_value=0.0,
-            value=float(bid0),
-            step=tick(bid0, listed),
+            value=None if bid0 is None else float(bid0),
+            step=tick(ask0 if bid0 is None else bid0, listed),
             format=PRICE_FORMAT,
             key=current_key("iv_bid|", f"iv_bid|{identity}"),
             persist_state="session",
+            placeholder="no bid",
+            width=PRICE_WIDTH,
+            help="The chain quotes an offer only, with no bid: type one to invert it." if offer_only else None,
         )
-        ask = row.number_input(
+        ask = quote_box.number_input(
             "Ask",
             min_value=0.0,
             value=float(ask0),
@@ -229,8 +244,12 @@ def render(inputs: Inputs) -> None:
             format=PRICE_FORMAT,
             key=current_key("iv_ask|", f"iv_ask|{identity}"),
             persist_state="session",
+            width=PRICE_WIDTH,
         )
-        prices = [("Bid", float(bid)), ("Mid", 0.5 * (float(bid) + float(ask))), ("Ask", float(ask))]
+        if bid is None:  # an offer only: nothing to invert but the ask
+            prices = [("Ask", float(ask))]
+        else:
+            prices = [("Bid", float(bid)), ("Mid", 0.5 * (float(bid) + float(ask))), ("Ask", float(ask))]
 
     # An American floor is the larger of the intrinsic value and the European floor (implied_vol.american_bounds):
     # the at-the-money call with a 5% rate and a 2% yield is floored at 2.90, its discounted intrinsic value.
@@ -256,7 +275,7 @@ def render(inputs: Inputs) -> None:
             st.warning(_no_time_value_text(s.price, lower, max(S, K), american, option_type))
         elif s.problem:
             errors.append(f"{s.label} {premium(s.price)}: {s.problem}")
-    if not single and prices[0][1] > prices[2][1]:
+    if len(prices) == 3 and prices[0][1] > prices[2][1]:
         errors.append(f"the bid {premium(prices[0][1])} is above the ask {premium(prices[2][1])}")
     if errors:
         st.error(md("No implied vol: " + "; ".join(errors) + "."))
@@ -265,7 +284,7 @@ def render(inputs: Inputs) -> None:
     mid = by_label.get("Mid", by_label.get("Price"))
     _tiles(inputs, market, by_label, mid, single, american, alo, (lower, upper), floor_name, option_type)
 
-    low, high = chart_window([s.iv for s in solved], mid.iv, sigma)
+    low, high = chart_window([s.iv for s in solved], math.nan if mid is None else mid.iv, sigma)
     if american and alo:
         vols, curve = cache.alo_curve(S, K, T, r, q, option_type, low, high, model.scheme)
     elif american:
@@ -381,7 +400,12 @@ def _tiles(inputs, market, by_label, mid, single, american, alo, bounds, floor_n
     lower, upper = bounds
     off = {"delta_color": "off", "delta_arrow": "off"}
 
+    offer_only = not single and "Bid" not in by_label
+
     def iv_tile(label: str, solved) -> tuple:
+        if solved is None and offer_only:
+            why = "No bid: the quote is an offer only." if label == "IV bid" else "No mid: the quote is one-sided."
+            return (label, MISSING, {"help": why})
         if solved is None:
             return (label, MISSING, {"help": "Single price: no bid or ask to invert."})
         if np.isfinite(solved.iv):
@@ -395,12 +419,14 @@ def _tiles(inputs, market, by_label, mid, single, american, alo, bounds, floor_n
         return (label, MISSING, {"help": md(why)})
 
     tiles = [
-        iv_tile("IV bid", None if single else by_label["Bid"]),
+        iv_tile("IV bid", None if single else by_label.get("Bid")),
         iv_tile("IV" if single else "IV mid", mid),
         iv_tile("IV ask", None if single else by_label["Ask"]),
     ]
+    # Vega at the mid's implied vol, or at the ask's for an offer only.
+    at = mid if mid is not None else by_label["Ask"]
     if market.listed and market.fit_vol is not None:
-        gap = mid.iv - market.fit_vol if np.isfinite(mid.iv) else math.nan
+        gap = mid.iv - market.fit_vol if mid is not None and np.isfinite(mid.iv) else math.nan
         tiles.append(
             (
                 "Surface",
@@ -409,7 +435,8 @@ def _tiles(inputs, market, by_label, mid, single, american, alo, bounds, floor_n
                     "delta": f"mid vs fit {vol_change(gap)}",
                     **off,
                     "help": "The published surface's vol at this strike. Mid vs fit = σ mid − σ fit: positive means "
-                    "the quote is rich against the fit.",
+                    "the quote is rich against the fit."
+                    + (" None here: an offer only has no mid." if mid is None else ""),
                 },
             )
         )
@@ -425,12 +452,13 @@ def _tiles(inputs, market, by_label, mid, single, american, alo, bounds, floor_n
                 },
             )
         )
-    vega = _vega(inputs, mid.iv, option_type, american, alo) if np.isfinite(mid.iv) and mid.iv > 0 else math.nan
+    vega = _vega(inputs, at.iv, option_type, american, alo) if np.isfinite(at.iv) and at.iv > 0 else math.nan
+    where = "the ask's (an offer only has no mid)" if mid is None else "the mid's"
     tiles.append(
         (
             "Vega",
             MISSING if not np.isfinite(vega) else premium(vega),
-            {"delta": "$ per vol point", **off, "help": "Value change per vol point at the mid's implied vol."},
+            {"delta": "$ per vol point", **off, "help": f"Value change per vol point at {where} implied vol."},
         )
     )
     problems = [s.problem for s in by_label.values() if s.problem in ("below", "above")]

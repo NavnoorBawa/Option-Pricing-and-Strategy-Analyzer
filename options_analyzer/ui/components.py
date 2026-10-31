@@ -15,6 +15,7 @@ quantity of the number standard (:data:`COLUMN_KINDS`), and :func:`table` draws 
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -364,7 +365,7 @@ class ColumnKind:
     unit: str
     format: str | None
     digits: int | None
-    auto: str = ""  # how table() chooses the digits when ``digits`` is None: "money", "strike" or "bp"
+    auto: str = ""  # how table() chooses the digits when ``digits`` is None: "money", "strike", "bp" or "cents"
     significant: bool = False  # ``digits`` are significant digits (%g), not decimals
 
 
@@ -375,6 +376,9 @@ class ColumnKind:
 COLUMN_KINDS: dict[str, ColumnKind] = {
     "text": ColumnKind("", None, None),
     "date": ColumnKind("", None, None),
+    # Diagnostics: a small signed difference in scientific notation, as text from format.signed_sci (−3.1e−7, with
+    # U+2212), right-aligned. A number column's %g mixed fixed and scientific notation in one column.
+    "difference": ColumnKind("", None, None),
     "level": ColumnKind("", "%,.{d}f", 2),  # spot, forward, index level: 5,815.22
     "strike": ColumnKind("", "%,.{d}f", None, "strike"),  # 5,815, or 582.5 where a strike needs a decimal
     "premium": ColumnKind("", "%,.{d}f", 2),  # theo, bid, ask, mid per share: 98.57
@@ -389,8 +393,10 @@ COLUMN_KINDS: dict[str, ColumnKind] = {
     "theta": ColumnKind("$/day", "%,.{d}f", 0),  # per position, per calendar day
     "rho": ColumnKind("$/1%", "%,.{d}f", 0),  # per position
     "vega_share": ColumnKind("$/vp", "%.{d}f", 2),  # per share, in a contract table: 6.37
-    "theta_share": ColumnKind("$/day", "%.{d}f", 2),  # per share, in a contract table: -2.04
-    "rho_share": ColumnKind("$/1%", "%.{d}f", 2),  # per share, in a contract table: 2.17
+    # Θ and ρ per share: cents, or two significant digits of the column's largest value when that is below 10
+    # cents (the textbook put's Θ of -0.0045 read 0.00).
+    "theta_share": ColumnKind("$/day", "%.{d}f", None, "cents"),  # per share, in a contract table: -2.04
+    "rho_share": ColumnKind("$/1%", "%.{d}f", None, "cents"),  # per share, in a contract table: 2.17
     "vol": ColumnKind("%", "%.{d}f", 2),  # implied vol: 15.46
     "vol_change": ColumnKind("vp", "%.{d}f", 2),  # vol changes, RR, BF, mid vs fit, edges
     "rate": ColumnKind("%", "%.{d}f", 2),  # rates and yields: 4.75
@@ -409,7 +415,7 @@ COLUMN_KINDS: dict[str, ColumnKind] = {
 }
 #: The precision of a data-dependent kind when :func:`col` is called without ``digits`` (no data to choose from):
 #: whole strikes (the index's 5-point grid), cents, whole basis points.
-_AUTO_DEFAULT = {"strike": 0, "money": 2, "bp": 0}
+_AUTO_DEFAULT = {"strike": 0, "money": 2, "bp": 0, "cents": 2}
 #: Rows a table shows before it scrolls (UI spec 2.8): shorter tables take their content's height.
 TABLE_ROWS = 15
 
@@ -477,11 +483,25 @@ def col(
     common = {"help": help, "pinned": pinned, "width": width}
     if kind == "text":
         return st.column_config.TextColumn(header, **common)
+    if kind == "difference":
+        return st.column_config.TextColumn(header, alignment="right", **common)
     if kind == "date":
         return st.column_config.DateColumn(header, format="DD-MMM-YY", **common)
     assert spec.format is not None
     places = spec.digits if spec.digits is not None else (_AUTO_DEFAULT[spec.auto] if digits is None else digits)
     return st.column_config.NumberColumn(header, format=spec.format.format(d=places), **common)
+
+
+def cents_places(largest: float) -> int:
+    """Decimals for small amounts per share: two (cents), or two significant digits of ``largest`` (the largest
+    absolute value of the column or row) when that is below $0.10, at most six.
+
+    >>> cents_places(2.04), cents_places(0.0045), cents_places(0.0), cents_places(1e-12)
+    (2, 4, 2, 6)
+    """
+    if not (np.isfinite(largest) and largest > 0) or round(largest, 2) >= 0.1:
+        return 2
+    return int(min(6, max(2, 1 - math.floor(math.log10(largest)))))
 
 
 def _auto_digits(kind: ColumnKind, values: np.ndarray) -> int:
@@ -496,6 +516,8 @@ def _auto_digits(kind: ColumnKind, values: np.ndarray) -> int:
         return 2 if round(largest, 2) < 1000 else 0
     if kind.auto == "bp":
         return 2 if round(largest, 2) < 1 else 1 if round(largest, 1) < 10 else 0
+    if kind.auto == "cents":
+        return cents_places(largest)
     # Strikes: no decimals while every strike is whole, else the fewest (up to two) that write them all.
     for places in range(3):
         if np.allclose(finite, np.round(finite, places), rtol=0, atol=1e-9):
@@ -535,6 +557,7 @@ def table(
     labels: Mapping[str, str] | None = None,
     digits: Mapping[str, int] | None = None,
     max_rows: int = TABLE_ROWS,
+    pin: bool = True,
     **kwargs: Any,
 ) -> Any:
     """Draw ``data`` as a desk table (UI spec 2.8): the registry's format for every column, one precision per
@@ -561,6 +584,9 @@ def table(
         money, bp): whole dollars in a column of fees below $1,000, say.
     max_rows : int, default 15
         Rows shown before the table scrolls.
+    pin : bool, default True
+        Pin the first column. Streamlit draws pinned columns first, so a table whose key column sits in the middle
+        (the Pricing tab's chain ladder, mirrored about its strike) pins none.
     **kwargs
         Further keyword arguments of ``st.dataframe``: ``key``, ``selection_mode``, ``on_select``, ``width``, ...
 
@@ -608,7 +634,7 @@ def table(
         if kinds[name] in _PERCENT_OF_CERTAINTY and clipped:
             text = f"{text.rstrip()} Above 99.9% shows as 99.9, below 0.1% as 0.1: only an exact 100% or 0% shows so."
         config[name] = col(
-            kinds[name], labels.get(name, str(name)), help=text, digits=places, pinned=True if i == 0 else None
+            kinds[name], labels.get(name, str(name)), help=text, digits=places, pinned=True if pin and i == 0 else None
         )
     rows = len(data)
     height: int | str = "content" if rows <= max_rows else table_height(max_rows)

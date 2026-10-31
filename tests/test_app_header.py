@@ -175,6 +175,10 @@ LINK_WORDS = {
     "contracts": "contracts",
     "multiplier": "shares per contract",
     "commission": "commission",
+    **dict.fromkeys(("pr_metric", "pr_x", "pr_range"), "profile"),
+    **dict.fromkeys(("pr_chain_win", "pr_chain_stride"), "chain window and stride"),
+    **dict.fromkeys(("pr_greeks", "pr_bsm_ref"), "Greeks order"),
+    "pricing_diag": "diagnostics",
 }
 
 

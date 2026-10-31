@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 from datetime import datetime
 
+import numpy as np
 import streamlit as st
 
 from .. import __version__, clock
@@ -12,7 +14,8 @@ from . import header, tab_iv, tab_methodology, tab_pricing, tab_risk, tab_strate
 from . import market as mk
 from .components import link_match
 from .format import md_code
-from .inputs import ASOF_RANGE, market_notes, sidebar
+from .format import strike as strike_text
+from .inputs import ASOF_RANGE, Inputs, market_notes, sidebar
 from .model_config import ALO_SCHEMES, MODEL_ALIASES, MODELS, ModelConfig
 
 REPO_URL = "https://github.com/NavnoorBawa/Option-Pricing-and-Strategy-Analyzer"
@@ -126,8 +129,9 @@ def _read_link() -> None:
             params.pop(key, None)
         state[tab_pricing.DIAGNOSTICS] = True
         engine = {MODELS["binomial"]: "a binomial tree", MODELS["monte_carlo"]: "Monte Carlo"}[legacy]
+        where = " (open below)" if "tab" not in params else ", open there"  # the link opens Pricing, or another tab
         notes.append(
-            f"This link asks for {engine}, which now runs in the Pricing tab's Engine diagnostics (open below); the "
+            f"This link asks for {engine}, which now runs in the Pricing tab's Engine diagnostics{where}; the "
             f"sidebar prices with {MODELS['bsm']}."
         )
     # The market: a preset by its label or a short name (?preset=textbook), a version-2 link's typed inputs, and
@@ -181,6 +185,31 @@ def _read_link() -> None:
         st.rerun()
 
 
+def beyond_reach(inputs: Inputs) -> str:
+    """Why nothing can be priced when the index's strike lies beyond the reach of the surface at its expiry: the
+    smile gives no vol there (``ArbitrageFreeSurface.implied_vol_at`` reads NaN beyond its quotes and its
+    extrapolation), so no engine can price it. The message names the strikes it does reach, found on the strike
+    grid up to the strike input's limit (about 4,600 reads, 0.1 s, on this error path only)."""
+    context = inputs.context
+    step = context.strike_step
+    grid = np.arange(step, 4 * context.spot + step / 2, step)
+    reached = [
+        k
+        for k in grid
+        if math.isfinite(context.surface.implied_vol_at(k / context.spot, inputs.maturity, extrapolate=True))
+    ]
+    where = (
+        f"at this expiry its smile reaches the strikes {strike_text(reached[0], step)} to "
+        f"{strike_text(reached[-1], step)}"
+        if reached
+        else "the surface reaches no strike at this expiry"
+    )
+    return (
+        f"The surface gives no vol at the strike {strike_text(inputs.strike, step)}: {where}, so nothing can be "
+        "priced. Choose a strike in that range in the sidebar, or ATMF."
+    )
+
+
 def _open_methodology() -> None:
     """Ask the next run to open the Methodology drawer (the header's Methodology button)."""
     st.session_state[_DRAWER] = True
@@ -208,6 +237,12 @@ def run() -> None:
     header.logo()
     _read_link()
     inputs = sidebar()
+    if not math.isfinite(inputs.volatility):
+        # A strike beyond the surface's reach at the focus expiry (typed in the sidebar, or from a link): the tabs
+        # cannot price it, so the page says why and stops, rather than fail inside the formulas.
+        header.render(inputs, on_methodology=_open_methodology)
+        st.error(beyond_reach(inputs), icon=":material/error:")
+        st.stop()
 
     # The engine's prices come first (cached; under the closed form two formulas), so that if the American engine
     # cannot value the contract the header's badge names the engine of the values on screen.

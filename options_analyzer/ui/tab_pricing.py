@@ -40,7 +40,7 @@ from ..strategies import ONE_DAY
 from ..vol_surface.published import Expiry, PublishedSurface, Quote
 from . import cache, charts, charts_pricing, surface_state, whatif
 from . import market as mk
-from .components import card_row, current_key, table
+from .components import card_row, cents_places, current_key, table
 from .format import (
     MINUS,
     MISSING,
@@ -68,12 +68,14 @@ from .format import moneyness as fmt_moneyness
 from .inputs import Inputs
 from .model_config import PATH_CHOICES, ModelConfig
 
-#: Session-state key of the Engine diagnostics expander (open or closed). A version-2 link to a tree or to Monte
-#: Carlo opens it (``app._read_link``).
+#: Session-state key of the Engine diagnostics expander (open or closed), bound to the URL. A version-2 link to a
+#: tree or to Monte Carlo opens it (``app._read_link``).
 DIAGNOSTICS = "pricing_diag"
 #: Session-state key: the chain ladder moved the strike, so its fragment reruns the whole app (the sidebar, tiles and
 #: tables read the new strike only in a full run).
 _CHAIN_MOVED = "pricing_chain_moved"
+#: Session-state key: why a click on the chain ladder did not move the strike (a row beyond the surface's reach).
+_CHAIN_NOTE = "pricing_chain_note"
 #: Session-state key of the header's Methodology button (``app.DRAWER``): the footer's button sets it too.
 DRAWER = "methodology_drawer"
 #: The headline tiles' row and its three pairs: 6 across on a desktop, 4 + 2 on a laptop with the sidebar open and
@@ -88,12 +90,28 @@ RANGES = ("±5%", "±10%", "±20%", "RN 95%", "Auto")
 #: Points of a profile curve: against spot 121 (the spot axis must resolve gamma's peak a few days out), against vol
 #: or time 41 (under the American engine each point solves its own boundary).
 SPOT_POINTS, OTHER_POINTS = 121, 41
-#: The chain ladder's window and stride (UI spec 3.1 item 5), and the rows that "Auto" keeps it to.
+#: The chain ladder's window and stride (UI spec 3.1 item 5), and the rows that "Auto" keeps it to before the
+#: Pricing strike's row is added: 14, so that the default ladder fits the 15 rows a table shows before it scrolls
+#: (UI spec 2.8) with the strike's row in view. (The spec's 30 gave 28 rows at 25 points, 5,425 to 6,075: the
+#: strike's row was the 17th, below the fold of a 15-row frame, which Streamlit cannot scroll to. A 50-point stride
+#: gives 14 rows over the same window; a finer stride or "All" scrolls inside the table.)
 WINDOWS = ("10Δ–10Δ", "25Δ–25Δ", "RN 95%", "All")
 STRIDES = ("Auto", 5, 10, 25, 50, 100)
-CHAIN_ROWS = 30
+CHAIN_ROWS = 14
 #: Orders of the Greeks table.
 ORDERS = ("1st", "+2nd", "+3rd")
+#: The profile (item 4) and the Greeks table (item 6) side by side from a main column of 960 px (1440 px with the
+#: sidebar open: 1,037 px), the table at its content's width and the chart in the rest (about 550 px); stacked on a
+#: narrower one (a laptop at 1,280 px with the sidebar open, tablets and phones). Both show the contract's
+#: sensitivities, and side by side they take one screen instead of two: the page at 1440 x 900 is about 1,650 px
+#: high with the diagnostics closed, within UI spec 3.1's 1,800 (2,492 px stacked, with the 28-row ladder).
+VIEWS_STYLE = (
+    "<style>"
+    ".st-key-pricing_views { container: pricing-views / inline-size; } "
+    "@container pricing-views (width >= 960px) { .st-key-pricing_views_row { display: grid !important; "
+    "grid-template-columns: minmax(520px, 1fr) minmax(0, max-content); column-gap: 1.5rem; align-items: start; } }"
+    "</style>"
+)
 #: The fixed trees of Engine diagnostics: (lattice, steps).
 DIAGNOSTIC_TREES = (("lr", 501), ("lr", 2001), ("crr", 2001))
 #: What the CALL and PUT tiles compare the American engine with: an American Leisen-Reimer tree of this many steps.
@@ -827,15 +845,18 @@ def _profile(inputs: Inputs, market: Contract) -> None:
     reruns this fragment only."""
     row = st.container(horizontal=True, key="pricing_profile_controls", vertical_alignment="bottom", gap="medium")
     metric = row.segmented_control(
-        "Metric", METRICS, default="Value", required=True, key="pr_metric", persist_state="session"
+        "Metric", METRICS, default="Value", required=True, key="pr_metric", bind="query-params", persist_state="session"
     )
-    axis = row.segmented_control("Against", AXES, default="Spot", required=True, key="pr_x", persist_state="session")
+    axis = row.segmented_control(
+        "Against", AXES, default="Spot", required=True, key="pr_x", bind="query-params", persist_state="session"
+    )
     choice = row.segmented_control(
         "Range",
         RANGES,
         default="±10%",
         required=True,
         key="pr_range",
+        bind="query-params",
         persist_state="session",
         disabled=axis != "Spot",
         help="The spot axis: a share of spot, the 95% risk-neutral range to expiry (from the smile; lognormal at the "
@@ -869,10 +890,14 @@ def _profile(inputs: Inputs, market: Contract) -> None:
 # --- The chain ladder (UI-7) ------------------------------------------------------------------------------------
 
 
-def on_chain_select(key: str, strikes: tuple[float, ...]) -> None:
+def on_chain_select(
+    key: str, strikes: tuple[float, ...], priced: tuple[bool, ...] | None = None, step: float = 0.01
+) -> None:
     """The chain ladder's ``on_select`` callback: price the clicked row's strike (UI spec 2.8, a selection is a
     click action). It writes the sidebar's ``strike`` (its keyboard route) and asks the chain's fragment to rerun
-    the whole app, since the sidebar, the tiles and the tables read the strike only in a full run.
+    the whole app, since the sidebar, the tiles and the tables read the strike only in a full run. A row beyond the
+    surface's reach (``priced`` False: the "All" window lists such strikes with their quotes) has no vol to price
+    it, so the strike stays and the ladder says why.
 
     Parameters
     ----------
@@ -880,13 +905,24 @@ def on_chain_select(key: str, strikes: tuple[float, ...]) -> None:
         The table's widget key, whose state holds the selection (``{"selection": {"rows": [i], ...}}``).
     strikes : tuple of float
         The strike of each row, in the table's order.
+    priced : tuple of bool, optional
+        Whether each row has a vol to price it; every row when omitted.
+    step : float, default 0.01
+        The strike interval, for the note's strike.
     """
     state = st.session_state
     selection = state.get(key) or {}
     rows = (selection.get("selection") or {}).get("rows") or []
     if not rows:
         return
-    chosen = float(strikes[int(rows[0])])
+    row = int(rows[0])
+    chosen = float(strikes[row])
+    if priced is not None and not priced[row]:
+        state[_CHAIN_NOTE] = (
+            f"{strike(chosen, step)} lies beyond the surface's reach at this expiry: "
+            "it has quotes but no vol to price it, so the strike stays."
+        )
+        return
     if chosen != state.get("strike"):
         state["strike"] = chosen
         state[_CHAIN_MOVED] = True
@@ -955,15 +991,22 @@ def _window(inputs: Inputs, market: Contract, window: str) -> tuple[float, float
     return _flat_delta_strike(inputs, -target, "put"), _flat_delta_strike(inputs, target, "call")
 
 
-def chain_frame(inputs: Inputs, market: Contract, strikes: np.ndarray) -> pd.DataFrame:
+def chain_vols(inputs: Inputs, market: Contract, strikes: np.ndarray) -> np.ndarray:
+    """The vol of each of the ladder's strikes: the published surface's (NaN beyond its reach) or the flat vol."""
+    if market.surface is not None and market.expiry is not None:
+        return np.array([market.surface.vol(k, market.expiry).vol for k in strikes], dtype=float)
+    return np.full(strikes.shape, inputs.volatility)
+
+
+def chain_frame(
+    inputs: Inputs, market: Contract, strikes: np.ndarray, vols: np.ndarray | None = None
+) -> pd.DataFrame:
     """The ladder's rows: calls (bid, ask, theo, mid IV, Δ), the strike and a mark on the Pricing strike's row, then
     puts mirrored. Theo is the engine's value at each strike's surface vol (index) or at the flat vol (textbook);
-    without quotes (textbook) the bid, ask and IV columns are left out."""
+    without quotes (textbook) the bid, ask and IV columns are left out. ``vols``: :func:`chain_vols`, if read
+    already."""
     S, K, T, r, sigma, q = _args(inputs)
-    if market.surface is not None and market.expiry is not None:
-        vols = np.array([market.surface.vol(k, market.expiry).vol for k in strikes])
-    else:
-        vols = np.full(strikes.shape, sigma)
+    vols = chain_vols(inputs, market, strikes) if vols is None else vols
     # Beyond the surface's reach the vol is NaN (on the default 20-Nov expiry the nine listed strikes 4,150 to 4,550,
     # which only the "All" window shows): those rows keep their quotes and read "–" for theo and delta.
     priced = np.isfinite(vols)
@@ -1021,6 +1064,7 @@ def _chain(inputs: Inputs, market: Contract) -> None:
         default=WINDOWS[0],
         required=True,
         key="pr_chain_win",
+        bind="query-params",
         persist_state="session",
         help="Strikes from the 10-delta put to the 10-delta call (each strike's delta at its own vol), 25 to 25, "
         "the 95% risk-neutral range to expiry, or every listed strike.",
@@ -1029,6 +1073,7 @@ def _chain(inputs: Inputs, market: Contract) -> None:
         "Stride",
         STRIDES,
         key="pr_chain_stride",
+        bind="query-params",
         persist_state="session",
         format_func=lambda s: s if s == "Auto" else f"{s} pts",
         width=120,
@@ -1046,7 +1091,8 @@ def _chain(inputs: Inputs, market: Contract) -> None:
             step = float(stride)
             grid = np.arange(math.ceil(lo / step) * step, hi + 1e-9, step)
         strikes = np.unique(np.r_[grid, inputs.strike])
-    frame = chain_frame(inputs, market, strikes)
+    vols = chain_vols(inputs, market, strikes)
+    frame = chain_frame(inputs, market, strikes, vols)
     engine = engine_name(inputs)
     kinds, help_text, labels = {}, {}, {}
     for column in frame.columns:
@@ -1055,7 +1101,8 @@ def _chain(inputs: Inputs, market: Contract) -> None:
         side, name = column.split(" ", 1)
         option = "call" if side == "C" else "put"
         kinds[column] = _CHAIN_KINDS[name]
-        labels[column] = name
+        # Each side's headers name it ("Call bid" to "Put ask"): the two halves share their column names.
+        labels[column] = f"{option.capitalize()} {name if name in ('IV', 'Δ') else name.lower()}"
         help_text[column] = {
             "Bid": f"The chain's {option} bid, $ per share.",
             "Ask": f"The chain's {option} ask, $ per share.",
@@ -1076,11 +1123,19 @@ def _chain(inputs: Inputs, market: Contract) -> None:
         kinds,
         help_text,
         labels=labels,
-        max_rows=CHAIN_ROWS + 1,
         key=key,
+        pin=False,  # a pinned column would be drawn first, and the ladder is mirrored about its strike
         selection_mode="single-row",
-        on_select=functools.partial(on_chain_select, key=key, strikes=tuple(float(k) for k in strikes)),
+        on_select=functools.partial(
+            on_chain_select,
+            key=key,
+            strikes=tuple(float(k) for k in strikes),
+            priced=tuple(bool(v) for v in np.isfinite(vols)),
+            step=step,
+        ),
     )
+    if note := st.session_state.pop(_CHAIN_NOTE, None):
+        st.warning(note, icon=":material/block:")
     span = f"{strike(float(strikes[0]), step)}–{strike(float(strikes[-1]), step)}"
     st.caption(
         f"{len(strikes)} strikes, {span}. Click a row to price its strike; the sidebar's strike is the keyboard route."
@@ -1143,26 +1198,36 @@ def greeks_frame(
         ("delta", "Δ", "spot, per 1 point of S", lambda u: signed(u["delta"], 3)),
         ("delta_fwd", "Δ fwd", "∂V/∂F, per 1 point of F", lambda u: signed(u["delta_fwd"], 3)),
         ("gamma", "Γ 1%", "Δ per 1% move in S", lambda u: _sig(u["gamma"])),
-        ("vega", "Vega", "$ per vol point", lambda u: signed(u["vega"], 2)),
-        ("theta", "Θ", "$ per calendar day", lambda u: signed(u["theta"], 2)),
-        ("rho", "ρ", "$ per 1% rate", lambda u: signed(u["rho"], 2)),
-        ("epsilon", "ε", "$ per 1% dividend yield", lambda u: signed(u["epsilon"], 2)),
+        ("vega", "Vega", "$ per vol point", None),
+        ("theta", "Θ", "$ per calendar day", None),
+        ("rho", "ρ", "$ per 1% rate", None),
+        ("epsilon", "ε", "$ per 1% dividend yield", None),
     )
+    units = {
+        header: desk_units({k: float(v) for k, v in source[kind].items()}, S, r, q, T)
+        for header, source, kind in columns
+    }
     rows = []
-    for _name, label, unit, text in first:
+    for name, label, unit, text in first:
         row = {"Greek": label, "Unit": unit}
-        for header, source, kind in columns:
-            row[header] = text(desk_units({k: float(v) for k, v in source[kind].items()}, S, r, q, T))
+        if text is None:
+            # Money per share: cents, or two significant digits of the row's largest value below 10 cents (the
+            # textbook put's Θ of -0.0045 read 0.00), one precision across the row.
+            places = cents_places(max((abs(u[name]) for u in units.values() if np.isfinite(u[name])), default=0.0))
+            row |= {header: signed(u[name], places) for header, u in units.items()}
+        else:
+            row |= {header: text(u) for header, u in units.items()}
         rows.append(row)
     # The one-day decay by repricing, beside theta: first when it leads (Milestone 1's rule).
     theta = {kind: raw[kind]["theta"] / 365.0 for kind in cache.KINDS}
     leads = any(decay_leads(theta[kind], decay[kind], expiring) for kind in cache.KINDS)
     decay_row = {"Greek": decay_label(expiring), "Unit": "$, repriced" + (" at expiry" if expiring else " a day on")}
-    for header, source, kind in columns:
-        if source is raw:
-            decay_row[header] = signed(decay[kind], 2)
-        else:
-            decay_row[header] = signed(float(closed_form_decay(S, K, T, r, sigma, q, kind)), 2)
+    decays = {
+        header: decay[kind] if source is raw else float(closed_form_decay(S, K, T, r, sigma, q, kind))
+        for header, source, kind in columns
+    }
+    places = cents_places(max((abs(v) for v in decays.values() if np.isfinite(v)), default=0.0))
+    decay_row |= {header: signed(value, places) for header, value in decays.items()}
     at = next(i for i, row in enumerate(rows) if row["Greek"] == "Θ") + (0 if leads else 1)
     rows.insert(at, decay_row)
     for row_order, name, label in _HIGHER:
@@ -1199,6 +1264,7 @@ def _greeks(inputs: Inputs, prices: Prices, market: Contract) -> None:
         default="1st",
         required=True,
         key="pr_greeks",
+        bind="query-params",
         persist_state="session",
         help="First-order Greeks, then also vanna, volga, charm and veta, then also speed, zomma, color and ultima.",
     )
@@ -1208,6 +1274,7 @@ def _greeks(inputs: Inputs, prices: Prices, market: Contract) -> None:
             "BSM ref",
             value=False,
             key="pr_bsm_ref",
+            bind="query-params",
             persist_state="session",
             help="Show the closed-form European Greeks beside the American engine's.",
         )
@@ -1373,8 +1440,8 @@ def engine_rows(inputs: Inputs, tree: ModelConfig, mc: ModelConfig) -> tuple[pd.
         }
     )
     frame = pd.DataFrame(rows)
-    frame["Call − ref"] = frame["call"] - reference["call"]
-    frame["Put − ref"] = frame["put"] - reference["put"]
+    frame["Call − ref"] = [signed_sci(v) for v in frame["call"] - reference["call"]]
+    frame["Put − ref"] = [signed_sci(v) for v in frame["put"] - reference["put"]]
     frame = frame.rename(columns={"call": "Call", "put": "Put", "interval": "MC 95% interval"})
     return frame[["Engine", "Call", "Put", "Call − ref", "Put − ref", "MC 95% interval", "ms"]], ref_name
 
@@ -1511,8 +1578,8 @@ def _diagnostics(inputs: Inputs, prices: Prices) -> None:
             "Engine": "text",
             "Call": "premium_diag",
             "Put": "premium_diag",
-            "Call − ref": "greek",
-            "Put − ref": "greek",
+            "Call − ref": "difference",
+            "Put − ref": "difference",
             "MC 95% interval": "text",
             "ms": "level",
         },
@@ -1562,16 +1629,25 @@ def footer_text(inputs: Inputs, market: Contract) -> str:
 def render(inputs: Inputs, prices: Prices) -> None:
     """The Pricing tab (see the module docstring)."""
     market = contract(inputs)
-    st.caption(context_line(inputs))
-    _tiles(inputs, prices, market)
+    # The context line names the tiles under it: the two sit half the usual gap apart (7 px, not 14), which keeps the
+    # tiles' top within UI spec 3.1's 180 px at 1440 x 900 under the two-line header (179 px, from 186).
+    with st.container(key="pricing_headline", gap="xsmall"):
+        st.caption(context_line(inputs))
+        _tiles(inputs, prices, market)
     frame, kinds, help_text, labels = contract_frame(inputs, prices, market)
     table(frame, kinds, help_text, labels=labels, key="tbl_pricing_contract")
-    _profile(inputs, market)
+    # The profile and the Greeks table side by side where there is room (VIEWS_STYLE), stacked otherwise.
+    st.html(VIEWS_STYLE)
+    with st.container(key="pricing_views"), st.container(key="pricing_views_row"):
+        with st.container(key="pricing_views_profile"):
+            _profile(inputs, market)
+        with st.container(key="pricing_views_greeks"):
+            _greeks(inputs, prices, market)
     st.subheader("Chain")
     _chain(inputs, market)
-    st.subheader("Greeks")
-    _greeks(inputs, prices, market)
-    diagnostics = st.expander("Engine diagnostics", key=DIAGNOSTICS, on_change="rerun")
+    # Bound to the URL, so that a link from this view opens it again; the key is DIAGNOSTICS, written out for the
+    # link test's reader (tests/test_app_header.py reads the keys of the widgets bound to the URL).
+    diagnostics = st.expander("Engine diagnostics", key="pricing_diag", on_change="rerun", bind="query-params")
     if diagnostics.open:
         with diagnostics, st.spinner("Pricing on the trees and by simulation…"):
             _diagnostics(inputs, prices)
