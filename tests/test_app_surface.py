@@ -165,6 +165,8 @@ def _texts_of_every_view(at: AppTest) -> list[str]:
         for frame in at.dataframe:
             texts += [str(c) for c in frame.value.columns]
             texts += [str(c.get("label", "")) for c in json.loads(frame.proto.columns or "{}").values()]
+            text = [c for c in frame.value.columns if not pd.api.types.is_numeric_dtype(frame.value[c])]
+            texts += [str(v) for v in frame.value[text].to_numpy().ravel()]  # the text cells (SF-1: never "None")
         for chart in _charts(at):
             layout = chart["layout"]
             for key, axis in layout.items():
@@ -181,6 +183,8 @@ def test_no_column_axis_title_or_tile_label_says_years(new_app):
         _ok(at)
         texts = _texts_of_every_view(at)
         assert texts and not [t for t in texts if "year" in t.lower()], [t for t in texts if "year" in t.lower()]
+        # SF-1: no literal None or nan in a cell, a label or a title (a missing value is the standard's –).
+        assert not [t for t in texts if t.strip() in ("None", "nan", "NaN")]
         # Removed (UI spec 3.4): the colour-scale menu, two side-by-side 3-D charts and 3-D local vol, and "ATM means
         # K = S" (the desk's ATM is the forward).
         assert not [w for w in at.selectbox if "colour" in (w.label or "").lower()]
