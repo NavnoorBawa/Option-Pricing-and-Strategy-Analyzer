@@ -692,8 +692,8 @@ class _Constraints:
         """The points of a dense check of the overlap (:data:`DENSE_POINTS`) where the total variance falls below the
         previous slice's by more than the quotes' precision: each slice's quotes are precise to
         :data:`QUOTE_PRECISION` in vol, ``2 sqrt(w T)`` of it in total variance (as the surface's own calendar check,
-        ``local_vol._time_derivative``; this slice's ``T`` bounds both). With ``thin``, those the cutting planes
-        add (:func:`_thinned`)."""
+        ``local_vol._secant_time_derivative``; this slice's ``T`` bounds both). With ``thin``, those the cutting
+        planes add (:func:`_thinned`)."""
         if self.overlap_span is None:
             return np.empty(0)
         y = np.linspace(*self.overlap_span, DENSE_POINTS)

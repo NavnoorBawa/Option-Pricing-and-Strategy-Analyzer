@@ -6,13 +6,14 @@ forward log-moneyness comes from the SVI slices (:func:`_time_derivative`): the 
 ``y / sqrt(theta)``, ``theta`` the ATM total variance, would have, read off the slice itself, plus the rest from
 polynomials in ``T`` through neighbouring slices (:func:`_scaled_slope`); secants between neighbouring slices
 (:func:`_secant_time_derivative`) decide calendar arbitrage and stand in where that cannot be used.
-:func:`_market_values` evaluates implied and local vol of the slices on a K/S grid, and an estimate of the truncation
-error of local vol (:func:`_truncation_error`).
+:func:`_market_values` evaluates implied and local vol of the slices on a K/S grid, and, if asked, an estimate of the
+truncation error of each local vol: how much it changes when ``dw/dT`` comes from one slice more.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import pairwise
 
 import numpy as np
 
@@ -20,8 +21,12 @@ from .svi import QUOTE_PRECISION, durrleman_g
 
 EXTRAPOLATION = 0.25  # a neighbour may be evaluated this fraction of its quoted y-range beyond its quotes
 SMILE_SCALING = 0.5  # the smile is taken to keep its shape in y / theta^0.5 (_time_derivative)
-# The neighbours read at each row's y: one maturity back and two on for dw/dT (_stencil), two back and three on for
-# its truncation error (_higher_stencils).
+#: Hyman's limit (Hyman 1983, SIAM J. Sci. Stat. Comput. 4(4)): a slope at a maturity of at most this many times the
+#: smaller resolved secant next to it keeps a cubic through the slices monotone in T; a scaled slope beyond it is not
+#: used (_time_derivative).
+MONOTONE_LIMIT = 3.0
+# The neighbours read at each row's y: one maturity back and two on for dw/dT (_stencils), two back and three on
+# for its truncation error as well (_extended).
 _NEAR_OFFSETS, _OFFSETS = range(-1, 3), range(-2, 4)
 
 
@@ -93,26 +98,25 @@ def _slope_weights(nodes, at: int) -> list[float]:
     return weights
 
 
-def _stencil(i: int, n: int) -> tuple[int, ...]:
-    """The maturities (offsets from row ``i`` of ``n >= 2``) whose slices give row ``i``'s ``dw/dT``: three, one-sided,
-    at the first maturity (two where there are only two), the row and its two neighbours inside, and the last two at
-    the last maturity (see :func:`_time_derivative` for why)."""
+def _stencils(i: int, n: int) -> list[tuple[int, ...]]:
+    """The maturities (offsets from row ``i`` of ``n >= 2``) whose slices may give row ``i``'s ``dw/dT``, in order
+    of preference (:func:`_time_derivative` says why): three, one-sided, at the first maturity, then the first two;
+    the row and its two neighbours inside, then the row and the one before, then the row and the one after; the last
+    two at the last maturity."""
     if i == 0:
-        return (0, 1, 2) if n >= 3 else (0, 1)
-    return (-1, 0) if i == n - 1 else (-1, 0, 1)
+        return [(0, 1, 2), (0, 1)] if n >= 3 else [(0, 1)]
+    return [(-1, 0)] if i == n - 1 else [(-1, 0, 1), (-1, 0), (0, 1)]
 
 
-def _higher_stencils(i: int, n: int) -> list[tuple[int, ...]]:
-    """:func:`_stencil` with one more maturity, one order higher: the next one out at the first and the last
-    maturity, either neighbour's neighbour inside; those that exist."""
-    near = _stencil(i, n)
-    if i == 0:
-        candidates = [(*near, near[-1] + 1)]
-    elif i == n - 1:
-        candidates = [(near[0] - 1, *near)]
-    else:
-        candidates = [(near[0] - 1, *near), (*near, near[-1] + 1)]
-    return [offsets for offsets in candidates if i + offsets[0] >= 0 and i + offsets[-1] < n]
+def _extended(offsets: tuple[int, ...], i: int, n: int) -> list[tuple[int, ...]]:
+    """The stencils one order higher than ``offsets`` at row ``i`` of ``n``: one maturity more on the far side of a
+    one-sided stencil, on either side of a centred one; those that exist."""
+    candidates = []
+    if offsets[-1] > 0:
+        candidates.append((*offsets, offsets[-1] + 1))
+    if offsets[0] < 0:
+        candidates.append((offsets[0] - 1, *offsets))
+    return [extended for extended in candidates if i + extended[0] >= 0 and i + extended[-1] < n]
 
 
 @dataclass(frozen=True, eq=False)  # holds arrays: compared by identity
@@ -134,21 +138,21 @@ class _Neighbours:
     atm_covered: np.ndarray
 
 
-def _scaled_slope(nb: _Neighbours, i: int, offsets: tuple[int, ...], *, limited: bool) -> np.ndarray:
+def _scaled_slope(nb: _Neighbours, i: int, offsets: tuple[int, ...], limit: np.ndarray | None = None) -> np.ndarray:
     """``dw/dT`` at row ``i``'s ``y`` from the slices at ``offsets`` (:func:`_time_derivative`): NaN where they
     cannot give it.
 
     With ``theta_k`` each slice's ATM total variance and ``r_k = theta_k / theta_i``, a slice that kept its shape
     in ``y / sqrt(theta)`` would be ``r_k w_i(y / sqrt(r_k))`` at maturity ``k``, whose slope at ``T_i`` is
     ``theta'_i / theta_i (w_i - y w_i' / 2)``. The rest, ``w_k(y) - r_k w_i(y / sqrt(r_k))`` (0 at ``T_i``), is
-    differentiated with the polynomial through it in ``T``, and ``theta'_i`` is the slope of the polynomial through
-    ``theta`` in ``T``. With ``limited`` (the reported value) ``theta'_i`` keeps a monotone interpolant's limits,
-    at most three times the smaller adjacent secant of ``theta`` and, where it is not positive (an end formula can
-    be), that secant; and the result is NaN where it is not positive or more than three times the smaller adjacent
-    secant of ``w`` at ``y`` (Hyman's limit, which keeps a cubic through the slices monotone). Either way it is NaN
-    unless every slice of the stencil is quoted near ``y`` and near the forward (``y = 0``: the smile scales about
-    it, and quotes far from it make ``theta`` an extrapolation), and both ``w`` at ``y`` and ``theta`` rise from
-    each of its maturities to the next by more than the quotes' precision.
+    differentiated with the polynomial through it in ``T``, and ``theta'_i`` with the polynomial through
+    ``ln theta`` in ``ln T`` (``theta`` is close to proportional to ``T``). With a ``limit`` (the reported value)
+    ``theta'_i`` keeps a monotone interpolant's limits, at most :data:`MONOTONE_LIMIT` times the smaller adjacent
+    secant of ``theta`` and, where it is not positive (an end formula can be), that secant; and the result is NaN
+    where it is not positive or above ``limit``. Either way it is NaN unless every slice of the stencil is quoted
+    near ``y`` and near the forward (``y = 0``: the smile scales about it, and quotes far from it make ``theta`` an
+    extrapolation), and both ``w`` at ``y`` and ``theta`` rise from each of its maturities to the next by more than
+    the quotes' precision.
     """
     nodes = [i + k for k in offsets]
     at = offsets.index(0)
@@ -159,31 +163,41 @@ def _scaled_slope(nb: _Neighbours, i: int, offsets: tuple[int, ...], *, limited:
         return nan
     log_slope = float(np.dot(_slope_weights(np.log(Ts), at), np.log(theta)))  # d ln(theta) / d ln(T)
     theta_t = log_slope * nb.theta[i] / nb.Ts[i]
-    if limited:
+    if limit is not None:
         secants = np.diff(theta) / np.diff(Ts)
         adjacent = secants[max(at - 1, 0) : at + 1]
         if theta_t <= 0:  # only at an end: inside, the slope is a weighted mean of the two secants
             theta_t = float(adjacent[0])
-        theta_t = min(theta_t, 3.0 * float(adjacent.min()))
+        theta_t = min(theta_t, MONOTONE_LIMIT * float(adjacent.min()))
     y = nb.y[i]
     value = theta_t / nb.theta[i] * (nb.w[0][i] - SMILE_SCALING * y * nb.w_y[i])
     for k, weight in zip(offsets, _slope_weights(Ts, at), strict=True):
         if k != 0:
             ratio = nb.theta[i + k] / nb.theta[i]
             value = value + weight * (nb.w[k][i] - ratio * nb.fits[i].total_variance(y / ratio**SMILE_SCALING)[0])
-    rises = [nb.w[b][i] - nb.w[a][i] for a, b in zip(offsets[:-1], offsets[1:], strict=True)]
     usable = np.logical_and.reduce(
         [nb.cover[k][i] for k in offsets if k != 0]
-        + [rise > nb.tol[a][i] + nb.tol[b][i] for (a, b), rise in zip(zip(offsets, offsets[1:]), rises, strict=True)]
+        + [nb.w[b][i] - nb.w[a][i] > nb.tol[a][i] + nb.tol[b][i] for a, b in pairwise(offsets)]
     )
-    if limited:
-        slopes = [rise / (Ts[j + 1] - Ts[j]) for j, rise in enumerate(rises)]
-        adjacent_slopes = slopes[max(at - 1, 0) : at + 1]
-        usable &= (value > 0) & (value <= 3.0 * np.minimum.reduce(adjacent_slopes))
+    if limit is not None:
+        usable &= (value > 0) & (value <= limit)
     return np.where(usable, value, nan)
 
 
-def _time_derivative(nb: _Neighbours):
+def _monotone_limit(nb: _Neighbours, i: int) -> np.ndarray:
+    """:data:`MONOTONE_LIMIT` times the smaller of row ``i``'s two secants of ``w`` in ``T`` at each ``y``, of those
+    that rise by more than the quotes' precision to a neighbour quoted near ``y`` (infinite where neither does)."""
+    limit = np.full(nb.y.shape[1], np.inf)
+    for k in (-1, 1):
+        j = i + k
+        if 0 <= j < len(nb.Ts):
+            rise = k * (nb.w[k][i] - nb.w[0][i])
+            resolved = nb.cover[k][i] & (rise > nb.tol[k][i] + nb.tol[0][i])
+            limit = np.where(resolved, np.minimum(limit, rise / abs(nb.Ts[j] - nb.Ts[i])), limit)
+    return MONOTONE_LIMIT * limit
+
+
+def _time_derivative(nb: _Neighbours, *, checks: bool = False):
     """``dw/dT`` at fixed ``y`` for every quoted maturity (rows), and the calendar-arbitrage mask.
 
     Total variance at fixed ``y`` depends on ``T`` in two ways: through the ATM level ``theta(T)``, the integral of
@@ -194,58 +208,71 @@ def _time_derivative(nb: _Neighbours):
     would have is read off the slice itself, and only the rest (none for SSVI with ``gamma = 1/2`` while ``theta``
     is small, nor for a flat surface) is differentiated between slices (:func:`_scaled_slope`): one-sided through
     the first three maturities at the first, centred through the neighbours inside, and from the last two at the
-    last (:func:`_stencil`). Chosen by measurement with noise-free SSVI quotes on 25 strikes from 70% to 130% of
-    the spot (largest local-vol error in vol points, secants in ``T`` against this):
+    last (:func:`_stencils`). Chosen by measurement with noise-free SSVI quotes on 25 strikes from 70% to 130% of
+    the spot (largest local-vol error in vol points; secants in ``T`` against this):
 
-    * listed expiries 30, 60, 91, 182, 273, 365, 547 and 730 days: 2.12 against 0.27 (0.07 at 30 days);
-    * weekly front 7, 14, 21, 28, 60, 91, 182 and 365 days: 3.37 against 1.15 (0.01 at 7 days; the 1.15 is at the
+    * listed expiries 30, 60, 91, 182, 273, 365, 547 and 730 days: 2.12 against 0.095 (the median at 30 days 0.45
+      against 0.038; at the last expiry 0.61 against 0.056);
+    * weekly front 7, 14, 21, 28, 60, 91, 182 and 365 days: 3.37 against 0.45 (0.045 at 7 days; the 0.45 is at the
       year, after a half-year gap);
-    * every two weeks from 14 days to a year: 2.70 against 0.07; quarterly to two years: 1.55 against 0.31;
-    * 57 random arbitrage-free surfaces (ATM vols 10-60%, mean reversion 0.3-4, gamma 0.2-0.5) on 17 strikes,
-      mean of the largest errors on the listed, weekly-front and quarterly expiries: 0.85, 2.85 and 0.75 against
-      0.54, 2.42 and 0.55.
+    * every two weeks from 14 to 364 days: 2.70 against 0.069; quarterly to two years: 1.56 against 0.030;
+    * random arbitrage-free surfaces (ATM vols 10-60%, mean reversion 0.3-4, gamma 0.2-0.5; 32 to 34 per grid, on 17
+      strikes from 80% to 120%), mean of the largest errors on the listed, weekly-front and quarterly expiries: 0.95,
+      2.38 and 1.04 against 0.42, 0.87 and 0.26.
 
-    A parabola in ``sqrt(T)`` at fixed ``y`` was as accurate on those grids (0.24 on the listed expiries) but 7.7
-    vol points off at 14 days on an equity skew whose ATM vol rises from 16% to 47%, where this is 1.5 (secants:
-    1.1): a power of ``T`` cannot follow both such a level and the smile's scaling. Polynomials in ``sqrt(theta)``
-    for the rest were 15-20% more accurate inside and no noisier, at the first maturity 30% noisier; ``T`` is used
-    throughout for simplicity.
+    The alternatives, on the listed and the weekly-front expiries and the random surfaces on the listed ones:
+    ``theta'`` from the parabola through ``theta`` in ``T`` instead of ``ln theta`` in ``ln T``, 0.27, 1.15 and 0.68;
+    the rest differentiated in ``sqrt(theta)`` instead of ``T``, 0.13, 0.50 and 0.43; ``w`` interpolated in ``T`` at
+    fixed standardised moneyness ``y / sqrt(theta)`` and converted back with the chain rule, 0.43, 1.51 and 0.77; a
+    cubic in ``T`` at fixed ``y`` through one more neighbour (Hyman-limited), 1.46, 2.10 and 0.52; a parabola in
+    ``sqrt(T)`` at fixed ``y``, 0.58, 1.18 and 1.16, and 7.9 vol points at 14 days on an equity skew whose ATM vol
+    rises from 16% to 47% (``mean_reversion`` 4), where this is 0.63 and secants 2.15.
 
     The ends are chosen for noise. With the 0.2 vol-point noise of the sample quotes (40 seeds) the RMS local-vol
-    error is 0.94 vol point at 30 days, 0.57 inside and 0.85 at two years (secants: 1.28, 0.56 and 0.89); on 60
-    random surfaces with that noise the median, 90th and 99th percentile errors are within a tenth of the secants'
-    (first maturity 0.95%, 3.5% and 6.5% against 1.11%, 3.6% and 6.6%). The three-point formula at the last
-    maturity would cut its clean error on the listed expiries from 0.27 to 0.09 vol point, but it raised the
-    sample's RMS there to 1.07 and the random surfaces' 99th percentile to 45% (31% with secants): total variance
-    grows with ``T``, and so does its noise.
+    error is 0.93 vol point at 30 days, 0.58 inside and 0.87 at two years (secants: 1.28, 0.56 and 0.89); on that
+    equity skew with the same noise (30 seeds), 0.27 to 1.13 by expiry (secants: 0.42 to 2.50). The three-slice
+    one-sided formula at the last maturity would cut its clean error on the weekly-front expiries from 0.45 to 0.13
+    vol point, but it raised the RMS there to 1.22 on the sample quotes and to 1.77 on the skew, and the clean error
+    on an inverted term structure (ATM vol from 80% to 20%, expiries at 30, 91, 365 and 730 days) from 0.74 to 3.9
+    vol points: total variance grows with ``T``, and so does its noise.
 
     Calendar arbitrage, the 'unresolved' case and ``dw/dT > 0`` where the slices rise measurably are decided by the
-    secant scheme (:func:`_secant_time_derivative`), as before: the scaled slope replaces its value only where that
-    is positive, and :func:`_scaled_slope` is NaN wherever a secant of its stencil is calendar arbitrage or
-    unresolved, or the slope is beyond the monotone limits. Returns ``(w_t, calendar_bad, available)``, each
-    ``(n_T, n_y)``.
+    secant scheme (:func:`_secant_time_derivative`), as before: a scaled slope replaces its value only where that is
+    positive, and :func:`_scaled_slope` is NaN wherever a secant of its stencil is calendar arbitrage or unresolved,
+    a slice of it is not quoted near ``y`` or the forward, or the slope is beyond Hyman's monotone limit
+    (:func:`_monotone_limit`). Where a row's three-slice stencil is NaN for those reasons the two-slice ones are
+    tried (the slice before first, as at the last maturity), and only then are the secants left: with SSVI quotes
+    rounded to 0.01 vol point at 30, 60, 91, 182, 365, 366 and 730 days, whose 365-366 day secant is within the
+    quotes' precision, the 365 and 366-day rows are 0.38 vol point off with the two-slice scaled slopes and 1.6 with
+    the secants. (Local vol still needs both neighbours of an inside maturity quoted near ``y``, and the next one
+    of the first: ``available``, as before.)
+
+    Returns ``(w_t, calendar_bad, available, higher)``, the first three ``(n_T, n_y)``. With ``checks``, ``higher``
+    holds up to two ``(n_T, n_y)`` arrays of ``dw/dT`` from the stencils one order higher than the one used at each
+    point (:func:`_extended`, without the monotone limits; at a point the secants decided, those of the row's first
+    stencil), NaN where there is none; else it is empty.
     """
     w_t, negative, available = _secant_time_derivative(nb.w, nb.cover, nb.tol, nb.Ts)
     n = len(nb.Ts)
+    higher = [np.full(w_t.shape, np.nan), np.full(w_t.shape, np.nan)] if checks else []
     for i in range(n):
-        scaled = _scaled_slope(nb, i, _stencil(i, n), limited=True)
-        w_t[i] = np.where(np.isfinite(scaled) & (w_t[i] > 0), scaled, w_t[i])
-    return w_t, negative, available
-
-
-def _truncation_error(nb: _Neighbours, local: np.ndarray, g: np.ndarray) -> np.ndarray:
-    """An estimate of the truncation error of ``local`` (the local vol of :func:`_time_derivative`) at every point:
-    the largest change to it when ``dw/dT`` comes from one maturity more (:func:`_higher_stencils`, one order
-    higher, without the monotone limits); NaN where no such stencil is usable or ``local`` is undefined. A slope
-    that is not positive gives a local vol of 0, an error as large as the local vol itself."""
-    error = np.full(local.shape, np.nan)
-    n = len(nb.Ts)
-    for i in range(n):
-        for offsets in _higher_stencils(i, n):
-            higher = _scaled_slope(nb, i, offsets, limited=False)
-            change = np.abs(np.sqrt(np.maximum(higher, 0.0) / g[i]) - local[i])  # NaN where undefined: fmax skips it
-            error[i] = np.fmax(error[i], change)
-    return error
+        stencils = _stencils(i, n)
+        # Where a secant rises measurably (one that falls beyond the precision is flagged anyway) and local vol can
+        # be defined: elsewhere dw/dT is not used.
+        open_ = (w_t[i] > 0) & available[i]
+        limit = _monotone_limit(nb, i)
+        for offsets in stencils:
+            if not open_.any():  # each stencil costs about 0.1 ms: try the next only where the last one failed
+                break
+            scaled = _scaled_slope(nb, i, offsets, limit)
+            use = open_ & np.isfinite(scaled)
+            w_t[i] = np.where(use, scaled, w_t[i])
+            for check, extended in zip(higher, _extended(offsets, i, n) if use.any() else [], strict=False):
+                check[i] = np.where(use, _scaled_slope(nb, i, extended), check[i])
+            open_ &= ~use
+        for check, extended in zip(higher, _extended(stencils[0], i, n) if open_.any() else [], strict=False):
+            check[i] = np.where(open_, _scaled_slope(nb, i, extended), check[i])  # where the secants decided
+    return w_t, negative, available, higher
 
 
 @dataclass(frozen=True)
@@ -258,13 +285,18 @@ class _MarketValues:
     available: np.ndarray  # dw/dT has its neighbours close to their quotes
     unresolved: np.ndarray  # no secant rises by more than the quote precision, and none falls by more
     zero_variance: bool
-    local_error: np.ndarray | None = None  # estimated truncation error of local (_truncation_error), if asked for
+    local_error: np.ndarray | None = None  # estimated truncation error of local, if asked for (_market_values)
 
 
 def _market_values(fits, Ts, quoted_y, log_fs, moneyness, *, truncation_error: bool = False) -> _MarketValues:
     """Implied and local vol of the SVI slices at K/S ``moneyness`` (1-D) on every quoted maturity (rows), where the
-    forward of maturity ``i`` is ``S e^{log_fs[i]}``; with ``truncation_error``, also the estimated truncation
-    error of each local vol (:func:`_truncation_error`)."""
+    forward of maturity ``i`` is ``S e^{log_fs[i]}``.
+
+    With ``truncation_error``, also an estimate of the truncation error of each local vol, as a vol: the largest
+    change to it when ``dw/dT`` comes from a stencil one maturity larger, one order higher (:func:`_time_derivative`),
+    NaN where local vol is undefined or no such stencil can be used. A higher-order slope that is not positive gives
+    a local vol of 0, an error as large as the local vol itself.
+    """
     n_T = len(Ts)
     y = np.log(np.asarray(moneyness, dtype=float))[None, :] - np.asarray(log_fs, dtype=float)[:, None]
     lo, hi = quoted_y[:, 0], quoted_y[:, 1]
@@ -298,7 +330,7 @@ def _market_values(fits, Ts, quoted_y, log_fs, moneyness, *, truncation_error: b
     inside = (y >= lo[:, None] - 1e-9) & (y <= hi[:, None] + 1e-9)
     defined = inside & (own > 0)
     implied = np.where(defined, np.sqrt(np.maximum(own, 0.0) / Ts[:, None]), np.nan)
-    w_t, calendar_bad, available = _time_derivative(neighbours)
+    w_t, calendar_bad, available, higher = _time_derivative(neighbours, checks=truncation_error)
     g = durrleman_g(y, np.where(defined, own, 1.0), w_y, w_yy)
     calendar_bad &= defined
     butterfly_bad = defined & (g <= 0)
@@ -306,6 +338,12 @@ def _market_values(fits, Ts, quoted_y, log_fs, moneyness, *, truncation_error: b
     ok = defined & available & ~calendar_bad & ~butterfly_bad & ~unresolved
     with np.errstate(divide="ignore", invalid="ignore"):
         local = np.where(ok, np.sqrt(np.where(ok, w_t / g, 0.0)), np.nan)
+    local_error = None
+    if truncation_error:
+        local_error = np.full(local.shape, np.nan)
+        g_ok = np.where(ok, g, np.nan)  # NaN where local vol is undefined, so is its error
+        for slope in higher:
+            local_error = np.fmax(local_error, np.abs(np.sqrt(np.maximum(slope, 0.0) / g_ok) - local))
     return _MarketValues(
         implied,
         local,
@@ -315,5 +353,5 @@ def _market_values(fits, Ts, quoted_y, log_fs, moneyness, *, truncation_error: b
         available,
         unresolved,
         bool((inside & (own <= 0)).any()),
-        _truncation_error(neighbours, local, np.where(ok, g, np.nan)) if truncation_error else None,
+        local_error,
     )

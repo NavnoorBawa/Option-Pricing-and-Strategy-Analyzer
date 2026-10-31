@@ -1454,12 +1454,12 @@ def test_the_methodology_renders_all_its_maths_and_fits_collapsed(chromium, app_
         _settle(page)
         found = page.evaluate(_METHODOLOGY, ".st-key-methodology")
         assert found["sections"] == [[s.title, False] for s in tab_methodology.sections()]
-        assert found["katex"] == DISPLAY + INLINE and found["display"] == DISPLAY == 4, found
+        assert found["katex"] == DISPLAY + INLINE and found["display"] == DISPLAY == 5, found
         assert found["errors"] == 0 and found["raw"] == 0 and found["duplicates"] == [], found
         assert found["height"] <= limit, found
         _open_all(page, ".st-key-methodology")
         found = page.evaluate(_METHODOLOGY, ".st-key-methodology")
-        assert all(is_open for _, is_open in found["sections"]) and found["display"] == 4, found
+        assert all(is_open for _, is_open in found["sections"]) and found["display"] == 5, found
         assert found["wideDisplay"] == found["breakable"] == found["pastLine"] == found["links"] == [], found
         assert not found["sideways"], found
     finally:

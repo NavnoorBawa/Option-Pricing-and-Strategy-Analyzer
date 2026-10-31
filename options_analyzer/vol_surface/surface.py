@@ -365,6 +365,20 @@ def fit_market_surface(
     :data:`UNKNOWN_PRICE_ERROR` of the forward or :data:`MIN_PRICE_ERROR` capped by the
     strike spacing, whichever is more); arbitrage in quoted vols that half a :data:`QUOTED_VOL_TICK` of error
     in each price would remove is reported as possible rather than certain.
+
+    ``local_vol_error`` estimates the truncation error of local vol from the spacing of the expiries: at each
+    maturity, the largest change to its local vols over the grid when ``dw/dT`` comes from one neighbouring slice
+    more, one order higher (:func:`.local_vol._time_derivative`), as a vol (0.01 is one vol point). On noise-free SSVI
+    quotes on the listed (30 days to two years), weekly-front, two-weekly and quarterly expiries it is 0.57 to 2.0
+    times the actual error at every maturity where that exceeds 0.01 vol point; over 1,205 such maturities of 60
+    random SSVI surfaces, each on the listed, weekly-front, quarterly and 30, 91, 365 and 730-day expiries, it is a
+    median 1.08 times the error, at least the error at 60% of them and twice it at 90%. It is an estimate, not a
+    bound: where the expiries are too far apart to resolve the term structure it falls short several-fold (on the
+    30, 91, 365 and 730-day expiries with an ATM vol falling from 80% to 20%, 0.59 against 2.5 vol points at a year;
+    at one maturity in a hundred of the random surfaces, a sixth of the error or less), and with noisy quotes it
+    moves with the noise rather than measuring it. NaN at a maturity where no larger stencil can be used at any of
+    its grid points: with fewer than three maturities, at all but the last of three, or where a slice of it is not
+    quoted near the forward.
     """
     if calibration not in CALIBRATIONS:
         raise ValueError(f"calibration must be one of {', '.join(map(repr, CALIBRATIONS))}, got {calibration!r}")

@@ -4,10 +4,13 @@ import re
 import numpy as np
 import pandas as pd
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from options_analyzer import black_scholes as bs
 from options_analyzer import vol_surface as vs
 from options_analyzer.implied_vol import implied_volatility
+from options_analyzer.vol_surface import local_vol
 
 M = np.linspace(0.7, 1.3, 25)
 T = np.linspace(0.1, 2.0, 12)
@@ -221,12 +224,67 @@ def test_noise_free_quotes_recover_the_surface_including_end_maturities_and_grid
     assert np.isfinite(fitted.implied_vol).all() and np.isfinite(fitted.local_vol).all()
     lv_err, iv_err = relative_local_vol_error(fitted, params, r, q)
     assert iv_err.max() < 1e-9
-    assert lv_err[1:-1].max() < 1e-3  # interior maturities: Fritsch-Butland secants (measured 0.014%)
-    assert lv_err[0].max() < 1e-3  # one-sided three-point formula (measured 0.047%; the secant gave 0.71%)
-    assert lv_err[-1].max() < 0.005  # one-sided secant (measured 0.12%)
-    assert lv_err[:, [0, -1]].max() < 0.01  # outermost strikes: analytic SVI derivatives, no boundary condition
+    # Bounds about three times the measured relative error of dw/dT with the smile's scaling read off each slice
+    # (local_vol._time_derivative). Secants in T between the slices measured 0.014% inside, 0.047% and 0.12% at the
+    # first and the last maturity, and 0.12% at the outermost strikes.
+    assert lv_err[1:-1].max() < 5e-5  # centred through the neighbours (measured 0.0014%)
+    assert lv_err[0].max() < 5e-5  # one-sided through the first three maturities (measured 0.0014%)
+    assert lv_err[-1].max() < 1e-3  # from the last two maturities (measured 0.032%)
+    assert lv_err[:, [0, -1]].max() < 1e-3  # outermost strikes: analytic SVI derivatives (measured 0.032%)
     assert fitted.calendar_violations == 0 and fitted.butterfly_violations == 0
     assert np.all(fitted.fit_rmse < 1e-9)
+
+
+def _tracks(estimate, error, *, low=0.4, high=3.0, floor=1e-4):
+    """Whether a truncation-error estimate is between ``low`` and ``high`` times the actual error at every maturity
+    whose error exceeds ``floor`` (0.01 vol point), and below ``high`` times ``floor`` elsewhere."""
+    large = error > floor
+    return bool(np.all(estimate[large] > low * error[large]) and np.all(estimate < high * np.maximum(error, floor)))
+
+
+def test_local_vol_on_the_listed_expiries_is_within_half_a_vol_point():
+    # The model validator's finding 1 (docs/reviews/panel-v3.0.md): on the listed expiries, with implied vols fitted
+    # to 3e-11, local vol was off by up to 2.12 vol points at 30 days with secants in T between the expiries (median
+    # 0.45 there); by expiry 2.12, 0.42, 0.63, 0.33, 0.14, 0.11, 0.15 and 0.61 vol points at most. With the smile's
+    # scaling in the ATM total variance read off each slice (local_vol._time_derivative): 0.095, 0.030, 0.026,
+    # 0.008, 0.024, 0.043, 0.052 and 0.056 (median 0.038 at 30 days).
+    params, r, q = vs.SSVIParams(), 0.03, 0.01
+    fitted = vs.fit_market_surface(ssvi_quotes(params, r, q, SAMPLE_DAYS, M), 100, r, q)
+    _, iv_err = relative_local_vol_error(fitted, params, r, q)
+    assert iv_err.max() < 1e-9 and fitted.calendar_violations == 0 and fitted.butterfly_violations == 0
+    assert np.isfinite(fitted.local_vol).all()  # defined everywhere here
+    error = np.abs(fitted.local_vol - vs.ssvi_surface(params, r, q, fitted.moneyness, fitted.maturities).local_vol)
+    assert error.max() < 0.005  # the bound asked for: half a vol point (measured 0.095 vol point)
+    assert np.median(error[0]) < 0.001  # measured 0.038 vol point (0.45 with secants)
+    # The estimated truncation error tracks the actual error: 0.116, 0.035, 0.020, 0.021, 0.032, 0.048, 0.050 and
+    # 0.046 vol points, 0.78 to 1.34 times it where it exceeds 0.01 vol point (at 182 days it is 0.008).
+    assert fitted.local_vol_error.shape == fitted.maturities.shape
+    assert _tracks(fitted.local_vol_error, error.max(axis=1))
+
+
+@pytest.mark.parametrize(
+    "days, bound",
+    [
+        # Weekly expiries, then monthly and quarterly ones: with secants in T 3.37 vol points at 7 days, 1.33 at
+        # 28 and 2.33 at a year; now 0.045, 0.021 and 0.45, the last at the end of the half-year gap from 182 days.
+        ((7, 14, 21, 28, 60, 91, 182, 365), 0.015),
+        # Every two weeks from 14 days to 364: 2.70 vol points at 14 days and 0.58 at 28 before; now 0.069 and 0.023.
+        (tuple(range(14, 365, 14)), 0.002),
+        # Quarterly to two years: 1.56 vol points at 91 days and 0.28 at two years before; now 0.026 and 0.030.
+        ((91, 182, 273, 365, 456, 547, 638, 730), 0.001),
+    ],
+    ids=["weekly-front", "two-weekly", "quarterly"],
+)
+def test_local_vol_on_other_expiry_grids(days, bound):
+    # Noise-free SSVI quotes; each bound is about three times the largest error measured. The estimated truncation
+    # error is 0.57 to 2.0 times the actual error at every expiry of these grids where that exceeds 0.01 vol point
+    # (0.57 at the last weekly expiry, 2.0 at the second quarterly one), and at most 0.021 vol point elsewhere.
+    params, r, q = vs.SSVIParams(), 0.03, 0.01
+    fitted = vs.fit_market_surface(ssvi_quotes(params, r, q, days, M), 100, r, q)
+    assert np.isfinite(fitted.local_vol).all()
+    error = np.abs(fitted.local_vol - vs.ssvi_surface(params, r, q, fitted.moneyness, fitted.maturities).local_vol)
+    assert error.max() < bound
+    assert _tracks(fitted.local_vol_error, error.max(axis=1))
 
 
 def test_inverted_term_structure_keeps_a_sound_last_maturity():
@@ -237,10 +295,196 @@ def test_inverted_term_structure_keeps_a_sound_last_maturity():
     lv_err, _ = relative_local_vol_error(coarse, params, 0.0, 0.0)
     assert coarse.calendar_violations == 0 and np.isfinite(coarse.local_vol).all()
     assert coarse.local_vol[-1].min() > 0.15
-    assert lv_err[-1].max() < 0.12  # first-order one-sided secant over a whole year (measured 9.6%)
+    # The ATM vol falls from 80% to 20% with an e-folding time of four months, sampled up to a year apart, which
+    # no scheme resolves. Largest error by expiry with secants in T: 9.7, 10.4, 1.6 and 2.4 vol points (8.5%, 13%,
+    # 4.8% and 9.6%); now 3.5, 1.6, 2.5 and 0.74 (3.6%, 2.5%, 7.8% and 3.0%): worse only at a year, where the
+    # parabola through ln(theta) at 91, 365 and 730 days misses the slope of the ATM variance. The estimated
+    # truncation error falls short here (1.1, 0.59, 0.59 and 3.1 vol points): it is the change one more expiry
+    # makes, and none is close enough to resolve the decay.
+    assert lv_err[:-1].max() < 0.1  # measured 7.8%, at a year
+    assert lv_err[-1].max() < 0.06  # measured 3.0% (9.6% with the one-sided secant)
     dense = vs.fit_market_surface(ssvi_quotes(params, 0.0, 0.0, range(30, 731, 15), strikes), 100, 0.0, 0.0)
     lv_err, _ = relative_local_vol_error(dense, params, 0.0, 0.0)
-    assert lv_err[1:].max() < 0.005  # measured 0.3%
+    assert lv_err[1:].max() < 0.005  # measured 0.25% (0.30% with secants)
+    assert lv_err[0].max() < 0.01  # measured 0.36% (0.77% with secants)
+
+
+@settings(max_examples=25, deadline=None)
+@given(
+    vol=st.floats(0.05, 0.9),
+    first=st.integers(1, 60),
+    gaps=st.lists(st.integers(1, 240), min_size=1, max_size=7),
+    rate=st.floats(-0.01, 0.08),
+)
+def test_flat_quotes_give_their_flat_local_vol_at_any_expiries(vol, first, gaps, rate):
+    # Total variance proportional to T at every y: ln(theta) is linear in ln(T), so its slope is exact, the smile
+    # keeps its (flat) shape and the rest of dw/dT is 0, as is the secants' error, wherever the expiries are.
+    days = first + np.cumsum([0, *gaps])
+    quotes = pd.DataFrame(
+        [{"strike": 100 * m, "maturity": d / 365, "iv": vol} for d in days for m in np.linspace(0.7, 1.3, 13)]
+    )
+    fitted = vs.fit_market_surface(quotes, 100, rate, 0.0)
+    assert np.isfinite(fitted.local_vol).all()
+    assert np.abs(fitted.local_vol - vol).max() < 1e-9
+    assert np.nanmax(fitted.local_vol_error, initial=0.0) < 1e-9  # NaN with fewer than three expiries
+
+
+@settings(max_examples=15, deadline=None)
+@given(
+    short=st.floats(0.1, 0.6),
+    long=st.floats(0.1, 0.45),
+    reversion=st.floats(0.3, 4.0),
+    rho=st.floats(-0.9, -0.1),
+    curvature=st.floats(0.3, 1.0),
+    gamma=st.floats(0.2, 0.5),
+)
+def test_arbitrage_free_ssvi_quotes_keep_a_positive_local_vol(short, long, reversion, rho, curvature, gamma):
+    # Calendar-free slices keep dw/dT > 0: a scaled slope is used only where it is positive and within Hyman's
+    # monotone limit, else the secants decide. On 32 random surfaces like these on the listed expiries the largest
+    # local-vol error was 0.42 vol point on average and 1.4 at worst (0.95 and 2.6 with secants in T); over 120 more
+    # and the 64 corners of these ranges, 1.45 at worst.
+    params = vs.SSVIParams(short, long, reversion, rho, curvature * 2 / (1 + abs(rho)), gamma)
+    quotes = ssvi_quotes(params, 0.03, 0.0, SAMPLE_DAYS, np.linspace(0.8, 1.2, 17))
+    fitted = vs.fit_market_surface(quotes, 100, 0.03, 0.0)
+    assert fitted.calendar_violations == 0 and fitted.butterfly_violations == 0
+    assert np.isfinite(fitted.local_vol).all() and (fitted.local_vol > 0).all()
+    true = vs.ssvi_surface(params, 0.03, 0.0, fitted.moneyness, fitted.maturities)
+    assert np.abs(fitted.local_vol - true.local_vol).max() < 0.05
+
+
+def test_the_truncation_error_estimate_on_random_surfaces():
+    # Over 1,205 maturities of 60 random SSVI surfaces on the listed, weekly-front, quarterly and 30, 91, 365 and
+    # 730-day expiries (errors above 0.01 vol point) the estimate was a median 1.08 times the actual error, at least
+    # the error at 60% of them and twice it at 90%; at the first expiry of the listed and weekly grids a median
+    # 0.75 and 0.68 times it. Here a few of those surfaces on the listed expiries.
+    rng = np.random.default_rng(11)
+    ratios = []
+    for _ in range(8):
+        rho = rng.uniform(-0.9, -0.1)
+        params = vs.SSVIParams(
+            rng.uniform(0.1, 0.6),
+            rng.uniform(0.1, 0.45),
+            rng.uniform(0.3, 4.0),
+            rho,
+            rng.uniform(0.3, 1.0) * 2 / (1 + abs(rho)),
+            rng.uniform(0.2, 0.5),
+        )
+        quotes = ssvi_quotes(params, 0.03, 0.0, SAMPLE_DAYS, np.linspace(0.8, 1.2, 17))
+        fitted = vs.fit_market_surface(quotes, 100, 0.03, 0.0)
+        true = vs.ssvi_surface(params, 0.03, 0.0, fitted.moneyness, fitted.maturities).local_vol
+        error = np.nanmax(np.abs(fitted.local_vol - true), axis=1)
+        assert np.isfinite(fitted.local_vol_error).all()
+        ratios += list(fitted.local_vol_error[error > 1e-4] / error[error > 1e-4])
+    ratios = np.array(ratios)
+    assert 0.7 < np.median(ratios) < 1.5  # measured 1.07 over these 57 maturities
+    assert np.mean(2 * ratios >= 1) > 0.8  # measured 0.88 (and the estimate at least the error at 60%)
+
+
+def test_the_truncation_error_needs_a_larger_stencil_and_ssvi_has_none():
+    params = vs.SSVIParams()
+    two = vs.fit_market_surface(ssvi_quotes(params, 0.0, 0.0, (30, 91), M), 100, 0.0, 0.0)
+    assert np.isfinite(two.local_vol).all() and np.isnan(two.local_vol_error).all()
+    # With three expiries only the last one has a stencil one expiry larger than its own (the last three).
+    three = vs.fit_market_surface(ssvi_quotes(params, 0.0, 0.0, (30, 91, 182), M), 100, 0.0, 0.0)
+    assert np.isfinite(three.local_vol).all()
+    assert np.isnan(three.local_vol_error[:2]).all() and np.isfinite(three.local_vol_error[2])
+    assert vs.ssvi_surface(params, 0.0, 0.0, M, T).local_vol_error is None  # analytic dw/dT
+
+
+def _secants_only(nb, i, offsets, limit=None):
+    """local_vol._scaled_slope that never applies: only the secant scheme is left."""
+    return np.full(nb.y.shape[1], np.nan)
+
+
+def test_calendar_arbitrage_and_unresolved_slopes_are_decided_by_the_secants_as_before(monkeypatch):
+    # The scaled slope replaces the secants' dw/dT only where that is positive: calendar arbitrage (a fall beyond
+    # the quotes' precision) and changes within the precision ('unresolved') are flagged where they were.
+    quotes, _ = vs.parse_quotes(vs.sample_quotes())
+    maturities = np.sort(quotes["maturity"].unique())
+    quotes.loc[quotes["maturity"] == maturities[4], "iv"] *= 0.8
+    cases = [(quotes, 0.04, "unconstrained"), (_flat_last_day((30, 60, 91, 182, 365, 366)), 0.0, "arbitrage_free")]
+    fits = [vs.fit_market_surface(table, 100, rate, 0.0, calibration=how) for table, rate, how in cases]
+    monkeypatch.setattr(local_vol, "_scaled_slope", _secants_only)
+    for (table, rate, how), fitted in zip(cases, fits, strict=True):
+        secants = vs.fit_market_surface(table, 100, rate, 0.0, calibration=how)
+        assert fitted.calendar_violations == secants.calendar_violations
+        assert fitted.notes == secants.notes
+        assert np.array_equal(np.isnan(fitted.local_vol), np.isnan(secants.local_vol))
+        assert np.nanmax(np.abs(fitted.local_vol - secants.local_vol)) > 0.001  # the scaled slopes apply elsewhere
+    assert fits[0].calendar_violations > 0 and any("changes by less than" in note for note in fits[1].notes)
+
+
+def test_quotes_far_from_the_forward_keep_the_secant_slopes(monkeypatch):
+    # With the spot set to 160 for quotes struck around 100 the forward (y = 0) lies outside every slice's quotes:
+    # the ATM total variance would be an extrapolation and the smile would scale about the wrong point, so such
+    # slices keep the secants, and no truncation error is estimated.
+    quotes = ssvi_quotes(vs.SSVIParams(), 0.04, 0.0, (30, 91, 182, 365, 730), np.linspace(0.75, 1.3, 23))
+    far = vs.fit_market_surface(quotes, 160.0, 0.04, 0.0)
+    monkeypatch.setattr(local_vol, "_scaled_slope", _secants_only)
+    secants = vs.fit_market_surface(quotes, 160.0, 0.04, 0.0)
+    assert np.isfinite(far.local_vol).any() and np.isnan(far.local_vol_error).all()
+    assert np.array_equal(far.local_vol, secants.local_vol, equal_nan=True)
+
+
+def _neighbours(fits, Ts, y) -> local_vol._Neighbours:
+    """local_vol._Neighbours as local_vol._market_values builds it, with every slice quoted near every ``y`` and near
+    the forward."""
+    n = len(Ts)
+    w, cover, tol = {}, {}, {}
+    for k in range(-2, 4):
+        w[k], cover[k], tol[k] = np.full(y.shape, np.nan), np.zeros(y.shape, dtype=bool), np.full(y.shape, np.nan)
+        for i in range(max(0, -k), min(n, n - k)):
+            w[k][i] = fits[i + k].total_variance(y[i])[0]
+            cover[k][i] = True
+            tol[k][i] = 2.0 * np.sqrt(w[k][i] * Ts[i + k]) * vs.QUOTE_PRECISION
+    w_y = np.array([fit.total_variance(row)[1] for fit, row in zip(fits, y, strict=True)])
+    theta = np.array([float(fit.total_variance(0.0)[0]) for fit in fits])
+    theta_tol = 2.0 * np.sqrt(theta * Ts) * vs.QUOTE_PRECISION
+    return local_vol._Neighbours(tuple(fits), Ts, y, w, cover, tol, w_y, theta, theta_tol, np.ones(n, dtype=bool))
+
+
+def test_a_scaled_slope_beyond_hymans_monotone_limit_is_not_used():
+    params = vs.SSVIParams()
+    Ts = np.array([0.25, 0.5, 0.75])
+    fits = tuple(ssvi_slice(params, t) for t in Ts)
+    y = np.tile([-0.1, 0.1], (3, 1))
+    nb = _neighbours(fits, Ts, y)
+    w_t, calendar, _, _ = local_vol._time_derivative(nb)
+    exact = params.total_variance(y, Ts[:, None])[3]
+    assert np.allclose(w_t, exact, rtol=0.04) and not calendar.any()  # measured within 1.3% (the secants: 4.7%)
+    # At row 1's second point the 0.25-year slice is moved up to three times the two slices' precision below the
+    # 0.5-year one: the secant between them is tiny, while the centred scaled slope, read mostly off the slices' own
+    # shape, stays near the true slope, far beyond three times that secant. It is not used; the two-slice slope from
+    # the row and the slice before it, close to that secant, is within the limit.
+    nb.w[-1][1, 1] = nb.w[0][1, 1] - 3 * (nb.tol[-1][1, 1] + nb.tol[0][1, 1])
+    limit = local_vol._monotone_limit(nb, 1)
+    assert local_vol._scaled_slope(nb, 1, (-1, 0, 1))[1] > limit[1]
+    moved, calendar, _, _ = local_vol._time_derivative(nb)
+    assert moved[1, 1] == local_vol._scaled_slope(nb, 1, (-1, 0), limit)[1]
+    assert 0 < moved[1, 1] <= limit[1] and moved[1, 1] < 0.1 * w_t[1, 1] and not calendar.any()
+    unchanged = np.ones(w_t.shape, dtype=bool)
+    unchanged[1, 1] = False
+    assert np.array_equal(moved[unchanged], w_t[unchanged])
+
+
+def test_a_neighbour_within_the_quotes_precision_leaves_the_two_slice_scaled_slope():
+    # Where total variance changes by less than the quotes' precision to the next slice, the row's centred stencil
+    # cannot be used; the scaled slope from the row and the slice before it is still far closer to the true slope
+    # than the secant from that slice, which the secant scheme would use.
+    params = vs.SSVIParams()
+    Ts = np.array([30, 91, 182, 365]) / 365
+    fits = tuple(ssvi_slice(params, t) for t in Ts)
+    y = np.tile(np.linspace(-0.3, 0.2, 6), (4, 1))
+    nb = _neighbours(fits, Ts, y)
+    nb.w[1][1] = nb.w[0][1] + 0.5 * (nb.tol[0][1] + nb.tol[1][1])
+    secant = (nb.w[0][1] - nb.w[-1][1]) / (Ts[1] - Ts[0])
+    assert np.array_equal(local_vol._secant_time_derivative(nb.w, nb.cover, nb.tol, Ts)[0][1], secant)
+    w_t, calendar, _, _ = local_vol._time_derivative(nb)
+    assert not calendar.any()
+    assert np.array_equal(w_t[1], local_vol._scaled_slope(nb, 1, (-1, 0), local_vol._monotone_limit(nb, 1)))
+    exact = params.total_variance(y, Ts[:, None])[3]
+    assert np.abs(w_t[1] / exact[1] - 1).max() < 0.075  # measured 2.4% (0.36% with the centred stencil)
+    assert np.abs(secant / exact[1] - 1).max() > 0.15  # measured 18%
 
 
 @pytest.mark.parametrize(
@@ -262,7 +506,8 @@ def test_identical_strikes_with_carry_keep_the_full_quoted_range(low, high, days
     if low <= 0.9 and high >= 1.1:
         assert np.isfinite(summary["Skew 90-110 (vol pts)"]).all() and np.isfinite(summary["Butterfly (vol pts)"]).all()
     lv_err, _ = relative_local_vol_error(fitted, params, r, 0.0)
-    assert lv_err[1:-1].max() < 0.02
+    assert lv_err[1:-1].max() < 0.02  # measured 0.41%, 0.37% and 0.64% (1.00%, 1.00% and 1.03% with secants in T)
+    assert lv_err.max() < 0.05  # measured 0.45%, 0.45% and 1.7% at the ends (5.5%, 3.6% and 6.6% with secants)
 
 
 def test_interior_calendar_arbitrage_is_flagged_and_left_undefined():
@@ -319,7 +564,9 @@ def test_a_steep_noisy_equity_surface_is_fitted_without_a_poor_fit_note():
     assert fitted.fit_rmse.max() < 0.003  # measured 0.14-0.21 vol points against 0.2 points of noise
     assert not any("SVI smile" in note for note in fitted.notes)
     assert np.nanmax(np.abs(fitted.implied_vol - true.implied_vol)) < 0.005  # measured 0.29 vol points
-    assert np.nanmax(np.abs(fitted.local_vol - true.local_vol)[:-1]) < 0.015  # measured 0.77 vol points
+    # Measured 1.04 vol points, at 91 days (0.78 with secants in T): one draw of the noise. Over 30 draws the RMS
+    # error by expiry is 0.27, 0.30, 0.42, 0.73 and 1.13 vol points (0.49, 0.42, 0.86, 0.77 and 2.50 with secants).
+    assert np.nanmax(np.abs(fitted.local_vol - true.local_vol)[:-1]) < 0.015
 
 
 def test_a_poor_fit_note_does_not_blame_quotes_that_svi_cannot_shape():
@@ -357,7 +604,9 @@ def test_total_variance_flat_within_quote_precision_is_not_calendar_arbitrage():
     for fitted in (last, inside):
         true = vs.ssvi_surface(params, 0.0, 0.0, fitted.moneyness, fitted.maturities)
         error = np.abs(fitted.local_vol - true.local_vol)[4:6]  # the 365 and 366-day rows
-        assert np.nanmax(error) < 0.02  # measured 1.6 vol points: the 182-365 day secant alone
+        # Measured 0.38 vol point: on both rows the scaled slope from the two slices before the day-long step
+        # (local_vol._stencils; 1.6 vol points with the 182-365 day secant alone).
+        assert np.nanmax(error) < 0.012
 
 
 def test_rounded_dense_chains_do_not_raise_spurious_calendar_flags():
@@ -372,8 +621,10 @@ def test_rounded_dense_chains_do_not_raise_spurious_calendar_flags():
 @pytest.mark.parametrize("seed", range(4))
 def test_sample_quotes_local_vol_is_close_to_the_generating_surface(seed):
     # The sample adds 0.2 vol-point noise. The old smoothing-spline fit was off by 57-176 vol points of local
-    # vol (seeds 0-3, max) with no arbitrage flag. The SVI fit is off by at most 1.9-4.4 points at the first
-    # maturity (three-point end formula; the one-sided secant gave 4.7-6.0) and 1.3-2.3 points elsewhere.
+    # vol (seeds 0-3, max) with no arbitrage flag. The SVI fit is off by at most 0.4-3.8 points at the first
+    # maturity and 1.7-2.6 points elsewhere, in the wings (secants in T: 1.9-4.4 and 1.3-2.3; the one-sided secant
+    # alone at the first maturity: 4.7-6.0). The noise dominates: over 40 seeds the RMS error is 0.93 vol point at
+    # the first maturity (1.28 with secants), 0.58 inside (0.56) and 0.87 at the last (0.89).
     quotes, _ = vs.parse_quotes(vs.sample_quotes(100, 0.04, 0.0, seed=seed))
     fitted = vs.fit_market_surface(quotes, 100, 0.04, 0.0)
     true = vs.ssvi_surface(vs.SSVIParams(), 0.04, 0.0, fitted.moneyness, fitted.maturities)
@@ -691,7 +942,8 @@ def test_a_months_header_recovers_the_surface():
     assert np.allclose(fitted.maturities, np.array(months) / 12)
     assert fitted.butterfly_violations == 0  # 66 points when the months were read as years
     lv_err, iv_err = relative_local_vol_error(fitted, params, 0.05, 0.0)
-    assert iv_err.max() < 1e-6 and lv_err[1:-1].max() < 0.01
+    assert iv_err.max() < 1e-6 and lv_err[1:-1].max() < 0.0015  # measured 0.042% (0.71% with secants in T)
+    assert lv_err.max() < 0.015  # measured 0.50%, at three months (3.1% with secants in T)
 
 
 @pytest.mark.parametrize("header", ["Maturity (M)", "Tenor (m)", "DTE (m)"])
