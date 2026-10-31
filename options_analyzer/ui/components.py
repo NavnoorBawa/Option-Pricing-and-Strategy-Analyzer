@@ -215,11 +215,25 @@ def _cards_style(
         # Three groups or more wrap on a grid of equal columns: as a flex row, six tiles in three pairs went 4 + 2 on
         # a laptop with the sidebar open, the last pair stretched to twice its cards' width (303.75 px against
         # 144.875 at 1,024 px). A group alone on a line now keeps the width of the groups above it.
+        column = f"{group}px"
+        if one_line_px is not None:
+            # A container query cannot style the container, so the row's own width (100%) picks the column: the
+            # one-line group's width from the one-line width up (every group on one line at the smaller values),
+            # the full-size group's below it. The clamp is a step: 0 below the one-line width, the difference above.
+            _, small, line = _one_line_sizes(one_line_px, sized, per_group, len(group_keys), gap)
+            column = f"calc({group}px - clamp(0px, (100% - {line - 1}px) * 1000, {max(group - small, 0)}px))"
         rules.append(
             f"{row} {{ display: grid !important; "
-            f"grid-template-columns: repeat(auto-fit, minmax(min(100%, {group}px), 1fr)); }}"
+            f"grid-template-columns: repeat(auto-fit, minmax(min(100%, {column}), 1fr)); }}"
         )
     return f"<style>{' '.join(rules)}</style>"
+
+
+def _one_line_sizes(value_px, sized, per_group, groups, gap) -> tuple[int, int, int]:
+    """The width (px) of a card, a group and the whole row on one line, with values of ``value_px``."""
+    card = int(np.ceil(max(_card_width(c[0], c[1], value_px, 1, *c[2:]) for c in sized)))
+    group = per_group * card + (per_group - 1) * gap
+    return card, group, groups * group + (groups - 1) * gap
 
 
 def _one_line(value_px, sized, per_group, groups, gap, row, name, group_items, each_card) -> list[str]:
@@ -227,9 +241,7 @@ def _one_line(value_px, sized, per_group, groups, gap, row, name, group_items, e
     holds every card on one line, before the theme-size rules that a narrower row's container queries set."""
     if value_px is None:
         return []
-    card = int(np.ceil(max(_card_width(c[0], c[1], value_px, 1, *c[2:]) for c in sized)))
-    group = per_group * card + (per_group - 1) * gap
-    line = groups * group + (groups - 1) * gap
+    card, group, line = _one_line_sizes(value_px, sized, per_group, groups, gap)
     return [
         f"@container {name} (width >= {line}px) {{ "
         f"{group_items} {{ flex: 1 1 {group}px !important; }} "

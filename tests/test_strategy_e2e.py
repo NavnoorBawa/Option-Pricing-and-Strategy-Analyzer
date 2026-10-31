@@ -14,8 +14,8 @@ pytestmark = [pytest.mark.e2e, pytest.mark.slow]
 INDEX = f"?tab=Strategy&asof={ASOF}"
 TEXTBOOK = "?tab=Strategy&preset=Textbook"
 
-#: Positions (px) on the page: the header strip, the price cards above the tabs (spec UI-1 moves them into the
-#: Pricing tab; until it lands they push every tab down), the tiles, the payoff chart and its P&L row's plot area,
+#: Positions (px) on the page: the header strip, the price cards above the tabs (none since UI-1 moved them into the
+#: Pricing tab), the tiles, the payoff chart and its P&L row's plot area,
 #: the builder bar's labels, the tiles' tops and value sizes, the curve labels against the plot's right edge, and the
 #: page's scroll width.
 _LAYOUT = """() => {
@@ -56,16 +56,14 @@ def _open(chromium, url: str, *, width: int = 1440, height: int = 900, scheme: s
 @pytest.mark.parametrize("scheme", ["dark", "light"])
 def test_the_answer_is_above_the_fold_on_a_laptop(chromium, app_url, scheme):  # noqa: F811
     # Spec 3.2 at 1,440 x 900 with the sidebar open: the tiles' top at most 320 px, the payoff chart's top at most
-    # 480 px and its P&L row's bottom at most 900 px. The price cards above the tabs (until UI-1 moves them into
-    # Pricing) push the tab down by their height and a gap, 74 px, which is taken off: measured 225, 474 and 863 px
-    # with them (299 and 548 px with them counted). The tiles hold one line beside the sidebar, at 19.25 px.
+    # 480 px and its P&L row's bottom at most 900 px (measured 226, 474 and 790 px). The tiles hold one line beside the
+    # sidebar, at 19.25 px.
     context, page = _open(chromium, app_url + INDEX, scheme=scheme)
     try:
         layout = page.evaluate(_LAYOUT)
-        shell = layout["cards"] - layout["header"] if layout["cards"] is not None else 0.0
-        assert 0 <= shell <= 90, layout
-        assert layout["tiles"] - shell <= 320, layout
-        assert layout["chart"] - shell <= 480, layout
+        assert layout["cards"] is None, layout  # no price cards above the tabs (UI-1: they are the Pricing tab's)
+        assert layout["tiles"] <= 320, layout
+        assert layout["chart"] <= 480, layout
         assert layout["pnlBottom"] <= 900, layout
         assert len(set(layout["tileTops"])) == 1 and layout["tileFonts"] == [19.25] * 6, layout
         # The builder bar's labels line up (a segmented control's sat 6 px lower).
@@ -73,20 +71,6 @@ def test_the_answer_is_above_the_fold_on_a_laptop(chromium, app_url, scheme):  #
         # Every curve label at the right end ends inside the plot area, in IBM Plex.
         assert layout["plex"] and len(layout["ends"]) >= 4, layout
         assert all(end["right"] <= layout["plotRight"] + 0.5 for end in layout["ends"]), layout
-    finally:
-        context.close()
-
-
-@pytest.mark.xfail(strict=True, reason="until UI-1 moves the price cards above the tabs into the Pricing tab")
-def test_the_spec_fold_limits_hold_as_measured(chromium, app_url):  # noqa: F811
-    # Spec 3.2's numbers as they stand, with the price cards counted: tiles' top at most 320 px and the chart's at most
-    # 480 px. Measured 299 and 548 px: the cards and their gap (74 px) put the chart 68 px over, which the Strategy
-    # tab cannot win back without dropping the what-if strip's caption or the view bar. This test passes, and so fails
-    # as a strict xfail, once UI-1 lands; then drop the marker and the shell offset in the test above.
-    context, page = _open(chromium, app_url + INDEX)
-    try:
-        layout = page.evaluate(_LAYOUT)
-        assert layout["tiles"] <= 320 and layout["chart"] <= 480, layout
     finally:
         context.close()
 
