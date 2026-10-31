@@ -321,9 +321,12 @@ def ladder_chart(
 #: Width (px) of a character of the stress chart's amounts at 12 px, generous for the app's sans fonts (Source Sans
 #: draws "−$4,096" 44 px wide at 12 px: 6.3 px a character), and the gap between the plot and the amounts.
 AMOUNT_CHAR_WIDTH, AMOUNT_GAP = 7.0, 8
-#: Height (px) of a stress bar's row, its name above the bar, and the name's offset above the bar's centre: at a gap
-#: of 0.55 a bar is 15 px thick, so an 11 px name 14 px above its centre clears it by 1 px.
-STRESS_ROW, STRESS_NAME_SHIFT, STRESS_BAR_GAP = 34, 14, 0.55
+#: Height (px) of a stress bar's row with its name above the bar, the gap between bars, and the offset of the
+#: name's baseline above the bar's centre. Measured in Chromium: the plot gets 0.92 of the row (33 px of 36), so a
+#: bar is 13 px thick at a gap of 0.6, and a name's 14 px box ends 1.5 px below its anchor; 8 px above the centre it
+#: clears its bar by 3 px and the bar above by 3 px. Rows of 34 px left 0.2 px to the bar above, and a name centred
+#: 14 px above, the first try, sat on its own bar on a phone.
+STRESS_ROW, STRESS_NAME_SHIFT, STRESS_BAR_GAP = 36, 8, 0.6
 
 
 def stress_bars(names: Sequence[str], values, *, palette: dict[str, str] | None = None) -> go.Figure:
@@ -373,6 +376,7 @@ def stress_bars(names: Sequence[str], values, *, palette: dict[str, str] | None 
             xanchor="left",
             y=name,
             yref="y",
+            yanchor="bottom",
             yshift=STRESS_NAME_SHIFT,
             text=name,
             showarrow=False,
@@ -388,6 +392,9 @@ def stress_bars(names: Sequence[str], values, *, palette: dict[str, str] | None 
         margin=dict(r=column + MARGIN["r"], t=MARGIN["t"] + STRESS_NAME_SHIFT),
     )
     fig.update_xaxes(showspikes=False, tickformat="$,.0f")
+    ticks = signed_ticks(values)  # on a phone Plotly's own step, 5,000, drew no tick on the loss side
+    if ticks is not None and all(t == round(t) for t in ticks):
+        fig.update_xaxes(tickmode="array", tickvals=ticks)
     return fig
 
 

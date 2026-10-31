@@ -569,23 +569,19 @@ def test_the_explain_report_explains_the_what_if_move(index):
     # With a total of $1,000 or more the waterfall's labels are in whole dollars, as the table is.
     labels = [label for label in _chart(at, "explain_waterfall")["data"][0]["text"] if label]
     assert abs(full) >= 1000 and all(re.fullmatch(r"[+−]\$[\d,]+", label) for label in labels), labels
-    # No shift set: the what-if has nothing to explain, and the next session explained nothing either (every term
-    # $0.00 but Θ). The report explains the worst stress, the tile's, and says so.
+    # No shift set: the what-if has nothing to explain, so the report explains the next session (Friday 16:00 to
+    # Monday 16:00, three calendar days, nothing else moving) and says that Θ carries it all.
     quiet = _risk(report="Explain")
-    today = _book(index.s, index.t, index.r, index.q, index.vol)
-    stresses = {}
-    for sc in tab_risk.ALL_STRESSES:
-        damp = min(1.0, (index.t / (30 / 365)) ** -0.25) if sc.one_month_vol_shock else 1.0
-        vol = index.vol * (1 + (sc.vol_multiplier - 1) * damp)
-        stresses[sc.name] = (
-            _book(index.s * (1 + sc.spot_change), index.t, index.r + sc.rate_change, index.q, vol) - today
-        )
-    name, loss = min(stresses.items(), key=lambda item: item[1])
-    assert f"No what-if shift is set: this explains the worst stress, {name}," in " ".join(
-        c.value for c in quiet.caption
+    assert any(c.value.startswith("No what-if shift is set: only time moves") for c in quiet.caption)
+    decay = _book(index.s, index.t - 3 / 365, index.r, index.q, index.vol) - _book(
+        index.s, index.t, index.r, index.q, index.vol
     )
     full = _frame(quiet, "Term").set_index("Term").loc["Full revaluation", "P&L"]
-    assert full == pytest.approx(loss, abs=0.5)  # the column's whole dollars
+    assert full == pytest.approx(decay, abs=0.005)  # the column's cents
+    # Only time moves, so every other term is zero and carries no label; the time decay by repricing is exact.
+    labels = _chart(quiet, "explain_waterfall")["data"][0]["text"]
+    assert decay < 0 and [label for label in labels if label] == [f"−${-decay:.2f}"] * 2  # Θ and the total
+    assert any("unexplained (0.0% of the P&L)" in c.value for c in quiet.caption)
 
 
 @pytest.mark.parametrize("report", tab_risk.REPORTS)

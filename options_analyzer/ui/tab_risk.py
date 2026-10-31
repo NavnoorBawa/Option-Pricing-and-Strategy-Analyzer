@@ -1369,12 +1369,15 @@ def _explain(book: Book) -> None:
     method = _segmented(row, "Method", ("Taylor", "Shapley"), "ex_method", "Greek waterfall, or an exact split.")
     move = explain_target(book, target)
     if move is None:
-        # The what-if with every shift at zero has no move to explain. The next session explained nothing either:
-        # every term $0.00 but Θ, and nothing unexplained by construction. The worst stress (the tile's) moves spot,
-        # vol and rate at once, so the report opens on an attribution, and says so.
-        worst = worst_stress(book)["Scenario"]
-        move = explain_target(book, worst)
-        st.caption(f"No what-if shift is set: this explains the worst stress, {worst}, as the Worst stress tile does.")
+        # The what-if with every shift at zero has no move to explain: the report explains the next session, where
+        # only time moves, and says that Θ carries it all and how to get an attribution. The worst stress was
+        # tried instead: on the default call spread it is the dot-com bust, a 49% fall, which a Taylor expansion
+        # cannot follow (−$39,826 unexplained of −$4,096, 316%), a poor first view of the report.
+        move = explain_target(book, NEXT_SESSION)
+        st.caption(
+            "No what-if shift is set: only time moves to the next session's close, so Θ carries it all. Set a "
+            "what-if or pick a stress above."
+        )
     args = (book.position.strategy, book.position.market)
     taylor = attribution.taylor_explain(*args, multiplier=book.units, **move)
     shapley = attribution.shapley_explain(*args, multiplier=book.units, **move)

@@ -100,6 +100,17 @@ def test_no_sideways_scroll_on_a_phone(chromium, app_url, report):  # noqa: F811
         page.context.close()
 
 
+@pytest.mark.xfail(strict=True, reason="UI-1 moves the four price cards into the Pricing tab (tiles at 369 px)")
+def test_the_tiles_meet_the_specs_bound(chromium, app_url):  # noqa: F811
+    # Spec 3.3 acceptance: the tiles' top at most 260 px at 1,440 x 900. Strict: once UI-1 merges this passes and
+    # fails the suite, so that the 380 px guard above is tightened to 260 and this marker removed.
+    page = _risk(chromium, app_url)
+    try:
+        assert page.evaluate(_MEASURE)["tiles"][0] <= 260
+    finally:
+        page.context.close()
+
+
 def test_a_click_on_a_scenario_cell_sets_the_what_if_strip(chromium, app_url):  # noqa: F811
     # UI-10: the (+5%, +2 vp) cell of the desk grid: row 4 of 7 (from -10 vp) and column 6 of 9 (from -10%), the
     # overlay's point 4 x 9 + 6 = 42.
@@ -119,8 +130,8 @@ def test_a_click_on_a_scenario_cell_sets_the_what_if_strip(chromium, app_url):  
         page.context.close()
 
 
-#: The stress chart's amounts (the annotations right of the plot): their text, fill and box, with the boxes of the
-#: plot area and of the scenario names (the y tick labels).
+#: The stress chart's annotations (the amounts right of the plot and the scenario names above the bars): their
+#: text, fill and box, with the boxes of the plot area, of the bars and of any y tick label.
 _BAR_LABELS = """() => {
   const chart = document.querySelector('.st-key-chart_stress_chart');
   const box = e => { const r = e.getBoundingClientRect(); return {l: r.left, r: r.right, t: r.top, b: r.bottom}; };
@@ -128,7 +139,8 @@ _BAR_LABELS = """() => {
   return {
     svg: box(svg),
     plot: box(chart.querySelector('.cartesianlayer .bg, rect.nsewdrag')),
-    names: [...chart.querySelectorAll('.ytick text')].map(box),
+    ticks: [...chart.querySelectorAll('.ytick text')].map(box),
+    bars: [...chart.querySelectorAll('.barlayer .point path')].map(box),
     labels: [...chart.querySelectorAll('.annotation-text')].map(t => ({
       label: t.textContent, text: getComputedStyle(t).fill, box: box(t)})),
   };
@@ -149,18 +161,29 @@ def test_stress_amounts_are_whole_and_clear_of_the_bars_and_names(chromium, app_
     # On a 390 px phone the amounts sat on the bars of a plot about 140 px wide: "−$3,35" for Black Monday's −$3,353
     # (its last digit clipped) and Tariff shock's "−$3,261" drawn over its own name. Now each amount is complete,
     # inside the chart, right of the plot area and clear of every name; in the text colour on the background
-    # (spec 2.6, 4.5:1 at least).
+    # (spec 2.6, 4.5:1 at least). The names, left of the plot as tick labels, then left the bars about 70 px of the
+    # phone: they now sit above their bars, inside the plot and clear of every bar, and the plot takes the width.
     page = _risk(chromium, app_url, "report=Stress", width=width, scheme=scheme, touch=width < 600)
     try:
         found = page.evaluate(_BAR_LABELS)
-        assert len(found["labels"]) == 14, found
-        assert all(re.fullmatch(r"[+−]\$[0-9,]+(\.[0-9]{2})?", label["label"]) for label in found["labels"]), found
+        amounts = [label for label in found["labels"] if re.fullmatch(r"[+−]\$[0-9,]+(\.[0-9]{2})?", label["label"])]
+        names = [label for label in found["labels"] if label not in amounts]
+        assert len(amounts) == len(names) == len(found["bars"]) == 14, found
+        assert not found["ticks"], found["ticks"]
         surface = theme.SEMANTIC[scheme]["surface"]
-        for label in found["labels"]:
+        plot = found["plot"]
+        for label in amounts:
             box = label["box"]
-            assert box["l"] >= found["plot"]["r"] - 0.5 and box["r"] <= found["svg"]["r"] + 0.5, (label, found["plot"])
-            assert not any(_overlap(box, name) for name in found["names"]), label
+            assert box["l"] >= plot["r"] - 0.5 and box["r"] <= found["svg"]["r"] + 0.5, (label, plot)
+            assert not any(_overlap(box, name["box"]) for name in names), label
+        for name in names:
+            box = name["box"]
+            assert box["l"] >= plot["l"] - 0.5 and box["r"] <= plot["r"] + 0.5, (name, plot)
+            assert not any(_overlap(box, bar) for bar in found["bars"]), (name, found["bars"])
+        for label in found["labels"]:
             assert charts_risk.contrast(_hex(label["text"]), surface) >= 4.5, label
+        # The plot is most of the chart: 230 px of the phone's 358 px column, against about 70 before.
+        assert plot["r"] - plot["l"] >= (200 if width < 600 else 800), plot
         # The stress table shows every scenario without a scrollbar: the header and 14 rows of 28 px.
         # (the report's one table: a dataframe without selection carries no key class)
         tables = page.locator("[role=tabpanel] [data-testid=stDataFrame]")
