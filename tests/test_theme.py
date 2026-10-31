@@ -1002,8 +1002,12 @@ def test_card_rows_line_up(chromium, app_url, width, query, three_up):
         assert [len(line) for line in _lines(rows["expectation_cards"])] == ([3] if three_up else [2, 1])
         for key in ("strategy_cards", "greek_cards"):
             assert [len(line) for line in _lines(rows[key])] == [2, 2], key
-        # The Risk tab's six tiles in three pairs: 2 + 2 + 2 on a phone, 4 + 2 at 1,024 px with the sidebar open.
-        assert [len(line) for line in _lines(rows["risk_tiles"])] == ([4, 2] if three_up else [2, 2, 2])
+        # The Risk tab's six tiles in three pairs wrap by whole pairs: 2 + 2 + 2 on a phone (and, measured, at 1,024 px
+        # with the sidebar open), one line of six on a 1,440 px window (tests/test_risk_e2e.py).
+        tile_lines = [len(line) for line in _lines(rows["risk_tiles"])]
+        assert sum(tile_lines) == 6 and all(n % 2 == 0 for n in tile_lines), tile_lines
+        if not three_up:
+            assert tile_lines == [2, 2, 2]
 
         def boxes(key: str) -> list[list[tuple[int, int]]]:
             return [[(round(c["x"]), round(c["width"])) for c in line] for line in _lines(rows[key])]

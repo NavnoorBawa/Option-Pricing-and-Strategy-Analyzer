@@ -39,7 +39,11 @@ def _risk(chromium, app_url, query: str = "", *, width: int = 1440, scheme: str 
     )
     page = context.new_page()
     page.goto(f"{app_url}/?tab=Risk&{ASOF}{'&' + query if query else ''}")
-    page.locator("[role=tabpanel] .st-key-risk_tiles").first.wait_for(state="visible", timeout=180_000)
+    # The tiles' values, not their container: on a cold server the first run draws the page's skeleton (the
+    # container with grey placeholders) before the market is built, and the script state can read idle meanwhile.
+    page.locator("[role=tabpanel] .st-key-risk_tiles [data-testid=stMetricValue]").first.wait_for(
+        state="visible", timeout=180_000
+    )
     _settle(page)
     return page
 
@@ -127,7 +131,10 @@ def test_stress_bar_labels_have_contrast_in_dark_mode(chromium, app_url):  # noq
             assert charts_risk.contrast(_hex(label["text"]), behind) >= 4.5, label
         assert any(label["inside"] for label in labels) and any(not label["inside"] for label in labels)
         # The stress table shows every scenario without a scrollbar: the header and 14 rows of 28 px.
-        height = page.locator(".st-key-tbl_stress").bounding_box()["height"]
+        # (the report's one table: a dataframe without selection carries no key class)
+        tables = page.locator("[role=tabpanel] [data-testid=stDataFrame]")
+        assert tables.count() == 1
+        height = tables.first.bounding_box()["height"]
         assert abs(height - components.table_height(14)) <= 2, height
     finally:
         page.context.close()
