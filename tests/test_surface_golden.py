@@ -5,15 +5,16 @@ just before it became the ``options_analyzer.vol_surface`` package, and recorded
 the spread-weighted arbitrage-free SVI calibration (SF-4) and Lee-bounded wings (SF-8) changed these outputs on
 purpose, and when local vol's ``dw/dT`` came to read the smile's scaling in the ATM total variance off each slice
 (the model validator's finding 1 in ``docs/reviews/panel-v3.0.md``), which changed the local-vol grids and the
-summary's ATM local vol and nothing else, bit for bit. For every case below it holds what
+summary's ATM local vol and nothing else, bit for bit, and added each maturity's estimated truncation error of local
+vol (``VolSurface.local_vol_error``). For every case below it holds what
 :func:`~options_analyzer.vol_surface.parse_quotes`, :func:`~options_analyzer.vol_surface.fit_market_surface` (or
 :func:`~options_analyzer.vol_surface.ssvi_surface`), :func:`~options_analyzer.vol_surface.surface_summary` and
 :meth:`~options_analyzer.vol_surface.VolSurface.implied_vol_at` returned or raised:
 
 * messages, notes and error messages verbatim, with the :class:`~options_analyzer.vol_surface.QuoteWarning` ones marked;
 * SVI parameters, each SVI slice's total variance at nine points of its quoted range, maturities, quoted ranges, fit
-  RMSEs, the summary table and implied vols at chosen points as exact floats (JSON writes the shortest decimal that
-  reads back as the same double);
+  RMSEs, the estimated truncation error of local vol, the summary table and implied vols at chosen points as exact
+  floats (JSON writes the shortest decimal that reads back as the same double);
 * every large array as its shape, NaN count, sum and the SHA-256 of its float64 bytes, and its values to 10
   significant digits: all of them for the K/S grid and the implied- and local-vol grids, 256 at evenly spaced
   positions for the cleaned and fitted quote tables.
@@ -179,6 +180,7 @@ def _surface(surface: vs.VolSurface) -> dict[str, Any]:
         "local_vol": _array(surface.local_vol),
         "quotes": None if surface.quotes is None else _frame(surface.quotes),
         "fit_rmse": None if surface.fit_rmse is None else _floats(surface.fit_rmse),
+        "local_vol_error": None if surface.local_vol_error is None else _floats(surface.local_vol_error),
         "svi": [_floats(dataclasses.astuple(fit)) for fit in surface.svi],
         "svi_variance": _svi_variance(surface),
         "quoted_y": None if surface.quoted_y is None else _floats(surface.quoted_y),
