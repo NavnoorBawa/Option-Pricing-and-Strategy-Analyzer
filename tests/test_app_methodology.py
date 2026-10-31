@@ -494,7 +494,7 @@ def _links() -> list[tuple[str, str]]:
 
 def test_every_reference_has_authors_a_year_and_a_link():
     entries = _entries()
-    assert len(entries) == 30
+    assert len(entries) == 31
     for entry in entries:
         assert re.match(r"^[A-Z][^()]+ \((19|20)\d\d\)\. ", entry), entry
         assert _LINK.search(entry), f"no link: {entry}"
@@ -505,7 +505,7 @@ def test_doi_and_arxiv_links_say_where_they_go():
     # abstract; any other link names its host.
     links = _links()
     dois = [(text, url) for text, url in links if text.startswith("doi:")]
-    assert len(dois) == 21
+    assert len(dois) == 22
     for text, url in dois:
         doi = text.removeprefix("doi:")
         assert _DOI.fullmatch(doi) and url == f"https://doi.org/{doi}", text
@@ -529,6 +529,7 @@ CITED = {
     "GARCH": "Bollerslev, T.", "Dupire": "Dupire, B.",
     "Gatheral & Jacquier": "Gatheral, J. and Jacquier, A.", "Gatheral's": "Gatheral, J. (2006)",
     "Lee's": "Lee, R. W.", "Zeliade": "De Marco, S. and Martini, C.", "Fritsch–Butland": "Fritsch, F. N.",
+    "Hyman's limit": "Hyman, J. M.",
     "2026 severely adverse": "Federal Reserve System (2026)",
     "Kupiec": "Kupiec, P. H.", "Christoffersen": "Christoffersen, P. F.",
     "MAR32": "Basel Committee on Banking Supervision (2020)",

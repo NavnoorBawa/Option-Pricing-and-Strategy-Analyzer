@@ -3,15 +3,18 @@
 ``tests/fixtures/surface_golden.jsonl`` was first recorded from the flat module ``options_analyzer/vol_surface.py``
 just before it became the ``options_analyzer.vol_surface`` package, and recorded again when parity forwards (SF-3),
 the spread-weighted arbitrage-free SVI calibration (SF-4) and Lee-bounded wings (SF-8) changed these outputs on
-purpose. For every case below it holds what
+purpose, and when local vol's ``dw/dT`` came to read the smile's scaling in the ATM total variance off each slice
+(the model validator's finding 1 in ``docs/reviews/panel-v3.0.md``), which changed the local-vol grids and the
+summary's ATM local vol and nothing else, bit for bit, and added each maturity's estimated truncation error of local
+vol (``VolSurface.local_vol_error``). For every case below it holds what
 :func:`~options_analyzer.vol_surface.parse_quotes`, :func:`~options_analyzer.vol_surface.fit_market_surface` (or
 :func:`~options_analyzer.vol_surface.ssvi_surface`), :func:`~options_analyzer.vol_surface.surface_summary` and
 :meth:`~options_analyzer.vol_surface.VolSurface.implied_vol_at` returned or raised:
 
 * messages, notes and error messages verbatim, with the :class:`~options_analyzer.vol_surface.QuoteWarning` ones marked;
 * SVI parameters, each SVI slice's total variance at nine points of its quoted range, maturities, quoted ranges, fit
-  RMSEs, the summary table and implied vols at chosen points as exact floats (JSON writes the shortest decimal that
-  reads back as the same double);
+  RMSEs, the estimated truncation error of local vol, the summary table and implied vols at chosen points as exact
+  floats (JSON writes the shortest decimal that reads back as the same double);
 * every large array as its shape, NaN count, sum and the SHA-256 of its float64 bytes, and its values to 10
   significant digits: all of them for the K/S grid and the implied- and local-vol grids, 256 at evenly spaced
   positions for the cleaned and fitted quote tables.
@@ -32,7 +35,8 @@ by one. Measured on the recording machine with NumPy's AVX-512 code paths and Op
 text, count and NaN was the same, and the largest difference was 4.2% of that tolerance (4.2e-8 relative, a butterfly
 in vol points; 4.1e-8 in the local-vol grids). Raw SVI parameters are not identifiable on a flat smile (there ``s``
 moved by a factor of three while every vol agreed), so they are compared only through the variances and vols they
-give.
+give. The estimated truncation error of local vol, a difference of two local vols, is compared to an absolute
+:data:`LOCAL_VOL_ERROR_ATOL` instead.
 
 The fit is not bit-reproducible on every input, before the split as after it: on some quote tables (about one in
 twelve random ones) repeating the same call can end :func:`~options_analyzer.vol_surface.fit_svi`'s
@@ -78,9 +82,9 @@ GOLDEN = FIXTURES / "surface_golden.jsonl"
 HEADER = (
     "# Provenance: synthetic",
     "# Description: outputs of options_analyzer.vol_surface for the cases in tests/test_surface_golden.py, recorded",
-    "# after SF-3, SF-4 and SF-8 (parity forwards, the arbitrage-free SVI fit). The first JSON line holds the",
-    "# recording platform and the module's names; each further line holds one case. Record again with",
-    "# PYTHONPATH=. python tests/test_surface_golden.py --record",
+    "# after SF-3, SF-4 and SF-8 (parity forwards, the arbitrage-free SVI fit) and the scaled dw/dT of local vol.",
+    "# The first JSON line holds the recording platform and the module's names; each further line holds one case.",
+    "# Record again with PYTHONPATH=. python tests/test_surface_golden.py --record",
 )
 #: Off the recording platform numbers must agree to RTOL (ATOL near zero). Since SF-4 the default calibration ends in
 #: a constrained search (SLSQP) that stops at a tolerance, not at a bit pattern: with OpenBLAS on one thread instead
@@ -93,6 +97,10 @@ RTOL, ATOL = 1e-4, 1e-9
 #: up to 1.4e-5 half-spread (5e-4 relative) under those settings, so it is compared to this many half-spreads instead.
 ERROR_RATIO = "Median |error| / half-spread"
 ERROR_RATIO_ATOL = 5e-5
+#: The estimated truncation error of local vol is a difference of two local vols of about 0.2, each within RTOL off
+#: the recording platform: with NumPy 1.26 and SciPy 1.11 it moved by 4.0e-7 (0.00004 vol point, 2.6e-4 of a value of
+#: 0.0015), so it is compared to 0.001 vol point instead; a change of the stencils moves it by tens of percent.
+LOCAL_VOL_ERROR, LOCAL_VOL_ERROR_ATOL = "local_vol_error", 1e-5
 #: Quotes that hold static arbitrage themselves (or a smile at zero variance): their arbitrage-free fit is the end of
 #: a constrained search whose path depends on the last bits of the BLAS kernels, so off the recording platform it may
 #: end at another arbitrage-free smile, or, on fit_zero_total_variance, at none (and the surface says so). Under the
@@ -177,6 +185,7 @@ def _surface(surface: vs.VolSurface) -> dict[str, Any]:
         "local_vol": _array(surface.local_vol),
         "quotes": None if surface.quotes is None else _frame(surface.quotes),
         "fit_rmse": None if surface.fit_rmse is None else _floats(surface.fit_rmse),
+        "local_vol_error": None if surface.local_vol_error is None else _floats(surface.local_vol_error),
         "svi": [_floats(dataclasses.astuple(fit)) for fit in surface.svi],
         "svi_variance": _svi_variance(surface),
         "quoted_y": None if surface.quoted_y is None else _floats(surface.quoted_y),
@@ -612,7 +621,7 @@ def _differences(actual: Any, expected: Any, path: str = "", *, exact: bool) -> 
             for found in _differences(*pair, f"{path}[{i}]", exact=exact)
         ]
     if isinstance(expected, float) and isinstance(actual, float) and not exact:
-        atol = ERROR_RATIO_ATOL if ERROR_RATIO in path else ATOL
+        atol = ERROR_RATIO_ATOL if ERROR_RATIO in path else LOCAL_VOL_ERROR_ATOL if LOCAL_VOL_ERROR in path else ATOL
         close = math.isclose(actual, expected, rel_tol=RTOL, abs_tol=atol)
         return [] if close else [f"{path}: {actual!r} != {expected!r}"]
     same = type(actual) is type(expected) and (
