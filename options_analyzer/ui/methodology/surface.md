@@ -15,14 +15,55 @@ $$
 The numerator and $g$ are exactly the calendar and butterfly no-arbitrage conditions; where either fails
 local volatility is undefined and is reported rather than patched.
 
-$\partial_y w$ and $\partial_{yy} w$ are analytic; $\partial_T w$ at fixed $y$ comes from secants between
-neighbouring maturities evaluated at the same $y$ — their Fritsch–Butland weighted harmonic mean inside, the
-one-sided three-point formula at the first maturity (the one-sided secant where that is not positive), and the
-one-sided secant at the last, where quote noise outweighs the secant's truncation error. A secant that falls
-by more than the quotes' precision is calendar arbitrage; one that changes by less (two expiries a day apart,
-say) cannot resolve $\partial_T w$ and is not used, and where no secant is left local vol is left blank.
+$\partial_y w$ and $\partial_{yy} w$ are analytic. $\partial_T w$ at fixed $y$ has two parts. A smile that keeps
+its shape in $y/\sqrt{\theta}$, with $\theta(T)$ the at-the-money total variance (as an SSVI smile nearly does, and
+an equity index skew roughly does), changes with $T$ at a rate its own slice gives:
+
+$$
+\partial_T w = \frac{\theta'(T)}{\theta}\left(w - \tfrac12\,y\,\partial_y w\right),
+$$
+
+with $\theta'$ from the parabola through $\ln\theta$ against $\ln T$ at the maturity and its two neighbours,
+through the last three at the last maturity. There that parabola is kept between the slopes a straight line and a
+power law through the last two slices give, and $\theta'$ is at most three times the secant of $\theta$ next to it.
+What the smile does beyond that scaling comes from the parabola in $T$ through the neighbouring slices at the same
+$y$: through the first three maturities at the first, the maturity and its two neighbours inside, and from the line
+through the last two at the last, where noise in total variance, which grows with $T$, outweighs the truncation
+error. Secants in $T$ alone miss the scaling, whose share of $w$ near the money grows like $\sqrt{T}$: with
+noise-free SSVI quotes at the listed expiries from 30 days to two years, local vol was up to 2.1 vol points off at
+30 days with them, and is within 0.1 vol point now (0.45 on weekly expiries to 28 days followed by 60, 91, 182 and
+365 days, at the year after a half-year gap; 0.07 every two weeks to a year; 0.03 on quarterly expiries to two
+years; 0.54 and 0.63 on a steep equity skew on the weekly and the listed expiries, against 1.37 and 0.96 with
+secants); a flat surface gives its flat local vol exactly. With quotes noisy to 0.2 vol point the noise dominates:
+the RMS error is 0.93 vol point at the first expiry, 0.58 inside and 0.87 at the last (1.28, 0.56 and 0.89 with
+secants).
+
+The last expiry is a trade-off. With $\theta'$ from the last two slices alone it was worse than with secants on a
+third of clean surfaces, by up to 3.3 times (1.96 against 1.19 vol points on that equity skew, weekly expiries);
+from the last three without the bracket its clean error halves again, but an at-the-money vol falling from 80% to
+20% within months, on expiries at 30, 91, 365 and 730 days, puts it 4.2 vol points off instead of 0.74, and the
+noise grows. With the bracket it is no worse than with secants on any of 245 clean surfaces on the listed, weekly
+and quarterly expiries, but it still is on 8 of 52 where the last two expiries are a year apart (30, 91, 365 and
+730 days), by up to 2.4 times, and on the synthetic index chain, whose prices sit on ticks, its last expiry is 0.60
+vol point off on average over 16 draws of the chain's noise, against 0.55 with secants.
+
+Secants between neighbouring maturities, evaluated at the same $y$, still decide where $\partial_T w$ stands: one
+that falls by more than the quotes' precision is calendar arbitrage, and one that changes by less (two expiries a
+day apart, say) cannot resolve $\partial_T w$, so where no secant is left local vol is left blank. Where the formula
+above cannot use all three maturities (one quoted far from the forward or from $y$, a change within the quotes'
+precision, or a slope above three times the smaller secant: Hyman's limit, beyond which a cubic through the slices
+is no longer guaranteed to be monotone) it uses the maturity and one neighbour, and failing that the secants give
+$\partial_T w$: their Fritsch–Butland weighted harmonic mean inside, the one-sided three-point formula at the first
+maturity and the one-sided secant at the last.
 Implied vol is shown only inside each maturity's quoted strikes, and local vol only where the neighbouring
 maturities are quoted near the same forward moneyness.
+
+The truncation error of local vol is estimated at each maturity as the largest change over its strikes when
+$\partial_T w$ comes from one neighbouring slice more. On noise-free quotes it is close to the actual error: over
+1,196 maturities of 60 random SSVI surfaces its median is 1.11 times the error, and twice it covers the error at 91%
+of them. It is an estimate, not a bound: it falls several-fold short where the expiries are too far apart for the
+term structure (0.6 against 2.5 vol points at a year on expiries at 30, 91, 365 and 730 days with an at-the-money
+vol falling from 80% to 20%), and with noisy quotes it moves with the noise rather than measuring it.
 
 ### Forwards and discounting
 Option prices are inverted at each expiry's own forward $F$ and discount factor $D$, read from the quotes by
