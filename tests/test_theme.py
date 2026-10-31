@@ -824,7 +824,7 @@ TAB_READY = {
     "Pricing": ".st-key-sensitivity_chart",
     "Strategy": ".st-key-strategy_cards",
     "Risk": ".st-key-var_cards",
-    "Surface": ".st-key-surface_cards",
+    "Surface": ".st-key-surface_tiles",
     "IV": ".st-key-iv_cards",
     "Methodology": ".st-key-methodology",
 }
@@ -888,7 +888,7 @@ CARD_ROW_TABS = {
     "greek_cards": "Strategy",
     "expectation_cards": "Strategy",
     "var_cards": "Risk",
-    "surface_cards": "Surface",
+    "surface_tiles": "Surface",
     "iv_cards": "IV",
 }
 
@@ -982,7 +982,7 @@ def test_card_rows_line_up(chromium, app_url, width, query, three_up):
                 _tab(page, tab)
             rows[key] = page.evaluate(_CARD_ROW, key)
         for key, cards in rows.items():
-            assert len(cards) in (3, 4), key
+            assert len(cards) in (3, 4, 6), key  # six: the Surface tiles, three pairs
             for line in _lines(cards):
                 for measure in ("width", "height", "valueTop"):
                     values = [card[measure] for card in line]
@@ -1002,6 +1002,8 @@ def test_card_rows_line_up(chromium, app_url, width, query, three_up):
         assert [len(line) for line in _lines(rows["expectation_cards"])] == ([3] if three_up else [2, 1])
         for key in ("strategy_cards", "greek_cards", "var_cards"):
             assert [len(line) for line in _lines(rows[key])] == [2, 2], key
+        if width < 1440:  # the Surface tiles: three pairs, a pair per line at these widths (six across at 1,440)
+            assert [len(line) for line in _lines(rows["surface_tiles"])] == [2, 2, 2]
 
         def boxes(key: str) -> list[list[tuple[int, int]]]:
             return [[(round(c["x"]), round(c["width"])) for c in line] for line in _lines(rows[key])]
