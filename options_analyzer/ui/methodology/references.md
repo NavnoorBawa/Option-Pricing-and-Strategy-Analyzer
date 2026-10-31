@@ -32,6 +32,30 @@
   scenarios).
   [federalreserve.gov](https://www.federalreserve.gov/publications/files/2026-final-supervisory-stress-test-scenarios-20260204.pdf)
 
+### Backtests and forecast comparison
+* Kupiec, P. H. (1995). Techniques for verifying the accuracy of risk measurement models. *Journal of Derivatives*
+  3(2), 73–84. [doi:10.3905/jod.1995.407942](https://doi.org/10.3905/jod.1995.407942)
+* Christoffersen, P. F. (1998). Evaluating interval forecasts. *International Economic Review* 39(4), 841–862.
+  [doi:10.2307/2527341](https://doi.org/10.2307/2527341)
+* Basel Committee on Banking Supervision (1996). *Supervisory framework for the use of "backtesting" in conjunction
+  with the internal models approach to market risk capital requirements*, January 1996.
+  [bis.org/publ/bcbs22.htm](https://www.bis.org/publ/bcbs22.htm)
+* Basel Committee on Banking Supervision (2020). *MAR32: Backtesting and P&L attribution test requirements*, Basel
+  Framework, version of 27 March 2020, in force from 1 January 2023.
+  [bis.org](https://www.bis.org/basel_framework/chapter/MAR/32.htm?inforce=20230101&published=20200327)
+* Acerbi, C. and Szekely, B. (2014). Backtesting expected shortfall. MSCI research paper, December 2014.
+  [msci.com](https://www.msci.com/documents/10199/22aa9922-f874-4060-b77a-0f0e267a489b)
+* Patton, A. J., Ziegel, J. F. and Chen, R. (2019). Dynamic semiparametric models for expected shortfall (and
+  Value-at-Risk). *Journal of Econometrics* 211(2), 388–413.
+  [doi:10.1016/j.jeconom.2018.10.008](https://doi.org/10.1016/j.jeconom.2018.10.008),
+  [arXiv:1707.05108](https://arxiv.org/abs/1707.05108)
+* Diebold, F. X. and Mariano, R. S. (1995). Comparing predictive accuracy. *Journal of Business & Economic
+  Statistics* 13(3), 253–263. [doi:10.1080/07350015.1995.10524599](https://doi.org/10.1080/07350015.1995.10524599)
+* Newey, W. K. and West, K. D. (1987). A simple, positive semi-definite, heteroskedasticity and autocorrelation
+  consistent covariance matrix. *Econometrica* 55(3), 703–708. [doi:10.2307/1913610](https://doi.org/10.2307/1913610)
+* Hull, J. and White, A. (1998). Incorporating volatility updating into the historical simulation method for
+  value-at-risk. *Journal of Risk* 1(1), 5–19. [doi:10.21314/JOR.1998.001](https://doi.org/10.21314/JOR.1998.001)
+
 ### Volatility surface
 * Dupire, B. (1994). Pricing with a smile. *Risk*, January 1994.
   [risk.net](https://www.risk.net/derivatives/equity-derivatives/1500211/pricing-with-a-smile)
