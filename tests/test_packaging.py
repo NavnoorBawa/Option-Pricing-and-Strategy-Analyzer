@@ -30,3 +30,20 @@ def test_launcher_without_streamlit_explains_the_app_extra(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         launch.main()
     assert "'app' extra" in str(exc.value.code)
+
+
+def _git(*args: str) -> list[str]:
+    """Lines of a git command run in the checkout; skips where there is no git repository (an unpacked sdist)."""
+    import shutil
+    import subprocess
+
+    if shutil.which("git") is None or not (ROOT / ".git").exists():
+        pytest.skip("needs a git checkout")
+    result = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, check=True)
+    return result.stdout.splitlines()
+
+
+def test_no_tracked_file_is_one_that_gitignore_excludes():
+    # Four logs of a failed local run (study_*.log, each one line naming a missing script by its local path) were
+    # committed at the repository root; *.log is ignored now, and this catches any other ignored file that slips in.
+    assert _git("ls-files", "--cached", "--ignored", "--exclude-standard") == []

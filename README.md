@@ -265,9 +265,9 @@ The public app uses synthetic data and files you upload; it never scrapes market
 - The VaR model's backtest runs on a synthetic history: there is no market history in the public app.
 
 [ROADMAP.md](ROADMAP.md) lists what is done and what remains, and
-[docs/improvement-guide.md](docs/improvement-guide.md) says how to take it further. This project is for education and analysis only and is
-**not investment advice**. Version 2.0 was a ground-up rebuild
-after a full audit of the original app ([AUDIT.md](AUDIT.md)); version 3.0 is summarised in the
+[docs/improvement-guide.md](docs/improvement-guide.md) says how to take it further. This project is for education and
+analysis only and is **not investment advice**. Version 2.0 was a ground-up rebuild after a full audit of the original
+app ([docs/reviews/audit-v1.md](docs/reviews/audit-v1.md)); version 3.0 is summarised in the
 [scorecard](docs/scorecard.md).
 
 ## Author
