@@ -99,6 +99,6 @@ Everything the project uses is free.
 | Papers: Jäckel (2015) *Let's Be Rational*; Andersen, Lake and Offengenden (2016); Healy (2021); Leisen and Reimer (1996); Gatheral (2006); Gatheral and Jacquier (2014); Acerbi and Tasche (2002) | Publicly available | Methods; full references in the app's Methodology tab |
 | NYSE holiday calendar, Cboe and OCC product specifications | Public web pages | The market clock, settlement rules and OCC symbols |
 
-Development was AI-assisted: the code, tests and documents were written with Claude Code (an AI coding assistant,
-on a paid plan) under the author's direction. Every result above is reproducible from the repository with the free
+Development was AI-assisted: the code, tests and documents were written with an AI coding assistant (on a paid
+plan) under the author's direction. Every result above is reproducible from the repository with the free
 tools listed.

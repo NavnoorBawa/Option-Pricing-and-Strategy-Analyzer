@@ -208,7 +208,9 @@ st.strike_for_delta(-0.16, market, 0.5, 0.22, "put")  # 88.07, the 16-delta put 
   opening print, PM weeklies at the 16:00 close), and is calendar days / 365 in the Textbook market. Rates and
   dividend yield are continuously compounded.
 - Greeks are displayed per calendar day (theta, charm, veta, color), per volatility point (vega, vanna, zomma …), per
-  1 % rate move (rho) and per $1 spot move (delta, gamma, speed).
+  1 % rate or dividend-yield move (rho, epsilon) and per point of spot (delta, speed). Gamma is shown for a 1 % move:
+  as Γ 1 % on the Pricing tab, the change in delta (Γ·S/100), and as Γ P&L 1 % on the Strategy and Risk tabs, the
+  dollar P&L of the move (½Γ(0.01·S)² for the position).
 - VaR horizons are in trading days (252 per year).
 - Strategy quantities are signed (+ long, − short); one unit is an option on one share. P&L is shown for the whole
   position (contracts × multiplier).
@@ -226,14 +228,18 @@ options_analyzer/
   implied_vol.py            Bounds-checked implied volatility, scalar and batch
   strategies.py             Leg-based strategy engine, templates, position risk
   scenarios.py              Stress tests, scenario grids, Greek ladder, vega buckets
-  risk.py                   Monte Carlo VaR / Expected Shortfall
-  vol_surface/              SVI, SSVI, quote parsing, surface fitting, local volatility
+  risk.py                   VaR / Expected Shortfall: Monte Carlo, delta-normal, exact delta-gamma-theta
+  backtest.py               VaR and ES backtests and their power, plain and volatility-scaled historical simulation
+  attribution.py            P&L explain: Greek waterfall and exact Shapley split
+  margin.py                 Illustrative FINRA 4210(g)-style portfolio margin
+  vol_surface/              Parity forwards, SVI, SSVI, quote parsing, surface fitting, local vol, published surface
   clock.py                  Market clock: NYSE calendar, settlement times, variance clock
   market_data/              Synthetic option chain, chain adapters, schema and OCC symbols
   ui/                       Streamlit interface (one module per tab, desk header, Methodology)
 tests/                      pytest suite (engines, oracles, invariants, app); tests/oracle needs QuantLib
 benchmarks/                 Timing scripts for the engines
-docs/                       Scorecard, method notes, data policy, screenshots
+scripts/                    README screenshots, the American engine's QuantLib reference grid
+docs/                       Scorecard, method notes, data policy, reviews, screenshots
 ```
 
 ## Development
