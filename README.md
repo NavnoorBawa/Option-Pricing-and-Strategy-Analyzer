@@ -257,7 +257,9 @@ The public app uses synthetic data and files you upload; it never scrapes market
 
 - Strategy and Risk value every leg with Black–Scholes–Merton at its own surface vol and expiry, sticky strike: the
   smile does not move with spot in scenarios, and exercise is European (the textbook market's American engine prices
-  the Pricing and IV tabs only, and the Strategy tab says what early exercise adds).
+  the Pricing and IV tabs only, and the Strategy tab says what early exercise adds). Legs on a later expiry than the
+  front one still take the front expiry's carry (on the default call calendar about 2 bp off its own discount rate,
+  $2.69 a contract).
 - The portfolio-margin array is illustrative (FINRA 4210(g)-style), not a broker's requirement. Transaction costs
   beyond a flat commission and discrete dividends are not modelled.
 - The VaR model's backtest runs on a synthetic history: there is no market history in the public app.

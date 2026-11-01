@@ -133,6 +133,8 @@ foundation and each reviewed by an independent correctness and design pass befor
   (`options_analyzer/margin.py`; ten points from −8 % to +6 % for a broad-based index) in the Risk tab's Scenarios.
   Left: a SPAN-like array as a library function.
 - [ ] RK-11 Futures legs and per-leg exercise style.
+- [ ] RK-13 Carry per expiry for legs on a later expiry: `strategies.Market` holds one rate and dividend yield, so a
+  calendar's back leg takes the front expiry's carry (about 2 bp, $2.69 a contract on the default call calendar).
 - [ ] RK-10 Euler ES contributions by leg and expiry (could).
 
 ### Strategy and Risk interface
