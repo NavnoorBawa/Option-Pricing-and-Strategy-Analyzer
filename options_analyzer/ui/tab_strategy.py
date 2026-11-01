@@ -315,6 +315,7 @@ class _Choice:
     risk_neutral: bool
     drift: float  # % a year, the user's view
     carry: bool
+    notes: tuple[str, ...] = ()  # wings the template moved into the surface's reach (legs.index_template)
 
 
 def _published(inputs: Inputs):
@@ -353,6 +354,7 @@ def _choice(inputs: Inputs) -> _Choice:
     label = _control("strategy", _label(default_template(index)), str, labels.__contains__, _link_template)
     name = _name(label)
     expiry = None
+    notes: list[str] = []
     if index:
         _, expiry = _template_expiry(published)
         by = _control("strategy_strikes_by", BY_DELTA, str, (BY_DELTA, BY_WIDTH).__contains__)
@@ -379,6 +381,7 @@ def _choice(inputs: Inputs) -> _Choice:
                 short_delta=delta / 100.0,
                 wing=float(wing),
                 width=width,
+                notes=notes,
             )
     else:
         width_pct = _control("strategy_width_pct", None, float, _within((MIN_WIDTH_PCT, MAX_WIDTH_PCT)))
@@ -394,7 +397,7 @@ def _choice(inputs: Inputs) -> _Choice:
     carry = bool(st.session_state.get("carry", False))
     store = f"{inputs.preset}::{label}"
     return _Choice(name, label, base, store, expiry, int(contracts), float(multiplier), float(commission),
-                   risk_neutral, drift, carry)  # fmt: skip
+                   risk_neutral, drift, carry, tuple(notes))  # fmt: skip
 
 
 def _width(inputs: Inputs, width_pct: float | None) -> float:
@@ -1124,12 +1127,12 @@ def _basis_text(basis: str) -> str:
     }[basis]
 
 
-def _empty_tiles() -> None:
+def _empty_tiles(reason: str = "No leg is on.") -> None:
     labels = ("Net premium", "Package", "Max profit", "Max loss", "Breakevens", "P(profit)")
     card_row(
         "strategy_tiles",
         ("strategy_tiles_a", "strategy_tiles_b", "strategy_tiles_c"),
-        [(label, MISSING, {"help": "No leg is on."}) for label in labels],
+        [(label, MISSING, {"help": reason}) for label in labels],
         one_line_px=TILE_VALUE_PX,
     )
 
@@ -1627,6 +1630,22 @@ def _row_actions(ctx: _Context, grid: lg.Grid) -> None:
 # --- The tab ------------------------------------------------------------------------------------------------------
 
 
+def _empty_reason(book: lg.Book) -> str:
+    """Why there is no position to analyse, by cause: rows in error, every leg that is on expired, or no leg on."""
+    if book.errors:
+        return "Fix or switch off the rows in error: no number is shown until every leg that is on can be valued."
+    on = [p for p in book.legs if p.on]
+    if on and all(p.expired for p in on):
+        return "Every leg that is on has expired at this valuation time. Pick a template or a later expiry."
+    return "No legs are on. Pick a template or switch a leg on in the blotter."
+
+
+def _template_notes(choice: _Choice, frame: pd.DataFrame) -> None:
+    """The template's wings moved into the surface's reach (:func:`.legs.index_template`), while the legs follow it."""
+    if choice.notes and _same(frame, choice.base):
+        st.caption(f"Wings moved in to the farthest strikes the surface reaches: {', '.join(choice.notes)}.")
+
+
 def render(inputs: Inputs) -> None:
     """Draw the rest of the tab, below :func:`controls`: tiles, what-if strip, primary view, blotter and footer."""
     try:
@@ -1640,10 +1659,17 @@ def render(inputs: Inputs) -> None:
     published = _published(inputs)
     index = published is not None
     as_of = inputs.context.as_of if index else mk.last_close()
-    if book.strategy is None:
-        _empty_tiles()
-        st.info("No legs are on. Pick a template or switch a leg on in the blotter.")
-        _blotter(None, inputs, choice, state, frame, editor_key, book, None)
+    if book.strategy is None or book.errors:
+        # Rows in error: no number, as the Risk tab (build_position). The valid legs alone were analysed before, under
+        # the template's name: a same-day iron condor whose wings had no vol read Max loss "Unlimited" and the P&L
+        # of a naked strangle, the errors below the fold.
+        _empty_tiles(_empty_reason(book))
+        for message in book.errors:
+            st.error(message)
+        if not book.errors:
+            st.info(_empty_reason(book))
+        _template_notes(choice, frame)
+        _blotter(None, inputs, choice, state, frame, editor_key, None)
         return
     position = Position(book.strategy, book.market, choice.contracts, choice.multiplier, book, choice.carry)
     entered = _entered(book.strategy, book.market)
@@ -1654,6 +1680,7 @@ def render(inputs: Inputs) -> None:
         front_at = as_of + timedelta(days=metrics.horizon * 365)
     ctx = _Context(inputs, choice, book, position, published, as_of, front_at, entered, metrics)
     _tiles(ctx)
+    _template_notes(choice, frame)
     atm = book.market.volatility
     shifts = whatif.strip(
         spot=book.market.spot,
@@ -1695,11 +1722,11 @@ def render(inputs: Inputs) -> None:
         )  # fmt: skip
         _table(ctx, shifts, str(unit))
         profile = None
-    _blotter(ctx, inputs, choice, state, frame, editor_key, book, profile)
+    _blotter(ctx, inputs, choice, state, frame, editor_key, profile)
     _footer(ctx)
 
 
-def _blotter(ctx, inputs, choice, state, frame, editor_key, book, profile) -> None:
+def _blotter(ctx, inputs, choice, state, frame, editor_key, profile) -> None:
     published = _published(inputs)
     index = published is not None
     grid = lg.Grid(published, step=_width(inputs, None) if not index else 1.0)
@@ -1713,8 +1740,6 @@ def _blotter(ctx, inputs, choice, state, frame, editor_key, book, profile) -> No
         _steppers(ctx, grid, head, frame)
         if profile is not None:
             _download(ctx, profile, head)
-    for message in book.errors:
-        st.error(message)
     if choice.name != CUSTOM and not _same(frame, choice.base):
         st.caption(
             "Edited legs: kept as they are while the builder or the market changes. Reset legs to template (Edit) "

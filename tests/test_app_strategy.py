@@ -580,8 +580,9 @@ def test_the_empty_and_invalid_states():
     editor = LegsEditor(at)
     at = editor.edit({str(i): {"On": False} for i in range(4)})
     assert all(value == "–" for value, _ in _tiles(at).values())
-    assert any("No legs are on" in i.value for i in at.info)
-    # A zero quantity: one line under the editor naming the row; the other legs are analysed.
+    assert [i.value for i in at.info] == ["No legs are on. Pick a template or switch a leg on in the blotter."]
+    # A zero quantity: one line naming the row, and no number, as the Risk tab, which has no position to analyse.
+    # The other three legs were analysed before, under the template's name and with the error below the fold.
     editor = LegsEditor(_edit(_index()))
     editor.id = _editor_id(editor.at)
     editor.state = {**NO_EDITS, "edited_rows": {"0": {"Qty": 0}}}
@@ -591,7 +592,56 @@ def test_the_empty_and_invalid_states():
     assert [e.value for e in at.error] == [
         "Row 1: the quantity is zero; type a signed whole number, or switch the leg off."
     ]
-    assert _tiles(at)["Net premium"] == ("$4,815", "credit")
+    assert all(value == "–" for value, _ in _tiles(at).values())
+    assert not at.info  # the legs are on: "No legs are on" told the user to switch on legs that were
+    assert _metric(at, "Max loss").help.startswith("Fix or switch off the rows in error")
+    assert not at.get("plotly_chart")
+    _open(at, "Risk")
+    assert any("no position to analyse" in i.value for i in at.info)
+
+
+def test_a_strike_beyond_the_surface_leaves_every_tile_empty():
+    # The edit of the audit: the long 5,300 put moved to strike 1, far below the surface's reach. Analysed alone, the
+    # other three legs read "Max loss −$535,185" and P(profit) 77.3% for the "Iron Condor".
+    editor = LegsEditor(_edit(_index()))
+    editor.id = _editor_id(editor.at)
+    editor.state = {**NO_EDITS, "edited_rows": {"0": {"Strike": 1.0}}}
+    states = editor.at._tree.get_widget_states()
+    states.widgets.append(WidgetState(id=editor.id, string_value=json.dumps(editor.state)))
+    at = editor.at._run(states)
+    assert [e.value for e in at.error] == ["Row 1: the surface has no vol at 1 on 18‑Dec‑26 AM; type an IV override."]
+    assert all(value == "–" for value, _ in _tiles(at).values())
+
+
+def test_legs_all_expired_say_so():
+    # Edited legs keep their dates: at the 18-Dec-26 AM settlement's day at noon, every leg has settled. The tab
+    # said "No legs are on. ... switch a leg on", while the blotter marked each leg on and expired.
+    at = _edit(_index())
+    at = LegsEditor(at).edit({"0": {"Qty": 2}})
+    at.sidebar.datetime_input(key="asof").set_value(datetime(2026, 12, 18, 12, 0)).run()
+    _ok(at)
+    infos = [i.value for i in at.info]
+    assert "Every leg that is on has expired at this valuation time. Pick a template or a later expiry." in infos
+    assert not any("No legs are on" in i for i in infos)
+
+
+def test_a_same_day_template_keeps_its_wings_within_the_surfaces_reach():
+    # At noon on Friday 30-Oct-26 the same-day PM expiry lists 5,000 to 6,250, but the surface reaches 5,715 to
+    # 5,885 only. The iron condor's 100-point wings, 5,675 and 5,920, had no vol: two rows in error, and the tiles
+    # analysed a naked short strangle (Max loss "Unlimited"). The wings move in to the farthest strikes reached, and
+    # the maximum loss is the wider wing less the credit, from the Net premium tile.
+    at = _app(preset=None, asof="2026-10-30T12:00", expiry="2026-10-30", strategy_expiry="2026-10-30 PM")
+    assert at.caption and any(
+        c.value == "Wings moved in to the farthest strikes the surface reaches: 5,715 for 5,675 on 30‑Oct‑26 PM, "
+        "5,885 for 5,920 on 30‑Oct‑26 PM."
+        for c in at.caption
+    )
+    credit = float(_metric(at, "Net premium").value.lstrip("$"))  # cents below $1,000: $358.61
+    published = surface_state.publish(mk.index_market(datetime(2026, 10, 30, 12)))
+    same_day = Expiry(date(2026, 10, 30), "PM")
+    assert all(np.isfinite(published.vol(k, same_day).vol) for k in (5715.0, 5775.0, 5820.0, 5885.0))
+    wider = max(5775.0 - 5715.0, 5885.0 - 5820.0)
+    assert _metric(at, "Max loss").value == f"{MINUS}${100 * wider - credit:,.0f}"
 
 
 def test_a_stock_template_under_the_index_is_replaced_with_a_note():
