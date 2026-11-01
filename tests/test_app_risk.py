@@ -782,6 +782,33 @@ def test_the_ladder_chart_has_a_tick_on_the_loss_side():
     assert yaxis["tickformat"] == ",.0f"
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        {"strike": "20"},  # the 20 / 22 call spread on spot 100: both legs deep in the money
+        {"strike": "500", "strategy": "Long Call"},  # far out of the money
+        {"strike": "20", "strategy": "Iron Condor"},
+    ],
+)
+def test_a_flat_ladder_draws_a_flat_chart(query):
+    # The P&L column is float noise of about 1e-10 here (the table shows 0): its ticks (0, 1e-9, 2e-9) fitted no count
+    # of decimals up to 6, and the default report raised StopIteration. Flat to the cent, the chart takes Plotly's own
+    # ticks in whole dollars.
+    at = _risk(preset="Textbook", **query)
+    ladder = _frame(at, "Move")
+    assert np.allclose(ladder["P&L"], 0.0, atol=0.005)
+    yaxis = _chart(at, "ladder_chart")["layout"]["yaxis"]
+    assert "tickvals" not in yaxis and yaxis["tickformat"] == ",.0f"
+
+
+def test_ladder_ticks_below_a_cent_are_flat():
+    from options_analyzer.ui import charts_risk
+
+    yaxis = charts_risk.ladder_chart([1.0, 2.0], [-1.2e-8, 4e-8], "P&L ($)", spot=1.0).layout.yaxis
+    assert yaxis.tickvals is None and yaxis.tickformat == ",.0f"
+    assert charts_risk.signed_ticks([-1e-12, 3e-12]) is None  # five ticks that all read 0.0, before
+
+
 def test_small_var_cards_are_to_the_cent_and_add_up_on_screen():
     # The textbook contract's VaR is about $55: whole dollars read −$54 beside a spot-only −$55 and "+$0.58 vs spot
     # only". Below $1,000 the six cards are to the cent and each gap is the difference of two amounts shown.
