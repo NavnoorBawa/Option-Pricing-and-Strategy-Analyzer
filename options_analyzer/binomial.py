@@ -71,7 +71,8 @@ class TreeResult:
     #: time, as the exact boundary is. Only steps where the boundary lies inside the lattice are used, so it
     #: is empty when early exercise is never optimal.
     exercise_boundary: tuple[np.ndarray, np.ndarray] | None = None
-    #: Bump-and-reprice sensitivities: central differences on trees with the same steps and lattice type.
+    #: Bump-and-reprice sensitivities: central differences on trees with the same steps and lattice type, except
+    #: that a CRR tree's vega comes from Leisen-Reimer trees (see :func:`price_with_greeks`).
     vega: float = float("nan")
     rho: float = float("nan")
     epsilon: float = float("nan")
@@ -304,12 +305,19 @@ def _difference(f, x: float, h: float, base: float, lower: float = -np.inf) -> f
 
 
 def _bumped_greeks(S, K, T, r, sigma, q, option_type, steps, american, method, base) -> tuple[float, float, float]:
-    """Vega, rho and dividend rho by repricing on trees with the same steps and lattice type."""
+    """Vega, rho and dividend rho by repricing on trees with the same steps and lattice type (vega of a CRR tree on
+    Leisen-Reimer trees: see :func:`price_with_greeks`)."""
 
-    def tree(r_: float = r, sigma_: float = sigma, q_: float = q) -> float:
-        return price(S, K, T, r_, sigma_, q_, option_type, steps, american, method)
+    def tree(r_: float = r, sigma_: float = sigma, q_: float = q, method_: str = method) -> float:
+        return price(S, K, T, r_, sigma_, q_, option_type, steps, american, method_)
 
-    vega = _difference(lambda v: tree(sigma_=v), sigma, min(_VOL_BUMP, 0.5 * sigma), base, lower=0.0)
+    # A CRR node sits at S u^j d^(n-j) with u = e^{sigma sqrt(dt)}: bumping sigma moves every node, and with it the
+    # strike's place among them, so the difference mixes vega with the tree's odd-even price error. A European put
+    # (S 100, K 120, 3 months, r 3 %, sigma 40 %, 1,001 steps) read 14.903 against the closed form's 14.783 (+0.81 %),
+    # the American one 14.135 against the ALO engine's 14.045. Leisen-Reimer trees keep the strike between the same
+    # two nodes at any sigma, and their difference gives 14.782 and 14.047.
+    base_vega = base if method == "lr" else price(S, K, T, r, sigma, q, option_type, steps, american, "lr")
+    vega = _difference(lambda v: tree(sigma_=v, method_="lr"), sigma, min(_VOL_BUMP, 0.5 * sigma), base_vega, lower=0.0)
     rho = _difference(lambda x: tree(r_=x), r, _RATE_BUMP, base)
     epsilon = _difference(lambda x: tree(q_=x), q, _RATE_BUMP, base)
     return vega, rho, epsilon
@@ -335,7 +343,11 @@ def price_with_greeks(
     central difference in time to expiry on the same tree, whose value is
     smooth in ``T``. Vega, rho and dividend rho are central differences on
     trees with the same number of steps and lattice type (half a volatility
-    point and 25 basis points either side), so they include early exercise.
+    point and 25 basis points either side), so they include early exercise;
+    vega always on Leisen-Reimer trees, because bumping a CRR tree's
+    volatility moves its nodes past the strike (0.8 % of vega at 1,001 steps,
+    see :func:`_bumped_greeks`). A rate or yield bump moves only a CRR tree's
+    probabilities, not its nodes.
     """
     phi, method, steps = _validate(S, K, sigma, option_type, steps, method)
 
