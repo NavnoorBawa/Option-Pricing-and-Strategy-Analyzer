@@ -392,6 +392,23 @@ def test_atmf_snaps_the_strike_to_the_forward(new_app):
     assert at.sidebar.number_input(key="strike").value == 5 * round(forward / 5) == 5840.0
 
 
+def test_a_strike_beyond_the_surface_draws_no_override_badge(new_app):
+    # Both vols were NaN there and math.isclose(nan, nan) is False, so the amber OVERRIDE badge showed, with a tooltip
+    # that read "+nan vp", while the vol source was still Surface.
+    at = new_app(preset=None, asof=ASOF, strike="9000").run()
+    assert len(at.error) == 1 and "gives no vol at the strike 9,000" in at.error[0].value
+    assert not any("OVERRIDE" in b for b in _badges(at))
+
+
+def test_vol_overridden_reads_a_missing_surface_vol():
+    model = header.ModelConfig()
+    typed = header.Inputs(5800.0, 9000.0, 28.0, 0.30, 0.04, 0.01, model, mk.INDEX, surface_vol=math.nan)
+    assert typed.vol_overridden  # a typed vol where the surface gives none: user state
+    assert not header.Inputs(5800.0, 9000.0, 28.0, math.nan, 0.04, 0.01, model, surface_vol=math.nan).vol_overridden
+    assert not header.Inputs(5800.0, 5815.0, 28.0, 0.15, 0.04, 0.01, model, surface_vol=0.15).vol_overridden
+    assert not header.Inputs(100.0, 100.0, 365, 0.2, 0.05, 0.0, model).vol_overridden  # textbook: no surface
+
+
 def test_an_override_vol_is_marked(new_app):
     at = new_app(preset=None, asof=ASOF).run()
     surface_card = _cards(at)["Call"]

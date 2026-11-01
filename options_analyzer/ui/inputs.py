@@ -94,8 +94,11 @@ class Inputs:
     @property
     def vol_overridden(self) -> bool:
         """Whether the contract's vol is typed over the surface's (index preset): by more than the 0.0001 vol point
-        to which an override starts at the surface's vol."""
-        return self.surface_vol is not None and not math.isclose(self.volatility, self.surface_vol, abs_tol=1e-6)
+        to which an override starts at the surface's vol, or at a strike where the surface gives none (NaN beyond its
+        reach). With no vol at all (NaN on both sides: the surface's, beyond its reach) nothing was typed."""
+        if self.surface_vol is None or not math.isfinite(self.volatility):
+            return False
+        return not math.isfinite(self.surface_vol) or not math.isclose(self.volatility, self.surface_vol, abs_tol=1e-6)
 
     @property
     def market(self) -> Market:

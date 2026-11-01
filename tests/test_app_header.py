@@ -522,16 +522,20 @@ def test_the_ticker_rates_use_the_minus_sign():
     ("model", "badge"),
     [
         (ModelConfig(), "BSM · closed form"),
-        (ModelConfig(kind="binomial"), "LR tree · 501 steps · European"),
-        (ModelConfig(kind="binomial", tree_method="crr", steps=20, american=True), "CRR tree · 20 steps · American"),
-        (ModelConfig(kind="monte_carlo"), "MC · 100,000 paths · AV+CV"),
-        (ModelConfig(kind="monte_carlo", n_paths=25_000, antithetic=False), "MC · 25,000 paths · CV"),
-        (ModelConfig(kind="monte_carlo", control_variate=False), "MC · 100,000 paths · AV"),
-        (ModelConfig(kind="monte_carlo", antithetic=False, control_variate=False), "MC · 100,000 paths"),
+        (ModelConfig(kind="alo"), "ALO · accurate · American"),
+        (ModelConfig(kind="alo", scheme="fast"), "ALO · fast · American"),
     ],
 )
 def test_model_badge(model, badge):
     assert header.model_badge(model) == badge
+
+
+@pytest.mark.parametrize("model", [ModelConfig(kind="binomial"), ModelConfig(kind="monte_carlo")])
+def test_the_badge_names_no_diagnostics_engine(model):
+    # The sidebar offers the closed form and the American engine only (model_config.SIDEBAR_MODELS): a tree or Monte
+    # Carlo runs in the Engine diagnostics, so a badge for one would be a header the app cannot draw.
+    with pytest.raises(ValueError, match="sidebar's engines only"):
+        header.model_badge(model)
 
 
 @pytest.mark.parametrize(
