@@ -809,10 +809,13 @@ def pla_test(hpl: ArrayLike, rtpl: ArrayLike) -> PLAResult:
         raise ValueError("a constant P&L series has no rank correlation")
     rank_h, rank_r = stats.rankdata(h), stats.rankdata(r)
     spearman = float(np.corrcoef(rank_h, rank_r)[0, 1])
+    # The distance from integer counts and one division, correctly rounded, so that a distance on a zone boundary
+    # is the boundary itself: 33/250 - 3/250 in floating point is 0.12000000000000001, which is above 0.12 (red),
+    # while 30/250 is 0.12 (amber). With 250 days, 37 of the 221 pairs of steps that differ by 30 rounded upwards.
     points = np.concatenate([h, r])
-    cdf_h = np.searchsorted(np.sort(h), points, side="right") / h.size
-    cdf_r = np.searchsorted(np.sort(r), points, side="right") / r.size
-    ks = float(np.max(np.abs(cdf_h - cdf_r)))
+    count_h = np.searchsorted(np.sort(h), points, side="right")
+    count_r = np.searchsorted(np.sort(r), points, side="right")
+    ks = int(np.max(np.abs(count_h * r.size - count_r * h.size))) / (h.size * r.size)
     ks_p = float(kolmogorov(math.sqrt(h.size * r.size / (h.size + r.size)) * ks))
     return PLAResult(spearman, ks, ks_p, pla_zone(spearman, ks))
 

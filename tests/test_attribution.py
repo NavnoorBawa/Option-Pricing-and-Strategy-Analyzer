@@ -18,6 +18,7 @@ import itertools
 import math
 import re
 import warnings
+from fractions import Fraction
 from pathlib import Path
 
 import mpmath as mp
@@ -655,6 +656,16 @@ def test_pla_metrics_by_hand():
     assert metrics == A.PLAMetrics(spearman=pytest.approx(0.8, abs=1e-15), ks=0.5, observations=4)
     assert A.pla_metrics([1, 2, 3], [3, 2, 1]).spearman == pytest.approx(-1.0, abs=1e-15)
     assert A.pla_metrics([1, 2, 3], [1, 2, 3]) == A.PLAMetrics(1.0, 0.0, 3)
+
+
+def test_pla_metrics_put_a_distance_on_mar32s_boundary_exactly_on_it():
+    # HPL 0..249 and RTPL the same with 30 days moved just above HPL's day ``at - 1``: the CDFs differ by 30/250 =
+    # 0.12 at one place. Subtracting floating-point CDFs gives 0.12000000000000001 for 37 of the 221 choices of
+    # ``at`` (33/250 - 3/250, say), which a zone rule would call red. The reference is the exact fraction.
+    for at in range(30, 251):
+        rtpl = np.arange(250.0)
+        rtpl[at - 30 : at] = at - 1 + np.arange(1, 31) / 31
+        assert A.pla_metrics(np.arange(250.0), rtpl).ks == float(Fraction(30, 250)) == 0.12, at
 
 
 def test_pla_metrics_of_a_constant_series_has_no_correlation():

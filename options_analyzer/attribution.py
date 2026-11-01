@@ -646,7 +646,10 @@ def pla_metrics(hpl: ArrayLike, rtpl: ArrayLike) -> PLAMetrics:
     rank_r = rankdata(r) - (r.size + 1) / 2.0
     spread = math.sqrt(float(rank_h @ rank_h) * float(rank_r @ rank_r))
     spearman = float(np.clip(float(rank_h @ rank_r) / spread, -1.0, 1.0)) if spread > 0 else math.nan
+    # From integer counts and one division, correctly rounded: a distance of 30 steps of 1/250 is then exactly 0.12,
+    # MAR32's red boundary, where the difference of the two CDFs in floating point can be 0.12000000000000001.
     pooled = np.concatenate([h, r])
-    cdf_h = np.searchsorted(np.sort(h), pooled, side="right") / h.size
-    cdf_r = np.searchsorted(np.sort(r), pooled, side="right") / r.size
-    return PLAMetrics(spearman=spearman, ks=float(np.max(np.abs(cdf_h - cdf_r))), observations=int(h.size))
+    count_h = np.searchsorted(np.sort(h), pooled, side="right")
+    count_r = np.searchsorted(np.sort(r), pooled, side="right")
+    ks = int(np.max(np.abs(count_h - count_r))) / h.size  # the two series have the same length
+    return PLAMetrics(spearman=spearman, ks=ks, observations=int(h.size))
