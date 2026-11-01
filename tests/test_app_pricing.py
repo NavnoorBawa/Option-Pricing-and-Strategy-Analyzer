@@ -628,6 +628,17 @@ def test_the_diagnostic_engines_run_only_while_their_expander_is_open(new_app, m
     assert "alo_timed" not in calls  # the index is European: no American engine rows
 
 
+def test_the_convergence_chart_computes_no_reference_it_does_not_draw(monkeypatch):
+    # The chart measures the trees against the engine table's reference; cache.tree_convergence also extrapolated
+    # Leisen-Reimer trees for a reference of its own (0.19 s a contract), which the tab threw away.
+    def refused(*args, **kwargs):
+        raise AssertionError("an extrapolated reference was computed")
+
+    monkeypatch.setattr(cache.binomial, "extrapolated_price", refused)
+    series = cache.tree_convergence(101.0, 99.0, 0.75, 0.04, 0.25, 0.01, 61, True)
+    assert set(series) == {"call", "put"} and len(series["call"]) == 2  # both lattices
+
+
 def test_the_engine_comparison_against_the_closed_form(new_app):
     at = new_app()
     at.session_state[tab_pricing.DIAGNOSTICS] = True

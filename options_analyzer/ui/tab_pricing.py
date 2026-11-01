@@ -1461,7 +1461,8 @@ def _diagnostic_settings(inputs: Inputs) -> tuple[ModelConfig, ModelConfig]:
 def engine_rows(inputs: Inputs, tree: ModelConfig, mc: ModelConfig) -> tuple[pd.DataFrame, str]:
     """The engine comparison (UI spec 3.1 item 7): each engine's call and put, their difference from the reference
     and the milliseconds they took. The reference is the closed form for European exercise and the American engine
-    at its high scheme for American (it is within 4e−10 of QuantLib's QdFp, ``docs/methods/american_alo.md``)."""
+    at its high scheme for American: on the 4,495 puts of Healy's grid it is within 5.4e−8 (RMSE 1.8e−9) of QuantLib's
+    QdFp at its strict tanh-sinh scheme (``docs/methods/american_alo.md``)."""
     S, K, T, r, sigma, q = _args(inputs)
     american_ = _alo(inputs)
     rows = []
@@ -1510,7 +1511,7 @@ def _convergence(inputs: Inputs, tree: ModelConfig, ref_name: str, reference: di
     put errors are one (European exercise: the tree keeps put-call parity, so they differ by a constant) draws one
     line, ``LR call and put``: the put's line hid the call's."""
     S, K, T, r, sigma, q = _args(inputs)
-    series, _ = cache.tree_convergence(S, K, T, r, sigma, q, tree.steps, tree.american)
+    series = cache.tree_convergence(S, K, T, r, sigma, q, tree.steps, tree.american)
     lines = {}
     for name in series["call"]:
         short = "LR" if name.startswith("Leisen") else "CRR"

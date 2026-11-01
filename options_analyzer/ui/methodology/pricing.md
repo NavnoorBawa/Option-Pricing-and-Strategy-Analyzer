@@ -45,9 +45,11 @@ verified against high-precision finite differences in the test-suite.
   early-exercise boundary is the critical price where the exercise gain changes sign, interpolated between
   adjacent nodes, averaged over consecutive steps (whose nodes interleave) and fitted to be monotone in
   time, as the exact boundary is. The early-exercise premium is measured on the same tree with European
-  exercise, so the discretisation error cancels; the American reference in the convergence chart
-  extrapolates Leisen–Reimer trees with 2,001 and 4,003 steps and is kept within the American no-arbitrage
-  bounds: at least the European and the exercise value, at most the perpetual American value.
+  exercise, so the discretisation error cancels. The convergence chart measures each tree against the engine
+  table's reference: the closed form for European exercise, the American engine's *high* scheme for American.
+  Where the American engine cannot value an option, it falls back to Leisen–Reimer trees with 2,001 and 4,003
+  steps, extrapolated and kept within the American no-arbitrage bounds: at least the European and the exercise
+  value, at most the perpetual American value.
 
 ### American engine (Andersen–Lake–Offengenden)
 The sidebar's *American (ALO)* engine values American calls and puts by spectral collocation of the
