@@ -973,9 +973,18 @@ def _tiles(ctx: _Context) -> None:
     m, units, market = ctx.metrics, ctx.units, ctx.market
     multi = len({p.label for p in ctx.book.live if p.kind != "stock"}) > 1
     cost = m.entry_cost * units
-    theo_cost = sum(p.quantity * p.theo for p in ctx.book.live) * units + ctx.entered.fees * units
+    fees = ctx.entered.fees * units
+    # The package's theo without the commissions, which the entry carries: with them in both, "the theo credit is
+    # $6,725.31, so entry at mid is −$56.31" did not add up against an entry of $6,687.00 (12 legs × $1.50 counted
+    # twice).
+    theo_cost = sum(p.quantity * p.theo for p in ctx.book.live) * units
     t0 = float(strat.pnl(ctx.entered, market, market.spot, 0.0)) * units
     basis = "mid" if ctx.index else "model value"
+    edge = (
+        f"{signed(t0 + fees, 2, '$')} against theo and, after {money(fees)} of commissions, {signed(t0, 2, '$')}"
+        if fees
+        else f"{signed(t0, 2, '$')} against theo"
+    )
     word = "credit" if cost < -0.005 else ("debit" if cost > 0.005 else "no premium")
     premium_tile: Card = (
         "Net premium",
@@ -987,8 +996,7 @@ def _tiles(ctx: _Context) -> None:
             "help": md(
                 f"{premium(abs(m.entry_cost))} per share at {basis} ({money(abs(cost))} for the position, "
                 f"commissions included). The theo {'credit' if theo_cost < 0 else 'debit'} is "
-                f"{money(abs(theo_cost))}, so entry at {basis} is {signed(t0, 2, '$')} against theo: the T+0 P&L at "
-                "today's spot."
+                f"{money(abs(theo_cost))}, so entry at {basis} is {edge}: the T+0 P&L at today's spot."
             ),
         },
     )

@@ -252,6 +252,26 @@ def test_the_default_tiles(published):
     assert "\\$155.00 per side" in _metric(at, "Package").proto.help  # half the 3.10 spread, × 100
 
 
+def test_the_net_premium_help_adds_up_with_commissions(published):
+    # 3 contracts at $1.50 a contract and leg: $18 of commissions on 12 contracts. The theo credit took them off as
+    # well, so "the theo credit is $6,725.31, so entry at mid is −$56.31" did not add up against $6,687.00 (the gap is
+    # −$38.31). The theo is now the legs' Black-Scholes-Merton value at their surface vols and the front expiry's
+    # carry, written here, without fees; entry at mid against it, and the T+0 P&L after the commissions.
+    at = _index(commission="1.5", contracts="3")
+    units, fees = 300.0, 12 * 1.5
+    mid = _quote_value(published, CONDOR_LEGS, units)  # −6,705: a credit
+    T = published.maturity(DEC)
+    r, q = mk.carry(published.forward(DEC), published.discount_factor(DEC), published.spot, T)
+    theo = units * sum(
+        n * bs.price(published.spot, k, T, r, published.vol(k, DEC).vol, q, kind) for kind, n, k in CONDOR_LEGS
+    )
+    text = _metric(at, "Net premium").proto.help.replace("\\$", "$")
+    assert f"(${-(mid + fees):,.2f} for the position, commissions included)" in text  # $6,687.00
+    edge, t0 = fmt.signed(theo - mid, 2, "$"), fmt.signed(theo - mid - fees, 2, "$")
+    assert f"The theo credit is ${-theo:,.2f}, so entry at mid is {edge} against theo and, after $18.00 of " in text
+    assert f"commissions, {t0}: the T+0 P&L at today's spot." in text
+
+
 def test_the_blotter_has_a_row_per_leg_and_a_total(published):
     at = _index()
     blotter = _blotter(at)
