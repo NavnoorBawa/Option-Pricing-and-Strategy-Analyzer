@@ -39,7 +39,6 @@ from typing import cast
 
 import numpy as np
 from numpy.typing import ArrayLike
-from scipy.stats import rankdata
 
 from .strategies import Leg, Market, Strategy, _number, position_risk, position_value
 
@@ -599,6 +598,17 @@ def _series(name: str, values: ArrayLike) -> np.ndarray:
     return array
 
 
+def _average_ranks(values: np.ndarray) -> np.ndarray:
+    """Ranks from 1 for the lowest value, tied values sharing their average rank (``scipy.stats.rankdata``'s default).
+
+    In NumPy because importing ``scipy.stats`` for this alone cost the app 0.4 to 0.6 s of its cold start (the app
+    imports this module, and nothing else it imports at load needs ``scipy.stats``).
+    """
+    _, group, counts = np.unique(values, return_inverse=True, return_counts=True)
+    last = np.cumsum(counts)  # the highest rank in each group of equal values
+    return (last - (counts - 1) / 2.0)[group.reshape(-1)]
+
+
 def pla_metrics(hpl: ArrayLike, rtpl: ArrayLike) -> PLAMetrics:
     """Spearman correlation and Kolmogorov-Smirnov distance between hypothetical and risk-theoretical P&L.
 
@@ -642,11 +652,14 @@ def pla_metrics(hpl: ArrayLike, rtpl: ArrayLike) -> PLAMetrics:
         raise ValueError(f"hpl and rtpl must cover the same days, got {h.size} and {r.size} observations")
     if h.size < 2:
         raise ValueError(f"the P&L attribution test needs at least 2 days, got {h.size}")
-    rank_h = rankdata(h) - (h.size + 1) / 2.0  # centred ranks: the mean rank of n days is (n + 1) / 2
-    rank_r = rankdata(r) - (r.size + 1) / 2.0
+    rank_h = _average_ranks(h) - (h.size + 1) / 2.0  # centred ranks: the mean rank of n days is (n + 1) / 2
+    rank_r = _average_ranks(r) - (r.size + 1) / 2.0
     spread = math.sqrt(float(rank_h @ rank_h) * float(rank_r @ rank_r))
     spearman = float(np.clip(float(rank_h @ rank_r) / spread, -1.0, 1.0)) if spread > 0 else math.nan
+    # From integer counts and one division, correctly rounded: a distance of 30 steps of 1/250 is then exactly 0.12,
+    # MAR32's red boundary, where the difference of the two CDFs in floating point can be 0.12000000000000001.
     pooled = np.concatenate([h, r])
-    cdf_h = np.searchsorted(np.sort(h), pooled, side="right") / h.size
-    cdf_r = np.searchsorted(np.sort(r), pooled, side="right") / r.size
-    return PLAMetrics(spearman=spearman, ks=float(np.max(np.abs(cdf_h - cdf_r))), observations=int(h.size))
+    count_h = np.searchsorted(np.sort(h), pooled, side="right")
+    count_r = np.searchsorted(np.sort(r), pooled, side="right")
+    ks = int(np.max(np.abs(count_h - count_r))) / h.size  # the two series have the same length
+    return PLAMetrics(spearman=spearman, ks=ks, observations=int(h.size))

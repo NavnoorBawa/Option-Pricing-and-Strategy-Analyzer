@@ -13,6 +13,7 @@ from __future__ import annotations
 import doctest
 import itertools
 import math
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -528,6 +529,32 @@ def test_the_kolmogorov_smirnov_thresholds_are_mar32s_p_values():
 )
 def test_pla_zones_follow_mar32_42(spearman, ks, zone):
     assert bt.pla_zone(spearman, ks) == zone
+
+
+def _ks_on_the_lattice(n: int, gap: int, at: int) -> tuple[np.ndarray, np.ndarray]:
+    """Two n-day series whose CDFs differ by ``gap`` steps of 1/n at one place only: HPL ``at`` of n, RTPL ``at - gap``.
+
+    HPL is 0, 1, ..., n - 1. RTPL is the same with its days ``at - gap`` to ``at - 1`` moved just above HPL's value
+    ``at - 1``, so on [at - 1, at - 1 + 1 / (gap + 1)) HPL has ``at`` observations at or below and RTPL ``at - gap``.
+    RTPL stays increasing, so the Spearman correlation is 1 and only the distance decides the zone.
+    """
+    hpl = np.arange(float(n))
+    rtpl = hpl.copy()
+    rtpl[at - gap : at] = at - 1 + np.arange(1, gap + 1) / (gap + 1)
+    return hpl, rtpl
+
+
+@pytest.mark.parametrize(("n", "gap", "zone"), [(250, 30, "amber"), (500, 45, "amber")])
+def test_a_distance_on_a_zone_boundary_is_the_boundary(n, gap, zone):
+    # 30/250 is MAR32's red boundary 0.12 and 45/500 its green boundary 0.09; a distance on either is amber. A
+    # difference of two floating-point CDFs misses them: 33/250 - 3/250 is 0.12000000000000001 (red) for 37 of the
+    # 221 ways of reaching 30/250, and 86/500 - 41/500 is 0.08999999999999998 (green-eligible) for 218 of the 456
+    # ways of reaching 45/500. The reference is the exact fraction, rounded once.
+    for at in range(gap, n + 1):
+        res = bt.pla_test(*_ks_on_the_lattice(n, gap, at))
+        assert (res.ks, res.zone) == (float(Fraction(gap, n)), zone), at
+    assert float(Fraction(30, 250)) == 0.12 and float(Fraction(45, 500)) == 0.09
+    assert bt.pla_test(np.arange(250.0), np.arange(250.0) + 29.5).zone == "amber"  # the audit's reproduction
 
 
 def test_pla_refuses_unequal_or_constant_series():

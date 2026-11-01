@@ -101,14 +101,17 @@ def test_the_cdf_matches_the_generators_own_prices(clean):
 
 def test_the_smile_moves_the_tail_probability_from_the_flat_vol_one(default):
     # UI spec 2.7 item 6: N(−d₂) at the 16Δ put's own vol gives 16.85% below it on the default chain, the smile
-    # 11.91%. Measured here: 16.97% and 11.96% (the spec's figures came from an earlier fit of the same chain).
+    # 11.91%. Measured here, at the 5,400 put of 18 December: 16.95% and 11.95% (the spec's figures came from an
+    # earlier fit of the same chain), as published.py's docstring quotes them. The tolerance, 0.05 pp, is the
+    # rounding of those figures with room for a fit off the recording platform (relative 1e-4 in the vols).
     _, published = default
     put = published.delta_strike(DEC, -0.16, "put")
     sigma, T, F = published.vol(put, DEC).vol, published.maturity(DEC), published.forward(DEC)
     flat = float(ndtr(-(math.log(F / put) - 0.5 * sigma * sigma * T) / (sigma * math.sqrt(T))))
     smile = published.cdf(put, DEC)
-    assert flat == pytest.approx(0.1685, abs=0.005)
-    assert smile == pytest.approx(0.1191, abs=0.005)
+    assert put == 5400.0
+    assert flat == pytest.approx(0.1695, abs=5e-4) and flat == pytest.approx(0.1685, abs=0.005)
+    assert smile == pytest.approx(0.1195, abs=5e-4) and smile == pytest.approx(0.1191, abs=0.005)
 
 
 @pytest.mark.parametrize("which", ["clean", "default"])

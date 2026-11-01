@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 
+from options_analyzer import american as am
 from options_analyzer import binomial as bn
 from options_analyzer import black_scholes as bs
 
@@ -210,11 +211,31 @@ def test_american_tree_vega_and_rho_include_early_exercise(method, steps):
 
 
 def test_bumped_greeks_fall_back_to_a_one_sided_difference_where_the_bumped_tree_is_invalid():
-    # CRR needs sigma > |r - q| sqrt(dt) = 0.0949 here: 0.097 is valid, 0.097 - 0.005 is not.
-    args = (100, 100, 1, 0.30)
-    res = bn.price_with_greeks(*args, 0.097, 0, "call", 10, False, "crr")
-    up = bn.price(*args, 0.102, 0, "call", 10, False, "crr")
-    assert res.vega == pytest.approx((up - res.price) / 0.005, rel=1e-12)
+    # CRR needs sigma > |r - q| sqrt(dt) here (sqrt(dt) = 0.3162): at sigma 0.0952 the rate 0.30 - 0.0025 is valid
+    # (0.0941) and 0.30 + 0.0025 is not (0.0957), so rho is the one-sided difference downwards.
+    args = (100, 100, 1)
+    res = bn.price_with_greeks(*args, 0.30, 0.0952, 0, "call", 10, False, "crr")
+    down = bn.price(*args, 0.2975, 0.0952, 0, "call", 10, False, "crr")
+    assert res.rho == pytest.approx((res.price - down) / 0.0025, rel=1e-12)
+
+
+@pytest.mark.parametrize("american", [False, True])
+def test_crr_vega_is_not_biased_by_nodes_moving_past_the_strike(american):
+    # Bumping a CRR tree's sigma moves its nodes, and the difference read the strike's changing place among them:
+    # this put's vega was 14.903 on 1,001 steps against the closed form's 14.783 (+0.81 %), and 14.135 American
+    # against the ALO engine's 14.045 (+0.64 %). It now comes from Leisen-Reimer trees of the same steps.
+    # References: the closed form, and a central difference of the ALO engine (1e-4 either side), which is
+    # accurate to about 1e-6 in price; the tolerance, 2e-3 (0.014 %), is the 1,001-step tree's own error.
+    args = (100, 120, 0.25, 0.03, 0.4, 0, "put", 1001, american)
+    vega = bn.price_with_greeks(*args, "crr").vega
+    if american:
+        h = 1e-4
+        alo = [float(am.price(100, 120, 0.25, 0.03, s, 0, option_type="put")) for s in (0.4 + h, 0.4 - h)]
+        reference = (alo[0] - alo[1]) / (2 * h)
+    else:
+        reference = bs.greeks(100, 120, 0.25, 0.03, 0.4, 0, "put")["vega"]
+    assert vega == pytest.approx(reference, abs=2e-3)
+    assert vega == bn.price_with_greeks(*args, "lr").vega
 
 
 @pytest.mark.parametrize("method", ["crr", "lr"])

@@ -814,6 +814,7 @@ def _tail_root(strategy, market, horizon, carry, end_spot: float, end_class: int
 class _SignProfile:
     grid: np.ndarray
     values: np.ndarray
+    scale: np.ndarray  # the magnitude of the terms summed into each value (for rounding tolerances)
     classes: np.ndarray
     transitions: dict[int, float]
     tail: float | None  # breakeven beyond the grid, see _tail_root
@@ -821,6 +822,14 @@ class _SignProfile:
     @property
     def breakevens(self) -> list[float]:
         return sorted([*self.transitions.values(), *([self.tail] if self.tail is not None else [])])
+
+    def nearest_attaining(self, index: int, spot: float) -> float:
+        """The grid point nearest ``spot`` whose P&L equals that at ``index`` within rounding (1e-13 of the terms
+        summed, as :func:`_sign_classes` reads zero): on a flat stretch, ``argmax`` lands wherever the rounding
+        noise peaks (a covered call's maximum reported at S = 255.67, not at its strike, 110)."""
+        tol = 1e-13 * np.maximum(self.scale, self.scale[index])
+        attaining = self.grid[np.abs(self.values - self.values[index]) <= tol]
+        return float(attaining[np.argmin(np.abs(attaining - spot))])
 
 
 def _sign_profile(strategy: Strategy, market: Market, horizon: float, carry: bool) -> _SignProfile:
@@ -837,7 +846,7 @@ def _sign_profile(strategy: Strategy, market: Market, horizon: float, carry: boo
             classes[(nonzero[-1] + 1) if nonzero.size else 0 :] = target
     transitions = _transitions(strategy, market, grid, classes, horizon, carry)
     tail = _tail_root(strategy, market, horizon, carry, float(grid[-1]), int(classes[-1]))
-    return _SignProfile(grid, values, classes, transitions, tail)
+    return _SignProfile(grid, values, scale, classes, transitions, tail)
 
 
 def _merge(points: list[float], market: Market) -> list[float]:
@@ -870,7 +879,9 @@ class StrategyMetrics:
     entry_cost: float
     max_profit: float  # np.inf when unlimited
     max_loss: float  # np.inf when unlimited; negative = guaranteed profit
-    max_profit_spot: float | None  # None when unlimited or reached as S -> infinity
+    # The spot nearest today's at which the extreme is reached: on a plateau (a covered call's maximum at every
+    # S >= K) its nearer end, or today's spot inside it. None when unlimited or reached only as S -> infinity.
+    max_profit_spot: float | None
     max_loss_spot: float | None
     breakevens: list[float]
     probability_of_profit: float
@@ -929,8 +940,8 @@ def analyze(strategy: Strategy, market: Market, drift: float | None = None, carr
 
     i_max, i_min = int(np.argmax(values)), int(np.argmin(values))
     max_profit, max_loss = float(values[i_max]), float(-values[i_min])
-    max_profit_spot: float | None = float(grid[i_max])
-    max_loss_spot: float | None = float(grid[i_min])
+    max_profit_spot: float | None = profile.nearest_attaining(i_max, market.spot)
+    max_loss_spot: float | None = profile.nearest_attaining(i_min, market.spot)
     if slope > slope_tol:
         max_profit, max_profit_spot = np.inf, None
     elif slope < -slope_tol:

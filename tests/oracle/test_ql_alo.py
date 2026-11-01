@@ -19,6 +19,7 @@ import numpy as np
 import pytest
 
 from options_analyzer import american as am
+from options_analyzer import binomial
 from options_analyzer import black_scholes as bs
 
 ql = pytest.importorskip("QuantLib")
@@ -199,3 +200,30 @@ def test_the_double_boundary_put_against_quantlib_finite_differences():
     details = am.price_details(100.0, 100.0, 1.0, -0.01, 0.2, -0.02, option_type="put")
     assert details.fallback
     assert abs(details.value - reference) <= 1e-4  # measured 2.6e-5
+
+
+#: binomial.extrapolated_price (two Leisen-Reimer trees, 2,001 and 4,003 steps, Richardson-extrapolated) against
+#: QdFp strict: ``(kind, S, K, days, r, q, sigma, bound)``. Measured: 7e-9 to 6.1e-6 on the ordinary inputs (bound
+#: 1e-5), and 2.6e-4 and 3.3e-4 low on the deep in-the-money three-year put at r 8 %, q 4 % (bound 5e-4), where the
+#: tree's error is not c / n; at 15 % vol it is clamped onto the intrinsic value 20.
+EXTRAPOLATION_CASES = [
+    ("put", 100.0, 100.0, 365, 0.05, 0.0, 0.2, 1e-5),
+    ("put", 100.0, 90.0, 182, 0.05, 0.02, 0.3, 1e-5),
+    ("call", 100.0, 110.0, 730, 0.03, 0.05, 0.25, 1e-5),
+    ("put", 100.0, 100.0, 91, 0.10, 0.0, 0.10, 1e-5),
+    ("put", 100.0, 80.0, 1825, 0.06, 0.02, 0.35, 1e-5),
+    ("put", 40.0, 45.0, 91, 0.03, 0.02, 0.4, 1e-5),
+    ("put", 100.0, 120.0, 1095, 0.08, 0.04, 0.40, 5e-4),
+    ("put", 100.0, 120.0, 1095, 0.08, 0.04, 0.15, 5e-4),
+]
+
+
+@pytest.mark.parametrize(("kind", "S", "K", "days", "r", "q", "sigma", "bound"), EXTRAPOLATION_CASES)
+def test_the_tree_extrapolation_against_quantlib(kind, S, K, days, r, q, sigma, bound):
+    """The accuracy binomial.extrapolated_price's docstring states, measured against QdFp rather than against
+    20,000-step trees: at the deep in-the-money put QuantLib's own 20,001-step Leisen-Reimer tree is 1.9e-4 low."""
+    reference = _option(kind, S, K, days, r, q, sigma, _strict).NPV()
+    value = binomial.extrapolated_price(S, K, days / 365, r, sigma, q, kind)
+    assert abs(value - reference) <= bound
+    # The engine the tree is a fallback for: within 2e-5 here (measured up to 1.6e-5, the 15 % vol put).
+    assert float(am.price(S, K, days / 365, r, sigma, q, option_type=kind)) == pytest.approx(reference, abs=2e-5)

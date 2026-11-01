@@ -40,8 +40,8 @@ from .. import clock
 from ..lets_be_rational import implied_black_volatility
 from .forwards import carry_gaps, implied_forwards
 from .local_vol import _market_values
-from .quotes import MATURITY_TOLERANCE, _forward_message
-from .surface import CALIBRATIONS, VolSurface, fit_market_surface
+from .quotes import MATURITY_TOLERANCE, QuoteParseError, _forward_message
+from .surface import CALIBRATIONS, MIN_STRIKES_PER_SLICE, VolSurface, fit_market_surface
 from .svi import durrleman_g
 
 __all__ = [
@@ -252,6 +252,33 @@ def _first(status: np.ndarray, rows: np.ndarray, reason: str) -> None:
     status[(status == "") & rows] = reason
 
 
+def _check_enough_expiries(status: np.ndarray, label: np.ndarray, strike: np.ndarray, n_expiries: int) -> None:
+    """Raise :class:`QuoteParseError` unless two or more expiries keep :data:`.surface.MIN_STRIKES_PER_SLICE`
+    usable strikes, saying what was left and what the screen set aside.
+
+    Worded around the surface the user asked for: :func:`.surface.fit_market_surface` would refuse the same quotes
+    for local volatility's sake, and an upload with no usable quote (a header-only file, one whose bids are all
+    missing) read as "local volatility needs at least two maturities ...; the quotes have 0 maturities".
+    """
+    used = status == USED
+    usable = [np.unique(strike[used & (label == i)]).size for i in range(n_expiries)]
+    enough = sum(n >= MIN_STRIKES_PER_SLICE for n in usable)
+    if enough >= 2:
+        return
+    need = f"a surface needs at least two expiries with {MIN_STRIKES_PER_SLICE}+ usable strikes each"
+    if not len(status):
+        raise QuoteParseError(f"{need}; after reading, no contract is left to fit")
+    text = (
+        f"{need}; after reading and screening, the chain has {n_expiries} expir{'y' if n_expiries == 1 else 'ies'}, "
+        f"{enough} of them with {MIN_STRIKES_PER_SLICE}+ usable strikes"
+    )
+    set_aside = {reason: int(np.sum(status == reason)) for reason in REASONS}
+    reasons = [f"{count:,} {reason}" for reason, count in set_aside.items() if count]
+    if reasons:
+        text += f" (the screen set aside {sum(set_aside.values()):,} of {len(status):,} quotes: {', '.join(reasons)})"
+    raise QuoteParseError(text)
+
+
 def fit_chain(
     chain: pd.DataFrame,
     *,
@@ -289,7 +316,8 @@ def fit_chain(
     Raises
     ------
     options_analyzer.vol_surface.QuoteParseError
-        If fewer than two expiries keep five or more strikes.
+        If fewer than two expiries keep five or more usable strikes after the screen; the message counts them and
+        the quotes the screen set aside, by reason.
 
     Examples
     --------
@@ -393,6 +421,7 @@ def fit_chain(
             _first(status, mine, "thin expiry")
     status[status == ""] = USED
     used = status == USED
+    _check_enough_expiries(status, label, strike, len(ordered))
 
     # 4. The fit: one point per expiry and strike (a call and a put at one strike, with OTM only off, are averaged).
     points = pd.DataFrame(

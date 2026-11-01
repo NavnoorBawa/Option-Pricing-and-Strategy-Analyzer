@@ -17,7 +17,10 @@ import doctest
 import itertools
 import math
 import re
+import subprocess
+import sys
 import warnings
+from fractions import Fraction
 from pathlib import Path
 
 import mpmath as mp
@@ -655,6 +658,31 @@ def test_pla_metrics_by_hand():
     assert metrics == A.PLAMetrics(spearman=pytest.approx(0.8, abs=1e-15), ks=0.5, observations=4)
     assert A.pla_metrics([1, 2, 3], [3, 2, 1]).spearman == pytest.approx(-1.0, abs=1e-15)
     assert A.pla_metrics([1, 2, 3], [1, 2, 3]) == A.PLAMetrics(1.0, 0.0, 3)
+
+
+@given(st.lists(st.integers(-5, 5), min_size=1, max_size=40))
+def test_average_ranks_are_scipys(values):
+    # Small integers, so that most draws have ties: SciPy's rankdata (method "average") is the reference, exactly.
+    x = np.asarray(values, dtype=float)
+    np.testing.assert_array_equal(A._average_ranks(x), stats.rankdata(x))
+
+
+def test_the_app_does_not_import_scipy_stats_at_load():
+    # Importing scipy.stats cost the app's cold start about 0.4 to 0.6 s, and attribution.py was its only importer
+    # at load (for rankdata). A fresh interpreter, so that this session's own imports do not hide it.
+    code = "import sys, options_analyzer.ui.app; sys.exit(3 if 'scipy.stats' in sys.modules else 0)"
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120, check=False)
+    assert result.returncode == 0, result.stderr[-2000:] or "importing the app loaded scipy.stats"
+
+
+def test_pla_metrics_put_a_distance_on_mar32s_boundary_exactly_on_it():
+    # HPL 0..249 and RTPL the same with 30 days moved just above HPL's day ``at - 1``: the CDFs differ by 30/250 =
+    # 0.12 at one place. Subtracting floating-point CDFs gives 0.12000000000000001 for 37 of the 221 choices of
+    # ``at`` (33/250 - 3/250, say), which a zone rule would call red. The reference is the exact fraction.
+    for at in range(30, 251):
+        rtpl = np.arange(250.0)
+        rtpl[at - 30 : at] = at - 1 + np.arange(1, 31) / 31
+        assert A.pla_metrics(np.arange(250.0), rtpl).ks == float(Fraction(30, 250)) == 0.12, at
 
 
 def test_pla_metrics_of_a_constant_series_has_no_correlation():

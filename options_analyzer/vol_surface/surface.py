@@ -406,6 +406,18 @@ def fit_market_surface(
     # _prepare yields one maturity at a time, which _fit_slices fits before the next one is read: on quotes that
     # parse_quotes did not clean, the first maturity the fit fails on decides the error and the warnings.
     slices = _fit_slices(_prepare(quotes, spot, rate, carry, notes), spot, calibration == "arbitrage_free")
+    if not slices:  # no SVI smile, before any question of local vol: no maturity has MIN_STRIKES_PER_SLICE strikes
+        n_maturities = quotes["maturity"].nunique()
+        found = (
+            f"have {n_maturities} maturit{'y' if n_maturities == 1 else 'ies'}, none with {MIN_STRIKES_PER_SLICE}+ "
+            "strikes"
+            if n_maturities
+            else "hold no usable row"
+        )
+        raise QuoteParseError(
+            f"a surface needs at least two maturities with {MIN_STRIKES_PER_SLICE}+ usable strikes each; the quotes "
+            + found
+        )
     if len(slices) < 2:
         n_maturities = quotes["maturity"].nunique()
         raise QuoteParseError(

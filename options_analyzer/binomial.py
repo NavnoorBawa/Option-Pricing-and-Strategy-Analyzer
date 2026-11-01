@@ -28,6 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from numpy.typing import ArrayLike
 
 from . import black_scholes as bs
 
@@ -70,14 +71,16 @@ class TreeResult:
     #: time, as the exact boundary is. Only steps where the boundary lies inside the lattice are used, so it
     #: is empty when early exercise is never optimal.
     exercise_boundary: tuple[np.ndarray, np.ndarray] | None = None
-    #: Bump-and-reprice sensitivities: central differences on trees with the same steps and lattice type.
+    #: Bump-and-reprice sensitivities: central differences on trees with the same steps and lattice type, except
+    #: that a CRR tree's vega comes from Leisen-Reimer trees (see :func:`price_with_greeks`).
     vega: float = float("nan")
     rho: float = float("nan")
     epsilon: float = float("nan")
 
 
-def _peizer_pratt(z: float, n: int) -> float:
-    """Peizer-Pratt method-2 inversion used by the Leisen-Reimer tree."""
+def _peizer_pratt(z: ArrayLike, n: int) -> np.ndarray | float:
+    """Peizer-Pratt method-2 inversion used by the Leisen-Reimer tree, elementwise (the synthetic chain's
+    escrowed-dividend trees use it over a vector of strikes)."""
     denom = n + 1.0 / 3.0 + 0.1 / (n + 1.0)
     return 0.5 + np.copysign(0.5, z) * np.sqrt(1.0 - np.exp(-((z / denom) ** 2) * (n + 1.0 / 6.0)))
 
@@ -302,12 +305,19 @@ def _difference(f, x: float, h: float, base: float, lower: float = -np.inf) -> f
 
 
 def _bumped_greeks(S, K, T, r, sigma, q, option_type, steps, american, method, base) -> tuple[float, float, float]:
-    """Vega, rho and dividend rho by repricing on trees with the same steps and lattice type."""
+    """Vega, rho and dividend rho by repricing on trees with the same steps and lattice type (vega of a CRR tree on
+    Leisen-Reimer trees: see :func:`price_with_greeks`)."""
 
-    def tree(r_: float = r, sigma_: float = sigma, q_: float = q) -> float:
-        return price(S, K, T, r_, sigma_, q_, option_type, steps, american, method)
+    def tree(r_: float = r, sigma_: float = sigma, q_: float = q, method_: str = method) -> float:
+        return price(S, K, T, r_, sigma_, q_, option_type, steps, american, method_)
 
-    vega = _difference(lambda v: tree(sigma_=v), sigma, min(_VOL_BUMP, 0.5 * sigma), base, lower=0.0)
+    # A CRR node sits at S u^j d^(n-j) with u = e^{sigma sqrt(dt)}: bumping sigma moves every node, and with it the
+    # strike's place among them, so the difference mixes vega with the tree's odd-even price error. A European put
+    # (S 100, K 120, 3 months, r 3 %, sigma 40 %, 1,001 steps) read 14.903 against the closed form's 14.783 (+0.81 %),
+    # the American one 14.135 against the ALO engine's 14.045. Leisen-Reimer trees keep the strike between the same
+    # two nodes at any sigma, and their difference gives 14.782 and 14.047.
+    base_vega = base if method == "lr" else price(S, K, T, r, sigma, q, option_type, steps, american, "lr")
+    vega = _difference(lambda v: tree(sigma_=v, method_="lr"), sigma, min(_VOL_BUMP, 0.5 * sigma), base_vega, lower=0.0)
     rho = _difference(lambda x: tree(r_=x), r, _RATE_BUMP, base)
     epsilon = _difference(lambda x: tree(q_=x), q, _RATE_BUMP, base)
     return vega, rho, epsilon
@@ -333,7 +343,11 @@ def price_with_greeks(
     central difference in time to expiry on the same tree, whose value is
     smooth in ``T``. Vega, rho and dividend rho are central differences on
     trees with the same number of steps and lattice type (half a volatility
-    point and 25 basis points either side), so they include early exercise.
+    point and 25 basis points either side), so they include early exercise;
+    vega always on Leisen-Reimer trees, because bumping a CRR tree's
+    volatility moves its nodes past the strike (0.8 % of vega at 1,001 steps,
+    see :func:`_bumped_greeks`). A rate or yield bump moves only a CRR tree's
+    probabilities, not its nodes.
     """
     phi, method, steps = _validate(S, K, sigma, option_type, steps, method)
 
@@ -422,11 +436,16 @@ def extrapolated_price(
     """Converged value: Richardson extrapolation of Leisen-Reimer trees with ``steps`` and twice as many.
 
     With early exercise the Leisen-Reimer error is usually close to ``c / n``, so ``(n2 V2 - n1 V1) / (n2 - n1)``
-    removes its leading term: at the defaults the result agrees with the 20,000-step references in the tests to
-    about 1e-5. Where the tree's error is irregular (e.g. a put at very low volatility with a high rate, or
-    several hundred percent volatility over years) the extrapolation is only about as accurate as the finer
-    tree. The result is kept within the no-arbitrage bounds of an American option (see :func:`_american_bounds`).
-    European values use the closed form.
+    removes its leading term. Against QuantLib's QdFp engine at strict settings (``tests/oracle/test_ql_alo.py``),
+    at the defaults it agrees to 1e-5 or better on ordinary inputs (measured 7e-9 to 6.1e-6, from three months to
+    five years), but only to a few 1e-4 deep in the money at multi-year, high-carry inputs: a 120 put on 100 over
+    three years at r 8 % and q 4 % is 2.6e-4 low at 40 % vol, and 3.3e-4 low at 15 %, where the value is clamped
+    onto the intrinsic 20 (the Andersen-Lake-Offengenden engine of :mod:`.american` is within 1.6e-5 of both).
+    Where the tree's error is irregular (e.g. a put at very low volatility with a high rate, or several hundred
+    percent volatility over years) the extrapolation is only about as accurate as the finer tree. The result is kept
+    within the no-arbitrage bounds of an American option (see :func:`_american_bounds`). It is the value
+    :func:`.american.price` falls back to where the exercise region has two boundaries. European values use the
+    closed form.
     """
     european = float(bs.price(S, K, T, r, sigma, q, option_type))
     if not american:

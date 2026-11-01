@@ -15,9 +15,12 @@ groups, no OCC theoretical prices, no house add-ons and no concentration charges
 broker's requirement, and the app labels it so.
 
 The rule's "ten equidistant intervals (valuation points)" is read as ten points, both ends of the range included
-(-8%, -6.44%, ..., +6% for SPX), as the app's spec draws them. Ten intervals of a range would be eleven points; the
-largest loss of a position whose P&L is monotone in spot (a vertical spread, a single option) is at an end of the
-range either way.
+(-8%, -6.44%, ..., +6% for SPX), as the app's spec draws them and as the SEC's order approving CBOE's portfolio
+margin rule describes them: "10 equidistant points ('valuation points') set at and between the upper and lower
+market range points" (Release 34-52032, 2005, SR-CBOE-2002-03). Some brokers instead place five points on each side
+of the current price, zero excluded (-8%, -6.4%, ..., -1.6%, +1.2%, ..., +6%). Ten intervals of a range would be
+eleven points. The largest loss of a position whose P&L is monotone in spot (a vertical spread, a single option) is
+at an end of the range on every reading; a butterfly's or a condor's interior worst point can differ between them.
 """
 
 from __future__ import annotations
