@@ -164,7 +164,8 @@ foundation and each reviewed by an independent correctness and design pass befor
   against the implied move on the Risk tab's theta tile.
 - [ ] DK-7 Browser regression and performance-budget suite in CI.
 - [ ] DK-8 Keyboard shortcuts and export menus.
-- [ ] DT-7 Local-only live adapters; DT-8 weekly network canary (could).
+- [ ] DT-7 Local-only live adapters (an optional extra would install their client library with them; none is
+  declared until one exists); DT-8 weekly network canary (could).
 
 ### Validation and engineering
 - [ ] VL-1 QuantLib oracle tests for European prices and Greeks and for binomial trees (LBR and ALO oracles exist).

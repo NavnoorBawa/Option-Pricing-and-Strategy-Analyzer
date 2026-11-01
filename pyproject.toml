@@ -34,10 +34,6 @@ app = [
     "streamlit>=1.65,<2",
     "xlsxwriter>=3.1",
 ]
-# Optional live market data for local use only; the app and the tests never need it.
-data = [
-    "yfinance>=1.7",
-]
 
 [project.scripts]
 options-analyzer = "options_analyzer.ui.launch:main"

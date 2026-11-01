@@ -156,3 +156,14 @@ def test_the_package_is_marked_typed_and_ships_the_marker():
     assert (ROOT / "options_analyzer" / "py.typed").is_file()
     config = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert "py.typed" in config["tool"]["setuptools"]["package-data"]["options_analyzer"]
+
+
+def test_no_requirement_or_extra_installs_a_market_data_client():
+    # A `data` extra installed yfinance although no module imports it (docs/data_policy.md), with a floor at the
+    # newest release, so untested too. A client comes back only with the local adapter that uses it (DT-7).
+    tomllib = pytest.importorskip("tomllib")  # Python 3.11+
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    declared = [*project["dependencies"], *(r for extra in project["optional-dependencies"].values() for r in extra)]
+    names = {re.split(r"[<>=!~;\[ ]", requirement, maxsplit=1)[0].lower() for requirement in declared}
+    names |= _requirements("requirements.txt") | _requirements("requirements-dev.txt")
+    assert "yfinance" not in names
