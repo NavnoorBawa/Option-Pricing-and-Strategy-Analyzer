@@ -1,10 +1,12 @@
 """Packaging and the repository: the installed app keeps the repository's Streamlit settings, the launcher fails
 cleanly, the checkout holds no ignored files, and every library a test needs is installed by some requirements file."""
 
+import ast
 import builtins
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -114,3 +116,34 @@ def test_the_oldest_dependency_job_runs_every_declared_lower_bound_on_the_oldest
             continue
         name, lower = re.match(r"([\w-]+)>=([\d.]+)", requirement).groups()
         assert pinned.get(name) == lower, f"{name}: declared >={lower}, the job installs {pinned.get(name)}"
+
+
+#: What the numerical core (everything outside options_analyzer/ui) may import besides the standard library: its
+#: declared dependencies, and dateutil, which pandas requires (2.1 to 3.x) and so comes with every install.
+_CORE_IMPORTS = frozenset({"numpy", "scipy", "pandas", "dateutil", "options_analyzer"})
+
+
+def test_the_numerical_core_imports_only_its_declared_dependencies():
+    # `pip install .` installs NumPy, SciPy and pandas only; one stray `import plotly` in a core module would have
+    # shipped unnoticed, because CI installed only the wheel with the app extra. An import inside a function counts
+    # too: it fails as soon as the function runs. (CI's package job also imports every core module from the bare
+    # wheel and runs the core tests there.)
+    stdlib = set(sys.stdlib_module_names)
+    package = ROOT / "options_analyzer"
+    offences = []
+    for path in sorted(package.rglob("*.py")):
+        if path.relative_to(package).parts[0] == "ui":
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                names = [node.module]
+            else:
+                continue
+            offences += [
+                f"{path.relative_to(ROOT)}:{node.lineno} imports {name}"
+                for name in names
+                if name.split(".")[0] not in stdlib | _CORE_IMPORTS
+            ]
+    assert offences == []
