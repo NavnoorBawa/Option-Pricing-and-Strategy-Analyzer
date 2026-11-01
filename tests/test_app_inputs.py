@@ -329,6 +329,22 @@ def test_a_strike_off_the_listed_grid_moves_to_the_nearest_listed_one(new_app):
     ]
 
 
+def test_an_expiry_the_surface_filters_leave_out_says_so(new_app):
+    # With Filters > Min days 30, 20-Nov-26 (27.7 days) is listed but not fitted: the note said it was "not a listed
+    # expiry at this valuation time", blaming the chain for a setting of the Surface tab.
+    at = new_app(preset=None, asof=ASOF, tab="Surface").run()
+    _ok(at)
+    assert at.sidebar.selectbox(key="expiry").value == "2026-11-20"
+    at.session_state["sf_days"] = 30.0
+    at.run()
+    _ok(at)
+    assert at.sidebar.selectbox(key="expiry").value == "2026-11-27"
+    assert [i.value for i in at.info if "expiry" in i.value] == [
+        "20-Nov-26 is listed, but the Surface tab's filters (expiries from 30 days) leave it out of the fit, so the "
+        "nearest fitted expiry, 27-Nov-26, is used."
+    ]
+
+
 @pytest.mark.parametrize(
     ("expiry", "chosen", "note"),
     [
@@ -457,3 +473,26 @@ def test_the_textbook_header_keeps_its_contract_ticker(new_app):
     assert _plain(at.markdown[0].value).startswith("**Options Analytics** S 100.00 · K 100.00 · ")
     assert not any("SYNTHETIC" in b for b in _badges(at))
     assert header.SHARE_NOTE and TEXTBOOK["preset"] == mk.TEXTBOOK
+
+
+@pytest.mark.parametrize(
+    ("asked", "chosen", "note"),
+    [
+        ("2026-12-18 AM", "2026-12-18 AM", None),
+        ("1990-01-19 PM", "2026-10-30 PM", "This link asks for the Strategy expiry `1990-01-19 PM`, which is not "
+                                           "listed at this valuation time, so 30‑Oct‑26 PM is used."),
+        ("2035-01-19 AM", "2026-12-18 AM", "This link asks for the Strategy expiry `2035-01-19 AM`, which is not "
+                                           "listed at this valuation time, so 18‑Dec‑26 AM is used."),
+        ("garbage", "2026-12-18 AM", "This link gives the Strategy expiry as `garbage`, which is not an expiry "
+                                     "(2026-12-18 AM), so the monthly nearest 45 days is used."),
+        ("2026-12-18 XM", "2026-12-18 AM", "This link gives the Strategy expiry as `2026-12-18 XM`, which is not an "
+                                           "expiry (2026-12-18 AM), so the monthly nearest 45 days is used."),
+    ],
+)  # fmt: skip
+def test_a_link_with_a_strategy_expiry_not_listed_gets_a_note(new_app, asked, chosen, note):
+    # These fell back silently, while the sidebar's expiry says why it moved.
+    at = new_app(preset=None, asof=ASOF, tab="Strategy", strategy_expiry=asked).run()
+    _ok(at)
+    day, settlement = chosen.split()
+    assert at.selectbox(key="strategy_expiry").value == (date.fromisoformat(day), settlement)
+    assert [w.value for w in at.warning] == ([note] if note else [])

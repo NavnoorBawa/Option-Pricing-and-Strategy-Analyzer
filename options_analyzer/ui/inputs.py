@@ -16,6 +16,7 @@ import math
 from dataclasses import dataclass
 from datetime import date, datetime
 
+import pandas as pd
 import streamlit as st
 
 from .. import clock
@@ -184,7 +185,8 @@ def _focus_expiry(context: mk.MarketContext) -> list[str]:
     The menu is not bound to the URL, because its labels count the days from the valuation time: the link holds
     the ISO date (``?expiry=2026-11-20``) instead, which this reads on the session's first run and the sidebar
     writes back on every run. An expiry that is not listed (a link from another valuation time, or a later
-    valuation time that let it expire) moves to the nearest listed one, with a note."""
+    valuation time that let it expire), or that the Surface tab's filters leave out of the fit, moves to the nearest
+    fitted one, with a note that says which (:func:`_unfitted_note`)."""
     state = st.session_state
     listed = [day.isoformat() for day in context.expiries["expiry"]]
     current = state.get("expiry")
@@ -202,12 +204,27 @@ def _focus_expiry(context: mk.MarketContext) -> list[str]:
         else:
             choice = context.expiry_row(asked)["expiry"]
             if choice != asked:
-                state[_NOTES] = [
-                    f"{short_date(asked)} is not a listed expiry at this valuation time, so the nearest listed one, "
-                    f"{short_date(choice)}, is used."
-                ]
+                state[_NOTES] = [_unfitted_note(context, asked, choice)]
     state["expiry"] = choice.isoformat()
     return listed
+
+
+def _unfitted_note(context: mk.MarketContext, asked: date, choice: date) -> str:
+    """Why the expiry ``asked`` moved to ``choice``: it is not listed at this valuation time, or it is listed but the
+    Surface tab's filters left it out of the fit (min days, weeklies, too few strikes), which is a setting the user
+    can change, not a fact of the chain."""
+    listed = {day.date() for day in pd.to_datetime(context.chain.expiries["expiry"])}
+    if asked not in listed:
+        return (
+            f"{short_date(asked)} is not a listed expiry at this valuation time, so the nearest listed one, "
+            f"{short_date(choice)}, is used."
+        )
+    changes = context.settings.filters.changes()
+    which = f" ({'; '.join(changes)})" if changes else ""
+    return (
+        f"{short_date(asked)} is listed, but the Surface tab's filters{which} leave it out of the fit, so the "
+        f"nearest fitted expiry, {short_date(choice)}, is used."
+    )
 
 
 def _index_market(sb, model: ModelConfig | None = None) -> Inputs:

@@ -10,7 +10,19 @@ import numpy as np
 import streamlit as st
 
 from .. import __version__, clock
-from . import header, tab_iv, tab_methodology, tab_pricing, tab_risk, tab_strategy, tab_surface, theme, whatif
+from . import (
+    header,
+    surface_state,
+    tab_iv,
+    tab_methodology,
+    tab_pricing,
+    tab_risk,
+    tab_strategy,
+    tab_surface,
+    theme,
+    whatif,
+)
+from . import legs as lg
 from . import market as mk
 from .components import link_match, link_shown
 from .format import MINUS
@@ -185,6 +197,7 @@ def _read_link() -> None:
                 "and 2097 (2026-10-23T16:00), so the last close is used."
             )
     notes += _read_numbers(params)
+    notes += _read_strategy_expiry(params)
     # The Strategy tab's template: ?strategy=<name> and the two menus of earlier links (tab_strategy.read_link).
     notes += tab_strategy.read_link(params)
     state[_LINK_NOTES] = notes
@@ -251,6 +264,39 @@ def _read_numbers(params: dict[str, list[str]]) -> list[str]:
             f"This link gives the {name} as {link_shown(value)}, which is not {wanted}, so the default is used."
         )
     return notes
+
+
+def _read_strategy_expiry(params: dict[str, list[str]]) -> list[str]:
+    """Check, in place, the Strategy template's expiry in a link (``?strategy_expiry=2026-12-18 AM``) and return the
+    notes. One that is not an expiry is dropped, and one not listed at the link's valuation time moves to the next
+    listed one (the default when none is later), as the tab moves it (``tab_strategy._template_expiry``), but with a
+    note, as the sidebar's expiry gets one: both fell back silently. The textbook market has no listed expiries."""
+    if "strategy_expiry" not in params or params.get("preset", [mk.INDEX])[-1] != mk.INDEX:
+        return []
+    value = params["strategy_expiry"][-1]
+    try:
+        asked = tab_strategy._parse_expiry_param(value)
+    except ValueError:
+        params.pop("strategy_expiry")
+        return [
+            f"This link gives the Strategy expiry as {link_shown(value)}, which is not an expiry (2026-12-18 AM), so "
+            "the monthly nearest 45 days is used."
+        ]
+    asof = params.get("asof")
+    # The market the sidebar builds next, at the default fit settings (cached: no extra fit), and its published
+    # surface (about 30 ms, once a session, for a link that names a Strategy expiry).
+    context = mk.index_market(datetime.fromisoformat(asof[-1]) if asof else mk.last_close())
+    published = surface_state.publish(context)
+    order = lg.listed(published)
+    if asked in order:
+        return []
+    later = [e for e in order if e.day >= asked.day]
+    chosen = later[0] if later else lg.default_expiry(published)
+    params["strategy_expiry"] = [tab_strategy._expiry_param(chosen)]
+    return [
+        f"This link asks for the Strategy expiry {link_shown(value)}, which is not listed at this valuation time, so "
+        f"{lg.expiry_text(*chosen)} is used."
+    ]
 
 
 def beyond_reach(inputs: Inputs) -> str:
