@@ -176,6 +176,8 @@ def test_the_selector_has_six_reports_and_ladder_is_the_default():
     at = _risk()
     pills = at.get("button_group")
     report = next(p for p in pills if p.proto.id.endswith("-report") or "report" in p.proto.id)
+    # A single-choice view switch, the segmented control, as Surface's views (pills are for multi-select filters).
+    assert at.segmented_control(key="report").value == "Ladder" and not [p for p in at.pills if p.key == "report"]
     assert [o.content for o in report.proto.options] == list(tab_risk.REPORTS)
     assert _frame(at, "Move") is not None  # the Ladder's table
 
@@ -528,7 +530,7 @@ def test_a_what_if_step_and_the_var_report_are_fast():
         assert time.perf_counter() - start < 3.0
     cache.value_at_risk.clear()
     start = time.perf_counter()
-    _ok(at.pills(key="report").set_value("VaR").run(timeout=240))
+    _ok(at.segmented_control(key="report").set_value("VaR").run(timeout=240))
     assert time.perf_counter() - start < 7.5
 
 
@@ -805,11 +807,14 @@ def _array(value) -> np.ndarray:
 
 def test_legs_that_settle_within_the_horizon_are_counted_and_leave_no_expansion():
     # A 1-day textbook call spread settles on day 1, the horizon itself: the caption counts its two legs (ported
-    # from the earlier Risk tab's test). Two days out (1.38 trading days) it outlives the horizon.
+    # from the earlier Risk tab's test). Two days out it settles within the horizon only when the next session is
+    # two calendar days away or more: the options age on the tab's clock from the last cash close (a Friday's
+    # Monday is three days away, a weekday's next session one), where 1/252 year (1.45 days) never reached it.
     at = _risk(report="VaR", preset="Textbook", days=1)
     basis = next(c.value for c in at.caption if "Monte Carlo" in c.value)
     assert basis.endswith(" 2 leg(s) settle before the horizon.")
-    assert not any("settle before" in c.value for c in _risk(report="VaR", preset="Textbook", days=2).caption)
+    two_days = any("settle before" in c.value for c in _risk(report="VaR", preset="Textbook", days=2).caption)
+    assert two_days == (_next_session_years(mk.last_close()) * 365 >= 2 - 1e-9)
     # A 3-day spread at a 5-day horizon: the expansion in today's Greeks is evaluated past expiry, where it read
     # "DGT VaR −$91.46" beside a full VaR of −$39.80 (the whole debit). The comparator, its gap and the
     # delta-normal VaR read – and say why.
@@ -1190,16 +1195,17 @@ def test_var_simulates_index_vol_dynamics_beside_the_spot_only_var(monkeypatch):
     at = _risk(report="VaR", **SPX_STRADDLE)
     moving = risk.VaRConfig(0.99, 1, 100_000, seed=7, vol_of_vol=1.0, spot_vol_correlation=-0.7)
     assert configs == [replace(moving, vol_of_vol=0.0), moving]
-    # The library's numbers, on its own clock (1/252 year of ageing): the panel's.
-    straddle = build_template("Short Straddle", 5800, 580, 45 / 365)
-    market = Market(5800, 0.043, 0.16, 45 / 365, 0.013)
-    library = [risk.value_at_risk(straddle, market, config, 100) for config in configs]
-    assert [round(run.var) for run in library] == [2833, 3862]
     # The tab ages the options on its clock, to the next session from its valuation time (the textbook market's is
     # the last cash close: Friday to Monday is 3/365, a weekday to the next 1/365), and shows the same simulations.
     years = _next_session_years(mk.last_close())
     assert clocks == [pytest.approx(years, abs=1e-9)] * 2
-    spot_run, run = (risk.value_at_risk(straddle, market, config, 100, years) for config in configs)
+    runs = list(configs)
+    monkeypatch.undo()  # the library's own function again, which no longer records its calls
+    # The library's numbers, on its own clock (1/252 year of ageing): the panel's.
+    straddle = build_template("Short Straddle", 5800, 580, 45 / 365)
+    market = Market(5800, 0.043, 0.16, 45 / 365, 0.013)
+    assert [round(risk.value_at_risk(straddle, market, config, 100).var) for config in runs] == [2833, 3862]
+    spot_run, run = (risk.value_at_risk(straddle, market, config, 100, years) for config in runs)
     cards = {m.label: m for m in at.metric}
     assert cards["VaR 99% 1D · MC"].value == tab_risk.dollars(-run.var)
     assert cards["Spot-only VaR"].value == tab_risk.dollars(-spot_run.var)
@@ -1251,7 +1257,16 @@ def test_vol_moves_switched_off_show_the_spot_only_run_from_the_cache(monkeypatc
     assert len(configs) == 2  # the frozen run came from the cache
     labels = [m.label for m in at.metric if "VaR" in m.label or "ES" in m.label or m.label == "Non-linearity"]
     assert labels == ["VaR 99% 1D · MC", "ES 97.5% 1D · MC", "DGT VaR 99% 1D", "Non-linearity"]
-    assert next(m for m in at.metric if m.label == "VaR 99% 1D · MC").value == "−$2,833"
+    # The spot-only run's VaR (the panel's $2,833 on the library's 1/252-year clock; the tab's own clock here).
+    from options_analyzer import risk
+    from options_analyzer.strategies import Market, build_template
+
+    monkeypatch.undo()
+    straddle = build_template("Short Straddle", 5800, 580, 45 / 365)
+    frozen = risk.VaRConfig(0.99, 1, 100_000, seed=7, vol_of_vol=0.0, spot_vol_correlation=-0.7)
+    years = _next_session_years(mk.last_close())
+    spot_only = risk.value_at_risk(straddle, Market(5800, 0.043, 0.16, 45 / 365, 0.013), frozen, 100, years)
+    assert next(m for m in at.metric if m.label == "VaR 99% 1D · MC").value == tab_risk.dollars(-spot_only.var)
 
 
 def test_the_theta_tile_gives_the_decay_to_expiry_of_a_one_day_position():

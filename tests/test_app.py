@@ -344,7 +344,7 @@ def test_value_at_risk_is_not_simulated_while_the_pricing_tab_is_open(app, monke
     assert calls == []
     _open(app, "Risk")
     assert calls == []  # its default report is the Ladder
-    app.pills(key="report").set_value("VaR").run()  # the counter does see the simulations once the report opens
+    app.segmented_control(key="report").set_value("VaR").run()  # the counter sees the simulations once the report opens
     assert len(calls) == 2  # with implied vol moving, and with it frozen (the spot-only VaR)
     assert any(chart.proto.id.endswith("-var_hist") for chart in app.get("plotly_chart"))
 
@@ -393,11 +393,11 @@ def test_risk_settings_survive_a_visit_to_another_tab(new_app):
     _ok(at)
     before = {m.label: m.value for m in at.metric}
     _away_and_back(at, "Risk")
-    assert at.pills(key="report").value == "VaR" and at.select_slider(key="var_paths").value == 25_000
+    assert at.segmented_control(key="report").value == "VaR" and at.select_slider(key="var_paths").value == 25_000
     assert at.segmented_control(key="var_model").value == "Student-t" and at.slider(key="var_dof").value == 4
     assert at.number_input(key="var_seed").value == 11
     assert {m.label: m.value for m in at.metric} == before  # the same simulation: same seed, paths and model
-    at.pills(key="report").set_value("Scenarios").run()
+    at.segmented_control(key="report").set_value("Scenarios").run()
     at.segmented_control(key="sc_volmode").set_value("relative")
     at.slider(key="sc_date").set_value(5).run()
     _away_and_back(at, "Risk")

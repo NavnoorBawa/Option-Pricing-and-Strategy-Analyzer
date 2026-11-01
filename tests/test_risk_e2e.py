@@ -22,12 +22,12 @@ ASOF = "asof=2026-10-23T16:00"
 _MEASURE = """() => {
   const main = document.querySelector('[data-testid=stMain]') || document.documentElement;
   const top = e => e ? Math.round(e.getBoundingClientRect().top + main.scrollTop) : null;
-  const pills = document.querySelector('.st-key-report');
+  const selector = document.querySelector('.st-key-report');
   const tiles = [...document.querySelectorAll('.st-key-risk_tiles [data-testid=stMetric]')];
-  let body = pills?.closest('[data-testid=stElementContainer]')?.nextElementSibling;
+  let body = selector?.closest('[data-testid=stElementContainer]')?.nextElementSibling;
   while (body && body.getBoundingClientRect().height === 0) body = body.nextElementSibling;
   return {height: Math.max(document.documentElement.scrollHeight, main.scrollHeight),
-          tiles: tiles.map(t => top(t)), report: top(pills), body: top(body),
+          tiles: tiles.map(t => top(t)), report: top(selector), body: top(body),
           sideways: document.documentElement.scrollWidth > innerWidth || main.scrollWidth > main.clientWidth};
 }"""
 
@@ -51,18 +51,19 @@ def _risk(chromium, app_url, query: str = "", *, width: int = 1440, scheme: str 
 
 
 def test_the_tab_is_one_screen_of_tiles_and_report(chromium, app_url):  # noqa: F811
-    # Measured on this branch at 1,440 x 900 with the sidebar open: tiles at 369 px, the selector at 473 px, the
-    # report at about 520 px, the page 1,159 px tall (5,106 px before, UI audit). The spec's 260 px for the tiles
-    # assumes UI-1, which moves the four price cards (about 110 px) into the Pricing tab; until it merges they sit
-    # above every tab, so the tiles' bound here is 260 + 120.
+    # Measured at 1,440 x 900 with the sidebar open, light and dark alike, on the default Ladder report: tiles at
+    # 276 px, the selector at 380 px, the report at 422 px, the page 1,066 px tall (5,106 px before the UI audit).
+    # The guards allow about 10 px over each top (a line's leading in another font build) and 8% over the height, so
+    # that a regression of one line or more fails: the bounds were 380, 480, 600 and 1,800, set while the header's
+    # four price cards (UI-1) sat above every tab, and no longer caught a 100 px regression.
     page = _risk(chromium, app_url)
     try:
         found = page.evaluate(_MEASURE)
         assert len(found["tiles"]) == 6 and len(set(found["tiles"])) == 1, found  # one line of six
-        assert found["tiles"][0] <= 380, found
-        assert found["report"] <= 480, found
-        assert found["body"] <= 600, found
-        assert found["height"] <= 1_800, found
+        assert found["tiles"][0] <= 286, found
+        assert found["report"] <= 390, found
+        assert found["body"] <= 432, found
+        assert found["height"] <= 1_150, found
         assert not found["sideways"], found
     finally:
         page.context.close()
@@ -96,14 +97,24 @@ def test_no_sideways_scroll_on_a_phone(chromium, app_url, report):  # noqa: F811
         assert not found["sideways"], found
         # Three pairs of tiles, 2 + 2 + 2.
         assert len(set(found["tiles"])) == 3, found
+        # The report selector, a segmented control, on one line: its six segments wrapped 5 + 1 (Explain alone) at
+        # the theme's padding; with desk.css's phone padding they take 323 px of the 362 px column, 28 px high.
+        selector = page.locator(".st-key-report").bounding_box()
+        assert selector["height"] <= 32 and selector["width"] <= 362, selector
     finally:
         page.context.close()
 
 
-@pytest.mark.xfail(strict=True, reason="UI-1 moves the four price cards into the Pricing tab (tiles at 369 px)")
+@pytest.mark.xfail(
+    strict=True,
+    reason="the tiles sit at 276 px, 16 px past the spec's 260: the caption under the what-if strip ('Sticky strike: "
+    "leg vols fixed by strike.', 20 px and a 14 px gap), which the spec's layout puts on the strip's row",
+)
 def test_the_tiles_meet_the_specs_bound(chromium, app_url):  # noqa: F811
-    # Spec 3.3 acceptance: the tiles' top at most 260 px at 1,440 x 900. Strict: once UI-1 merges this passes and
-    # fails the suite, so that the 380 px guard above is tightened to 260 and this marker removed.
+    # Spec 3.3 acceptance: the tiles' top at most 260 px at 1,440 x 900. UI-1 has moved the price cards into the
+    # Pricing tab (they took the tiles to 369 px); what is left is the strip's caption line. Strict: once the caption
+    # joins the strip's row this passes and fails the suite, so that the guard above is tightened and the marker
+    # removed.
     page = _risk(chromium, app_url)
     try:
         assert page.evaluate(_MEASURE)["tiles"][0] <= 260

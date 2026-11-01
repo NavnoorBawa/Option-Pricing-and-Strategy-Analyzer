@@ -1149,13 +1149,27 @@ def test_a_leg_edit_is_kept_when_another_tab_is_clicked_before_enter(chromium, a
         page.locator(".st-key-st_blotter button", has_text="Edit").click()  # the legs editor is in Edit
         _settle(page)
         grid = page.locator("[data-testid=stMain] [data-testid=stDataFrame]").first
+        # The grid draws on a canvas, with an accessibility table of its cells: wait until it holds the first leg's
+        # quantity, so that the grid has its data and no rerun is drawing it.
+        page.wait_for_function(
+            "() => document.querySelector('[data-testid=stMain] [data-testid=stDataFrame] #glide-cell-2-0')"
+            "?.textContent === '1'",
+            timeout=60_000,
+        )
         box = grid.bounding_box()
-        # The grid draws on a canvas: click the first row's Type cell (its columns On, Qty, Type, ... share the
-        # 1,038 px row, about 143 px each after the row gutter; the header and each row are 32 to 35 px high), step
-        # to Qty and type into it, which opens the cell's editor (an input over the grid) a moment later.
-        page.mouse.click(box["x"] + 400, box["y"] + 35 + 16)
-        page.keyboard.press("ArrowLeft")
-        page.keyboard.type("3")
+        # Double-click the first row's Qty cell, the second of seven equal columns (the header and each row 32 to 35
+        # px high), until its editor (an input over the grid) opens, and fill it. A click at a pixel offset, then
+        # ArrowLeft and a keystroke, timed out under load (-n 2): when the click landed during a rerun the editor
+        # never opened.
+        editor = page.locator("input.gdg-input")
+        for _ in range(3):
+            page.mouse.dblclick(box["x"] + box["width"] * 1.5 / 7, box["y"] + 35 + 16)
+            try:
+                editor.wait_for(state="visible", timeout=5_000)
+                break
+            except pytest.importorskip("playwright.sync_api").TimeoutError:
+                _settle(page)
+        editor.fill("3")
         page.wait_for_function(
             "() => document.activeElement?.matches('input.gdg-input') && document.activeElement.value === '3'"
         )

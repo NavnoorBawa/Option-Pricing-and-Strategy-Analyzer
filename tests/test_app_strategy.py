@@ -949,13 +949,22 @@ def test_a_link_to_the_risk_tab_analyses_the_linked_template():
     _assert_heatmap_of(at, 200, condor)
     strategy = strat.Strategy("Iron Condor", strat.build_template("Iron Condor", 100, 10, 1.0).legs, fees=4 * 0.0065)
     # The VaR with the default index implied-vol dynamics, and beside it the spot-only VaR (implied vol frozen).
-    at.pills(key="report").set_value("VaR").run()
+    at.segmented_control(key="report").set_value("VaR").run()
     frozen = risk.VaRConfig(confidence=0.99, horizon_days=1, n_paths=100_000, seed=7)
+    # The options age on the tab's clock: from the last cash close to the next session's (the textbook market has no
+    # valuation time of its own), counted here day by day.
+    start = mk.last_close()
+    day = start.date()
+    while True:
+        day = date.fromordinal(day.toordinal() + 1)
+        if clock.is_trading_day(day):
+            break
+    years = (day - start.date()).days / 365
     for config, var_label in (
         (dataclasses.replace(frozen, **INDEX_VOL), "VaR 99% 1D · MC"),
         (frozen, "Spot-only VaR"),
     ):
-        var = risk.value_at_risk(strategy, strat.Market(100, 0.05, 0.2, 1.0), config, 200)
+        var = risk.value_at_risk(strategy, strat.Market(100, 0.05, 0.2, 1.0), config, 200, years)
         # The VaR cards are to the cent while every amount on them is below $1,000 (about $300 here).
         assert var.var < 900 and _metric(at, var_label).value == tab_risk.exact(-var.var)
     # The link now holds the menu's one parameter.

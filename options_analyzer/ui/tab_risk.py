@@ -1593,7 +1593,9 @@ def render(position: Position | None, inputs: Inputs) -> None:
     # Three pairs: one line of six on a laptop with the sidebar open, 2 + 2 + 2 on a phone (two groups of three went
     # 2 + 1 + 2 + 1 there).
     card_row("risk_tiles", ("risk_tiles_delta", "risk_tiles_vol", "risk_tiles_losses"), _tile_cards(book, tiles(book)))
-    report = st.pills(
+    # One single-choice view switch, the segmented control, as Surface's views and Strategy's Chart/Table; pills are
+    # for multi-select filters (the stress groups, the dated curves). The link keeps ?report= and its values.
+    report = st.segmented_control(
         "Report",
         REPORTS,
         default=REPORTS[0],

@@ -249,6 +249,17 @@
   }
 }
 
+/* --- Risk tab (ui/tab_risk.py) ------------------------------------------------------------------------------- */
+
+/* The report selector's six segments on one line of a 390 px phone (a 362 px column): at the theme's 14 px padding
+   they need 394 px and wrapped 5 + 1, Explain alone on a second line; at 0.6rem they need 323 px. */
+@media (max-width: 640px) {
+  .st-key-report button {
+    padding-left: 0.6rem;
+    padding-right: 0.6rem;
+  }
+}
+
 /* --- Surface tab --------------------------------------------------------------------------------------------- */
 
 /* The name of the kept quotes file is a code span in a caption, which Streamlit draws at 0.75em (9.2 px against
