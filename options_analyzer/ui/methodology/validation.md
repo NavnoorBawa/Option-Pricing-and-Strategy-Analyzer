@@ -48,4 +48,5 @@ Greek ladder's identities across all 26 strategy templates and the vega-bucket s
 ### The app
 Streamlit's headless tests run every tab and deep link (`tests/test_app*.py`), and browser tests in Chromium check
 the layout at desktop and phone widths, in light and dark themes (`tests/test_theme.py` and the `tests/test_*_e2e.py`
-files, run locally with `pytest -m e2e`). A test enforces the data policy: the public app fetches no market data.
+files, run every night in continuous integration and locally with `pytest -m e2e`). A test enforces the data
+policy: the public app fetches no market data.
