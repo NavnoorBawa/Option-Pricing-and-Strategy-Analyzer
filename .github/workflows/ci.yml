@@ -54,7 +54,7 @@ jobs:
           python -c "import brotli, fontTools.ttLib"
       - name: Run tests
         # One worker per CPU; --dist loadfile keeps each test file (and its Streamlit AppTests) on one worker.
-        # Network canaries and browser tests run in their own workflows.
+        # The browser and network tests run every night instead (nightly.yml).
         run: pytest -n auto --dist loadfile -q -m "not network and not e2e"
 
   # The oldest dependency versions the project declares on the oldest Python it supports, so that the lower bounds

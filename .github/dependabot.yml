@@ -1,8 +1,8 @@
 version: 2
 updates:
-  # requirements.txt (runtime ranges), requirements-dev.txt (pinned dev tools) and requirements-oracle.txt (pinned
-  # test oracles). One pull request a month for the tools, a separate one for the oracles, whose new releases can
-  # move reference numbers.
+  # requirements.txt (runtime ranges), requirements-dev.txt (pinned dev tools), requirements-e2e.txt (Playwright for
+  # the browser tests) and requirements-oracle.txt (pinned test oracles). One pull request a month for the tools, a
+  # separate one for the oracles, whose new releases can move reference numbers.
   - package-ecosystem: pip
     directory: /
     schedule:

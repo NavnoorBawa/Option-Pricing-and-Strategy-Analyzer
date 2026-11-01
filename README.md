@@ -197,8 +197,9 @@ st.strike_for_delta(-0.16, market, 0.5, 0.22, "put")  # 88.07, the 16-delta put 
   the scarce side of the strike, and the reliability flag is set where coverage falls short.
 - **Invariants**: put–call parity and symmetry, no-arbitrage bounds, monotonicity, Greeks against finite
   differences, the Greek-ladder identities across all 26 strategy templates, and the vega-bucket sums.
-- **App tests**: Streamlit AppTests of every tab and deep link, plus Chromium browser tests of the layout, run locally
-  with `pytest -m e2e`.
+- **App tests**: Streamlit AppTests of every tab and deep link on every push, plus Chromium browser tests of the layout
+  (`pytest -m e2e`), which CI runs every night. The interface's performance budgets are measured by hand on one
+  machine, not in CI.
 - The app's Methodology tab documents every model with its references, and
   [`docs/methods/american_alo.md`](docs/methods/american_alo.md) states the American engine's error and limits.
 
@@ -252,7 +253,9 @@ ruff check . && ruff format --check .
 ```
 
 Continuous integration runs the linters, the suite on Python 3.10–3.14, the oracle tests, the suite against the
-oldest supported dependency versions, and a wheel build. See [CONTRIBUTING.md](CONTRIBUTING.md).
+oldest supported dependency versions on Python 3.10, and a wheel build whose numerical core is installed and tested
+without the app. Every night it also runs the browser tests in Chromium, the check of every reference link, and the
+property tests with 5,000 fresh examples each. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Data
 

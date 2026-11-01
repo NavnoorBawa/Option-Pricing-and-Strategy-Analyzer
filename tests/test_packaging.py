@@ -73,7 +73,7 @@ _SKIPPED_WITHOUT = {
     "py_lets_be_rational": ("lets-be-rational", "requirements-oracle.txt"),
     "xlsxwriter": ("xlsxwriter", "requirements.txt"),
     "requests": ("streamlit", "requirements.txt"),  # a dependency of Streamlit's
-    "playwright.sync_api": None,  # the browser tests: installed by hand (CONTRIBUTING.md)
+    "playwright.sync_api": ("playwright", "requirements-e2e.txt"),
     "tomllib": None,  # the standard library from Python 3.11
 }
 
@@ -167,3 +167,17 @@ def test_no_requirement_or_extra_installs_a_market_data_client():
     names = {re.split(r"[<>=!~;\[ ]", requirement, maxsplit=1)[0].lower() for requirement in declared}
     names |= _requirements("requirements.txt") | _requirements("requirements-dev.txt")
     assert "yfinance" not in names
+
+
+def test_every_suite_the_per_push_jobs_leave_out_runs_in_a_scheduled_workflow():
+    # ci.yml said the browser and network tests ran "in their own workflows" and conftest.py that the nightly
+    # Hypothesis profile ran each night, but ci.yml was the only workflow: 72 browser tests ran nowhere in CI.
+    workflows = {path.name: path.read_text(encoding="utf-8") for path in (ROOT / ".github" / "workflows").glob("*.yml")}
+    scheduled = "\n".join(text for text in workflows.values() if re.search(r"^  schedule:", text, flags=re.MULTILINE))
+    excluded = set(re.findall(r"not (\w+)", " ".join(re.findall(r'-m "([^"]+)"', _ci_job("test")))))
+    assert excluded == {"network", "e2e"}
+    for marker in excluded:
+        assert re.search(rf"pytest .*-m {marker}\b", scheduled), f"no scheduled workflow runs pytest -m {marker}"
+    assert "HYPOTHESIS_PROFILE: nightly" in scheduled
+    # The browser job must fail rather than skip when Chromium is missing, and install what the tests import.
+    assert "chromium.launch()" in scheduled and "requirements-e2e.txt" in scheduled

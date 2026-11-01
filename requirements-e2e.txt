@@ -1,0 +1,6 @@
+# Browser tests (pytest -m e2e) and the README screenshots (scripts/screenshots.py): the dev tools plus Playwright,
+# pinned like them. Playwright's own Chromium comes from `python -m playwright install chromium` (the nightly
+# workflow adds --with-deps for the system libraries).
+-r requirements-dev.txt
+pillow==12.3.0
+playwright==1.64.1
