@@ -147,6 +147,9 @@ def test_the_index_market_reads_the_chain_back():
         ("2098-01-02", None),
         ("2150-01-01", None),
         ("2000-01-03", datetime(2000, 1, 3, 16, 0)),  # the first trading day it accepts
+        # From 2067 an expiry two years out would be labelled '69 or later, which reads as 1969 (the %y pivot).
+        ("2066-12-31T16:00", datetime(2066, 12, 31, 16, 0)),
+        ("2067-01-03T16:00", None),
         ("noon", None),
     ],
 )
@@ -230,7 +233,7 @@ def test_a_link_to_a_market_that_does_not_exist_opens_the_index_with_a_note(new_
             "yesterday",
             None,
             [
-                "This link asks for a valuation time `yesterday`, which is not a date and time between 2000 and 2097 "
+                "This link asks for a valuation time `yesterday`, which is not a date and time between 2000 and 2066 "
                 "(2026-10-23T16:00), so the last close is used."
             ],
         ),
@@ -496,3 +499,14 @@ def test_a_link_with_a_strategy_expiry_not_listed_gets_a_note(new_app, asked, ch
     day, settlement = chosen.split()
     assert at.selectbox(key="strategy_expiry").value == (date.fromisoformat(day), settlement)
     assert [w.value for w in at.warning] == ([note] if note else [])
+
+
+def test_every_expiry_label_reads_as_its_own_century():
+    # At the last valuation time accepted, the furthest listed expiry's two-digit year still reads as 20xx under the
+    # usual pivot (strptime's %y): at 2097-12-31 the chain labelled 31-Jan-98, which reads as 1998.
+    from options_analyzer.ui.inputs import ASOF_RANGE
+
+    context = mk.index_market(ASOF_RANGE[1].replace(hour=16, minute=0))
+    for expiry in context.expiries["expiry"]:
+        label = _plain(mk.expiry_label(context.expiry_row(expiry))).split()[0]
+        assert datetime.strptime(label, "%d-%b-%y").date() == expiry, label

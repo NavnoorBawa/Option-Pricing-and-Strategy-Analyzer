@@ -29,9 +29,11 @@ from .format import level, moneyness, pct
 from .format import strike as strike_text
 from .model_config import ModelConfig, model_sidebar  # code that imports ModelConfig from here keeps working
 
-#: The valuation times the index preset accepts (New York wall time): the clock's calendar runs 2000 to 2100, and
-#: the chain lists expiries up to three years out.
-ASOF_RANGE = (datetime(2000, 1, 3, 0, 0), datetime(2097, 12, 31, 23, 55))
+#: The valuation times the index preset accepts (New York wall time). The clock's calendar runs 2000 to 2100 and the
+#: chain lists expiries up to two years out (``synthetic.HORIZON_DAYS``), but every expiry is labelled with a
+#: two-digit year (``31‑Jan‑98``), which reads as 1998 from 2069 on: the usual pivot, Python's and POSIX's ``%y``
+#: (00 to 68 are 20xx, 69 to 99 are 19xx). Ending at 2066 keeps every expiry on screen at 2068 or before.
+ASOF_RANGE = (datetime(2000, 1, 3, 0, 0), datetime(2066, 12, 31, 23, 55))
 #: The textbook inputs (version 2's defaults), by widget key.
 TEXTBOOK = {"spot": 100.0, "strike": 100.0, "days": 365, "vol": 20.0, "rate": 5.0, "div": 0.0}
 #: The range each textbook input accepts, by widget key (the link reader checks a link's values against it).

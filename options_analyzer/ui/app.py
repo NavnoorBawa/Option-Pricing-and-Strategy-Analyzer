@@ -194,7 +194,7 @@ def _read_link() -> None:
         elif value.strip():
             notes.append(
                 f"This link asks for a valuation time {link_shown(value)}, which is not a date and time between 2000 "
-                "and 2097 (2026-10-23T16:00), so the last close is used."
+                f"and {ASOF_RANGE[1].year} (2026-10-23T16:00), so the last close is used."
             )
     notes += _read_numbers(params)
     notes += _read_strategy_expiry(params)
