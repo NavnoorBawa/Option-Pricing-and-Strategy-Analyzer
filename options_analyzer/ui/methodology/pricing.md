@@ -43,12 +43,12 @@ verified against high-precision finite differences in the test-suite.
   the tree, theta from the step-2 middle node (CRR) or a central difference in time (Leisen–Reimer), and
   vega, rho and dividend rho from repricing on a tree with the same steps (±0.5 vol point, ±25 bp); vega
   always on Leisen–Reimer trees, since bumping a CRR tree's volatility moves its nodes past the strike (its
-  vega was 0.8% high on a 1,001-step put). The early-exercise boundary is the critical price where the exercise gain changes sign, interpolated between
-  adjacent nodes, averaged over consecutive steps (whose nodes interleave) and fitted to be monotone in
-  time, as the exact boundary is. The early-exercise premium is measured on the same tree with European
-  exercise, so the discretisation error cancels; the American reference in the convergence chart
-  extrapolates Leisen–Reimer trees with 2,001 and 4,003 steps and is kept within the American no-arbitrage
-  bounds: at least the European and the exercise value, at most the perpetual American value.
+  vega was 0.8% high on a 1,001-step put). The early-exercise boundary is the critical price where the
+  exercise gain changes sign, interpolated between adjacent nodes, averaged over consecutive steps (whose
+  nodes interleave) and fitted to be monotone in time, as the exact boundary is. The early-exercise premium
+  is measured on the same tree with European exercise, so the discretisation error cancels; the American
+  reference in the convergence chart extrapolates Leisen–Reimer trees with 2,001 and 4,003 steps and is kept
+  within the American no-arbitrage bounds: at least the European and the exercise value, at most the perpetual American value.
 
 ### American engine (Andersen–Lake–Offengenden)
 The sidebar's *American (ALO)* engine values American calls and puts by spectral collocation of the
