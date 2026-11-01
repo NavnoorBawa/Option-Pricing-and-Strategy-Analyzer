@@ -91,3 +91,26 @@ def test_every_library_a_test_skips_without_is_installed_by_a_requirements_file(
         if source is not None:
             distribution, requirements = source
             assert distribution in _requirements(requirements), f"{module}: {requirements} lacks {distribution}"
+
+
+def _ci_job(name: str) -> str:
+    """The text of one job in .github/workflows/ci.yml, up to the next job."""
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    match = re.search(rf"^  {re.escape(name)}:\n(.*?)(?=^  [\w-]+:\n|\Z)", workflow, flags=re.MULTILINE | re.DOTALL)
+    assert match, f"ci.yml has no job {name}"
+    return match.group(1)
+
+
+def test_the_oldest_dependency_job_runs_every_declared_lower_bound_on_the_oldest_python():
+    # The job ran on Python 3.11 although the project declares 3.10, so the real floor was never tested.
+    tomllib = pytest.importorskip("tomllib")  # Python 3.11+
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    job = _ci_job("oldest-dependencies")
+    floor = project["requires-python"].removeprefix(">=")
+    assert re.search(rf'python-version: "{re.escape(floor)}"', job), f"the job should run on Python {floor}"
+    pinned = dict(re.findall(r'"([\w-]+)==([\d.]+)\.\*"', job))
+    for requirement in [*project["dependencies"], *project["optional-dependencies"]["app"]]:
+        if ";" in requirement:  # tzdata, on Windows only
+            continue
+        name, lower = re.match(r"([\w-]+)>=([\d.]+)", requirement).groups()
+        assert pinned.get(name) == lower, f"{name}: declared >={lower}, the job installs {pinned.get(name)}"
