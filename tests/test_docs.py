@@ -47,3 +47,30 @@ def test_the_conventions_name_gamma_as_the_app_shows_it():
     for label, source in shown.items():
         assert f'"{label}"' in source, f"the app no longer labels gamma {label}"
         assert label.replace("%", " %") in conventions, f"the README does not name {label}"
+
+
+def _screenshot_script() -> str:
+    return (ROOT / "scripts" / "screenshots.py").read_text(encoding="utf-8")
+
+
+def test_the_screenshot_script_waits_for_charts_the_tabs_still_draw():
+    # The script clicks each tab and waits for one of its charts by Streamlit key: a key the tab no longer uses would
+    # time the script out after two minutes.
+    tabs = re.search(r"^TABS = \{\n(.*?)^\}", _screenshot_script(), flags=re.MULTILINE | re.DOTALL).group(1)
+    keys = re.findall(r'\("\w+", "(\w+)"\)', tabs)
+    assert len(keys) == 5
+    ui = "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "options_analyzer" / "ui").glob("*.py"))
+    for key in keys:
+        assert f'key="{key}"' in ui, f"no tab draws a chart with key {key!r}"
+
+
+@pytest.mark.parametrize("image", sorted(set(re.findall(r"\]\((docs/images/[^)\s]+\.png)\)", README))))
+def test_every_readme_screenshot_has_the_size_the_script_takes(image):
+    # The README showed the removed version-2 interface in 1,400 x 1,700 frames that the current script (a 1,440 x
+    # 1,000 window at a pinned valuation time) cannot make: the images were never regenerated after the redesign.
+    # Images from the script have its window's size exactly; a hand-made or stale one almost never does.
+    viewport = re.search(r'^VIEWPORT = \{"width": (\d+), "height": (\d+)\}', _screenshot_script(), flags=re.MULTILINE)
+    header = (ROOT / image).read_bytes()[:24]
+    assert header[:8] == b"\x89PNG\r\n\x1a\n"
+    size = int.from_bytes(header[16:20], "big"), int.from_bytes(header[20:24], "big")  # the IHDR chunk
+    assert size == (int(viewport.group(1)), int(viewport.group(2))), "regenerate it: python scripts/screenshots.py"

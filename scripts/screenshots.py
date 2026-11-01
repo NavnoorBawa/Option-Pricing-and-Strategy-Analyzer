@@ -1,14 +1,16 @@
 """Regenerate the README screenshots in docs/images from the running app.
 
-Usage (from the repository root, with the app dependencies installed)::
+Usage (from the repository root)::
 
-    pip install playwright pillow && playwright install chromium
+    pip install -r requirements-e2e.txt && python -m playwright install chromium
     python scripts/screenshots.py                    # writes docs/images/*.png
-    python scripts/screenshots.py --chromium /path/to/chrome --out /tmp/shots
+    python scripts/screenshots.py --chromium /path/to/chrome --out /tmp/shots --color-scheme light
 
-The script starts ``streamlit run main.py`` on a free port with the default sidebar inputs, opens each tab in a
-1400 x 1700 dark-theme window, saves what is on screen, and stops the server. Re-run it whenever the interface
-changes so that the README shows the app as it is.
+The script starts ``streamlit run main.py`` on a free port, opens the app on the synthetic index at the pinned
+valuation time ``QUERY`` with the default sidebar inputs, clicks each tab in a ``VIEWPORT`` window (1,440 x 1,000,
+dark unless ``--color-scheme light``), saves what is on screen, and stops the server. Re-run it whenever the
+interface changes so that the README shows the app as it is (tests/test_docs.py checks the images' size against
+``VIEWPORT``).
 """
 
 from __future__ import annotations
@@ -35,6 +37,8 @@ TABS = {
 #: The valuation time of the screenshots (and of the README's numbers): the synthetic index at a pinned cash close,
 #: so that the images do not change with the day they are taken.
 QUERY = "?asof=2026-10-23T16:00"
+#: The browser window: the desk layout's design width, tall enough for each tab's tiles and first chart.
+VIEWPORT = {"width": 1440, "height": 1000}
 
 
 def _free_port() -> int:
@@ -56,6 +60,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--out", type=Path, default=ROOT / "docs" / "images", help="output folder")
     parser.add_argument("--chromium", help="Chromium executable (default: the one Playwright installed)")
+    parser.add_argument("--color-scheme", choices=("dark", "light"), default="dark", help="theme (default: dark)")
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 
@@ -69,7 +74,7 @@ def main() -> None:
     try:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(executable_path=args.chromium)
-            page = browser.new_page(viewport={"width": 1440, "height": 1000}, color_scheme="dark")
+            page = browser.new_page(viewport=VIEWPORT, color_scheme=args.color_scheme)
             for _ in range(120):  # the server needs a few seconds to start
                 try:
                     page.goto(f"http://127.0.0.1:{port}/{QUERY}", wait_until="networkidle")
