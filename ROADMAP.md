@@ -25,6 +25,29 @@ The project is done when all of these hold, each shown by a test or a measuremen
 6. **Honesty.** README, scorecard and Methodology describe only what the code and tests show, and say what is not
    done.
 
+## Next session
+
+State on 1-Nov-26: `main` is green in CI (Python 3.10 to 3.14, the oldest dependencies on 3.10, the oracles, the
+package checks) and deployed. Every tab is in the desk layout of the UI specification, and an independent audit of the
+whole product (six auditors: library numbers, every number on screen, edge cases, engineering, performance, design)
+found 71 issues, each fixed with a test or refuted with evidence. The live app shows the numbers the tests pin.
+
+In order of value:
+
+1. DK-7 latency: a Pricing strike step settles in about 0.9 s against 0.6 s, a tab switch in 1.0 to 1.5 s against
+   0.6 s, a Strategy what-if step in about 0.8 s against 0.5 s (`scripts/app_payload.py`). Move the Strategy analysis
+   into a fragment as the specification says, then add the performance suite to the nightly workflow.
+2. RK-13 carry per expiry for later legs; RK-7 surface shocks in scenarios; RK-12 American revaluation in Strategy and
+   Risk through an ALO price grid.
+3. RK-5 historical and filtered historical simulation; VL-7 the generated validation report.
+4. VL-4 mypy on the numerical core; VL-5 a coverage gate; VL-11 mutation testing of the pricing core.
+5. The Risk tiles sit at 276 px at 1,440 × 900, 16 px over the specification's 260 (a strict xfail in
+   `tests/test_risk_e2e.py` names the cause: the what-if strip's caption line).
+
+For the owner (not possible from a coding session): tag the releases (`v3.0.0` at `323a01d` and the desk build on
+`main`) and publish their notes, turn on Dependabot security updates and branch protection that requires CI, and
+open the app shortly before sharing it: Streamlit Community Cloud puts it to sleep after a few days without visits.
+
 ## Done (version 3.0)
 
 - Desk design system: theme tokens, self-hosted IBM Plex, chart house style, number formats (DK-1 to DK-4).
@@ -188,4 +211,5 @@ foundation and each reviewed by an independent correctness and design pass befor
   strike in scenarios (RK-7), and legs on a later expiry take the front expiry's carry (RK-13).
 - Browser acceptance tests run every night, not on each pull request, and the performance budgets are not measured
   in CI (DK-7).
-- Bit-exact surface golden tests skip on CPUs other than the recording one; the tolerance versions run everywhere.
+- Bit-exact surface golden tests run only on the recording platform (CI does not collect them); the tolerance and
+  invariant versions run everywhere.
