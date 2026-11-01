@@ -56,7 +56,7 @@ The numbers a desk would have caught first (docs/improvement-guide.md section 2)
 
 | Measure | v3.0.0 | Now |
 | --- | --- | --- |
-| Automated tests (`pytest --collect-only`) | 5,004 | 5,343 (5,236 pass, 103 skip off the recording platform, 4 strict xfails) |
+| Automated tests (`pytest --collect-only`) | 5,004 | 6,127 (6,125 pass and 2 strict xfails on the recording platform; the 76 browser and network tests run nightly in CI, and CI collects 108 fewer, the golden surface's bit-identity checks) |
 | 1-day at-the-money put (S 5,800, σ 18 %), cost of the next day | θ/365 = −10.66 on a 21.56 premium | Decay to expiry −21.56 (full revaluation), shown first |
 | 7-day iron condor, P&L of one day | θ/365 = +$137.50 | +$151.97 by revaluation, beside θ/365 |
 | 45-day short straddle, 99 % 1-day VaR (100,000 paths, seed 7) | $2,833 (implied vol frozen by default) | $3,862 with implied-vol moves by default, the spot-only $2,833 beside it |
@@ -83,19 +83,24 @@ textbook one; now on the default synthetic index at 23-Oct-26 16:00):
 What the desk build sends and how long a page takes to settle, measured with `python scripts/app_payload.py` (3
 repeats; websocket bytes as the page receives them, after the per-message compression is undone; time from the click
 or navigation to the last DOM change before 600 ms of quiet, Streamlit idle; 1,440 × 900, dark, on the synthetic
-index at 23-Oct-26 16:00). Measured on 1-Nov-26 at commit `21863b7`, before the payload fixes of that day's audit, on
-the shared 4-core container at a load average of 4.1, so the timings run high; the byte counts did not vary between
-repeats. v3.0.0's 56 KB a load and a rerun (above) came from another script on the one textbook page.
+index at 23-Oct-26 16:00), on 1-Nov-26 before the audit's fixes (commit `21863b7`) and after them, on the shared
+4-core container (load averages 4.1 and 2.0 to 2.8, so the timings are indicative; the byte counts did not vary
+between repeats). v3.0.0's 56 KB a load and a rerun (above) came from another script on the one textbook page.
 
-| Measure | Data sent | Time to a settled page, median (range) |
+| Measure | Data sent, before → after | Time to a settled page, median, before → after |
 | --- | --- | --- |
-| First load after the server starts (Pricing) | 67 KB | 6.3 s |
-| First load of a tab in a fresh page: Pricing, Strategy, Risk | 67 KB, 157 KB, 52 KB | 3.9 s, 4.3 s, 2.9 s (1.7–5.3 s) |
-| First load of a tab in a fresh page: Surface, IV, Methodology | 88 KB, 48 KB, 96 KB | 4.2 s, 2.9 s, 1.9 s (1.8–4.2 s) |
-| Pricing: strike step of 5 points | 53 KB | 0.95 s (0.93–0.97 s) |
-| Tab switch from Pricing to Strategy | 142 KB | 1.44 s (1.13–1.44 s) |
-| Strategy: what-if spot step | 143 KB | 0.68 s (0.61–0.84 s) |
-| Strategy: template change | 142 KB | 1.09 s (1.02–1.21 s) |
+| First load after the server starts (Pricing) | 67 → 73 KB | 6.3 → 5.7 s |
+| First load of a tab in a fresh page: Pricing, Strategy, Risk | 67, 157, 52 → 73, 112, 54 KB | 3.9, 4.3, 2.9 → 3.8, 3.8, 3.6 s |
+| First load of a tab in a fresh page: Surface, IV, Methodology | 88, 48, 96 → 89, 49, 109 KB | 4.2, 2.9, 1.9 → 3.9, 3.0, 2.0 s |
+| Pricing: strike step of 5 points | 53 → 58 KB | 0.95 → 0.90 s |
+| Tab switch from Pricing to Strategy | 142 → 97 KB | 1.44 → 1.27 s |
+| Strategy: what-if spot step | 143 → 97 KB | 0.68 → 0.78 s |
+| Strategy: template change | 142 → 95 KB | 1.09 → 1.13 s |
+
+The P&L chart's grid of 301 points instead of 600 takes about a third off every Strategy rerun. The websocket's
+per-message compression, on since the audit, about halves the bytes on the wire besides (a Pricing strike step 58
+→ 25 KB, a Strategy what-if step 143 → 76 KB). The spec's latency budgets (0.6 s for a strike step or a tab switch,
+0.5 s for a what-if step) are still missed on this machine; ROADMAP DK-7 tracks them.
 
 ## Free-resources ledger
 
