@@ -29,6 +29,14 @@ pytest -m "not slow"                         # markers: oracle, slow, network, e
 HYPOTHESIS_PROFILE=ci pytest                 # Hypothesis profiles: dev (default), ci, nightly
 ```
 
+The browser tests drive the running app in Chromium with Playwright. They skip when Playwright or its Chromium is
+missing, so install both first (`CHROMIUM_EXECUTABLE` points them at another Chromium):
+
+```bash
+pip install -r requirements-e2e.txt && python -m playwright install chromium
+pytest -n 2 --dist loadfile -m e2e           # about 7 min on 2 workers
+```
+
 Tests run with outbound network access blocked (`tests/conftest.py`); a test that really needs the internet must be
 marked `@pytest.mark.network`. Proxy settings (`HTTPS_PROXY` and the like) are switched off inside unmarked tests,
 so a proxy on your machine cannot fetch pages for them and a test that passes locally also passes in CI, which has no
@@ -42,12 +50,15 @@ pytest
 ```
 
 Continuous integration runs the same commands on every supported Python version and against the oldest declared
-dependency versions. Development tools are pinned in `requirements-dev.txt` and updated by Dependabot.
+dependency versions; the browser tests, the network tests and the nightly Hypothesis profile run every night
+(`.github/workflows/nightly.yml`), not on pull requests. Development tools are pinned in `requirements-dev.txt` (and
+Playwright in `requirements-e2e.txt`) and updated by Dependabot.
 
 ## Guidelines
 
-- Keep the numerical core (`options_analyzer/*.py`) free of Streamlit imports; the interface lives in
-  `options_analyzer/ui/`.
+- Keep the numerical core (everything outside `options_analyzer/ui/`) free of Streamlit and Plotly imports: it may
+  import only the standard library, NumPy, SciPy and pandas (`tests/test_packaging.py` checks it, and CI tests the core
+  installed without the app).
 - Every numerical change needs a test against an independent reference: a closed form, a high-precision
   (`mpmath`) computation, a published value or an invariant such as put-call parity.
 - Adding a strategy template: add a `StrategyTemplate` to `TEMPLATES` in `options_analyzer/strategies.py` (with its
@@ -56,7 +67,7 @@ dependency versions. Development tools are pinned in `requirements-dev.txt` and 
 - Use plain units in the interface and say which convention a number follows (per day, per volatility point, per
   share or per position).
 - After an interface change, refresh the README screenshots with `python scripts/screenshots.py` (needs
-  `pip install playwright pillow` and `playwright install chromium`).
+  `requirements-e2e.txt` and Playwright's Chromium, as for the browser tests).
 
 ## Reporting bugs
 

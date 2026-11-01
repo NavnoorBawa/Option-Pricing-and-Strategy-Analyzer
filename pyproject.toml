@@ -34,10 +34,6 @@ app = [
     "streamlit>=1.65,<2",
     "xlsxwriter>=3.1",
 ]
-# Optional live market data for local use only; the app and the tests never need it.
-data = [
-    "yfinance>=1.7",
-]
 
 [project.scripts]
 options-analyzer = "options_analyzer.ui.launch:main"
@@ -55,6 +51,8 @@ include = ["options_analyzer*"]
 [tool.setuptools.package-data]
 # Streamlit reads .streamlit/config.toml next to the main script, so the installed app keeps the repo's settings.
 # static/ holds the files Streamlit serves (fonts with their licence), methodology/ the Methodology tab's text.
+# py.typed (PEP 561) tells type checkers to read the package's own annotations.
+"options_analyzer" = ["py.typed"]
 "options_analyzer.ui" = [".streamlit/config.toml", "static/**/*", "methodology/*"]
 
 [tool.ruff]

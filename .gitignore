@@ -12,6 +12,9 @@ dist/
 .DS_Store
 .streamlit/secrets.toml
 
+# Logs of local runs (study and benchmark output stays on the machine that made it)
+*.log
+
 # pytest-cov output
 .coverage
 .coverage.*

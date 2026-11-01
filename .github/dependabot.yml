@@ -1,8 +1,8 @@
 version: 2
 updates:
-  # requirements.txt (runtime ranges), requirements-dev.txt (pinned dev tools) and requirements-oracle.txt (pinned
-  # test oracles). One pull request a month for the tools, a separate one for the oracles, whose new releases can
-  # move reference numbers.
+  # requirements.txt (runtime ranges), requirements-dev.txt (pinned dev tools), requirements-e2e.txt (Playwright for
+  # the browser tests) and requirements-oracle.txt (pinned test oracles). One pull request a month for the tools, a
+  # separate one for the oracles, whose new releases can move reference numbers.
   - package-ecosystem: pip
     directory: /
     schedule:
@@ -16,6 +16,9 @@ updates:
       # Hypothesis 6.169 and later need Python 3.11; drop this when the project drops Python 3.10.
       - dependency-name: hypothesis
         versions: [">=6.169"]
+      # fontTools 4.66 and later need Python 3.11, likewise.
+      - dependency-name: fonttools
+        versions: [">=4.66"]
   - package-ecosystem: github-actions
     directory: /
     schedule:

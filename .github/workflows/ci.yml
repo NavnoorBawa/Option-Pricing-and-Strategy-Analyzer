@@ -48,13 +48,17 @@ jobs:
           cache: pip
           cache-dependency-path: requirements*.txt
       - name: Install dependencies
-        run: pip install -r requirements-dev.txt
+        # The font-metric tests skip when fontTools or brotli does not import; here that stops the job instead.
+        run: |
+          pip install -r requirements-dev.txt
+          python -c "import brotli, fontTools.ttLib"
       - name: Run tests
         # One worker per CPU; --dist loadfile keeps each test file (and its Streamlit AppTests) on one worker.
-        # Network canaries and browser tests run in their own workflows.
+        # The browser and network tests run every night instead (nightly.yml).
         run: pytest -n auto --dist loadfile -q -m "not network and not e2e"
 
-  # The oldest dependency versions the project declares, so that the lower bounds stay true.
+  # The oldest dependency versions the project declares on the oldest Python it supports, so that the lower bounds
+  # stay true together (Streamlit 1.65 is the last release for Python 3.10; NumPy 1.26 has no wheels past 3.12).
   oldest-dependencies:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -62,7 +66,9 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.11"
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: requirements*.txt
       - name: Install the declared minimum versions
         # The test tools come from requirements-dev.txt (the one place they are pinned); the constraints hold each
         # runtime dependency at its lower bound.
@@ -70,6 +76,7 @@ jobs:
           printf '%s\n' "numpy==1.26.*" "pandas==2.1.*" "scipy==1.11.*" "plotly==5.24.*" "streamlit==1.65.*" \
             "xlsxwriter==3.1.*" > "$RUNNER_TEMP/oldest.txt"
           pip install -r requirements-dev.txt -c "$RUNNER_TEMP/oldest.txt"
+          python -c "import brotli, fontTools.ttLib"
           pip list
       - name: Run tests
         run: pytest -n auto --dist loadfile -q -m "not network and not e2e"
@@ -102,11 +109,35 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
-      - name: Build and install the wheel with the app extra
+      - name: Build the wheel
         run: |
           pip install build
           python -m build --wheel
-          pip install "$(ls dist/*.whl)[app]"
+      - name: Install the numerical core alone, import every core module and run the core tests
+        # `pip install .` promises a core that needs only NumPy, SciPy and pandas: a stray Streamlit or Plotly import
+        # outside options_analyzer/ui would break it. The test tools come from requirements-dev.txt without its
+        # `-r requirements.txt` (which would bring the app); pythonpath is emptied so the tests import the wheel.
+        run: |
+          python -m venv "$RUNNER_TEMP/core"
+          . "$RUNNER_TEMP/core/bin/activate"
+          pip install "$(ls dist/*.whl)"
+          grep -v '^-r' requirements-dev.txt > "$RUNNER_TEMP/tools.txt"
+          pip install -r "$RUNNER_TEMP/tools.txt"
+          cd "$RUNNER_TEMP"
+          python - <<'EOF'
+          import importlib, pkgutil, sys, options_analyzer
+          core = [m.name for m in pkgutil.walk_packages(options_analyzer.__path__, "options_analyzer.")
+                  if not m.name.startswith("options_analyzer.ui")]
+          for name in core:
+              importlib.import_module(name)
+          assert not {"streamlit", "plotly", "xlsxwriter"} & set(sys.modules), "the core imported the app's libraries"
+          print(f"imported {len(core)} core modules from {options_analyzer.__file__} without the app extra")
+          EOF
+          cd "$GITHUB_WORKSPACE"
+          pytest -n auto -q -o pythonpath= tests/test_black_scholes.py tests/test_american.py tests/test_implied_vol.py \
+            tests/test_strategies.py tests/test_risk.py
+      - name: Install the wheel with the app extra
+        run: pip install "$(ls dist/*.whl)[app]"
       - name: Check that the wheel ships every file of the package
         # Fonts, stylesheets and Methodology text are package data; a missing glob would drop them silently.
         run: |

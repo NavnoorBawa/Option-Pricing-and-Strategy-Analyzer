@@ -1,0 +1,79 @@
+name: Nightly
+
+# What the per-push workflow (ci.yml) leaves out because it is slow, needs a browser or needs the internet: the
+# browser tests, the reference-link check and the property tests at 5,000 fresh examples each. A failure here does
+# not block a pull request; it shows on the Actions page and in the repository's notifications.
+on:
+  schedule:
+    - cron: "17 6 * * *" # 06:17 UTC, outside US market hours
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  # The app in Chromium (pytest -m e2e): layout at desktop and phone widths in light and dark, tab links, edits that
+  # survive tab switches, and the loose timing guards. The performance budgets of the UI specification are not
+  # measured here: they are measured by hand on one machine (ROADMAP.md, DK-7).
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      HYPOTHESIS_PROFILE: ci
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Install the dev tools, Playwright and its Chromium
+        run: |
+          pip install -r requirements-e2e.txt
+          python -m playwright install --with-deps chromium
+      - name: Check that Chromium starts
+        # The browser fixtures skip when no Chromium launches; here that stops the job instead.
+        run: python -c "from playwright.sync_api import sync_playwright as s; p = s().start(); p.chromium.launch().close(); p.stop()"
+      - name: Run the browser tests
+        # Two workers: each test module starts its own app server and browser.
+        run: pytest -n 2 --dist loadfile -q -m e2e
+
+  # Every DOI, arXiv identifier and web link the Methodology cites (pytest -m network). A site that refuses the check
+  # makes the test skip with the link's name rather than fail.
+  links:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      HYPOTHESIS_PROFILE: ci
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Run the network tests
+        run: pytest -q -rs -m network
+
+  # The property tests with fresh random examples, 5,000 per property (the per-push jobs replay 300 from a fixed
+  # seed). Hypothesis prints a reproduction blob for any failure. The seven files with property tests took 3 min on 2
+  # workers under this profile.
+  properties:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      HYPOTHESIS_PROFILE: nightly
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Run the suite with the nightly Hypothesis profile
+        run: pytest -n auto --dist loadfile -q -m "not network and not e2e"

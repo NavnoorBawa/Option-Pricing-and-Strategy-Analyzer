@@ -197,8 +197,9 @@ st.strike_for_delta(-0.16, market, 0.5, 0.22, "put")  # 88.07, the 16-delta put 
   the scarce side of the strike, and the reliability flag is set where coverage falls short.
 - **Invariants**: put–call parity and symmetry, no-arbitrage bounds, monotonicity, Greeks against finite
   differences, the Greek-ladder identities across all 26 strategy templates, and the vega-bucket sums.
-- **App tests**: Streamlit AppTests of every tab and deep link, plus Chromium browser tests of the layout, run locally
-  with `pytest -m e2e`.
+- **App tests**: Streamlit AppTests of every tab and deep link on every push, plus Chromium browser tests of the layout
+  (`pytest -m e2e`), which CI runs every night. The interface's performance budgets are measured by hand on one
+  machine, not in CI.
 - The app's Methodology tab documents every model with its references, and
   [`docs/methods/american_alo.md`](docs/methods/american_alo.md) states the American engine's error and limits.
 
@@ -208,7 +209,9 @@ st.strike_for_delta(-0.16, market, 0.5, 0.22, "put")  # 88.07, the 16-delta put 
   opening print, PM weeklies at the 16:00 close), and is calendar days / 365 in the Textbook market. Rates and
   dividend yield are continuously compounded.
 - Greeks are displayed per calendar day (theta, charm, veta, color), per volatility point (vega, vanna, zomma …), per
-  1 % rate move (rho) and per $1 spot move (delta, gamma, speed).
+  1 % rate or dividend-yield move (rho, epsilon) and per point of spot (delta, speed). Gamma is shown for a 1 % move:
+  as Γ 1 % on the Pricing tab, the change in delta (Γ·S/100), and as Γ P&L 1 % on the Strategy and Risk tabs, the
+  dollar P&L of the move (½Γ(0.01·S)² for the position), where delta is shown as dollar delta ($Δ, delta × spot).
 - VaR horizons are in trading days (252 per year).
 - Strategy quantities are signed (+ long, − short); one unit is an option on one share. P&L is shown for the whole
   position (contracts × multiplier).
@@ -226,27 +229,33 @@ options_analyzer/
   implied_vol.py            Bounds-checked implied volatility, scalar and batch
   strategies.py             Leg-based strategy engine, templates, position risk
   scenarios.py              Stress tests, scenario grids, Greek ladder, vega buckets
-  risk.py                   Monte Carlo VaR / Expected Shortfall
-  vol_surface/              SVI, SSVI, quote parsing, surface fitting, local volatility
+  risk.py                   VaR / Expected Shortfall: Monte Carlo, delta-normal, exact delta-gamma-theta
+  backtest.py               VaR and ES backtests and their power, plain and volatility-scaled historical simulation
+  attribution.py            P&L explain: Greek waterfall and exact Shapley split
+  margin.py                 Illustrative FINRA 4210(g)-style portfolio margin
+  vol_surface/              Parity forwards, SVI, SSVI, quote parsing, surface fitting, local vol, published surface
   clock.py                  Market clock: NYSE calendar, settlement times, variance clock
   market_data/              Synthetic option chain, chain adapters, schema and OCC symbols
   ui/                       Streamlit interface (one module per tab, desk header, Methodology)
 tests/                      pytest suite (engines, oracles, invariants, app); tests/oracle needs QuantLib
 benchmarks/                 Timing scripts for the engines
-docs/                       Scorecard, method notes, data policy, screenshots
+scripts/                    README screenshots, the app's payload and timings, the American engine's QuantLib grid
+docs/                       Scorecard, method notes, data policy, reviews, screenshots
 ```
 
 ## Development
 
 ```bash
 pip install -r requirements-dev.txt     # app dependencies plus pinned test and lint tools
-pytest -n auto --dist loadfile           # 5,000 tests in parallel
+pytest -n auto --dist loadfile           # about 6,000 tests in parallel
 pip install -r requirements-oracle.txt && pytest -m oracle   # the QuantLib, Let's Be Rational and mpmath oracles
 ruff check . && ruff format --check .
 ```
 
 Continuous integration runs the linters, the suite on Python 3.10–3.14, the oracle tests, the suite against the
-oldest supported dependency versions, and a wheel build. See [CONTRIBUTING.md](CONTRIBUTING.md).
+oldest supported dependency versions on Python 3.10, and a wheel build whose numerical core is installed and tested
+without the app. Every night it also runs the browser tests in Chromium, the check of every reference link, and the
+property tests with 5,000 fresh examples each. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Data
 
@@ -265,9 +274,9 @@ The public app uses synthetic data and files you upload; it never scrapes market
 - The VaR model's backtest runs on a synthetic history: there is no market history in the public app.
 
 [ROADMAP.md](ROADMAP.md) lists what is done and what remains, and
-[docs/improvement-guide.md](docs/improvement-guide.md) says how to take it further. This project is for education and analysis only and is
-**not investment advice**. Version 2.0 was a ground-up rebuild
-after a full audit of the original app ([AUDIT.md](AUDIT.md)); version 3.0 is summarised in the
+[docs/improvement-guide.md](docs/improvement-guide.md) says how to take it further. This project is for education and
+analysis only and is **not investment advice**. Version 2.0 was a ground-up rebuild after a full audit of the original
+app ([docs/reviews/audit-v1.md](docs/reviews/audit-v1.md)); version 3.0 is summarised in the
 [scorecard](docs/scorecard.md).
 
 ## Author
