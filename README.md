@@ -211,7 +211,7 @@ st.strike_for_delta(-0.16, market, 0.5, 0.22, "put")  # 88.07, the 16-delta put 
 - Greeks are displayed per calendar day (theta, charm, veta, color), per volatility point (vega, vanna, zomma …), per
   1 % rate or dividend-yield move (rho, epsilon) and per point of spot (delta, speed). Gamma is shown for a 1 % move:
   as Γ 1 % on the Pricing tab, the change in delta (Γ·S/100), and as Γ P&L 1 % on the Strategy and Risk tabs, the
-  dollar P&L of the move (½Γ(0.01·S)² for the position).
+  dollar P&L of the move (½Γ(0.01·S)² for the position), where delta is shown as dollar delta ($Δ, delta × spot).
 - VaR horizons are in trading days (252 per year).
 - Strategy quantities are signed (+ long, − short); one unit is an option on one share. P&L is shown for the whole
   position (contracts × multiplier).

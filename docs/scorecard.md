@@ -110,6 +110,9 @@ Everything the project uses is free.
 | Let's Be Rational reference code (P. Jäckel) and `py_lets_be_rational` | Permissive notice; MIT | The port in `lets_be_rational.py` (notice in `THIRD_PARTY_NOTICES.md`) and a test reference |
 | mpmath | BSD | 60-digit reference values |
 | pytest, pytest-xdist, ruff | MIT | Tests and linting |
+| Hypothesis | MPL 2.0 | Property tests |
+| fontTools and Brotli | MIT | Font-metric tests (reading the self-hosted WOFF2 fonts) |
+| Pillow | MIT-CMU | Shrinking the README screenshots |
 | Playwright and Chromium | Apache 2.0, BSD | Browser tests and screenshots |
 | IBM Plex Sans and Mono | SIL Open Font License | Self-hosted type |
 | GitHub and GitHub Actions | Free for public repositories | Code hosting and CI |

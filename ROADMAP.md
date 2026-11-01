@@ -162,7 +162,7 @@ foundation and each reviewed by an independent correctness and design pass befor
 - [ ] UI-23 Trader marks on the smile; UI-26 model-free 30-day vol; UI-27 realised vol and breakeven move; DT-9 and
   UI-25 earnings events. Done: UI-26 (the VIX-style figure on the Surface tab's ATMF 30D tile) and the breakeven move
   against the implied move on the Risk tab's theta tile.
-- [ ] DK-7 Browser regression and performance-budget suite in CI. Done: the browser tests (layout, links, edits,
+- [ ] DK-7 Browser regression and performance-budget suite in CI. Done: the browser tests (layout, tab links, edits,
   loose timing guards) run every night (`.github/workflows/nightly.yml`). Left: the performance suite of UI spec
   2.12 (medians of five runs per interaction, an alert at +25 %). Until then the budgets are measured by hand on one
   machine; the audit of 1-Nov-26 (1,440 × 900, dark) found three missed: a strike step 0.86–1.10 s against 0.6 s, a
