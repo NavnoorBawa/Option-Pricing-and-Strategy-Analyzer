@@ -60,10 +60,11 @@ jobs:
         run: pytest -q -rs -m network
 
   # The property tests with fresh random examples, 5,000 per property (the per-push jobs replay 300 from a fixed
-  # seed). Hypothesis prints a reproduction blob for any failure.
+  # seed). Hypothesis prints a reproduction blob for any failure. The seven files with property tests took 3 min on 2
+  # workers under this profile.
   properties:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     env:
       HYPOTHESIS_PROFILE: nightly
     steps:
