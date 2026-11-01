@@ -500,6 +500,32 @@ def test_an_uploaded_chain_is_screened_quote_by_quote_and_not_published(new_app)
     assert "F 5,813.91," in _carry(at)
 
 
+def test_on_an_uploaded_chain_the_contract_is_read_at_its_moneyness_against_the_uploads_forward(new_app):
+    """The readout's K/F is the one the vol is read at, on the upload's own forward (it was the sidebar's, another
+    market's: 100.0% here, where the upload's carry puts the contract's K/S at 101.1% of its forward)."""
+    r, q = 0.04, 0.20  # a carry far from the synthetic index's, so that the two forwards part
+    chain = sample_chain(6000.0, r, q, as_of=AS_OF, seed=5)
+    at = new_app(preset=None, asof=ASOF, tab="Surface").run()
+    _upload(at, _csv(chain.quotes), "my_chain.csv")
+    _ok(at)
+    readout = next(c.value for c in at.caption if c.value.startswith("Pricing contract K"))
+    context = mk.index_market(AS_OF)
+    row = context.expiry_row(context.default_expiry())
+    K = context.atm_strike(row["expiry"])
+    assert readout.startswith(f"Pricing contract K {K:,.0f} · {short_date(row['expiry'])} AM at its moneyness → σ ")
+    # The reference: the chain's own forward for that expiry over the spot the upload is read at, the front expiry's
+    # F·DF (the data panel's "S … from parity (front F·DF)"), both as sample_chain generated them.
+    e = chain.expiries
+    [forward] = e.loc[(e["expiry"] == pd.Timestamp(row["expiry"])) & (e["settlement"] == "AM"), "forward"]
+    spot = float(e["forward"].iloc[0] * e["discount_factor"].iloc[0])
+    expected = K / context.spot / (float(forward) / spot)
+    shown = float(re.search(r"K/F ([\d.]+)%", readout).group(1)) / 100
+    # 0.05% of display rounding (K/F to 0.1%) plus parity's spot and forward, within 2e-4 of the chain's (above).
+    assert shown == pytest.approx(expected, abs=0.0005 + 0.0004)
+    assert expected > 1.01  # the case: the sidebar's forward would have read 100.0%
+    assert len(readout) <= 140
+
+
 def test_a_table_of_quotes_still_builds_a_surface(app):
     _upload(app, _csv(vol_surface.sample_quotes(100, 0.05, 0.0, prices=True)))
     _ok(app)

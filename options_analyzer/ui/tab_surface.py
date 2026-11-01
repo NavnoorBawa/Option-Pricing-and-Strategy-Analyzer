@@ -1454,28 +1454,37 @@ def _share(valid: int, quoted: int) -> str:
 
 
 def _contract_readout(shown: Shown, inputs: Inputs) -> None:
-    """One line: the Pricing contract's vol on this surface, inside the quotes or extrapolated."""
+    """One line: the Pricing contract's vol on this surface, inside the quotes or extrapolated.
+
+    The surface is read at the contract's K/S, and the K/F and |k| shown are measured against the forward of the
+    surface on screen (``dg.log_forward_ratio``), the one its vol is read at. They used to be measured against the
+    sidebar's forward, another market's: on an upload with another carry the line stated a moneyness that the vol was
+    not read at. An uploaded chain carries its own spot (parity's), so on it the contract is read at its moneyness,
+    and the line says so: the sidebar's strike in index points would mean nothing on a chain at another level (K 5,815
+    on a chain at 7,911 is K/F 73%)."""
     surface = shown.surface
     T = inputs.expiry
     k_over_s = inputs.strike / inputs.spot
     iv = surface.implied_vol_at(k_over_s, T, extrapolate=True)
-    forward = inputs.spot * math.exp(dg.log_forward_ratio(surface, T)) if shown.published else inputs.forward
     when = (
         f"{short_date(inputs.expiry_date)} {inputs.settlement}"
         if inputs.expiry_date is not None
         else time_left(T * clock.MINUTES_PER_YEAR)
     )
     lead = f"Pricing contract K {strike(inputs.strike, 5.0 if inputs.context is not None else 0.01)} · {when}"
+    if surface.spot is not None and not math.isclose(surface.spot, inputs.spot, rel_tol=1e-9):
+        lead += " at its moneyness"  # an uploaded chain at its own spot
     if not math.isfinite(iv):
         st.caption(f"{lead} → no vol on this surface: beyond its expiries or its reach.")
         return
+    forward_ratio = math.exp(dg.log_forward_ratio(surface, T))  # F/S of the surface on screen
     where = (
-        f"extrapolated, |k| {number(abs(math.log(inputs.strike / forward)), 2)}"
+        f"extrapolated, |k| {number(abs(math.log(k_over_s / forward_ratio)), 2)}"
         if surface.is_extrapolated(k_over_s, T)
         else ("inside its strike grid" if shown.source == SSVI else "inside quotes")  # SSVI has no quotes
     )
     tail = "" if shown.published else f" · Pricing uses {'the synthetic chain' if inputs.context else 'the typed σ'}"
-    st.caption(f"{lead} → σ {vol(iv)} (K/F {moneyness(inputs.strike, forward)}, {where}){tail}")
+    st.caption(f"{lead} → σ {vol(iv)} (K/F {moneyness(k_over_s, forward_ratio)}, {where}){tail}")
 
 
 def _grid_frames(surface: vs.VolSurface) -> dict[str, pd.DataFrame]:
