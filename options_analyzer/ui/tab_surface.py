@@ -31,7 +31,6 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 import streamlit as st
-from scipy.special import ndtr
 
 from .. import clock
 from .. import vol_surface as vs
@@ -40,7 +39,7 @@ from ..market_data.synthetic import DEFAULT_CLOCK
 from ..vol_surface import diagnostics as dg
 from . import cache, charts, charts_surface, exports, surface_state, theme
 from . import market as mk
-from .components import card_row, table
+from .components import card_row, input_format, table
 from .components import col as column
 from .format import (
     MISSING,
@@ -88,10 +87,13 @@ QUOTES_LAYOUT = (
     "A table of quotes: Strike, Days (or Maturity in years) and ImpliedVol, or prices (Price, or Bid and Ask) with a "
     "call/put Type."
 )
-#: The footer: what the fit is, in one line.
+#: The footer: what the fit is, in one line, in a trader's words (no roadmap codes). "Wing cap |k| ≤ 1.5" was half
+#: the rule: the reach is four at-the-money standard deviations, at most 1.5, and Methodology › Surface gives it. The
+#: citation is the arbitrage-free SVI calibration's, which References lists (Gatheral's 2004 slides have no stable
+#: link to list).
 FOOTER = (
-    "SVI per expiry (Gatheral 2004), Durrleman g ≥ 0, calendar w(k, T) non-decreasing; wing cap |k| ≤ "
-    f"{number(vs.svi.WING_CAP, 1)} (SF-8). Method: Methodology › Surface."
+    "SVI per expiry (Gatheral and Jacquier 2014), Durrleman g ≥ 0, w(k, T) non-decreasing in T; Lee-bounded wings. "
+    "Method: Methodology › Surface."
 )
 #: The parametric surface's footer: no fit, one formula for every maturity (the SVI footer misdescribed it).
 FOOTER_SSVI = (
@@ -409,7 +411,7 @@ def _upload_source(inputs: Inputs, upload) -> Shown | None:
         st.error("The uploaded file is not a text CSV.")
         return None
     if fit is None:
-        st.error(f"Could not build a surface from {md_code(name)}: {error}")
+        st.error(f"Could not build a surface from {md_code(name)}: {_sentence(error)}")
         for message in messages:
             st.caption(message)
         return None
@@ -437,6 +439,23 @@ def _upload_source(inputs: Inputs, upload) -> Shown | None:
         name,
         vendor,
     )
+
+
+def _sentence(reason: object) -> str:
+    """A reader's reason as the end of a sentence: with its full stop (the readers' messages have none).
+
+    >>> _sentence("found columns: foo, bar"), _sentence("no valid rows remain."), _sentence(" 3 rows ")
+    ('found columns: foo, bar.', 'no valid rows remain.', '3 rows.')
+    """
+    text = str(reason).strip()
+    return text if text.endswith((".", "!", "?")) else f"{text}."
+
+
+def _layout_list(container, lead: str) -> None:
+    """The layouts an upload is read in, one line each under ``lead``: the empty state's, and under a file that
+    matched none of them."""
+    lines = "\n".join(f"- :small[{line}]" for line in (*LAYOUTS, QUOTES_LAYOUT))
+    container.markdown(f":small[{lead}]\n{lines}")
 
 
 def _dropped_reading(messages, fit: dg.ChainFit) -> int:
@@ -471,13 +490,19 @@ def _quotes_table_source(
         st.error("The uploaded file is not a UTF-8 text CSV.")
         return None
     except (vs.QuoteParseError, ValueError, pd.errors.ParserError) as exc:
-        st.error(f"Could not build a surface from this file: {exc}")
+        # Every file that gets here failed the three chain layouts too (read_chain refused it): say so, and keep the
+        # layouts on screen, so that a chain short of one column is not told only what a table of quotes needs.
+        st.error(
+            "Could not build a surface from this file. It is in none of the three chain layouts; read as a table of "
+            f"quotes, {_sentence(exc)}"
+        )
+        _layout_list(st, "The layouts the app reads:")
         return None
     for message in messages:
         if isinstance(message, vs.QuoteWarning):  # a unit was guessed: the surface may be read wrongly
             st.warning(message)
     if error or surface is None:
-        st.error(f"Could not build a surface from this file: {error}")
+        st.error(f"Could not build a surface from this file: {_sentence(error)}")
         for message in messages:
             if not isinstance(message, vs.QuoteWarning):
                 st.caption(message)
@@ -593,6 +618,7 @@ def _filters(inputs: Inputs, container) -> None:
             max_value=30.0,
             value=defaults["sf_days"],
             step=0.5,
+            format=input_format("days", 1),  # 0.0, 0.5, 1.0: the step's precision (Streamlit's default read 0.00)
             key="sf_days",
             persist_state="session",
             help="Expiries closer than this are left out (short expiry). LSEG's default is 2 days; here 0, because "
@@ -713,8 +739,7 @@ def _data_panel(inputs: Inputs) -> Shown | None:
         kept = st.session_state.get("quotes_upload")
         upload = _uploader(panel, compact=kept is not None)
         if upload is None:
-            lines = "\n".join(f"- :small[{line}]" for line in (*LAYOUTS, QUOTES_LAYOUT))
-            panel.markdown(f":small[Upload a chain: a CSV file in one of these layouts.]\n{lines}")
+            _layout_list(panel, "Upload a chain: a CSV file in one of these layouts.")
             if inputs.context is not None:
                 panel.button("Use synthetic", key="surface_use_synthetic", on_click=_use_synthetic)
             return None
@@ -992,17 +1017,13 @@ def _smile_data(shown: Shown, focus: int) -> charts_surface.SmileData:
 
 
 def _call_delta(shown: Shown, focus: int):
-    """Strikes to their call delta (spot convention) at the focus expiry's fitted vol, for the Call Δ axis."""
+    """Strikes to their call delta (spot convention) at the focus expiry's fitted vol, for the Call Δ axis: the
+    expiry table's own delta (``dg._call_delta``, its confidence measure's), read at the strikes' ln(K/F)."""
     surface, row = shown.surface, shown.rows.iloc[focus]
     T, forward = float(row["maturity"]), float(row["forward"])
-    carry = forward * float(row["discount_factor"]) / (surface.spot if surface.spot is not None else forward)
 
     def delta(strikes):
-        y = np.log(np.asarray(strikes, dtype=float) / forward)
-        w = dg.smile_variance(surface, T, y)[0]
-        with np.errstate(all="ignore"):
-            root = np.sqrt(w)
-            return carry * ndtr(-y / root + 0.5 * root)
+        return dg._call_delta(surface, T, np.log(np.asarray(strikes, dtype=float) / forward), shown.rate)
 
     return delta
 
@@ -1454,28 +1475,37 @@ def _share(valid: int, quoted: int) -> str:
 
 
 def _contract_readout(shown: Shown, inputs: Inputs) -> None:
-    """One line: the Pricing contract's vol on this surface, inside the quotes or extrapolated."""
+    """One line: the Pricing contract's vol on this surface, inside the quotes or extrapolated.
+
+    The surface is read at the contract's K/S, and the K/F and |k| shown are measured against the forward of the
+    surface on screen (``dg.log_forward_ratio``), the one its vol is read at. They used to be measured against the
+    sidebar's forward, another market's: on an upload with another carry the line stated a moneyness that the vol was
+    not read at. An uploaded chain carries its own spot (parity's), so on it the contract is read at its moneyness,
+    and the line says so: the sidebar's strike in index points would mean nothing on a chain at another level (K 5,815
+    on a chain at 7,911 is K/F 73%)."""
     surface = shown.surface
     T = inputs.expiry
     k_over_s = inputs.strike / inputs.spot
     iv = surface.implied_vol_at(k_over_s, T, extrapolate=True)
-    forward = inputs.spot * math.exp(dg.log_forward_ratio(surface, T)) if shown.published else inputs.forward
     when = (
         f"{short_date(inputs.expiry_date)} {inputs.settlement}"
         if inputs.expiry_date is not None
         else time_left(T * clock.MINUTES_PER_YEAR)
     )
     lead = f"Pricing contract K {strike(inputs.strike, 5.0 if inputs.context is not None else 0.01)} · {when}"
+    if surface.spot is not None and not math.isclose(surface.spot, inputs.spot, rel_tol=1e-9):
+        lead += " at its moneyness"  # an uploaded chain at its own spot
     if not math.isfinite(iv):
         st.caption(f"{lead} → no vol on this surface: beyond its expiries or its reach.")
         return
+    forward_ratio = math.exp(dg.log_forward_ratio(surface, T))  # F/S of the surface on screen
     where = (
-        f"extrapolated, |k| {number(abs(math.log(inputs.strike / forward)), 2)}"
+        f"extrapolated, |k| {number(abs(math.log(k_over_s / forward_ratio)), 2)}"
         if surface.is_extrapolated(k_over_s, T)
         else ("inside its strike grid" if shown.source == SSVI else "inside quotes")  # SSVI has no quotes
     )
     tail = "" if shown.published else f" · Pricing uses {'the synthetic chain' if inputs.context else 'the typed σ'}"
-    st.caption(f"{lead} → σ {vol(iv)} (K/F {moneyness(inputs.strike, forward)}, {where}){tail}")
+    st.caption(f"{lead} → σ {vol(iv)} (K/F {moneyness(k_over_s, forward_ratio)}, {where}){tail}")
 
 
 def _grid_frames(surface: vs.VolSurface) -> dict[str, pd.DataFrame]:

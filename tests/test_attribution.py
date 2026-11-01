@@ -726,7 +726,7 @@ def test_the_methodology_quotes_the_golden_stress_day():
     explain = A.taylor_explain(STRADDLE, GOLDEN, 96, vol_shift=0.06, days=1, multiplier=LOT)
     shapley = A.shapley_explain(STRADDLE, GOLDEN, 96, vol_shift=0.06, days=1, multiplier=LOT)
     assert rf"loses \${-explain.total:.2f}" in body
-    assert rf"leave \${explain.unexplained:.2f} unexplained ({100 * explain.quality:.1f} %)" in body
+    assert rf"leave \${explain.unexplained:.2f} unexplained ({100 * explain.quality:.1f}%)" in body
     shares = re.findall(r"spot −\\\$([\d.]+), vol −\\\$([\d.]+) and time \+\\\$([\d.]+)", body)
     assert shares == [(f"{-shapley.spot:.2f}", f"{-shapley.vol:.2f}", f"{shapley.time:.2f}")]
     # The largest piece of the residual: zomma's term, from the engine's zomma (checked against mpmath in

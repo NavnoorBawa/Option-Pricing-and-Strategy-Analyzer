@@ -5,6 +5,8 @@
   Economy* 81(3), 637–654. [doi:10.1086/260062](https://doi.org/10.1086/260062)
 * Merton, R. C. (1973). Theory of rational option pricing. *Bell Journal of Economics and Management Science*
   4(1), 141–183. [doi:10.2307/3003143](https://doi.org/10.2307/3003143)
+* Black, F. (1976). The pricing of commodity contracts. *Journal of Financial Economics* 3(1–2), 167–179.
+  [doi:10.1016/0304-405X(76)90024-6](https://doi.org/10.1016/0304-405X(76)90024-6)
 * Cox, J. C., Ross, S. A. and Rubinstein, M. (1979). Option pricing: a simplified approach. *Journal of Financial
   Economics* 7(3), 229–263. [doi:10.1016/0304-405X(79)90015-1](https://doi.org/10.1016/0304-405X(79)90015-1)
 * Leisen, D. P. J. and Reimer, M. (1996). Binomial models for option valuation – examining and improving
@@ -19,6 +21,11 @@
   [maths-people.anu.edu.au](https://maths-people.anu.edu.au/~brent/pub/pub011.html)
 * Jäckel, P. (2015). Let's be rational. *Wilmott* 2015(75), 40–53.
   [doi:10.1002/wilm.10395](https://doi.org/10.1002/wilm.10395)
+* Andersen, L., Lake, M. and Offengenden, D. (2016). High-performance American option pricing. *Journal of
+  Computational Finance* 20(1), 39–87. [doi:10.21314/JCF.2016.312](https://doi.org/10.21314/JCF.2016.312)
+* Healy, J. (2021). Pricing American options under negative rates. *Journal of Computational Finance* 25(1).
+  [doi:10.21314/JCF.2021.004](https://doi.org/10.21314/JCF.2021.004),
+  [arXiv:2109.15157](https://arxiv.org/abs/2109.15157)
 * Glasserman, P. (2003). *Monte Carlo Methods in Financial Engineering*. Springer.
   [doi:10.1007/978-0-387-21617-1](https://doi.org/10.1007/978-0-387-21617-1)
 
@@ -34,6 +41,8 @@
 * Shapley, L. S. (1953). A value for n-person games. In H. W. Kuhn and A. W. Tucker (eds.), *Contributions to the
   Theory of Games II*, Annals of Mathematics Studies 28, 307–317. Princeton University Press.
   [doi:10.1515/9781400881970-018](https://doi.org/10.1515/9781400881970-018)
+* Financial Industry Regulatory Authority (2026). *FINRA Rule 4210: Margin Requirements*, paragraph (g), portfolio
+  margin; the rule as in force in 2026. [finra.org](https://www.finra.org/rules-guidance/rulebooks/finra-rules/4210)
 
 ### Backtests and forecast comparison
 * Kupiec, P. H. (1995). Techniques for verifying the accuracy of risk measurement models. *Journal of Derivatives*
@@ -60,6 +69,8 @@
   value-at-risk. *Journal of Risk* 1(1), 5–19. [doi:10.21314/JOR.1998.001](https://doi.org/10.21314/JOR.1998.001)
 
 ### Volatility surface
+* Breeden, D. T. and Litzenberger, R. H. (1978). Prices of state-contingent claims implicit in option prices.
+  *Journal of Business* 51(4), 621–651. [doi:10.1086/296025](https://doi.org/10.1086/296025)
 * Dupire, B. (1994). Pricing with a smile. *Risk*, January 1994.
   [risk.net](https://www.risk.net/derivatives/equity-derivatives/1500211/pricing-with-a-smile)
 * Gatheral, J. (2006). *The Volatility Surface: A Practitioner's Guide*. Wiley.
@@ -69,6 +80,8 @@
   [arXiv:1204.0646](https://arxiv.org/abs/1204.0646)
 * Lee, R. W. (2004). The moment formula for implied volatility at extreme strikes. *Mathematical Finance* 14(3),
   469–480. [doi:10.1111/j.0960-1627.2004.00200.x](https://doi.org/10.1111/j.0960-1627.2004.00200.x)
+* Durrleman, V. (2010). From implied to spot volatilities. *Finance and Stochastics* 14(2), 157–177.
+  [doi:10.1007/s00780-009-0112-1](https://doi.org/10.1007/s00780-009-0112-1)
 * De Marco, S. and Martini, C. (2009). Quasi-explicit calibration of Gatheral's SVI model. Zeliade Systems white
   paper; also part of De Marco's PhD thesis (2010, Université Paris-Est and Scuola Normale Superiore).
   [theses.hal.science/tel-00588686](https://theses.hal.science/tel-00588686)
@@ -77,6 +90,9 @@
   [doi:10.1137/0905021](https://doi.org/10.1137/0905021)
 * Hyman, J. M. (1983). Accurate monotonicity preserving cubic interpolation. *SIAM Journal on Scientific and
   Statistical Computing* 4(4), 645–654. [doi:10.1137/0904045](https://doi.org/10.1137/0904045)
+* Cboe Global Indices (2026). *Cboe Volatility Index Mathematics Methodology*, version 5.0, 26 February 2026: the
+  VIX method behind the Surface tab's model-free 30-day vol.
+  [cdn.cboe.com](https://cdn.cboe.com/resources/indices/governance/Cboe_Volatility_Index_Mathematics_Methodology.pdf)
 
 ### Textbooks
 * Hull, J. C. (2021). *Options, Futures, and Other Derivatives*, 11th edition. Pearson. ISBN 978-0-13-693997-9.

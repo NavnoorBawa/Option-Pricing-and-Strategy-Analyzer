@@ -14,9 +14,12 @@ One renderer draws the Methodology in two places:
   (:func:`drawer`). Streamlit has no way to open a dialog scrolled to a section, so the drawer starts with the open
   tab's own section (:data:`TAB_SECTIONS`), already open, followed by the others, collapsed.
 
-The Validation section ends with the results of the validation report, read from ``methodology/
-validation_results.json`` (:func:`validation_results`) with the commit and the date of its run. Until the report
-has been generated, it says so: the app never shows results that were not computed.
+The Validation section states the validation that exists: the tests' oracles, references, coverage studies and
+invariants with their measured results (``validation.md``). It can also end with the tables of a generated
+validation report, read from ``methodology/validation_results.json`` (:func:`validation_results`) with the commit
+and the date of its run. No such report is shipped yet (ROADMAP VL-7), and while the file is absent the section is
+its text alone: it neither shows results that were not computed nor names a report that does not exist (it used
+to end "The validation report has not been generated…", an empty placeholder where the evidence belonged).
 """
 
 from __future__ import annotations
@@ -41,17 +44,15 @@ SECTIONS = (
 )  # fmt: skip
 #: The section of each tab but the Methodology itself, which the drawer opens first (app.TABS names the tabs).
 TAB_SECTIONS = {"Pricing": "pricing", "Strategy": "strategy", "Risk": "risk", "Surface": "surface", "IV": "iv"}
-#: The section that ends with the validation report's results.
+#: The section that ends with a validation report's results, when there are any.
 VALIDATION = "validation"
-#: The validation report's results, written by the report (scripts/validation_report.py, roadmap item VL-7).
+#: A generated validation report's results (roadmap item VL-7: no generator exists yet, so no file is shipped).
 VALIDATION_FILE = FOLDER / "validation_results.json"
 #: The first line of the Methodology (at most 140 characters, as every caption).
 INTRO = (
     "How every number in the app is computed: data, models, conventions, validation and references. Click a "
     "section to open it."
 )
-#: What the Validation section says until the report has been generated.
-NOT_GENERATED = "The validation report has not been generated for this version of the app, so there are no results yet."
 #: The commit of a report run: 7 to 40 lowercase hexadecimal digits, as git writes it.
 _COMMIT = re.compile(r"[0-9a-f]{7,40}")
 #: A cell of a results table that reads as a number, which the table right-aligns: a JSON number as Python writes
@@ -329,14 +330,13 @@ def numeric_columns(table: ResultsTable) -> tuple[str, ...]:
 
 
 def _results() -> None:
-    """The validation report's results, at the end of the Validation section, or why there are none."""
+    """A generated validation report's results, at the end of the Validation section; nothing without a report."""
     try:
         results = validation_results()
     except (OSError, ValueError) as exc:
         st.warning(f"The validation results file cannot be read, so no results are shown: {exc}.")
         return
     if results is None:
-        st.markdown(f"**Results.** {NOT_GENERATED}")
         return
     st.caption(f"Computed by the validation report at commit `{results.commit}` on {results.date.isoformat()}.")
     for table in results.tables:

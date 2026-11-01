@@ -322,14 +322,13 @@ def _validation(at: AppTest):
     return section
 
 
-def test_until_the_report_is_generated_the_section_says_so(new_app, results_file):
+def test_without_a_results_file_the_section_is_its_text_alone(new_app, results_file):
+    # It ended "The validation report has not been generated…": an empty placeholder where the evidence belonged,
+    # naming a report that does not exist. The text now states the validation that does.
     at = new_app(tab="Methodology").run()
     _ok(at)
     section = _validation(at)
-    assert [m.value for m in section.markdown] == [
-        BY_NAME["validation"].body,
-        f"**Results.** {tab_methodology.NOT_GENERATED}",
-    ]
+    assert [m.value for m in section.markdown] == [BY_NAME["validation"].body]
     assert not section.table and not section.warning and not section.caption
 
 
@@ -486,6 +485,67 @@ def test_the_shipped_results_file_if_any_is_readable():
         assert validation_results() is None
 
 
+# --- The pages describe the shipped product ------------------------------------------------------------------------
+
+#: A measured figure as the pages write it: a number with a decimal point, an exponent or a thousands separator.
+_FIGURE = re.compile(r"(?<![\w.^{-])\d{1,3}(?:,\d{3})+(?![\d,])|(?<![\w.^{-])\d+\.\d+(?:e-\d+)?(?![\d.])|\b\d+e-\d+\b")
+
+
+def test_every_figure_on_the_validation_page_is_one_the_readme_or_the_scorecard_states():
+    # The page restates the measured results of README.md's Validation section and docs/scorecard.md; a figure of
+    # its own would be a claim no measurement backs.
+    page = BY_NAME["validation"].body
+    sources = (ROOT / "README.md").read_text(encoding="utf-8") + (ROOT / "docs/scorecard.md").read_text("utf-8")
+    figures = set(_FIGURE.findall(page))
+    assert {"1.6e-7", "66,738", "97,086", "7.7e-6", "2,259", "87.8", "0.0064", "8.6"} <= figures
+    assert not [figure for figure in figures if figure not in sources]
+    assert "report" not in page  # no generated report exists (ROADMAP VL-7): the page names none
+
+
+def test_the_figure_pattern_reads_the_pages_numbers():
+    text = "RMSE 1.6e-7 on 4,495 puts, 0.27 of ${10^{-14}}$, 1e-5, 2,000 steps, 26 templates, 95% and 3.10"
+    assert _FIGURE.findall(text) == ["1.6e-7", "4,495", "0.27", "1e-5", "2,000", "3.10"]
+
+
+def test_the_strategy_page_describes_both_markets_as_the_tab_values_them():
+    page = " ".join(BY_NAME["strategy"].body.split())  # one line: a phrase may wrap
+    # The index: listed legs at their surface vols, entry at the mid, P(profit) from the smile's risk-neutral
+    # distribution, short strikes by delta and wings in points. The textbook market: the flat vol, the model value
+    # and a log-normal probability.
+    for phrase in ("published surface", "the chain's mid", "Breeden–Litzenberger", "own delta", "index points",
+                   "flat sidebar vol", "model value in the textbook market", "log-normal"):  # fmt: skip
+        assert phrase in page, phrase
+    # The tiles it names are the tab's, and the decay it describes is the blotter's (no tile shows theta).
+    for tile in ("Net premium", "Package"):
+        assert f"{tile} tile" in page
+    assert "card" not in page and "1-day decay" in page
+
+
+def test_known_limitations_are_the_readmes():
+    page = " ".join(BY_NAME["limitations"].body.split())
+    readme = (ROOT / "README.md").read_text(encoding="utf-8").split("## Limitations", 1)[1].split("\n## ", 1)[0]
+    readme = " ".join(readme.split())
+    for phrase in ("sticky strike", "front expiry's", "illustrative", "synthetic history", "discrete dividends"):
+        assert phrase in page.lower() and phrase in readme.lower(), phrase
+    assert "$2.69 a contract" in readme and r"\$2.69 a contract" in page
+    # The page listed these, and the app has had each for a while: margin (Risk › Scenarios), smile probabilities
+    # (Strategy), same-day expiries (the index lists them) and bid/ask (the Package tile).
+    for stale in ("No margin", "Log-normal probabilities", "Whole-day expiries", "No bid-ask"):
+        assert stale not in page, stale
+
+
+#: A roadmap item's code (SF-8, PR-4, VL-7): it means nothing to a trader and reads as unfinished work.
+_ROADMAP_CODE = re.compile(r"\b[A-Z]{2}-\d+[a-z]?\b")
+
+
+@pytest.mark.parametrize("path", FILES, ids=lambda p: p.name)
+def test_no_page_names_a_roadmap_item_or_spaces_its_percent_signs(path):
+    text = path.read_text(encoding="utf-8")
+    assert not _ROADMAP_CODE.findall(text)
+    # One spelling of a percentage, the app's: "16%", not "16 %" beside "−57.8%" in one paragraph.
+    assert not re.findall(r".{12}\d %", text)
+
+
 # --- References ----------------------------------------------------------------------------------------------------
 
 REFERENCES = tab_methodology.FOLDER / "references.md"
@@ -505,7 +565,7 @@ def _links() -> list[tuple[str, str]]:
 
 def test_every_reference_has_authors_a_year_and_a_link():
     entries = _entries()
-    assert len(entries) == 31
+    assert len(entries) == 38
     for entry in entries:
         assert re.match(r"^[A-Z][^()]+ \((19|20)\d\d\)\. ", entry), entry
         assert _LINK.search(entry), f"no link: {entry}"
@@ -516,12 +576,13 @@ def test_doi_and_arxiv_links_say_where_they_go():
     # abstract; any other link names its host.
     links = _links()
     dois = [(text, url) for text, url in links if text.startswith("doi:")]
-    assert len(dois) == 22
+    assert len(dois) == 27
     for text, url in dois:
         doi = text.removeprefix("doi:")
         assert _DOI.fullmatch(doi) and url == f"https://doi.org/{doi}", text
     arxiv = [(text, url) for text, url in links if text.startswith("arXiv:")]
     assert arxiv == [
+        ("arXiv:2109.15157", "https://arxiv.org/abs/2109.15157"),
         ("arXiv:cond-mat/0104295", "https://arxiv.org/abs/cond-mat/0104295"),
         ("arXiv:1707.05108", "https://arxiv.org/abs/1707.05108"),
         ("arXiv:1204.0646", "https://arxiv.org/abs/1204.0646"),
@@ -549,6 +610,11 @@ CITED = {
     "Diebold and Mariano": "Diebold, F. X. and Mariano, R. S.", "Newey–West": "Newey, W. K. and West, K. D.",
     "Hull and White": "Hull, J. and White, A.",
     "Shapley": "Shapley, L. S.",
+    # Cited by the app and the pages but missing from the list until the audit found them.
+    "Black-76": "Black, F. (1976)", "Breeden–Litzenberger": "Breeden, D. T. and Litzenberger, R. H. (1978)",
+    "Durrleman": "Durrleman, V. (2010)", "FINRA Rule 4210": "Financial Industry Regulatory Authority (2026)",
+    "VIX method": "Cboe Global Indices (2026)",
+    "Andersen, Lake and Offengenden": "Andersen, L., Lake, M. and Offengenden, D. (2016)", "Healy (2021": "Healy, J.",
 }  # fmt: skip
 
 
@@ -558,6 +624,22 @@ def test_every_cited_work_is_in_the_references():
     for name, author in CITED.items():
         assert name in text, f"{name} is no longer cited: update CITED"
         assert author in references, f"{name} is cited but {author} is not in the references"
+
+
+def test_the_works_the_tabs_cite_are_in_the_references():
+    # The Surface footer cited "Gatheral 2004", the Pricing tab Breeden-Litzenberger, the ATMF 30D tile Cboe's VIX
+    # white paper and the margin grid FINRA's rule, none of them in the list.
+    from options_analyzer.ui import tab_pricing, tab_risk, tab_strategy, tab_surface
+
+    references = " ".join(_entries())
+    assert "(Gatheral and Jacquier 2014)" in tab_surface.FOOTER and "(Gatheral and Jacquier 2014)" in (
+        tab_surface.FOOTER_SSVI
+    )
+    assert "Gatheral, J. and Jacquier, A. (2014)" in references
+    code = {m: Path(m.__file__).read_text(encoding="utf-8") for m in (tab_pricing, tab_risk, tab_surface, tab_strategy)}
+    for name, author in (("Breeden", "Breeden, D. T."), ("VIX", "Cboe Global Indices"), ("4210", "FINRA Rule 4210")):
+        assert any(name in text for text in code.values()), name
+        assert author in references, name
 
 
 #: How to check each link that is neither a DOI nor an arXiv ID: the address to ask (the link itself, or an API where
@@ -583,6 +665,10 @@ SITES = {
         None, "Backtesting zones"
     ),
     "https://www.msci.com/documents/10199/22aa9922-f874-4060-b77a-0f0e267a489b": (None, "%PDF-"),
+    "https://www.finra.org/rules-guidance/rulebooks/finra-rules/4210": (None, "4210. Margin Requirements"),
+    "https://cdn.cboe.com/resources/indices/governance/Cboe_Volatility_Index_Mathematics_Methodology.pdf": (
+        None, "%PDF-"
+    ),
 }  # fmt: skip
 #: When the last request to the arXiv API was sent: its terms ask for at most one request every 3 seconds.
 _ARXIV_LAST = [0.0]

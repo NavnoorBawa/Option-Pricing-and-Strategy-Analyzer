@@ -77,8 +77,8 @@ the rate ${-\ln D / T}$ a standard error above 0.5% (an expiry a day or two away
 rate), or implies a rate outside −10% to 50%, $D$ comes from the sidebar rate plus the spread over it that the other
 expiries' slopes measured (the sidebar rate alone where none did) — options discount at a financing (box) rate
 tens of basis points above Treasuries — and $F$ is the weighted mean of ${K + (C-P)/D}$. An expiry with fewer than
-six strikes quoted on both sides keeps the sidebar rate and dividend yield. Black-76 with $F$ and $D$ is
-Black–Scholes–Merton at the rate ${-\ln D / T}$ and the yield ${-\ln D / T - \ln(F/S)/T}$, so the existing
+six strikes quoted on both sides keeps the sidebar rate and dividend yield. Black-76 (Black 1976) with $F$ and
+$D$ is Black–Scholes–Merton at the rate ${-\ln D / T}$ and the yield ${-\ln D / T - \ln(F/S)/T}$, so the existing
 solver inverts each quote at its own expiry's carry; the Forwards and discounting table on the Surface tab lists
 them with the gap to the sidebar forward in basis points.
 
@@ -97,7 +97,7 @@ rate and a 30% vol, expiries from 30 days to two years, as an implied dividend y
 179 bp low, which would have raised the carry-gap warning at every expiry). When the sidebar's pricing model is
 American, parity is not used: every expiry takes the sidebar rate and dividend yield, and the Forwards control says
 so. The prices are still inverted as European options, which overstates their implied vols by the early-exercise
-premium, until de-Americanisation (roadmap items PR-4 and SF-5) is in.
+premium: the app does not yet strip that premium from American quotes.
 
 In-the-money quotes whose time value at the expiry's forward is within their own bid/ask spread are dropped: they
 are the in-the-money side at strikes whose out-of-the-money option has no bid, and say nothing about the vol.
@@ -130,9 +130,9 @@ spread). Its Fit RMSE is unweighted, so it can exceed an unweighted fit's: on a 
 of tick-rounded mids the 30-day fit is 0.73 vol point RMSE from the quotes (an unweighted fit, 0.68), with every
 fitted vol inside its bid/ask and a median error of 0.18 half-spread.
 
-By default the calibration is arbitrage-free. Each smile must keep Durrleman's ${g > 0}$ (a positive density) over
-its quoted range widened by 10% and out to its wing reach, four at-the-money standard deviations ${4\sqrt{w(0)}}$
-(at most ${|\ln K/F| = 1.5}$), and its total variance must not fall below the previous expiry's where both are
+By default the calibration is arbitrage-free. Each smile must keep Durrleman's (2010) ${g > 0}$ (a positive
+density) over its quoted range widened by 10% and out to its wing reach, four at-the-money standard deviations
+${4\sqrt{w(0)}}$ (at most ${|\ln K/F| = 1.5}$), and its total variance must not fall below the previous expiry's where both are
 quoted. Both are checked on 2,001 points (more around the smile's vertex); where either fails, the smile is replaced
 by the nearest one that meets ${g \ge 0.001}$ and ${w_T \ge w_{T^-}}$, found by sequential quadratic programming
 with analytic gradients from the unconstrained fit (and, when that ends more than 10% worse, from the quasi-explicit
@@ -180,3 +180,24 @@ the price is their midpoint or a Price, Mid or Mark column. The price behind a q
 so it may be off by 0.01% of the forward or 0.005 (at most 1% of the strike spacing, for sub-cent strike
 grids), whichever is more, and arbitrage that half a 0.05 tick (at most 5% of the strike spacing) in each price
 would remove is reported as possible rather than certain: vols inverted from rounded prices can show it.
+
+### The tiles
+The Surface tab's tiles read the surface at constant maturities, interpolating total variance linearly in time
+between the expiries around them and never beyond the first or last (a tile then reads –).
+
+* **ATMF 30D** is the at-the-money-forward vol at 30 days, the vol at ${K = F}$. Under the synthetic chain or an
+  uploaded chain, the line below it is the model-free 30-day vol by Cboe's VIX method: the variance of the two
+  listed expiries around 30 days from every out-of-the-money mid (puts below $K_0$, the first strike at or below
+  the forward, calls above it and their average at $K_0$, each side stopping after two consecutive zero bids),
+  interpolated in total variance to 30 days.
+  It reads above the at-the-money vol by the share of variance in the skew and the wings.
+* **25Δ RR 30D** is the 25-delta risk reversal, ${\sigma(25\Delta\text{c}) - \sigma(25\Delta\text{p})}$, at
+  30 days, with spot deltas ${e^{-qT}N(d_1)}$: negative when puts are richer, as on an equity index.
+* **25Δ BF 30D** is the 25-delta butterfly,
+  ${\tfrac12(\sigma(25\Delta\text{c}) + \sigma(25\Delta\text{p})) - \sigma_{\text{ATMF}}}$, at 30 days: the smile's
+  curvature.
+* **TERM 30→365D** is the term slope, the at-the-money-forward vol at 365 days less that at 30 days: positive for an
+  upward-sloping term structure.
+* **FIT** is the median across expiries of the fit's RMSE against the median half bid/ask spread of the quotes used,
+  both in vol points, with the share of quotes whose fitted vol lies inside their bid/ask; **ARB** counts the
+  calendar and butterfly violations on the fitted surface's grid.

@@ -18,15 +18,15 @@ is the highest close of each quarter, so its shock is the ratio of two spikes, a
 calm 15% goes to 41%, not to the Fed's 72%. Those implied-vol shocks are one-month shocks, damped for longer
 tenors by $(T/\text{1M})^{-0.25}$ by default, since long-dated volatility moves much less than one-month
 volatility in a crisis; hypothetical IV shocks and the heatmap apply literally to every leg.
-The Risk tab's desk grid moves spot by −10 % to +10 % and every leg's vol by −10 to +10 vol points (or, by
+The Risk tab's desk grid moves spot by −10% to +10% and every leg's vol by −10 to +10 vol points (or, by
 choice, by a share of each leg's vol, or of one-month vol damped by tenor), at a trading date chosen in sessions;
 its spot × date grid has the trading dates from the valuation date to the front expiry. The illustrative
 portfolio-margin grid follows FINRA Rule 4210(g): ten equidistant spot moves over the product class's range
-(−8 % to +6 % for a high-capitalisation broad-based index such as SPX, ±10 % for another broad-based index, ±15 % for
+(−8% to +6% for a high-capitalisation broad-based index such as SPX, ±10% for another broad-based index, ±15% for
 an equity or a narrow-based index, 4210(g)(2)(F)), vols unchanged, and the greater of the largest loss and the
 minimum of \$0.375 times the multiplier a contract (4210(g)(7)(B)). It has no offsets between product groups and
 no house add-ons: it is not a broker's requirement. The ladder's Θ is ∂V/∂t ÷ 365 at fixed vols; where it misstates
-a day's decay by more than 10 % (within days of expiry) the Θ tile gives the day's decay by repricing instead.
+a day's decay by more than 10% (within days of expiry) the Θ tile gives the day's decay by repricing instead.
 The ladder's σ steps are daily standard deviations of spot at one vol, the front expiry's at-the-money-forward vol
 (the sidebar vol on the textbook market); no leg is valued at it unless it is that leg's own.
 
@@ -38,7 +38,7 @@ Full revaluation on simulated spot and implied-vol paths:
   targeting ${\omega = (1-\alpha-\beta)\,\sigma^2/252}$ and the same shocks driving returns and variance.
 * **Implied-vol moves** — one-month implied vol is log-normal with a chosen vol of vol, correlated with the spot
   return through a Gaussian copula (so the multiplier keeps mean one under fat tails) and damped for longer
-  tenors. They are on by default, with index (VIX-like) dynamics: vol of vol 100 % a year and spot–vol
+  tenors. They are on by default, with index (VIX-like) dynamics: vol of vol 100% a year and spot–vol
   correlation −0.7.
 
 Spot is simulated at the front expiry's at-the-money-forward vol (the sidebar vol on the textbook market), the
@@ -47,10 +47,10 @@ for its tenor.
 
 With implied-vol moves on, the tab shows the spot-only VaR and ES beside the result: the same simulated spot
 paths (one seed) re-priced with implied vol frozen, so the gap between the two is what the implied-vol moves
-add, the vega risk. On a 45-day at-the-money short straddle on an index (spot 5,800, volatility 16 %, rate
-4.3 %, dividend yield 1.3 %, one 100-share contract, 100,000 paths, seed 7, the app's default settings), the one-day
-99 % VaR is \$3,862 with implied-vol moves and \$2,833 without them: frozen implied vol understates it by 27 %
-(24 % to 27 % over seeds 0 to 9).
+add, the vega risk. On a 45-day at-the-money short straddle on an index (spot 5,800, volatility 16%, rate
+4.3%, dividend yield 1.3%, one 100-share contract, 100,000 paths, seed 7, the app's default settings), the one-day
+99% VaR is \$3,862 with implied-vol moves and \$2,833 without them: frozen implied vol understates it by 27%
+(24% to 27% over seeds 0 to 9).
 
 Options that expire before the horizon are settled on the simulated price at the close of their expiry day,
 and the cash earns the risk-free rate until the horizon.
@@ -60,8 +60,8 @@ options age on the calendar: the Risk tab reprices each leg, settles the legs th
 delta-gamma-theta decay over the calendar time from the valuation (or what-if) time to the same time $h$ sessions
 later, three days from a Friday close to Monday's and one from a Tuesday's, as its what-if strip ages them. The
 library's default, which the figures on this page use, ages them ${h/252}$ years whatever the weekday: on a 7-day
-at-the-money short straddle (spot 5,800, volatility 16 %, rate 4.3 %, dividend yield 1.3 %) that credits \$1,122 of
-decay at an unchanged spot where the session from a Friday close is worth \$2,501, and the one-day 99 % VaR is
+at-the-money short straddle (spot 5,800, volatility 16%, rate 4.3%, dividend yield 1.3%) that credits \$1,122 of
+decay at an unchanged spot where the session from a Friday close is worth \$2,501, and the one-day 99% VaR is
 \$5,871 against \$5,388 on the calendar.
 
 VaR and ES use the Acerbi–Tasche estimators: with ${w = \lfloor n(1-\alpha)\rfloor}$ worst outcomes, VaR is the
@@ -82,23 +82,23 @@ VaR minus the time decay ${\theta h/252}$, and it moves there continuously as ${
 revaluation shows the spot risk beyond gamma, how the time decay and gamma change as expiry nears, the legs that
 expire within the horizon, the vega and the fatter tails. The VaR report's Non-linearity tile takes it against
 the spot-only VaR, implied vol frozen in both, so that it leaves the vega out. On the 45-day straddle above with implied vol frozen, the
-one-day 99 % VaR is \$2,882 delta-gamma-theta and \$2,833 by full revaluation (\$1,016 delta-normal). On ten
-strategy templates, at least one of each kind (30 days, spot 100, volatility 20 %, 400,000 paths), the one-day gap
-is at most 3.2 %; on a put ratio backspread it is 10 %, since its gamma grows as the spot falls towards its two long
+one-day 99% VaR is \$2,882 delta-gamma-theta and \$2,833 by full revaluation (\$1,016 delta-normal). On ten
+strategy templates, at least one of each kind (30 days, spot 100, volatility 20%, 400,000 paths), the one-day gap
+is at most 3.2%; on a put ratio backspread it is 10%, since its gamma grows as the spot falls towards its two long
 puts. It is a check for short horizons: an option's time decay speeds up as expiry nears, which today's theta
 leaves out. Over 20 trading days of the 30-day long straddle, full revaluation loses \$373 at an unchanged spot, about
-its worst outcome, where ${\theta h/252}$ says \$221, and the 99 % VaR is \$372 by full revaluation against \$222
+its worst outcome, where ${\theta h/252}$ says \$221, and the 99% VaR is \$372 by full revaluation against \$222
 delta-gamma-theta.
 
 ### Backtesting
 The backtests are in the library (`options_analyzer/backtest.py`); the Risk tab does not run them. A VaR model
 is judged by its exceptions, the days whose loss exceeds the VaR. Kupiec's (1995) likelihood ratio tests their rate,
 with the exact binomial p-value beside the chi-square one; Christoffersen's (1998) Markov test asks whether they come
-in clusters; and the Basel traffic light of MAR32 counts them: in 250 days at 99 %, 0 to 4 exceptions are green
+in clusters; and the Basel traffic light of MAR32 counts them: in 250 days at 99%, 0 to 4 exceptions are green
 (capital multiplier 1.50), 5 to 9 amber (1.70 to 1.92) and 10 or more red (2.00). Other sample sizes follow the
-Basel Committee's 1996 rule, amber from a cumulative binomial probability of 95 % and red from 99.99 %. Basel's
-traffic light is defined at 99 % only (at 97.5 % MAR32 sets just a desk's limit of 30 exceptions in 12 months); the
-zones the library also gives at 97.5 % apply the same rule as its own extension. Expected shortfall is tested by
+Basel Committee's 1996 rule, amber from a cumulative binomial probability of 95% and red from 99.99%. Basel's
+traffic light is defined at 99% only (at 97.5% MAR32 sets just a desk's limit of 30 exceptions in 12 months); the
+zones the library also gives at 97.5% apply the same rule as its own extension. Expected shortfall is tested by
 Acerbi and Szekely's (2014) $Z_2$, with its critical value simulated under the model, and two models are ranked by
 the FZ0 loss of Patton, Ziegel and Chen (2019) with Diebold and Mariano's (1995) test and a Newey–West variance.
 MAR32's P&L attribution test (the Spearman correlation and the Kolmogorov–Smirnov distance between the desk's and
@@ -106,16 +106,16 @@ the risk model's P&L) is there too. A rolling backtest builds the position at ev
 its next-day P&L, and scores the forecasts against the P&L of that position held to the next close, re-priced at the
 next close's spot and implied vol.
 
-A year of data tells little. At 250 days and 99 %, Kupiec's test at a nominal 5 % rejects a correct model 9.5 % of
-the time (the binomial is discrete) and a model whose true exception rate is 2 %, twice the forecast, only 24 % of
-the time; ten years (2,520 days) raise that to 98.7 %. The traffic light leaves that model green 44 % of the time.
-Christoffersen's independence test rejects exceptions that follow one another a quarter of the time in only 34 % of
-such years. $Z_2$ catches a volatility 20 % above the model's in 77 % of years, but tails as fat as a Student-t's
-with 5 degrees of freedom, at the model's variance, in only 16 %.
+A year of data tells little. At 250 days and 99%, Kupiec's test at a nominal 5% rejects a correct model 9.5% of
+the time (the binomial is discrete) and a model whose true exception rate is 2%, twice the forecast, only 24% of
+the time; ten years (2,520 days) raise that to 98.7%. The traffic light leaves that model green 44% of the time.
+Christoffersen's independence test rejects exceptions that follow one another a quarter of the time in only 34% of
+such years. $Z_2$ catches a volatility 20% above the model's in 77% of years, but tails as fat as a Student-t's
+with 5 degrees of freedom, at the model's variance, in only 16%.
 
 The tests check themselves on a synthetic history, labelled "Synthetic — not market data": ten years of GARCH(1,1)
 returns with Student-t shocks, their volatility set by a log-normal implied-vol index with the Risk tab's index
-dynamics, on which the 45-day at-the-money short straddle above is struck again at every close. At 99 % over 2,020
+dynamics, on which the 45-day at-the-money short straddle above is struck again at every close. At 99% over 2,020
 days (20.2 exceptions expected, red from 39), the Normal model with implied vol frozen has 50 exceptions (red), the
 Risk tab's default with implied-vol moves 31 (amber), both with 5,000 paths a day, and historical simulation on the
 last 500 days with Hull and White's (1998) volatility scaling 17 (green); over ten seeds, 42 to 76, 21 to 39 and 15
@@ -136,7 +136,7 @@ elapsed $\delta t$:
 * **Unexplained** — $U$, the P&L less the nine terms.
 
 Theta as $\theta\,\delta t$ would leave ${\tfrac12\,\partial_{tt}V\,\delta t^2}$ and the higher orders in time
-unexplained: 0.8 % of a 30-day at-the-money straddle's one-day decay, and half of a 1-day at-the-money option's,
+unexplained: 0.8% of a 30-day at-the-money straddle's one-day decay, and half of a 1-day at-the-money option's,
 whose value falls with the square root of the time left (the $\delta t^2$ term is then only a quarter of the gap).
 The unexplained P&L $U$ is third order in the spot and vol moves, so halving them divides it by about 8 (7.84,
 8.10 and 8.11 on an iron condor); the second-order terms of a rate move are left in it too. The quality
@@ -145,9 +145,9 @@ the nine terms' sizes, comes into play when the P&L is smaller than that, as whe
 gamma of a spot move: such a P&L is a small difference of larger amounts, and the share of it that the Greeks miss
 means little. With this floor the quality never exceeds 11. A floor in the notional would be the wrong scale for
 options: one basis point of a 7-day index iron condor's notional is \$232, more than its whole day of time decay,
-\$151.97. On a 30-day at-the-money short straddle (spot and strike 100, vol 20 %, rate 4 %, no dividends, one
-100-share contract), a day on which spot falls 4 % and implied vol rises 6 points loses \$188.36, and the nine terms
-leave \$25.17 unexplained (13.4 %): mostly zomma, since the higher vol lowers the straddle's gamma (its third-order
+\$151.97. On a 30-day at-the-money short straddle (spot and strike 100, vol 20%, rate 4%, no dividends, one
+100-share contract), a day on which spot falls 4% and implied vol rises 6 points loses \$188.36, and the nine terms
+leave \$25.17 unexplained (13.4%): mostly zomma, since the higher vol lowers the straddle's gamma (its third-order
 term ${\tfrac12\,\partial_{SS\sigma}V\,\delta S^2\,\delta\sigma}$ is +\$33.19).
 
 The Shapley split shares the same P&L exactly between the four factors spot, vol, time and rate. With $v(A)$ the

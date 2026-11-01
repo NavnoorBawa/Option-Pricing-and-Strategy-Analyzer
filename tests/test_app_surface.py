@@ -272,6 +272,28 @@ def test_the_call_delta_axis_runs_from_90_to_10_delta(new_app):
     assert hi < 25  # the 20-Nov-26 smile between 0.90 and 0.10 delta (about 12% to 21% at the mids)
 
 
+def test_the_call_delta_axis_is_the_spot_delta_at_each_strikes_fitted_vol():
+    # The reference: e^{−qT} N(d₁) = F·DF/S · N(d₁), d₁ = (ln F/K + ½σ²T)/(σ√T), with each strike's vol read off the
+    # surface and the expiry's parity forward and discount factor; 1e-12 is a few ulps of N(d₁).
+    context = mk.index_market(AS_OF)
+    rows = tab_surface._chain_rows(context.fit, *mk.INDEX_CARRY, iso=True)
+    prov = exports.Provenance(exports.SYNTHETIC, exports.SYNTHETIC_SOURCE, AS_OF, "Black-76", seed=0)
+    shown = tab_surface.Shown(
+        tab_surface.CHAIN, context.surface, context.fit, rows, *mk.INDEX_CARRY, AS_OF, "", (), prov, True
+    )
+    for focus in (0, 3, len(rows) - 1):
+        row = rows.iloc[focus]
+        T, F, DF = float(row["maturity"]), float(row["forward"]), float(row["discount_factor"])
+        strikes = F * np.exp(np.linspace(-0.15, 0.08, 12))
+        sigma = np.array([context.surface.implied_vol_at(k / context.spot, T, extrapolate=True) for k in strikes])
+        d1 = (np.log(F / strikes) + 0.5 * sigma**2 * T) / (sigma * np.sqrt(T))
+        expected = F * DF / context.spot * np.array([0.5 * math.erfc(-d / math.sqrt(2)) for d in d1])
+        inside = np.isfinite(sigma)  # the surface reads no vol beyond a short expiry's reach; the axis's wings do
+        assert inside.sum() >= 9
+        delta = tab_surface._call_delta(shown, focus)(strikes)
+        np.testing.assert_allclose(delta[inside], expected[inside], rtol=0, atol=1e-12)
+
+
 def test_the_smile_draws_one_bid_ask_bar_per_used_quote_and_dashes_the_extrapolated_fit(index):
     smile = _smile(index)
     bars = [t for t in smile["data"] if "bid–ask" in (t.get("name") or "")]
@@ -410,6 +432,23 @@ def test_the_tab_formats_numbers_only_through_the_standard_and_keeps_captions_sh
     assert own and all(len(c) <= 140 for c in own), [c for c in own if len(c) > 140]
 
 
+#: A roadmap item's code (SF-8, UI-26, RK-13): it means nothing to a trader and reads as unfinished work.
+ROADMAP_CODE = re.compile(r"\b[A-Z]{2}-\d+[a-z]?\b")
+
+
+def test_no_text_on_the_tab_names_a_roadmap_item(index):
+    shown = [e.value for e in (*index.caption, *index.markdown, *index.warning, *index.info)]
+    shown += [w.label for w in (*index.number_input, *index.selectbox, *index.toggle, *index.segmented_control)]
+    shown += [w.help or "" for w in (*index.number_input, *index.selectbox, *index.toggle, *index.segmented_control)]
+    assert tab_surface.FOOTER in shown
+    assert not [text for text in shown if ROADMAP_CODE.search(text)]
+
+
+def test_the_min_days_filter_shows_the_precision_of_its_half_day_step(index):
+    days = index.number_input(key="sf_days")
+    assert days.step == 0.5 and days.format == "%.1f"  # it read 0.00
+
+
 def test_the_exports_carry_their_provenance(index, monkeypatch):
     context = mk.index_market(AS_OF)
     rows = tab_surface._chain_rows(context.fit, *mk.INDEX_CARRY, iso=True)
@@ -500,6 +539,32 @@ def test_an_uploaded_chain_is_screened_quote_by_quote_and_not_published(new_app)
     assert "F 5,813.91," in _carry(at)
 
 
+def test_on_an_uploaded_chain_the_contract_is_read_at_its_moneyness_against_the_uploads_forward(new_app):
+    """The readout's K/F is the one the vol is read at, on the upload's own forward (it was the sidebar's, another
+    market's: 100.0% here, where the upload's carry puts the contract's K/S at 101.1% of its forward)."""
+    r, q = 0.04, 0.20  # a carry far from the synthetic index's, so that the two forwards part
+    chain = sample_chain(6000.0, r, q, as_of=AS_OF, seed=5)
+    at = new_app(preset=None, asof=ASOF, tab="Surface").run()
+    _upload(at, _csv(chain.quotes), "my_chain.csv")
+    _ok(at)
+    readout = next(c.value for c in at.caption if c.value.startswith("Pricing contract K"))
+    context = mk.index_market(AS_OF)
+    row = context.expiry_row(context.default_expiry())
+    K = context.atm_strike(row["expiry"])
+    assert readout.startswith(f"Pricing contract K {K:,.0f} · {short_date(row['expiry'])} AM at its moneyness → σ ")
+    # The reference: the chain's own forward for that expiry over the spot the upload is read at, the front expiry's
+    # F·DF (the data panel's "S … from parity (front F·DF)"), both as sample_chain generated them.
+    e = chain.expiries
+    [forward] = e.loc[(e["expiry"] == pd.Timestamp(row["expiry"])) & (e["settlement"] == "AM"), "forward"]
+    spot = float(e["forward"].iloc[0] * e["discount_factor"].iloc[0])
+    expected = K / context.spot / (float(forward) / spot)
+    shown = float(re.search(r"K/F ([\d.]+)%", readout).group(1)) / 100
+    # 0.05% of display rounding (K/F to 0.1%) plus parity's spot and forward, within 2e-4 of the chain's (above).
+    assert shown == pytest.approx(expected, abs=0.0005 + 0.0004)
+    assert expected > 1.01  # the case: the sidebar's forward would have read 100.0%
+    assert len(readout) <= 140
+
+
 def test_a_table_of_quotes_still_builds_a_surface(app):
     _upload(app, _csv(vol_surface.sample_quotes(100, 0.05, 0.0, prices=True)))
     _ok(app)
@@ -529,6 +594,20 @@ def test_a_malformed_file_names_the_columns_found_and_needed(app):
     _upload(app, b"Price,When\n1,2\n")
     assert not app.exception
     assert any("found columns: Price, When" in e.value for e in app.error)
+
+
+def test_a_file_in_no_layout_says_so_and_keeps_the_layouts_on_screen(app):
+    # The error named only what a table of quotes needs, without a full stop, and the list of layouts went away.
+    _upload(app, b"foo,bar\n1,2\n")
+    assert not app.exception
+    [error] = app.error
+    assert error.value == (
+        "Could not build a surface from this file. It is in none of the three chain layouts; read as a table of "
+        "quotes, the file needs a Strike column and a Maturity column (in years) or a Days column; found columns: "
+        "foo, bar."
+    )
+    text = next(m.value for m in app.markdown if m.value.startswith(":small[The layouts the app reads:"))
+    assert text.count("\n- ") == len(tab_surface.LAYOUTS) + 1 == 4
 
 
 def test_quotes_far_from_the_sidebar_spot_are_flagged(app):
