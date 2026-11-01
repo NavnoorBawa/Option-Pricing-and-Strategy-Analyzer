@@ -19,10 +19,12 @@ w' = dw/dy, both from the SVI slice):
 
     P(S_T <= K) = N(−d₂) + φ(d₂) · w' / (2√w),   d₂ = −y/√w − √w/2,
 
-the flat-vol N(−d₂) plus the smile's slope term, which is what moves a 16Δ put's probability from 16.85% to 11.91%
-under skew (UI spec 2.7 item 6). Its derivative is the density, Gatheral's g(y) · φ(d₂) / (K√w) with Durrleman's
-g(y) >= 0 (no butterfly arbitrage) exactly where the density is non-negative. No finite difference is taken, so the
-CDF carries no step-size error: it is exact for the fitted smile.
+the flat-vol N(−d₂) plus the smile's slope term, which is what moves a 16Δ put's probability under skew (UI spec 2.7
+item 6): on the synthetic SPX chain at 5,800 valued 23 October 2026 16:00, the 18 December AM expiry's 16Δ put (the
+5,400 strike) has 16.95% below it at its own vol and 11.95% on the smile (``tests/test_published_surface.py``; the
+spec's 16.85% and 11.91% came from an earlier fit). Its derivative is the density, Gatheral's g(y) · φ(d₂) / (K√w)
+with Durrleman's g(y) >= 0 (no butterfly arbitrage) exactly where the density is non-negative. No finite difference
+is taken, so the CDF carries no step-size error: it is exact for the fitted smile.
 
 An expiry is a date and a settlement: the SPX AM monthly and the SPXW PM weekly both expire on each third Friday,
 six and a half hours apart. Every method takes the date alone where one settlement is listed on it, and an
