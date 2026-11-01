@@ -42,8 +42,7 @@
   Theory of Games II*, Annals of Mathematics Studies 28, 307–317. Princeton University Press.
   [doi:10.1515/9781400881970-018](https://doi.org/10.1515/9781400881970-018)
 * Financial Industry Regulatory Authority (2026). *FINRA Rule 4210: Margin Requirements*, paragraph (g), portfolio
-  margin; the rule as in force in 2026.
-  [finra.org/rules-guidance/rulebooks/finra-rules/4210](https://www.finra.org/rules-guidance/rulebooks/finra-rules/4210)
+  margin; the rule as in force in 2026. [finra.org](https://www.finra.org/rules-guidance/rulebooks/finra-rules/4210)
 
 ### Backtests and forecast comparison
 * Kupiec, P. H. (1995). Techniques for verifying the accuracy of risk measurement models. *Journal of Derivatives*
