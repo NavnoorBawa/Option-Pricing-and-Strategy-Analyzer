@@ -287,6 +287,41 @@ def test_the_order_control_adds_second_and_third_order_greeks(app, order, rows):
     assert _number(table.loc["Vanna", "Call (BSM)"]) == pytest.approx(vanna, rel=5e-3)  # 3 significant digits
 
 
+def test_third_order_greeks_are_in_the_gamma_the_table_shows(index_app, default_index):
+    # At the index (S = 5,800, not 100) the table shows Γ 1% = Γ·S/100. Speed, zomma and color were in raw Γ per
+    # point of spot, 58 times smaller than a change in that Γ 1%. Reference: the closed-form gamma written out here,
+    # Γ = e^{−qT}·φ(d1)/(Sσ√T), turned into Γ 1% and differenced: by a 1% move in S (central, ±0.01%, then scaled
+    # to 1%), by ±0.01 vol point (scaled to 1 point) and by ±1 minute (per calendar day, t = −T). Tolerance 5e-3
+    # relative: the table shows 3 significant digits, rounded by at most 5e-3 relative; the differences are good to
+    # about 1e-6.
+    d = default_index
+    index_app.segmented_control(key="pr_greeks").set_value("+3rd").run()
+    _ok(index_app)
+    table = _frame(index_app, "tbl_pricing_greeks").value.set_index("Greek")
+    inputs = _inputs_of(index_app)
+    S, K, T, r, q, sigma = inputs.spot, inputs.strike, inputs.expiry, inputs.rate, inputs.dividend_yield, d["sigma"]
+
+    def gamma_1pct(s=S, v=sigma, t=T):
+        d1 = (math.log(s / K) + (r - q + v * v / 2) * t) / (v * math.sqrt(t))
+        return math.exp(-q * t) * math.exp(-d1 * d1 / 2) / math.sqrt(2 * math.pi) / (s * v * math.sqrt(t)) * s / 100
+
+    h, minute = 1e-4, 1 / 525_600
+    expected = {
+        "Speed": (gamma_1pct(s=S * (1 + h)) - gamma_1pct(s=S * (1 - h))) / (2 * h) / 100,
+        "Zomma": (gamma_1pct(v=sigma + h) - gamma_1pct(v=sigma - h)) / (2 * h) / 100,
+        "Color": (gamma_1pct(t=T - minute) - gamma_1pct(t=T + minute)) / (2 * minute) / 365,
+    }
+    assert table.loc["Speed", "Unit"] == "Γ 1% per 1% move in S"
+    assert table.loc["Zomma", "Unit"] == "Γ 1% per vol point"
+    assert table.loc["Color", "Unit"] == "Γ 1% per calendar day"
+    for row, value in expected.items():
+        for column in ("Call (BSM)", "Put (BSM)"):  # one gamma, so one speed, zomma and color for both
+            shown = table.loc[row, column]
+            assert "e" not in shown, (row, shown)  # plain decimals, as the rest of the column
+            assert _number(shown) == pytest.approx(value, rel=5e-3), (row, column)
+    assert table.loc["Ultima", "Unit"] == "volga per vol point"  # the table's row is Volga, not vomma
+
+
 def test_p_itm_comes_from_the_smile(index_app, default_index):
     # Breeden-Litzenberger by a central difference of call values on the smile (each strike at its own surface
     # vol, 0.5 points either side): P(S_T > K) = −∂C/∂K ÷ DF. The difference's error is O(h²) of the density's

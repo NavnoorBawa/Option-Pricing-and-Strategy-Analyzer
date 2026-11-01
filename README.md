@@ -208,7 +208,8 @@ st.strike_for_delta(-0.16, market, 0.5, 0.22, "put")  # 88.07, the 16-delta put 
   opening print, PM weeklies at the 16:00 close), and is calendar days / 365 in the Textbook market. Rates and
   dividend yield are continuously compounded.
 - Greeks are displayed per calendar day (theta, charm, veta, color), per volatility point (vega, vanna, zomma …), per
-  1 % rate move (rho) and per $1 spot move (delta, gamma, speed).
+  1 % rate move (rho) and per $1 spot move (delta). Gamma is Γ 1 %, the change in delta per 1 % move (ΓS/100), and
+  speed, zomma and color are changes in that Γ 1 % (speed per 1 % move).
 - VaR horizons are in trading days (252 per year).
 - Strategy quantities are signed (+ long, − short); one unit is an option on one share. P&L is shown for the whole
   position (contracts × multiplier).

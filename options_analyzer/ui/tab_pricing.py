@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import functools
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -1137,17 +1138,40 @@ def _chain(inputs: Inputs, market: Contract) -> None:
 
 # --- The Greeks table -------------------------------------------------------------------------------------------
 
-#: Rows of the Greeks table after the first order: (order, name in black_scholes.GREEKS, label).
+#: Rows of the Greeks table after the first order: (order, name in black_scholes.GREEKS, label, unit). Each unit
+#: names a row the table shows: the third order is in Γ 1%, the table's gamma, not the raw Γ per point of spot it
+#: never shows (58 times smaller at the default index, so a zomma of −0.000105 read as a change in the Γ 1% of
+#: +0.0937 above it was 58 times too small). :func:`higher_order` does the scaling.
 _HIGHER = (
-    (2, "vanna", "Vanna"),
-    (2, "vomma", "Volga"),
-    (2, "charm", "Charm"),
-    (2, "veta", "Veta"),
-    (3, "speed", "Speed"),
-    (3, "zomma", "Zomma"),
-    (3, "color", "Color"),
-    (3, "ultima", "Ultima"),
+    (2, "vanna", "Vanna", "Δ per vol point"),
+    (2, "vomma", "Volga", "vega per vol point"),
+    (2, "charm", "Charm", "Δ per calendar day"),
+    (2, "veta", "Veta", "vega per calendar day"),
+    (3, "speed", "Speed", "Γ 1% per 1% move in S"),
+    (3, "zomma", "Zomma", "Γ 1% per vol point"),
+    (3, "color", "Color", "Γ 1% per calendar day"),
+    (3, "ultima", "Ultima", "volga per vol point"),
 )
+
+
+def higher_order(name: str, greeks: Mapping[str, float], spot: float) -> float:
+    """A second- or third-order Greek of ``black_scholes.greeks`` (raw model units) in the Greeks table's unit
+    (:data:`_HIGHER`).
+
+    The second order and ultima take ``black_scholes.GREEKS``' display scale. Zomma and color are derivatives of
+    Γ 1% = Γ·S/100, so they take S/100 on top of it. Speed is the change in Γ 1% for a 1% move in S:
+    (S/100)·∂(Γ·S/100)/∂S = S·(Γ + S·speed)/10⁴. At S = 100 zomma and color are unchanged and speed is
+    speed + Γ/100.
+
+    >>> raw = {"gamma": 0.02, "speed": -1e-4, "zomma": 0.05, "color": -0.01}
+    >>> [round(higher_order(n, raw, 100.0), 8) for n in ("speed", "zomma", "color")]
+    [0.0001, 0.0005, -2.74e-05]
+    """
+    value = float(greeks[name])
+    if name == "speed":
+        return spot * (float(greeks["gamma"]) + spot * value) / 1e4
+    scaled = value * bs.GREEKS[name].scale
+    return scaled * spot / 100.0 if name in ("zomma", "color") else scaled
 
 
 def p_itm(inputs: Inputs, market: Contract) -> tuple[dict[str, float], dict[str, float], str]:
@@ -1229,13 +1253,13 @@ def greeks_frame(
     decay_row |= {header: _money_greek(value, places) for header, value in decays.items()}
     at = next(i for i, row in enumerate(rows) if row["Greek"] == "Θ") + (0 if leads else 1)
     rows.insert(at, decay_row)
-    for row_order, name, label in _HIGHER:
+    for row_order, name, label, unit in _HIGHER:
         if row_order > order:
             continue
-        row = {"Greek": label, "Unit": bs.GREEKS[name].unit}
+        row = {"Greek": label, "Unit": unit}
         for header, source, kind in columns:
-            value = source[kind].get(name) if source is bsm or not alo else None
-            row[header] = MISSING if value is None else _sig(float(value) * bs.GREEKS[name].scale)
+            known = source is bsm or not alo
+            row[header] = _sig(higher_order(name, source[kind], S)) if known else MISSING
         rows.append(row)
     rn, flat, basis = p_itm(inputs, market)
     row = {"Greek": "P(ITM)", "Unit": f"at expiry, {basis}"}
