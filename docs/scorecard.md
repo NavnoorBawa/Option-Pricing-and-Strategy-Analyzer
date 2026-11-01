@@ -80,6 +80,23 @@ textbook one; now on the default synthetic index at 23-Oct-26 16:00):
 | Time from opening a tab to an idle page, first visit | 2.5 to 6.4 s | 2.6 to 3.4 s |
 | Numbers written by hand in the tabs (the DK-4 lint) | Not checked | None: every tab formats through the number standard, enforced by a test |
 
+What the desk build sends and how long a page takes to settle, measured with `python scripts/app_payload.py` (3
+repeats; websocket bytes as the page receives them, after the per-message compression is undone; time from the click
+or navigation to the last DOM change before 600 ms of quiet, Streamlit idle; 1,440 × 900, dark, on the synthetic
+index at 23-Oct-26 16:00). Measured on 1-Nov-26 at commit `21863b7`, before the payload fixes of that day's audit, on
+the shared 4-core container at a load average of 4.1, so the timings run high; the byte counts did not vary between
+repeats. v3.0.0's 56 KB a load and a rerun (above) came from another script on the one textbook page.
+
+| Measure | Data sent | Time to a settled page, median (range) |
+| --- | --- | --- |
+| First load after the server starts (Pricing) | 67 KB | 6.3 s |
+| First load of a tab in a fresh page: Pricing, Strategy, Risk | 67 KB, 157 KB, 52 KB | 3.9 s, 4.3 s, 2.9 s (1.7–5.3 s) |
+| First load of a tab in a fresh page: Surface, IV, Methodology | 88 KB, 48 KB, 96 KB | 4.2 s, 2.9 s, 1.9 s (1.8–4.2 s) |
+| Pricing: strike step of 5 points | 53 KB | 0.95 s (0.93–0.97 s) |
+| Tab switch from Pricing to Strategy | 142 KB | 1.44 s (1.13–1.44 s) |
+| Strategy: what-if spot step | 143 KB | 0.68 s (0.61–0.84 s) |
+| Strategy: template change | 142 KB | 1.09 s (1.02–1.21 s) |
+
 ## Free-resources ledger
 
 Everything the project uses is free.

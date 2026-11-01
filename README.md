@@ -239,7 +239,7 @@ options_analyzer/
   ui/                       Streamlit interface (one module per tab, desk header, Methodology)
 tests/                      pytest suite (engines, oracles, invariants, app); tests/oracle needs QuantLib
 benchmarks/                 Timing scripts for the engines
-scripts/                    README screenshots, the American engine's QuantLib reference grid
+scripts/                    README screenshots, the app's payload and timings, the American engine's QuantLib grid
 docs/                       Scorecard, method notes, data policy, reviews, screenshots
 ```
 
