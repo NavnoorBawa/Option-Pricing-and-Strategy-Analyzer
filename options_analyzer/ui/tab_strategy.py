@@ -1232,7 +1232,7 @@ def _chart(ctx: _Context, shifts: whatif.Shifts, range_choice: str, dated: list[
     curves = [
         charts_strategy.Curve(
             strat.pnl(ctx.entered, market, spots, T, carry) * units, f"Expiry {front_text}", "expiry",
-            f"exp {front_text}",
+            f"exp · {front_text}",
         )
     ]  # fmt: skip
     t0 = _elapsed(ctx, shifts.sessions)

@@ -25,7 +25,7 @@ from streamlit.testing.v1 import AppTest
 from options_analyzer import black_scholes as bs
 from options_analyzer import clock, risk
 from options_analyzer import strategies as strat
-from options_analyzer.ui import charts, surface_state, tab_risk, tab_strategy
+from options_analyzer.ui import charts, charts_strategy, surface_state, tab_risk, tab_strategy
 from options_analyzer.ui import format as fmt
 from options_analyzer.ui import legs as lg
 from options_analyzer.ui import market as mk
@@ -495,9 +495,18 @@ def test_the_chart_draws_the_rn_ranges_the_straddle_move_and_the_reference_lines
     assert "straddle ±4.82%" in names and "straddle ±4.82%" not in texts
     ticks = [s["x0"] for s in spec["layout"]["shapes"] if s.get("line", {}).get("width") == 2]
     assert ticks == [pytest.approx(5800 * (1 - move)), pytest.approx(5800 * (1 + move))]
-    # The expiry, T+0 and two dated curves (⅓ and ⅔ of the 38 sessions to expiry), each named at its right end.
+    # The expiry, T+0 and two dated curves (⅓ and ⅔ of the 38 sessions to expiry), each named in the right margin at
+    # its right end's height, in two lines: inside the plot their boxes hid the curves' last 90 px and Plotly cut
+    # "01‑Dec" at the plot's edge.
     assert names[4:8] == ["Expiry 18‑Dec", "T+0", "T+13 · 11‑Nov", "T+26 · 01‑Dec"]
-    assert {"exp 18‑Dec", "T+0", "T+13 · 11‑Nov", "T+26 · 01‑Dec"} <= set(texts)
+    ends = {a["text"]: a for a in spec["layout"]["annotations"] if a.get("xref") == "paper" and a["x"] == 1.0}
+    assert set(ends) == {"exp<br>18‑Dec", "T+0", "T+13<br>11‑Nov", "T+26<br>01‑Dec"}
+    assert all(a["xanchor"] == "left" and "bgcolor" not in a for a in ends.values())
+    widest = max(charts_strategy._label_width(line) for text in ends for line in text.split("<br>"))
+    assert spec["layout"]["margin"]["r"] == charts.MARGIN["r"] + widest + charts_strategy.END_GAP
+    # In the curves' order at the right end, top to bottom: T+0, T+13, T+26, the expiry.
+    heights = [ends[t]["y"] for t in ("T+0", "T+13<br>11‑Nov", "T+26<br>01‑Dec", "exp<br>18‑Dec")]
+    assert heights == sorted(heights, reverse=True)
     # Strikes 100 points apart in a range of about 2,200 share a label, which a phone's 230 px plot needs.
     assert {"K 5,300/5,400", "K 6,150/6,250", "S 5,800", " F"} <= set(texts)
     assert sorted(_strike_lines(at)) == [5300.0, 5400.0, 6150.0, 6250.0]
@@ -507,9 +516,10 @@ def test_the_chart_draws_the_rn_ranges_the_straddle_move_and_the_reference_lines
     assert set(labels) == {f"BE 5,378<br>{MINUS}7.3%", "BE 6,172<br>+6.4%"}
     assert [labels[t]["xanchor"] for t in sorted(labels)] == ["right", "left"]
     assert all("bgcolor" in a for a in labels.values())
-    # The note: the same days as the builder's expiry menu, on the third line under S and F.
-    [note] = [a for a in spec["layout"]["annotations"] if a["text"] == "18‑Dec‑26 AM · 55d · RN smile"]
-    assert note["yshift"] == -28
+    # The note, after the spot axis's title (inside the plot, on a third line, it lay over S, F and the payoff on a
+    # phone): the same days as the builder's expiry menu.
+    assert spec["layout"]["xaxis2"]["title"]["text"] == "Spot · 18‑Dec‑26 AM · 55d · RN smile"
+    assert "18‑Dec‑26 AM · 55d · RN smile" not in texts
     menu = at.selectbox(key="strategy_expiry")
     assert menu.format_func(menu.value) == "18‑Dec‑26 AM · 55d"  # 55.73 days, floored as the what-if strip does
 
