@@ -1565,8 +1565,12 @@ def test_under_the_american_engine_the_note_gives_the_early_exercise_the_legs_ig
         )
         assert md(sentence) in note
     assert us - eu > 0.3  # the put's premium at r 5%, q 0: a real amount the legs leave out
-    # Under the closed form there is nothing to say.
-    assert not [i.value for i in _app(strategy="Long Straddle").info if "Early exercise" in i.value]
+    # Under the closed form there is nothing to say; nor under a link to a tree, which the sidebar reads as BSM (the
+    # note's tree branch, "on this tree", is gone with the sidebar's trees).
+    for model in (None, "Binomial tree", "binomial"):
+        at = _app(strategy="Long Straddle", **({"model": model} if model else {}))
+        assert at.sidebar.segmented_control(key="model").value == "bsm"
+        assert not [i.value for i in at.info if "Early exercise" in i.value]
 
 
 # --- Chart and label helpers ---------------------------------------------------------------------------------
