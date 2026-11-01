@@ -121,7 +121,7 @@ def test_probabilities_carry_their_basis():
 
 
 def test_moneyness_quantities_and_counts():
-    assert fmt.moneyness(5670.0, 5815.22) == "97.5%"
+    assert fmt.moneyness(5670.0, 5815.22) == "97.50%"
     assert fmt.moneyness(5670.0, 5815.22, log=True) == "−0.025"
     assert fmt.quantity(1) == "+1" and fmt.quantity(-2) == "−2"
     assert fmt.number(0.07597, 6) == "0.075970"  # year fraction, diagnostics

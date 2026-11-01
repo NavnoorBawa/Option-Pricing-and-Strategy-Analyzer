@@ -24,7 +24,7 @@ from ..strategies import Market
 from . import market as mk
 from . import surface_state
 from .format import date as short_date
-from .format import level, pct
+from .format import level, moneyness, pct
 from .format import strike as strike_text
 from .model_config import ModelConfig, model_sidebar  # code that imports ModelConfig from here keeps working
 
@@ -304,7 +304,7 @@ def _index_market(sb, model: ModelConfig | None = None) -> Inputs:
         gap = (volatility - surface_vol) * 100
         sb.caption(f"{gap:+.2f} vp against the surface's {pct(surface_vol, 2)}".replace("-", "−"))
     else:
-        sb.caption(f"σ {pct(surface_vol, 2)} from the surface at K/F {float(strike) / forward:.4f}")
+        sb.caption(f"σ {pct(surface_vol, 2)} from the surface at K/F {moneyness(float(strike), forward)}")
     rate, dividend_yield = mk.carry(forward, discount, context.spot, maturity)
     sb.caption(
         f"{mk.INDEX_ROOT} {level(context.spot)}, synthetic (not market data). From put-call parity on the expiry's "

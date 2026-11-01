@@ -644,8 +644,12 @@ def futures_equiv(delta: float, *, carry_factor: float = 1.0, contract: str = "E
 
 
 def moneyness(k: float, forward: float, *, log: bool = False) -> str:
-    """Moneyness against the forward: K/F in percent with 1 decimal (``97.5%``), or k = ln(K/F) signed with 3
+    """Moneyness against the forward: K/F in percent with 2 decimals (``97.50%``), or k = ln(K/F) signed with 3
     decimals (``−0.025``).
+
+    The one form of a contract's K/F in text: the sidebar, the Pricing tab and the Surface tab's readout. With 1
+    decimal the default contract's 100.02% read 100.0% while the sidebar wrote 1.0002. A table's K/F column keeps 1
+    decimal (:data:`.components.COLUMN_KINDS`), where the strikes are 5 points, 0.09%, apart.
 
     Parameters
     ----------
@@ -662,13 +666,13 @@ def moneyness(k: float, forward: float, *, log: bool = False) -> str:
     Examples
     --------
     >>> moneyness(5670.0, 5815.22), moneyness(5670.0, 5815.22, log=True), moneyness(5815.22, 5815.22, log=True)
-    ('97.5%', '−0.025', '0.000')
+    ('97.50%', '−0.025', '0.000')
     """
     if _absent(k) or _absent(forward) or not (k > 0 and forward > 0):
         return MISSING
     if log:
         return signed(math.log(k / forward), 3)
-    return f"{k / forward * 100:.1f}%"
+    return f"{k / forward * 100:.2f}%"
 
 
 def time_left(minutes: float, *, expiry_day: bool = False) -> str:

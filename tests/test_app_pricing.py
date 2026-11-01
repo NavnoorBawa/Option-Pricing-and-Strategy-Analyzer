@@ -637,13 +637,33 @@ def test_every_caption_of_the_tab_is_at_most_140_characters(new_app, query):
     assert captions and all(len(c) <= 140 for c in captions), [c for c in captions if len(c) > 140]
 
 
+def _default_k_over_f() -> str:
+    """The default contract's K/F, from the chain's parity forward: 5,815 over 20-Nov-26's forward, in percent."""
+    forward = float(mk.index_market(AT).expiry_row(date(2026, 11, 20))["forward"])
+    return f"{5815.0 / forward * 100:.2f}%"
+
+
 def test_the_footer_names_the_engine_and_the_time_basis(index_app):
+    assert _default_k_over_f() == "100.02%"  # 1 decimal read it 100.0%, the sidebar 1.0002
     assert any(
         c.value == "BSM · European · T to Fri 20‑Nov 09:30 ET = minutes/525,600 · σ from the surface at K/F "
-        "100.0% · per share"
+        "100.02% · per share"
         for c in index_app.caption
     )
     assert index_app.button(key="pricing_methodology").label == "Methodology"
+
+
+def test_one_k_over_f_in_the_sidebar_the_pricing_tab_and_the_surface_readout(new_app):
+    # The sidebar wrote K/F as 1.0002 while the Pricing tab and the Surface readout wrote 100.0%.
+    at = new_app(**INDEX, tab="Surface").run()
+    assert not at.exception
+    k_over_f = f"K/F {_default_k_over_f()}"
+    assert any(k_over_f in c.value for c in at.sidebar.caption)
+    assert any(f"({k_over_f}," in c.value for c in at.main.caption)  # the Surface readout
+    vol_tile = next(m for m in new_app(**INDEX).run().metric if m.label == "Vol")
+    assert f"at {k_over_f} " in vol_tile.help
+    texts = [c.value for c in at.caption] + [vol_tile.help]
+    assert not [t for t in texts if re.search(r"K/F (1\.\d{4}|\d+\.\d%)", t)]
 
 
 @pytest.mark.parametrize("module", [tab_pricing, tab_iv])
