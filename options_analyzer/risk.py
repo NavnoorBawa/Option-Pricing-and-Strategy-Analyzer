@@ -28,7 +28,15 @@ VaR and ES are read off the simulated P&L distribution:
 
 Horizons are in trading days (252 per year) because volatility scales with
 trading time; a horizon of ``h`` days removes ``h / 252`` years from each
-option's life.
+option's life, unless the caller gives the calendar time to the horizon's close
+(``calendar_years``: three calendar days from a Friday close to Monday's), which
+then ages the options and settles the legs while the variance keeps ``h / 252``.
+On a 7-day at-the-money index short straddle (spot and strike 5,800, vol 16 %,
+r 4.3 %, q 1.3 %, 100 shares) the trading-day clock credits $1,122 of decay over
+one day at an unchanged spot, where the next session from a Friday close is worth
+$2,501 and one calendar day $760; its one-day 99 % VaR is $5,871 on the trading-day
+clock and $5,388 from a Friday close (100,000 paths, seed 7). The app's Risk tab
+passes its clock.
 
 Beside the simulation, :func:`delta_gamma_var` gives the exact VaR and ES of
 the position's delta-gamma-theta P&L, quadratic in a Normal spot move: the
@@ -294,17 +302,21 @@ def tail_measures(pnl: np.ndarray, confidence: float) -> tuple[float, float]:
     return var, es
 
 
-def _settlement_days(strategy: Strategy, market: Market, horizon_days: int) -> dict[int, int]:
+def _settlement_days(
+    strategy: Strategy, market: Market, horizon_days: int, horizon_years: float | None = None
+) -> dict[int, int]:
     """Index of every option leg expiring before the horizon -> trading day it settles on.
 
     A leg settles at the close of the first trading day on or after its expiry, which is the horizon itself for a
-    leg that expires during the horizon's last day (a 30-day option at a 21-day horizon: 20.7 trading days).
+    leg that expires during the horizon's last day (a 30-day option at a 21-day horizon: 20.7 trading days). The
+    horizon's ``horizon_years`` (default ``horizon_days / 252``) are shared equally among its days.
     """
+    per_day = (horizon_days / TRADING_DAYS if horizon_years is None else horizon_years) / horizon_days
     days = {}
     for i, leg in enumerate(strategy.legs):
         if leg.is_option:
             expiry = market.expiry if leg.expiry is None else leg.expiry
-            expiry_days = expiry * TRADING_DAYS
+            expiry_days = expiry / per_day
             if expiry_days < horizon_days - 1e-9:
                 days[i] = int(min(max(math.ceil(expiry_days - 1e-9), 1), horizon_days))
     return days
@@ -338,6 +350,7 @@ def delta_gamma_var(
     horizon_days: float,
     confidence: float,
     *,
+    theta_years: float | None = None,
     es_rtol: float = 1e-10,
 ) -> DeltaGammaVaR:
     """Exact VaR and ES of the delta-gamma-theta P&L under a Normal spot move.
@@ -346,6 +359,9 @@ def delta_gamma_var(
     ``x`` and to first order in time,
 
         ``P&L = θ h/252 + Δ x + ½ Γ x²``,  ``x ~ N(0, s²)``,  ``s = S σ √(h/252)``,
+
+    where ``theta_years``, when given, takes the place of ``h/252`` in the decay term (the calendar time over which
+    :func:`value_at_risk` then ages the options) and ``s`` keeps ``h/252``.
 
     the analytic comparator of the full revaluation in :func:`value_at_risk`, which stores it on
     :attr:`VaRResult.delta_gamma`. With ``x = s z`` and ``δ = Δ / (Γ s)``, completing the square gives
@@ -385,7 +401,8 @@ def delta_gamma_var(
     theta : float
         Position theta dV/dt, in $ per year: the raw units of :func:`~.strategies.position_greeks` (positive for a
         short option). The horizon takes ``horizon_days / 252`` years of it, as :func:`value_at_risk` removes that
-        much of each option's life: one trading day is 365/252 of a calendar day's theta.
+        much of each option's life: one trading day is 365/252 of a calendar day's theta; ``theta_years`` instead
+        when given.
     spot : float
         Spot price ($ per share), positive.
     vol : float
@@ -394,6 +411,9 @@ def delta_gamma_var(
         Horizon in trading days (252 a year), positive; fractions are allowed.
     confidence : float
         Confidence level α, strictly between 0.5 and 1.
+    theta_years : float, optional
+        Years of time decay over the horizon, positive: the calendar time to the horizon's close (3/365 from a
+        Friday close over a one-day horizon). Default ``horizon_days / 252``. The spot's variance keeps ``h/252``.
     es_rtol : float, default 1e-10
         Accuracy asked of the ES integration, relative to the larger of the integral and the P&L's size; positive.
 
@@ -405,8 +425,8 @@ def delta_gamma_var(
     Raises
     ------
     ValueError
-        If an argument is not a single finite number, ``spot``, ``vol``, ``horizon_days`` or ``es_rtol`` is not
-        positive, or ``confidence`` is not between 0.5 and 1.
+        If an argument is not a single finite number, ``spot``, ``vol``, ``horizon_days``, ``theta_years`` or
+        ``es_rtol`` is not positive, or ``confidence`` is not between 0.5 and 1.
 
     Examples
     --------
@@ -428,6 +448,8 @@ def delta_gamma_var(
     293.09
     >>> round(delta_gamma_var(100, 0, 252, 100, 0.2, 1, 0.99).var, 2)  # theta $252 a year: $1 a trading day
     292.09
+    >>> round(delta_gamma_var(100, 0, 365, 100, 0.2, 1, 0.99, theta_years=3 / 365).var, 2)  # Friday to Monday: $3
+    290.09
     """
     delta, gamma, theta = _finite("delta", delta), _finite("gamma", gamma), _finite("theta", theta)
     positive = {"spot": spot, "vol": vol, "horizon_days": horizon_days, "es_rtol": es_rtol}
@@ -444,9 +466,11 @@ def delta_gamma_var(
     from scipy.stats import ncx2
 
     tau = horizon_days / TRADING_DAYS
+    if theta_years is not None and not _finite("theta_years", theta_years) > 0:
+        raise ValueError(f"theta_years must be positive, got {theta_years!r}")
     s = spot * vol * math.sqrt(tau)
     # P&L(z) = c + a z + b z², z ~ N(0, 1).
-    c, a, b = theta * tau, delta * s, 0.5 * gamma * s * s
+    c, a, b = theta * (tau if theta_years is None else float(theta_years)), delta * s, 0.5 * gamma * s * s
     if not math.isfinite(abs(c) + abs(a) + abs(b)):
         raise ValueError("the delta, gamma and theta P&L over the horizon overflows; check the units of the Greeks")
     tail = 1.0 - confidence
@@ -494,13 +518,27 @@ def delta_gamma_var(
     return DeltaGammaVaR(var=-quantile, expected_shortfall=-total / tail, es_error=error / tail)
 
 
-def value_at_risk(strategy: Strategy, market: Market, config: VaRConfig, multiplier: float = 1.0) -> VaRResult:
-    """Full-revaluation Monte Carlo VaR/ES of ``strategy`` (in $ after ``multiplier``)."""
+def value_at_risk(
+    strategy: Strategy,
+    market: Market,
+    config: VaRConfig,
+    multiplier: float = 1.0,
+    calendar_years: float | None = None,
+) -> VaRResult:
+    """Full-revaluation Monte Carlo VaR/ES of ``strategy`` (in $ after ``multiplier``).
+
+    ``calendar_years``, when given, is the calendar time from the valuation time to the horizon's close (the same
+    wall-clock time ``config.horizon_days`` sessions later: 3/365 from a Friday close over one day). It ages the
+    options, settles the legs that expire within it and is the decay of the delta-gamma-theta comparator; the
+    simulated variance keeps ``horizon_days / 252``. Without it every leg ages ``horizon_days / 252`` years.
+    """
     h = int(config.horizon_days)
-    settle = _settlement_days(strategy, market, h)
+    if calendar_years is not None and not _finite("calendar_years", calendar_years) > 0:
+        raise ValueError(f"calendar_years must be positive, got {calendar_years!r}")
+    horizon_years = h / TRADING_DAYS if calendar_years is None else float(calendar_years)
+    settle = _settlement_days(strategy, market, h, horizon_years)
     spot_at, spot, log_return, rng = _simulate(market, config, sorted({d for d in settle.values() if d < h}))
     vol_multiplier = _vol_multiplier(log_return, config, rng)
-    horizon_years = h / TRADING_DAYS
 
     later = np.zeros_like(spot)
     alive = tuple(leg for i, leg in enumerate(strategy.legs) if i not in settle)
@@ -520,19 +558,21 @@ def value_at_risk(strategy: Strategy, market: Market, config: VaRConfig, multipl
         leg = strategy.legs[i]
         phi = 1.0 if leg.kind == "call" else -1.0
         payoff = np.maximum(phi * ((spot_at[day] if day < h else spot) - leg.strike), 0.0)
-        later = later + leg.quantity * payoff * np.exp(market.rate * (h - day) / TRADING_DAYS)
+        later = later + leg.quantity * payoff * np.exp(market.rate * (h - day) * horizon_years / h)
 
     today = float(position_value(strategy, market))
     pnl = multiplier * (later - today)
     var, es, ci = _var_es(pnl, config.confidence)
 
     greeks = position_greeks(strategy, market)
-    sigma_h = market.volatility * np.sqrt(horizon_years)
+    sigma_h = market.volatility * np.sqrt(h / TRADING_DAYS)  # the variance's clock, whatever ages the options
     delta_normal = float(abs(multiplier * greeks["delta"] * market.spot) * sigma_h * ndtri(config.confidence))
     # The analytic comparator from the same Greeks, volatility, horizon and confidence.
     dollar_greeks = [float(multiplier * greeks[name]) for name in ("delta", "gamma", "theta")]
     delta_gamma = (
-        delta_gamma_var(*dollar_greeks, market.spot, market.volatility, h, config.confidence)
+        delta_gamma_var(
+            *dollar_greeks, market.spot, market.volatility, h, config.confidence, theta_years=calendar_years
+        )
         if all(math.isfinite(greek) for greek in dollar_greeks)
         else None
     )
