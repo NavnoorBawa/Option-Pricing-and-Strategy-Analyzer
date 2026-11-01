@@ -807,6 +807,16 @@ def test_fit_requires_two_usable_maturities():
     sparse = pd.concat([quotes, pd.DataFrame({"strike": [100.0], "maturity": [1.0], "iv": [0.2]})])
     with pytest.raises(vs.QuoteParseError, match=r"the quotes have 2 maturities, 1 of them with 5\+ strikes"):
         vs.fit_market_surface(sparse, 100, 0.0, 0.0)
+    # No maturity with five strikes is no smile at all, before any question of local vol: the message says surface.
+    three = pd.DataFrame({"strike": [90, 100, 110] * 3, "maturity": np.repeat([0.1, 0.5, 1.0], 3), "iv": 0.2})
+    with pytest.raises(vs.QuoteParseError) as error:
+        vs.fit_market_surface(three, 100, 0.04, 0.0)
+    assert str(error.value) == (
+        "a surface needs at least two maturities with 5+ usable strikes each; the quotes have 3 maturities, none with "
+        "5+ strikes"
+    )
+    with pytest.raises(vs.QuoteParseError, match=r"the quotes hold no usable row$"):
+        vs.fit_market_surface(three.iloc[:0], 100, 0.04, 0.0)
 
 
 @pytest.mark.parametrize("decimals", [3, 5])
@@ -988,6 +998,19 @@ def test_a_months_header_recovers_the_surface():
     lv_err, iv_err = relative_local_vol_error(fitted, params, 0.05, 0.0)
     assert iv_err.max() < 1e-6 and lv_err[1:-1].max() < 0.0015  # measured 0.042% (0.71% with secants in T)
     assert lv_err.max() < 0.015  # measured 0.50%, at three months (3.1% with secants in T)
+
+
+@pytest.mark.parametrize(("delimiter", "name"), [(";", "semicolon"), ("\t", "tab")])
+def test_a_table_read_as_one_column_is_called_semicolon_or_tab_delimited(delimiter, name):
+    # A quotes table saved with semicolons, read with commas, is one column named after its header line.
+    text = vs.sample_quotes(seed=0).to_csv(index=False, sep=delimiter)
+    frame = pd.read_csv(io.StringIO(text))
+    with pytest.raises(vs.QuoteParseError) as error:
+        vs.parse_quotes(frame)
+    assert str(error.value).endswith(f"(the file looks {name}-delimited: save it with commas between the columns)")
+    with pytest.raises(vs.QuoteParseError) as error:  # several columns, none of them a strike: no such guess
+        vs.parse_quotes(pd.DataFrame({"Level;x": [1.0], "Maturity": [0.5], "IV": [0.2]}))
+    assert "delimited" not in str(error.value)
 
 
 @pytest.mark.parametrize("header", ["Maturity (M)", "Tenor (m)", "DTE (m)"])

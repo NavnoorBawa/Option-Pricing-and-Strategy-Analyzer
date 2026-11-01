@@ -934,6 +934,19 @@ def test_three_layouts_give_identical_cleaned_quotes(fixture_chains):
     assert chains["yfinance"]["vendor_iv"].isna().sum() == 1 and reference["vendor_iv"].notna().all()
 
 
+@pytest.mark.parametrize(("delimiter", "name"), [(";", "semicolon"), ("\t", "tab")])
+def test_a_semicolon_or_tab_delimited_chain_reads_as_its_comma_twin(fixture_chains, delimiter, name):
+    # A European-locale export separates columns with semicolons; read as commas, the long layout was one column
+    # named 'symbol;root;expiry;...' and the file was refused as an unknown table. The fixtures hold no decimal comma.
+    for layout, file in FIXTURE_LAYOUTS.items():
+        text = (FIXTURES / file).read_text(encoding="utf-8").replace(",", delimiter)
+        chain, messages = read_chain(text.encode(), as_of=AS_OF)
+        reference, expected = fixture_chains[layout]
+        pd.testing.assert_frame_equal(chain, reference)
+        assert messages[0] == expected[0].removesuffix(".") + f", {name}-delimited.", layout
+        assert messages[1:] == expected[1:], layout
+
+
 def test_expired_crossed_and_zero_bid_rows_are_dropped_with_one_message_each(fixture_chains):
     """DT-5 acceptance (3)."""
     for layout, (chain, messages) in fixture_chains.items():

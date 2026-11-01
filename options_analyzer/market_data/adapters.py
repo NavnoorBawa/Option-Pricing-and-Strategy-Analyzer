@@ -102,29 +102,43 @@ def _key(name: object) -> str:
     return re.sub(r"[^a-z0-9]", "", re.sub(r"\.\d+$", "", str(name).strip()).lower())
 
 
-def _table(text: str) -> tuple[str, pd.DataFrame]:
-    """The layout and the table (all cells as text) of a chain file."""
+#: Delimiters other than the comma, by name: European-locale spreadsheets export CSV with semicolons (the comma is
+#: their decimal mark), and copies out of a browser or a terminal can come tab-separated.
+_DELIMITERS = {";": "semicolon", "\t": "tab"}
+
+
+def _delimiter(line: str) -> str:
+    """The delimiter of a file whose first line is ``line``: the comma, unless that line holds none and holds a
+    semicolon or a tab (:data:`_DELIMITERS`), as a chain exported in a European locale does."""
+    if "," in line:
+        return ","
+    return next((delimiter for delimiter in _DELIMITERS if delimiter in line), ",")
+
+
+def _table(text: str) -> tuple[str, pd.DataFrame, str]:
+    """The layout, the table (all cells as text) and the delimiter of a chain file."""
     lines = text.splitlines()
     start = 0
     while start < len(lines) and (not lines[start].strip() or lines[start].lstrip().startswith("#")):
         start += 1
+    sep = _delimiter(lines[start]) if start < len(lines) else ","
     for i in range(start, len(lines)):
-        header = next(csv.reader([lines[i]]), [])
+        header = next(csv.reader([lines[i]], delimiter=sep), [])
         if {"calls", "strike", "puts"} <= {_key(cell) for cell in header}:
             # Cboe: lines about the underlying come first, and the header names Bid, Ask and IV twice (calls, puts).
-            frame = _read_csv("\n".join(lines[i + 1 :]), header=None)
+            frame = _read_csv("\n".join(lines[i + 1 :]), header=None, sep=sep)
             names = [cell.strip() for cell in header]
             names += [f"_extra{j}" for j in range(frame.shape[1] - len(names))]  # rows that end in a trailing comma
             frame.columns = names[: frame.shape[1]]
-            return "cboe", frame
-    frame = _read_csv("\n".join(lines[start:]))
-    return _layout_of(frame), frame
+            return "cboe", frame, sep
+    frame = _read_csv("\n".join(lines[start:]), sep=sep)
+    return _layout_of(frame), frame, sep
 
 
-def _read_csv(text: str, *, header: int | None = 0) -> pd.DataFrame:
+def _read_csv(text: str, *, header: int | None = 0, sep: str = ",") -> pd.DataFrame:
     """All cells as text; a trailing comma on a row never turns the first column into the index."""
     try:
-        return pd.read_csv(io.StringIO(text), dtype=str, header=header, index_col=False)
+        return pd.read_csv(io.StringIO(text), dtype=str, header=header, index_col=False, sep=sep)
     except pd.errors.EmptyDataError:
         raise ValueError("the file holds no table (it is empty, or holds only comment lines)") from None
 
@@ -534,14 +548,15 @@ def read_chain(
     if layout != "auto" and layout not in LAYOUTS:
         raise ValueError(f"layout must be 'auto' or one of {', '.join(LAYOUTS)}, got {layout!r}")
     if isinstance(source, pd.DataFrame):
-        found, frame = _layout_of(source), source.astype("string").astype(object)
+        found, frame, sep = _layout_of(source), source.astype("string").astype(object), ","
     else:
-        found, frame = _table(_text(source))
+        found, frame, sep = _table(_text(source))
     if layout != "auto" and found != layout:
         raise ValueError(f"the file looks like {_NAMES[found]}, not the {layout} layout")
     notes: list[str] = []
     contracts = _READERS[found](frame.reset_index(drop=True), notes)
-    messages = [f"Read {len(contracts)} contract(s) in {_NAMES[found]}.", *notes]
+    delimited = f", {_DELIMITERS[sep]}-delimited" if sep in _DELIMITERS else ""
+    messages = [f"Read {len(contracts)} contract(s) in {_NAMES[found]}{delimited}.", *notes]
     return _finish(contracts, as_of, messages), messages
 
 

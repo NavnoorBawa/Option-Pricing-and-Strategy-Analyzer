@@ -803,9 +803,14 @@ def _map_columns(frame: pd.DataFrame, messages: list[str]) -> dict[str, tuple[st
         )
         del found["iv"]
     if "strike" not in found or ("maturity" not in found and "days" not in found):
+        # A file saved with semicolons (a European-locale export) or tabs reads as one column named after the
+        # whole header line: say so, rather than leave the reader to spot the delimiter in the column list.
+        only = str(frame.columns[0]) if len(frame.columns) == 1 else ""
+        delimiter = next((name for mark, name in {";": "semicolon", "\t": "tab"}.items() if mark in only), None)
+        looks = f" (the file looks {delimiter}-delimited: save it with commas between the columns)" if delimiter else ""
         raise QuoteParseError(
             "the file needs a Strike column and a Maturity column (in years) or a Days column; "
-            f"found columns: {', '.join(map(str, frame.columns))}"
+            f"found columns: {', '.join(map(str, frame.columns))}{looks}"
         )
     if "iv" not in found and not has_prices:
         raise QuoteParseError(

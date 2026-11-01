@@ -50,6 +50,32 @@ def _reconciles(counts: dict[str, int]) -> bool:
     return counts["quoted"] == counts["used"] + sum(counts[reason] for reason in dg.REASONS)
 
 
+def test_a_chain_without_two_usable_expiries_is_refused_for_the_surface_not_local_vol():
+    """An upload with no usable quote read "local volatility needs at least two maturities with 5+ strikes each; the
+    quotes have 0 maturities", though the user asked for an implied-vol surface and the reason was what reading and
+    screening left. The message is now worded around the surface and says what the screen set aside, by reason."""
+    chain = sample_chain(SPOT, RATE, YIELD, as_of=AS_OF).quotes
+    with pytest.raises(
+        vs.QuoteParseError,
+        match=r"^a surface needs at least two expiries with 5\+ usable strikes each; "
+        r"after reading, no contract is left to fit$",
+    ):
+        dg.fit_chain(chain.iloc[:0], as_of=AS_OF, spot=SPOT, rate=RATE, dividend_yield=YIELD)
+    # Ten strikes of 5,000 to 7,000, every one in a different expiry's screen: each expiry keeps a few OTM quotes.
+    strikes = np.sort(chain["strike"].unique())
+    sparse = chain[chain["strike"].isin(strikes[: 10 * 40 : 40])]
+    with pytest.raises(vs.QuoteParseError) as error:
+        dg.fit_chain(sparse, as_of=AS_OF, spot=SPOT, rate=RATE, dividend_yield=YIELD)
+    text = str(error.value)
+    expiries = sparse.groupby(["expiry", "settlement"]).ngroups
+    assert text.startswith(
+        f"a surface needs at least two expiries with 5+ usable strikes each; after reading and "
+        f"screening, the chain has {expiries} expiries, 0 of them with 5+ usable strikes"
+    )
+    assert f"(the screen set aside {len(sparse)} of {len(sparse)} quotes: " in text and "thin expiry" in text
+    assert "local vol" not in text
+
+
 def test_the_default_screen_counts_reconcile_and_keep_what_the_parser_kept(default):
     chain, fit = default
     counts = fit.counts()
@@ -93,7 +119,7 @@ def test_each_filter_excludes_with_its_own_reason(default):
     for reason, filters in checks.items():
         settings = dg.FitSettings(filters)
         if reason == "thin expiry":  # leaves too few expiries to fit: the screen itself is what is checked
-            with pytest.raises(vs.QuoteParseError):
+            with pytest.raises(vs.QuoteParseError, match=r"0 of them with 5\+ usable strikes \(the screen set aside"):
                 _fit(settings=settings)
             continue
         counts = _fit(settings=settings)[1].counts()
