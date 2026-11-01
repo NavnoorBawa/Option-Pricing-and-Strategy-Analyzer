@@ -209,16 +209,19 @@ def grid_scale(bound: float) -> tuple[float, str]:
 
 def grid_cell_text(value: float, bound: float) -> str:
     """A grid cell in the unit of :func:`grid_scale`: one decimal below 100 of the unit (``−3.6``), none from 100
-    (``+216``); cents below $10; signed with U+2212, ``0`` for a value that rounds to zero.
+    (``+216``); cents below $10; signed with U+2212, unsigned for a value that rounds to zero, at the grid's decimals
+    (``0.0`` beside ``−0.6``: a bare ``0`` read as another precision).
 
     >>> grid_cell_text(-3611.4, 4096.0), grid_cell_text(257.0, 4096.0), grid_cell_text(-4.2, 8.0)
     ('−3.6', '+0.3', '−4.20')
+    >>> grid_cell_text(-12.0, 4096.0), grid_cell_text(0.0, 999.0), grid_cell_text(0.001, 8.0)
+    ('0.0', '0', '0.00')
     """
     divisor, unit = grid_scale(bound)
     scaled, top = value / divisor, bound / divisor
     decimals = 2 if unit == "$" and bound < 10 else (0 if unit == "$" or top >= 100 else 1)
     text = signed(scaled, decimals)
-    return "0" if text.strip("0.,") == "" else text
+    return number(0.0, decimals) if text.strip("0.,") == "" else text
 
 
 def plain(value: float, most: int = 4) -> str:
@@ -1163,9 +1166,19 @@ def _var(book: Book) -> None:
     # is fixed, so a change of the vol dynamics finds it in the cache.
     frozen = dataclasses.replace(config, vol_of_vol=0.0, spot_vol_correlation=INDEX_SPOT_VOL_CORRELATION)
     with_vol = config.vol_of_vol > 0
+    # The options age on the tab's clock, as the what-if strip ages them: from the what-if time to the same time
+    # ``horizon`` sessions later (Friday 16:00 to Monday 16:00 is 3 calendar days over 1D). The library's own clock,
+    # h/252 years, aged them 1.45 days whatever the weekday: on the default Friday valuation time it overstated a
+    # short-premium book's 1D loss (a 7-day short straddle's VaR $5,871 against $5,388 on the clock) and understated
+    # it Monday to Thursday. The spot's variance still counts trading days.
+    start = book.scenario_time()
+    end = whatif.scenario_time(start, int(horizon))
+    calendar = clock.year_fraction(start, end)
     with st.spinner("Simulating…"):
-        spot_only = cache.value_at_risk(book.strategy, book.market, frozen, book.units)
-        result = cache.value_at_risk(book.strategy, book.market, config, book.units) if with_vol else spot_only
+        spot_only = cache.value_at_risk(book.strategy, book.market, frozen, book.units, calendar)
+        result = (
+            cache.value_at_risk(book.strategy, book.market, config, book.units, calendar) if with_vol else spot_only
+        )
     h = f"{int(horizon)}D"
     var, es = risk.tail_measures(result.pnl, VAR_CONFIDENCE)[0], risk.tail_measures(result.pnl, ES_CONFIDENCE)[1]
     spot_var, spot_es = spot_only.var, risk.tail_measures(spot_only.pnl, ES_CONFIDENCE)[1]
@@ -1189,18 +1202,25 @@ def _var(book: Book) -> None:
             book.market.volatility,
             int(horizon),
             ES_CONFIDENCE,
+            theta_years=calendar,
         ).expected_shortfall
     basis = f"{model} Monte Carlo, {number(int(paths), 0)} paths, seed {int(seed)}"
     vol_text = "spot and implied vol moving" if with_vol else "implied vol frozen"
     # The simulated spot moves at the market's vol, each leg is re-priced at its own (Book.spot_vol).
     spot_vol = spot_vol_text(book)
     legs_vol = "each leg re-priced at its own vol" + (", times the 1M multiplier damped by tenor" if with_vol else "")
+    days = round(calendar * clock.MINUTES_PER_YEAR) / 1440.0
+    clock_text = (
+        f"The options age on the New York clock, {plain(days, 2)} calendar day{'s' if days != 1 else ''} to "
+        f"{date_text(end.date())} {end:%H:%M} ({int(horizon)} session{'s' if int(horizon) > 1 else ''} later); the "
+        f"spot's variance counts trading days, σ²·h/252."
+    )
     ci = 2 if abs(var) < 1000 else 0  # the interval to the cent on a small position (−$54.30: −$54.08 to −$54.55)
     # The cards compare amounts a few dollars apart: on the textbook contract the VaR read −$54 beside a spot-only
     # VaR of −$55 and "+$0.58 vs spot only". Where a gap the cards show is below $10, which whole dollars cannot
     # write so that it adds up, every card is to the cent and each gap is the difference of the amounts on screen
     # (−$54.30 − (−$54.88)). Otherwise whole dollars: a 100,000-path VaR is not known to the cent (the default iron
-    # condor's −$479.95 has the 95% interval −$471.51 to −$487.45), and to the cent its cards ("+$234.00 vs spot
+    # condor's −$415.39 has the 95% interval −$409.27 to −$423.86), and to the cent its cards ("+$231.00 vs spot
     # only") needed 163 px each, so the six went 4 + 2 in the 1,038 px main column of a 1,440 px window with the
     # sidebar open. The rule was every card to the cent below $1,000.
     gaps = ([var - spot_var, es - spot_es] if with_vol else []) + ([] if dg is None else [spot_var - dg.var])
@@ -1211,7 +1231,7 @@ def _var(book: Book) -> None:
             -var,
             f"The 1% worst P&L over {h} by full revaluation, {vol_text} ({basis}): {exact(-var)}; 95% "
             f"simulation interval {exact(-result.var_ci95[0], ci)} to {exact(-result.var_ci95[1], ci)}. Spot "
-            f"moves at {spot_vol}; {legs_vol}.",
+            f"moves at {spot_vol}; {legs_vol}. {clock_text}",
             f"{difference(-var, -spot_var, cents)} vs spot only" if with_vol else None,
             cents,
         ),
@@ -1237,8 +1257,8 @@ def _var(book: Book) -> None:
     # The comparator's like: the delta-gamma-theta VaR moves spot alone, Normally, at the spot vol, so its gap is taken
     # to the spot-only run (the full VaR when implied vol is frozen), which differs from it by the full revaluation
     # alone (and by fatter tails under a Student-t or GARCH model). Against the spot-plus-vol VaR the gap would mix
-    # in the vega risk: on the default iron condor at the pinned valuation time (ASOF in tests/_apptest.py), +$245
-    # against the full VaR (−$480, implied vol moving) but +$11 against the spot-only one (−$714; DGT −$725).
+    # in the vega risk: on the default iron condor at the pinned valuation time (ASOF in tests/_apptest.py), +$247
+    # against the full VaR (−$415, implied vol moving) but +$16 against the spot-only one (−$646; DGT −$662).
     # The amounts shown are subtracted (whole dollars, or cents where a gap is below $10), so that the cards add up on
     # screen.
     gap = None if dg is None else difference(-spot_var, -dg.var, cents)
@@ -1247,8 +1267,9 @@ def _var(book: Book) -> None:
         _var_card(
             f"DGT VaR 99% {h}",
             MISSING if dg is None else -dg.var,
-            f"Exact VaR of Δ·x + ½Γ·x² + Θ·h for a Normal spot move at {spot_vol}, implied vol frozen (the "
-            f"analytic comparator): {MISSING if dg is None else exact(-dg.var)}; its ES 97.5%: "
+            f"Exact VaR of Δ·x + ½Γ·x² + Θ·t for a Normal spot move at {spot_vol} over {h} of trading-day "
+            f"variance, implied vol frozen, with t the {plain(days, 2)} calendar days the options age (the analytic "
+            f"comparator): {MISSING if dg is None else exact(-dg.var)}; its ES 97.5%: "
             f"{MISSING if dg_es is None else exact(-dg_es)}{no_expansion}.",
             cents=cents,
         ),
@@ -1490,11 +1511,18 @@ def _explain(book: Book) -> None:
         )
     # attribution's quality: |unexplained| over the P&L, floored at a tenth of the terms' gross (0 is a perfect fit).
     share = MISSING if not math.isfinite(taylor.quality) else f"{pct(taylor.quality, 1)} of the P&L"
+    # The table's precision (a money column: cents while its largest amount is below $1,000): the caption's whole
+    # dollars read "Shapley splits +$125 exactly" under a table of 124.69.
+    decimals = 2 if round(max((abs(v) for v in [*values, taylor.total]), default=0.0), 2) < 1000 else 0
+
+    def amount(value: float) -> str:
+        return signed(value, decimals, "$")
+
     st.caption(
         md(
-            f"Taylor leaves {dollars(taylor.unexplained)} unexplained ({share}); Shapley splits "
-            f"{dollars(shapley.total)} exactly, spot {dollars(shapley.spot)} against Δ + Γ "
-            f"{dollars(taylor.delta + taylor.gamma)}."
+            f"Taylor leaves {amount(taylor.unexplained)} unexplained ({share}); Shapley splits "
+            f"{amount(shapley.total)} exactly, spot {amount(shapley.spot)} against Δ + Γ "
+            f"{amount(taylor.delta + taylor.gamma)}."
         )
     )
 

@@ -348,10 +348,15 @@ def stress_bars(names: Sequence[str], values, *, palette: dict[str, str] | None 
     bar lost its last digit ("−$3,35") and one outside a negative bar ran over its scenario's name. In a margin of
     their own the amounts never meet a bar or a name at any width, and need no second colour (spec 2.6: text in the
     text colour on the background).
+
+    One precision for every amount, the stress table's (a money column: cents while the largest is below $1,000,
+    whole dollars from $1,000), as :func:`waterfall`'s labels: per amount (cents below $100), "Rates +200 bp −$57.08"
+    sat among whole dollars and beside the table's −57.
     """
     colors = palette or desk_theme.palette()
     values = [float(v) for v in values]
-    labels = [signed(v, 0 if abs(v) >= 100 else 2, "$") for v in values]
+    decimals = 2 if round(max((abs(v) for v in values), default=0.0), 2) < 1000 else 0
+    labels = [signed(v, decimals, "$") for v in values]
     column = int(np.ceil(AMOUNT_CHAR_WIDTH * max((len(t) for t in labels), default=0))) + AMOUNT_GAP
     fig = go.Figure(
         go.Bar(

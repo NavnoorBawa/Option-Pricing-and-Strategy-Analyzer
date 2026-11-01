@@ -33,7 +33,7 @@ from scipy.optimize import brentq
 from scipy.stats import norm
 from streamlit.testing.v1 import AppTest
 
-from options_analyzer import scenarios
+from options_analyzer import clock, scenarios
 from options_analyzer import strategies as strat
 from options_analyzer.ui import legs as lg
 from options_analyzer.ui import market as mk
@@ -571,10 +571,13 @@ def test_the_stress_table_is_sorted_worst_first_with_readable_labels(index):
     # on the bars they were clipped or ran over the scenario names on a phone (tests/test_risk_e2e.py measures it).
     notes = chart["layout"]["annotations"]
     amounts = [n for n in notes if n["xanchor"] == "right"]
-    # From the amounts themselves, not the table's whole dollars: the rate shock's −$57.08 reads to the cent.
+    # One precision for every amount, the table's: whole dollars, the largest being $1,000 or more. Per amount, the
+    # rate shock read −$57.08 among whole dollars and beside the table's −57.
     pnl = [stresses[n] for n in table["Scenario"]]
     assert [n["y"] for n in amounts] == table["Scenario"].tolist()
-    assert [n["text"] for n in amounts] == [signed(v, 0 if abs(v) >= 100 else 2, "$") for v in pnl]
+    assert max(abs(v) for v in pnl) >= 1000 and min(abs(v) for v in pnl) < 100
+    assert [n["text"] for n in amounts] == [signed(v, 0, "$") for v in pnl]
+    assert [n["text"] for n in amounts] == [signed(v, 0, "$") for v in table["P&L"]]  # the table's figures
     assert all(n["xref"] == "paper" and n["x"] == 1.0 for n in amounts)
     # Each name above its bar at the plot's left edge, not as a tick label left of the plot: on a phone the tick
     # labels took 150 px and left the bars about 70.
@@ -618,6 +621,10 @@ def test_the_desk_grid_axes_and_its_cells(index, mode):
     z = _array(heat["z"])
     zero = "0 vp" if mode == "vp" else "0%"
     assert z[heat["y"].index(zero), heat["x"].index("5,800 (0%)")] == 0.0
+    # The printed cells have one precision: the no-move cell reads "0.0" beside "−0.6" in $k, not a bare "0".
+    texts = _chart(at, "sc_heatmap_True")["data"][1]["text"]
+    assert texts[heat["y"].index(zero) * 9 + 4] == "0.0" and "0" not in texts
+    assert all(re.fullmatch(r"[+−]?[\d,]+\.\d", t) for t in texts), texts
     # Every cell: each leg's own vol shocked by the mode (1M-scaled damped by the legs' 55.7 days), today.
     grid = _desk_grid(index, mode)
     expected = [[grid[(x, dv)] for x in tab_risk.DESK_SPOT] for dv in tab_risk.DESK_VOL[mode]]
@@ -678,12 +685,15 @@ def test_the_finra_grid_and_its_illustrative_requirement(index):
     assert "\\$150.00" in line
 
 
-def _dgt_var(delta: float, gamma: float, theta: float, s: float, sigma: float, confidence: float = 0.99) -> float:
-    """VaR (a loss, positive) of θh/252 + Δx + ½Γx² over one trading day, x ~ N(0, (Sσ√(1/252))²), found as the P&L
-    level q whose loss region has probability 1 − confidence: for Γ < 0 the two tails beyond the roots of the
-    quadratic, from the Normal distribution directly (no chi-square)."""
+def _dgt_var(
+    delta: float, gamma: float, theta: float, s: float, sigma: float, confidence: float = 0.99, years: float = 1 / 252
+) -> float:
+    """VaR (a loss, positive) of θt + Δx + ½Γx² over one trading day of variance, x ~ N(0, (Sσ√(1/252))²), and
+    ``years`` t of decay (default the trading day), found as the P&L level q whose loss region has probability
+    1 − confidence: for Γ < 0 the two tails beyond the roots of the quadratic, from the Normal distribution directly
+    (no chi-square)."""
     sd = s * sigma * math.sqrt(1 / 252)
-    decay = theta / 252
+    decay = theta * years
 
     def tail(q: float) -> float:
         # P&L(x) ≤ q  ⇔  ½Γx² + Δx + (θh − q) ≤ 0, outside the roots when Γ < 0.
@@ -710,16 +720,18 @@ def test_the_var_report(index):
     for label in ("VaR 99% 1D · MC", "ES 97.5% 1D · MC", "Spot-only VaR", "Spot-only ES"):
         assert cards[label].value.startswith("−"), label
     # The simulations are the library's (tests/test_risk.py checks the engine) on the four legs built here at their
-    # own surface vols, the spot paths at the ATMF vol; the DGT VaR is solved here from the Normal distribution.
+    # own surface vols, the spot paths at the ATMF vol; the DGT VaR is solved here from the Normal distribution. The
+    # options age on the tab's clock (audit quant-3): Friday 16:00 to Monday 16:00, three calendar days, one trading
+    # day of variance. On the library's clock (1/252 year of ageing) the cards read −$480, −$492, −$714, −$728, −$725.
     legs = tuple(strat.Leg(kind, n, k, index.t, v) for (n, kind, k), v in zip(LEGS, index.vols, strict=True))
     condor = strat.Strategy("Iron Condor", legs)
     market = strat.Market(index.s, index.r, index.atm, index.t, index.q)
     moving = risk.VaRConfig(0.99, 1, 100_000, seed=7, vol_of_vol=1.0, spot_vol_correlation=-0.7)
-    full = risk.value_at_risk(condor, market, moving, UNITS)
-    spot = risk.value_at_risk(condor, market, replace(moving, vol_of_vol=0.0), UNITS)
+    full = risk.value_at_risk(condor, market, moving, UNITS, WEEKEND)
+    spot = risk.value_at_risk(condor, market, replace(moving, vol_of_vol=0.0), UNITS, WEEKEND)
     es = (risk.tail_measures(full.pnl, 0.975)[1], risk.tail_measures(spot.pnl, 0.975)[1])
     delta, gamma, _, theta = index.greeks()
-    dgt = _dgt_var(delta, gamma, theta, index.s, index.atm)
+    dgt = _dgt_var(delta, gamma, theta, index.s, index.atm, years=WEEKEND)
     expected = {
         "VaR 99% 1D · MC": -full.var,
         "ES 97.5% 1D · MC": -es[0],
@@ -728,19 +740,25 @@ def test_the_var_report(index):
         "DGT VaR 99% 1D": -dgt,
     }
     # Every gap between the cards is $10 or more, so they are in whole dollars (the VaR's 95% simulation interval
-    # is −$471.51 to −$487.45: no cent of it is known), each amount to the cent in its help.
-    assert [round(v, 2) for v in expected.values()] == [-479.95, -492.32, -713.95, -727.60, -725.40]
+    # is −$409.27 to −$423.86: no cent of it is known), each amount to the cent in its help.
+    assert [round(v, 2) for v in expected.values()] == [-415.39, -428.27, -646.00, -659.92, -662.15]
     assert {label: cards[label].value for label in expected} == {k: tab_risk.dollars(v) for k, v in expected.items()}
-    assert [cards[label].value for label in expected] == ["−$480", "−$492", "−$714", "−$728", "−$725"]
+    assert [cards[label].value for label in expected] == ["−$415", "−$428", "−$646", "−$660", "−$662"]
     for label, amount in expected.items():
         assert tab_risk.exact(amount).replace("$", "\\$") in cards[label].help, label
-    assert "95% simulation interval −\\$471.51 to −\\$487.45" in cards["VaR 99% 1D · MC"].help
-    # The gaps from the amounts shown, so that the cards add up on screen: −$480 − (−$714), −$492 − (−$728) and
-    # −$714 − (−$725), the comparator taken like for like (implied vol frozen in both).
-    assert cards["VaR 99% 1D · MC"].delta == "+\\$234 vs spot only"
-    assert cards["ES 97.5% 1D · MC"].delta == "+\\$236 vs spot only"
+    assert "95% simulation interval −\\$409.27 to −\\$423.86" in cards["VaR 99% 1D · MC"].help
+    # The help says which clock ages the options and which counts the variance.
+    assert (
+        "The options age on the New York clock, 3 calendar days to 26-Oct-26 16:00 (1 session later); the spot's "
+        "variance counts trading days, σ²·h/252."
+    ) in cards["VaR 99% 1D · MC"].help
+    assert "with t the 3 calendar days the options age" in cards["DGT VaR 99% 1D"].help
+    # The gaps from the amounts shown, so that the cards add up on screen: −$415 − (−$646), −$428 − (−$660) and
+    # −$646 − (−$662), the comparator taken like for like (implied vol frozen in both).
+    assert cards["VaR 99% 1D · MC"].delta == "+\\$231 vs spot only"
+    assert cards["ES 97.5% 1D · MC"].delta == "+\\$232 vs spot only"
     gap = tab_risk.shown(-spot.var) - tab_risk.shown(-dgt)
-    assert cards["Non-linearity"].value == tab_risk.dollars(gap) == "+$11"
+    assert cards["Non-linearity"].value == tab_risk.dollars(gap) == "+$16"
     assert cards["Non-linearity"].delta == "spot only − DGT"
     # The spot vol is named where it is used: the front expiry's ATMF vol, not a leg's.
     assert "at 15.52%, the 18‑Dec‑26 AM ATMF vol" in cards["DGT VaR 99% 1D"].help
@@ -952,6 +970,9 @@ def test_the_explain_report_explains_the_what_if_move(index):
     labels = _chart(quiet, "explain_waterfall")["data"][0]["text"]
     assert decay > 0 and [label for label in labels if label] == [f"+${decay:.2f}"] * 2  # Θ and the total
     assert any("unexplained (0.0% of the P&L)" in c.value for c in quiet.caption)
+    # The caption at the table's precision: "Shapley splits +$125 exactly" sat under a table of 124.69.
+    caption = next(c.value for c in quiet.caption if "Shapley splits" in c.value).replace("\\$", "$")
+    assert f"Shapley splits +${decay:.2f} exactly" in caption and "Taylor leaves $0.00 unexplained" in caption
 
 
 def test_the_footer_states_each_legs_vol(index):
@@ -1127,18 +1148,33 @@ SPX_STRADDLE = {
 }
 
 
-def _var_configs(monkeypatch) -> list:
-    """The configuration of every VaR simulation from now on, in order (the cache is cleared, so none hides there)."""
+def _var_configs(monkeypatch, clocks: list | None = None) -> list:
+    """The configuration of every VaR simulation from now on, in order (the cache is cleared, so none hides there),
+    and in ``clocks`` the calendar years each ages the options by."""
     from options_analyzer import risk
     from options_analyzer.ui import cache
 
-    configs = []
+    configs, clocks = [], [] if clocks is None else clocks
     real = risk.value_at_risk
-    monkeypatch.setattr(
-        risk, "value_at_risk", lambda s, m, config, n=1.0: configs.append(config) or real(s, m, config, n)
-    )
+
+    def recorded(s, m, config, n=1.0, calendar_years=None):
+        configs.append(config)
+        clocks.append(calendar_years)
+        return real(s, m, config, n, calendar_years)
+
+    monkeypatch.setattr(risk, "value_at_risk", recorded)
     cache.value_at_risk.clear()
     return configs
+
+
+def _next_session_years(start: datetime) -> float:
+    """Calendar years from ``start`` to the same wall-clock time on the next NYSE trading day, counted here day by
+    day (the textbook market's VaR starts at the last cash close, so its clock depends on the day the test runs)."""
+    day = start.date()
+    while True:
+        day = date.fromordinal(day.toordinal() + 1)
+        if clock.is_trading_day(day):
+            return (day - start.date()).days / 365
 
 
 def test_var_simulates_index_vol_dynamics_beside_the_spot_only_var(monkeypatch):
@@ -1149,16 +1185,27 @@ def test_var_simulates_index_vol_dynamics_beside_the_spot_only_var(monkeypatch):
     from options_analyzer import risk
     from options_analyzer.strategies import Market, build_template
 
-    configs = _var_configs(monkeypatch)
+    clocks = []
+    configs = _var_configs(monkeypatch, clocks)
     at = _risk(report="VaR", **SPX_STRADDLE)
     moving = risk.VaRConfig(0.99, 1, 100_000, seed=7, vol_of_vol=1.0, spot_vol_correlation=-0.7)
     assert configs == [replace(moving, vol_of_vol=0.0), moving]
-    cards = {m.label: m for m in at.metric}
-    assert cards["VaR 99% 1D · MC"].value == "−$3,862" and cards["Spot-only VaR"].value == "−$2,833"
-    assert cards["VaR 99% 1D · MC"].delta == r"−\$1,029 vs spot only"  # Markdown, as the delta renders it
-    # ES at 97.5% (FRTB's level) off the same simulation: the mean of the 2,500 worst of 100,000.
+    # The library's numbers, on its own clock (1/252 year of ageing): the panel's.
     straddle = build_template("Short Straddle", 5800, 580, 45 / 365)
-    run = risk.value_at_risk(straddle, Market(5800, 0.043, 0.16, 45 / 365, 0.013), moving, 100)
+    market = Market(5800, 0.043, 0.16, 45 / 365, 0.013)
+    library = [risk.value_at_risk(straddle, market, config, 100) for config in configs]
+    assert [round(run.var) for run in library] == [2833, 3862]
+    # The tab ages the options on its clock, to the next session from its valuation time (the textbook market's is
+    # the last cash close: Friday to Monday is 3/365, a weekday to the next 1/365), and shows the same simulations.
+    years = _next_session_years(mk.last_close())
+    assert clocks == [pytest.approx(years, abs=1e-9)] * 2
+    spot_run, run = (risk.value_at_risk(straddle, market, config, 100, years) for config in configs)
+    cards = {m.label: m for m in at.metric}
+    assert cards["VaR 99% 1D · MC"].value == tab_risk.dollars(-run.var)
+    assert cards["Spot-only VaR"].value == tab_risk.dollars(-spot_run.var)
+    gap = tab_risk.difference(-run.var, -spot_run.var)
+    assert cards["VaR 99% 1D · MC"].delta == f"{gap} vs spot only".replace("$", "\\$")  # Markdown, as it renders
+    # ES at 97.5% (FRTB's level) off the same simulation: the mean of the 2,500 worst of 100,000.
     es = -np.sort(run.pnl)[:2_500].mean()
     assert cards["ES 97.5% 1D · MC"].value == tab_risk.dollars(-es)
     assert at.toggle(key="var_volmoves").value is True

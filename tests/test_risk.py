@@ -769,7 +769,8 @@ def test_calendar_years_age_the_options_and_leave_the_variance_on_trading_days()
     # The trading-day clock is kept without it, and is the same as passing h/252 (the documented library figures).
     default = risk.value_at_risk(STRADDLE, market, config, 100)
     np.testing.assert_array_equal(default.pnl, risk.value_at_risk(STRADDLE, market, config, 100, h).pnl)
-    assert (round(default.var), round(res.var)) == (5871, 5388)  # the module docstring's numbers
+    assert (round(default.var), round(res.var)) == (5871, 5388)  # the module docstring's and the Methodology's
+    assert r"is worth \$2,501, and the one-day 99 % VaR is \$5,871 against \$5,388 on the calendar" in _methodology()
     # The delta-normal VaR is the variance's alone: the same on both clocks.
     assert res.delta_normal_var == default.delta_normal_var
     # The comparator's decay takes the calendar time: theta × 3/365 instead of theta / 252.
