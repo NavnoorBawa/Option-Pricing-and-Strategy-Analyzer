@@ -1,5 +1,6 @@
 import re
 import sys
+from dataclasses import replace
 
 import mpmath as mp
 import numpy as np
@@ -70,6 +71,25 @@ def test_iron_condor_is_symmetric_and_bounded():
     m = S.analyze(strategy, MARKET)
     assert np.isfinite(m.max_profit) and np.isfinite(m.max_loss)
     assert m.max_profit + m.max_loss == pytest.approx(5.0)
+
+
+def test_an_extreme_on_a_plateau_is_reported_at_the_end_nearest_the_spot():
+    # analyze() took argmax/argmin of the grid P&L, so on a flat stretch the spot was wherever rounding noise
+    # peaked: a covered call's maximum at S = 255.67 (it is reached at every S >= 110), an iron condor's maximum
+    # loss at S = 21.30 (every S <= 85). The reference is the payoff at expiry, read off by hand.
+    market = S.Market(spot=100, rate=0.05, volatility=0.2, expiry=0.25, dividend_yield=0.02)
+    covered = S.Strategy("Covered call", (S.Leg("stock", 1.0), S.Leg("call", -1.0, 110.0)))
+    m = S.analyze(covered, market)
+    assert m.max_profit_spot == 110.0 and m.max_loss_spot == 0.0
+    assert float(S.pnl(covered, market, 110.0, m.horizon)) == pytest.approx(m.max_profit, abs=1e-12)
+    legs = (S.Leg("put", 1.0, 85.0), S.Leg("put", -1.0, 90.0), S.Leg("call", -1.0, 110.0), S.Leg("call", 1.0, 115.0))
+    m = S.analyze(S.Strategy("Iron condor", legs), market)
+    # Maximum profit between the short strikes, where today's spot lies; the maximum loss on both wings, equally
+    # far from the spot (85 and 115), reported at the lower one.
+    assert m.max_profit_spot == 100.0 and m.max_loss_spot == 85.0
+    # Off a plateau the extreme is a single point, unchanged: a butterfly's maximum at its body.
+    fly = S.Strategy("Butterfly", (S.Leg("call", 1.0, 90.0), S.Leg("call", -2.0, 100.0), S.Leg("call", 1.0, 110.0)))
+    assert S.analyze(fly, replace(market, spot=97.0)).max_profit_spot == 100.0
 
 
 def test_calendar_spread_uses_leg_expiries():
