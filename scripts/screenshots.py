@@ -26,12 +26,15 @@ ROOT = Path(__file__).resolve().parents[1]
 #: Screenshot name: the tab's label and a chart that the tab draws when it runs (only the open tab runs, so a
 #: click on a tab is complete once that chart is on the page).
 TABS = {
-    "pricing": ("Pricing", "sensitivity_chart"),
+    "pricing": ("Pricing", "pricing_profile"),
     "strategy": ("Strategy", "payoff_chart"),
     "risk": ("Risk", "ladder_chart"),
-    "surface": ("Surface", "surf_iv"),
-    "iv": ("IV", "iv_curve"),
+    "surface": ("Surface", "chart_smile"),
+    "iv": ("IV", "iv_price"),
 }
+#: The valuation time of the screenshots (and of the README's numbers): the synthetic index at a pinned cash close,
+#: so that the images do not change with the day they are taken.
+QUERY = "?asof=2026-10-23T16:00"
 
 
 def _free_port() -> int:
@@ -66,10 +69,10 @@ def main() -> None:
     try:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(executable_path=args.chromium)
-            page = browser.new_page(viewport={"width": 1400, "height": 1700}, color_scheme="dark")
+            page = browser.new_page(viewport={"width": 1440, "height": 1000}, color_scheme="dark")
             for _ in range(120):  # the server needs a few seconds to start
                 try:
-                    page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
+                    page.goto(f"http://127.0.0.1:{port}/{QUERY}", wait_until="networkidle")
                     break
                 except Exception:
                     time.sleep(0.5)
