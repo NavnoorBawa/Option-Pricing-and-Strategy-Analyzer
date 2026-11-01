@@ -37,9 +37,11 @@ with no dividend yield) outside the no-arbitrage bounds as well.
    none is removed (at most :data:`TRIM_ROUNDS` rounds);
 4. ``F = a / DF``. Where fewer than :data:`MIN_PARITY_PAIRS` pairs remain the expiry keeps the forward and discount
    factor of the rate and dividend yield it was given. Where the slope is too uncertain (standard error above
-   :data:`MAX_DISCOUNT_SE`, typical of short expiries whose few strikes span a narrow range, where it hardly matters)
-   or implausible (an implied rate outside :data:`RATE_LIMITS`), the discount factor comes from the given rate plus
-   the spread over it that the other expiries' slopes measured (:func:`_rate_spread`; the given rate alone where none
+   :data:`MAX_DISCOUNT_SE`, typical of short expiries whose few strikes span a narrow range, where it hardly matters),
+   too uncertain to give a rate (the implied rate's standard error ``SE(DF) / (DF T)`` above :data:`MAX_RATE_SE`:
+   above all an expiry a day or two away, whose slope pins the discount factor but not ``-ln(DF) / T``) or
+   implausible (an implied rate outside :data:`RATE_LIMITS`), the discount factor comes from the given rate plus the
+   spread over it that the other expiries' slopes measured (:func:`_rate_spread`; the given rate alone where none
    did), and the forward is the weighted mean of ``K + (C - P) / DF`` over the same pairs. Near the money that mean
    barely depends on ``DF``: a discount factor off by ``d`` (relative) moves each term by ``d (F - K)``.
 
@@ -66,6 +68,7 @@ __all__ = [
     "FORWARD_COLUMNS",
     "FORWARD_SOURCES",
     "MAX_DISCOUNT_SE",
+    "MAX_RATE_SE",
     "MIN_CARRY_GAP_BP",
     "MIN_PARITY_PAIRS",
     "carry_gaps",
@@ -84,6 +87,14 @@ MIN_NEAR_PAIRS = 20
 #: the discount factor moves the undiscounted out-of-the-money prices, hence their implied vols, by 0.05 % (relative)
 #: at most, while a slope that uncertain would give the implied rate an error of 5 bp / T.
 MAX_DISCOUNT_SE = 5e-4
+#: ...and so is a slope whose implied rate ``-ln(DF) / T`` has a larger standard error, ``SE(DF) / (DF T)``, than
+#: this (50 bp, about the box spread the slope is there to measure). Near expiry a well-measured slope still fixes no
+#: rate: on the synthetic SPX chain at 10:00 on the day of a 16:00 expiry (T = 0.000685) the slope's standard error
+#: was 1.6e-4, within MAX_DISCOUNT_SE, but the rate's was 24 % and the fit read r = -0.01 % (and so q = -2.93 %)
+#: against the generator's 4.45 % (1.30 %); a day out it read 1.32 % (SE 2.8 %), and 3.25 days out 5.03 % (SE 45 bp,
+#: kept). Weeklies a week or more out measure it to 23 bp or better; the 30-day expiry of ``tests/test_forwards.py``'s
+#: chain on a $100 underlying, priced to $0.05, to 56 bp, so it takes the pooled rate too.
+MAX_RATE_SE = 0.005
 #: Implied rates outside this range (continuously compounded) are not believed; the given rate's discount factor is
 #: used instead.
 RATE_LIMITS = (-0.10, 0.50)
@@ -101,7 +112,8 @@ FORWARD_SOURCES = {
     "parity": "put-call parity: forward and discount factor fitted to the call/put pairs",
     "parity_forward": "put-call parity for the forward; discount factor from the rate input plus the spread over it "
     "that the other expiries' parity fits measured (the rate input alone where none did), because this expiry's own "
-    "slope was too uncertain (standard error above MAX_DISCOUNT_SE) or implied a rate outside RATE_LIMITS",
+    "slope was too uncertain (standard error above MAX_DISCOUNT_SE, or its implied rate's above MAX_RATE_SE, as a "
+    "day or two from expiry) or implied a rate outside RATE_LIMITS",
     "rates": "the rate and dividend yield inputs (too few call/put pairs, parity not asked for, or American exercise)",
 }
 #: The columns of :func:`implied_forwards`' table.
@@ -238,11 +250,26 @@ class _ParityFit:
         return math.sqrt(max(float(self.covariance[1, 1]), 0.0))
 
     @property
-    def measured(self) -> bool:
-        """Whether the slope measures the discount factor (module docstring, step 4)."""
+    def rate_se(self) -> float:
+        """The standard error of the implied rate ``-ln(DF) / T``: ``SE(DF) / (DF T)``."""
+        return self.discount_se / (self.discount * self.T)
+
+    def _plausible(self) -> bool:
+        """A slope measured to MAX_DISCOUNT_SE whose implied rate lies within RATE_LIMITS."""
         if not (self.discount > 0 and self.discount_se <= MAX_DISCOUNT_SE):
             return False
         return RATE_LIMITS[0] <= -math.log(self.discount) / self.T <= RATE_LIMITS[1]
+
+    @property
+    def too_near(self) -> bool:
+        """Whether a slope that passes every other test is set aside only because, so near expiry, it fixes no rate
+        (the implied rate's standard error above :data:`MAX_RATE_SE`)."""
+        return self._plausible() and self.rate_se > MAX_RATE_SE
+
+    @property
+    def measured(self) -> bool:
+        """Whether the slope measures the discount factor (module docstring, step 4)."""
+        return self._plausible() and self.rate_se <= MAX_RATE_SE
 
 
 def _parity_fit(group: pd.DataFrame, T: float, given_discount: float, floor: float) -> _ParityFit | None:
@@ -306,7 +333,7 @@ def _rate_spread(fits: list[_ParityFit], rate: float) -> float | None:
     if not measured:
         return None
     spreads = np.array([-math.log(fit.discount) / fit.T - rate for fit in measured])
-    errors = np.array([max(fit.discount_se, 1e-12) / (fit.discount * fit.T) for fit in measured])
+    errors = np.array([max(fit.rate_se, 1e-12 / (fit.discount * fit.T)) for fit in measured])
     return float(np.average(spreads, weights=1.0 / errors**2))
 
 
@@ -350,7 +377,9 @@ def implied_forwards(
         discount factor was not fitted); ``gap_bp``, the forward's distance from ``spot e^{(rate - dividend_yield)
         T}`` in basis points of the forward; ``atm_half_spread_bp``, half the at-the-money call and put spreads in
         basis points of the discounted forward (the precision the quotes give the forward); and the ``source``, a
-        key of :data:`FORWARD_SOURCES`.
+        key of :data:`FORWARD_SOURCES`. ``attrs["too_near"]`` counts the ``"parity_forward"`` expiries whose slope
+        measured the discount factor but was too near expiry to give a rate (:data:`MAX_RATE_SE`), for the message
+        that names why.
 
     Raises
     ------
@@ -404,6 +433,7 @@ def implied_forwards(
             row.update(_settled(fit, discount) or {})
         rows.append(row)
     table = pd.DataFrame(rows, columns=["expiry", *FORWARD_COLUMNS])
+    table.attrs["too_near"] = sum(fit is not None and fit.too_near for _, _, fit in expiries)
     if table.empty:
         return table
     T = table["maturity"].to_numpy(float)
@@ -412,7 +442,10 @@ def implied_forwards(
     table["rate"] = -np.log(discount) / T
     table["dividend_yield"] = table["rate"] - np.log(forward / spot) / T
     table["gap_bp"] = 1e4 * (np.log(forward / spot) - (rate - dividend_yield) * T)
-    return table.sort_values("maturity", kind="stable").reset_index(drop=True)
+    too_near = table.attrs["too_near"]
+    table = table.sort_values("maturity", kind="stable").reset_index(drop=True)
+    table.attrs["too_near"] = too_near  # pandas does not promise to carry attrs through every operation
+    return table
 
 
 def carry_gaps(table: pd.DataFrame) -> np.ndarray:

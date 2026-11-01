@@ -21,6 +21,7 @@ from options_analyzer import vol_surface as vs
 from options_analyzer.implied_vol import implied_volatility_batch
 from options_analyzer.market_data import sample_chain, synthetic, to_quotes
 from options_analyzer.vol_surface import forwards as fw
+from options_analyzer.vol_surface.diagnostics import fit_chain
 
 S, RATE, YIELD = 100.0, 0.045, 0.02
 DAYS = (30, 91, 182, 365, 547, 730)
@@ -99,6 +100,45 @@ def test_too_few_pairs_keep_the_given_rates_and_an_uncertain_slope_takes_the_poo
     assert np.isnan(table["discount_se"].iloc[2]) and table["discount_se"].iloc[1] < fw.MAX_DISCOUNT_SE
 
 
+def test_an_expiry_hours_away_takes_its_discount_factor_from_the_rate_not_its_slope():
+    # Six hours to expiry (T = 1/1460), strikes 98-102, prices at r = 5 %, q = 2 % with +/-$0.0001 of noise: the
+    # slope is measured to 1.4e-5, well within MAX_DISCOUNT_SE, but that leaves -ln(DF) / T a standard error of 2.1 %,
+    # and it read r = 0.55 %, inside RATE_LIMITS. The rate now comes from the given 4 % plus the 100 bp spread a
+    # half-year expiry measures, the generator's 5 %, and the forward from parity: S e^{0.03 T}.
+    rng = np.random.default_rng(4)
+    T = 1 / 1460
+    hours = _price_table(np.arange(98.0, 102.01, 0.25), T, 0.05, 0.02)
+    hours["price"] += rng.uniform(-0.0001, 0.0001, len(hours))
+    fit = fw._parity_fit(hours, T, math.exp(-0.04 * T), 1e-8)
+    assert fit is not None and fit.discount_se <= fw.MAX_DISCOUNT_SE
+    assert fit.discount_se / (fit.discount * T) > fw.MAX_RATE_SE  # the case the bound on the rate's error adds
+    assert fw.RATE_LIMITS[0] < -math.log(fit.discount) / T < 0.01  # what the slope alone gave
+    wide = _price_table(np.arange(60.0, 141.0, 2.5), 0.5, 0.05, 0.02)
+    table = fw.implied_forwards(pd.concat([hours, wide]), S, 0.04, 0.0)
+    assert table["source"].tolist() == ["parity_forward", "parity"] and table.attrs["too_near"] == 1
+    assert table["rate"].iloc[0] == pytest.approx(0.05, abs=1e-9)
+    # The forward to its quotes' precision: $0.0001 of noise on a $100 forward is 1e-6 relative.
+    assert table["forward"].iloc[0] == pytest.approx(S * math.exp(0.03 * T), rel=1e-6)
+
+
+def test_the_synthetic_index_reads_the_box_rate_on_the_day_of_expiry():
+    # The audit's case: 10:00 on the day of a 16:00 PM expiry (T = 0.000685) on the synthetic SPX chain read the
+    # parity slope as r = -0.01 % and q = -2.93 %. The generator's carry is the Treasury rate plus the box spread,
+    # 4.45 %, and a 1.30 % yield. Now: the rate within 5 bp of 4.45 % (it is the 4 % given plus the spread the
+    # weeklies measured, which scatter by about 20 bp each), every expiry from a week out still on its own slope.
+    as_of = datetime(2026, 10, 30, 10, 0)
+    chain = sample_chain(5800.0, 0.04, 0.013, as_of=as_of)
+    fit = fit_chain(chain.quotes, as_of=as_of, spot=5800.0, rate=0.04, dividend_yield=0.013)
+    table = fit.forwards
+    assert table["maturity"].iloc[0] == pytest.approx(6 / (365 * 24))
+    assert table["source"].iloc[0] == "parity_forward" and (table["source"].iloc[1:] == "parity").all()
+    assert table["rate"].iloc[0] == pytest.approx(0.04 + synthetic.BOX_SPREAD, abs=5e-4)
+    # q from the parity forward over six hours (1.52 %): its standard error is forward_se / (F T), 0.16 %.
+    se_q = table["forward_se"].iloc[0] / (table["forward"].iloc[0] * table["maturity"].iloc[0])
+    assert abs(table["dividend_yield"].iloc[0] - 0.013) < 3 * se_q
+    assert "the expiry is too near for it to fix a rate" in fit.messages[0]
+
+
 def test_parity_off_gives_the_table_of_the_given_rates():
     table = fw.implied_forwards(_price_table(np.arange(80.0, 121.0, 5.0), 0.5, 0.05, 0.02), S, 0.03, 0.01, parity=False)
     assert table["source"].tolist() == ["rates"] and table["pairs"].tolist() == [0]
@@ -113,11 +153,13 @@ def test_acceptance_1_forwards_and_an_arbitrage_free_surface_from_a_sidebar_with
     """S = 100, r = 4.5 %, q = 2 %, six expiries from 30 days to two years, strikes 70-130 in steps of 2.5, mids
     rounded to $0.05 and quoted $0.05 either side, read with the sidebar's q = 0.
 
-    Every forward is within 2 bp (measured 0.89) and every discount factor within three of its own standard errors
-    (measured errors up to 4.0e-4, at most 1.3 standard errors of 2.3e-4 to 4.6e-4). The plan asked for 2e-5, which
-    these quotes cannot give: rounding each price to $0.05 on a $100 underlying leaves the slope of C - P that
-    uncertain, and it costs the vols at most sigma * 4e-4, 0.01 vol point. No calendar or butterfly point and no
-    static-arbitrage note.
+    Every forward is within 2 bp (measured 0.89) and every discount factor from the second expiry on within three of
+    its own standard errors (measured errors up to 4.0e-4, at most 1.3 standard errors of 2.3e-4 to 3.2e-4). The plan
+    asked for 2e-5, which these quotes cannot give: rounding each price to $0.05 on a $100 underlying leaves the slope
+    of C - P that uncertain, and it costs the vols at most sigma * 4e-4, 0.01 vol point. At 30 days the slope's
+    standard error, 4.6e-4, leaves the implied rate one of 56 bp, above MAX_RATE_SE, so that expiry discounts at the
+    given rate plus the spread the others measured: 4.49 % (its own slope read 4.53 %), a discount factor 9e-6 from
+    the generator's. No calendar or butterfly point and no static-arbitrage note.
 
     The plan's fit criterion, an RMSE below 0.4 vol point, is restated as what a fit to bid/ask quotes can be held
     to: at every expiry at least 99 % of the fitted vols lie inside their quote's bid/ask in vol, and the median
@@ -125,7 +167,8 @@ def test_acceptance_1_forwards_and_an_arbitrage_free_surface_from_a_sidebar_with
     largest error is 0.63 of its half-spread). With the sidebar forward instead, 4 to 83 % lie inside, with medians up
     to 8.9 (and, fitted unconstrained, 9 calendar and 15 butterfly points), so the criterion tells the two apart.
 
-    The unweighted RMSE stays reported and bounded: 0.733 vol point at 30 days (bound 0.8, 9 % headroom), where wing
+    The unweighted RMSE stays reported and bounded: 0.742 vol point at 30 days (bound 0.8, 7 % headroom; 0.733 with
+    the discount factor of that expiry's own slope, before MAX_RATE_SE), where wing
     quotes worth a few ticks are rounded by up to a third of their value, and 0.118 at most from the second expiry on
     (bound 0.15). Since roadmap item SF-4 the fit minimises the spread-weighted error, so the unweighted RMSE at 30
     days is above the 0.684 of an unweighted fit, which follows the wide wing quotes at the expense of the tight ones
@@ -135,7 +178,8 @@ def test_acceptance_1_forwards_and_an_arbitrage_free_surface_from_a_sidebar_with
     T = table["maturity"].to_numpy()
     assert np.max(np.abs(np.log(table["forward"] / (S * np.exp((RATE - YIELD) * T))))) < 2e-4
     error = np.abs(table["discount_factor"] - np.exp(-RATE * T))
-    assert (table["source"] == "parity").all() and (error <= 3 * table["discount_se"]).all()
+    assert table["source"].tolist() == ["parity_forward"] + ["parity"] * 5
+    assert (error[1:] <= 3 * table["discount_se"][1:]).all() and error[0] < 2e-5
     assert surface.calendar_violations == 0 and surface.butterfly_violations == 0
     assert not [note for note in surface.notes if "arbitrage" in note]
     summary = vs.surface_summary(surface)
@@ -248,6 +292,12 @@ def test_the_parse_message_names_where_a_fitted_forwards_discount_factor_comes_f
     text = vs.quotes._forward_message(table, "parity")
     assert "at 1 of them the discount factor is the sidebar rate plus the spread over it that the other" in text
     assert "the slope of C − P in the strike was too uncertain (the strikes span too little) or implied a rate" in text
+    # Within a week of expiry the message names the other reason, an expiry too near for its slope to fix a rate.
+    near = table.copy()
+    near.attrs["too_near"] = 1  # as implied_forwards counts them
+    assert "too uncertain (the strikes span too little, or the expiry is too near for it to fix a rate)" in (
+        vs.quotes._forward_message(near, "parity")
+    )
     assert "outside −10% to 50%" in text  # RATE_LIMITS, with the minus sign U+2212
     assert "the other 1 use the sidebar rate and dividend yield" in text
 

@@ -72,8 +72,9 @@ an expiry lie on a line in $K$ with slope ${-D}$ and root $F$. The line is fitte
 call/put pairs within the wider of 8% and 1.5 standard deviations ($\sigma\sqrt{T}$, read from the at-the-money
 straddle) of a first-guess forward, each pair weighted by ${1/(e_C + e_P)^2}$ with $e$ half its bid/ask spread, and
 pairs more than 3.5 scaled median absolute deviations from the line (and outside their own spreads) are removed.
-Where the slope is too uncertain (standard error above 0.0005, typical of short expiries with few strikes) or
-implies a rate outside −10% to 50%, $D$ comes from the sidebar rate plus the spread over it that the other
+Where the slope is too uncertain (standard error above 0.0005, typical of short expiries with few strikes), leaves
+the rate ${-\ln D / T}$ a standard error above 0.5% (an expiry a day or two away, whose slope pins $D$ but not the
+rate), or implies a rate outside −10% to 50%, $D$ comes from the sidebar rate plus the spread over it that the other
 expiries' slopes measured (the sidebar rate alone where none did) — options discount at a financing (box) rate
 tens of basis points above Treasuries — and $F$ is the weighted mean of ${K + (C-P)/D}$. An expiry with fewer than
 six strikes quoted on both sides keeps the sidebar rate and dividend yield. Black-76 with $F$ and $D$ is

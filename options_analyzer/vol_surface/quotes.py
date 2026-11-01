@@ -474,11 +474,16 @@ def _forward_message(table: pd.DataFrame, method: str, exercise: str = "european
     text = f"Forwards from put-call parity at {'every one' if parity == n else parity} of the {expiries}"
     slope = int(counts.get("parity_forward", 0))
     if slope:
+        why = "the strikes span too little"
+        if table.attrs.get("too_near"):
+            # A slope measured well enough near expiry still leaves -ln(DF) / T too uncertain to be a rate
+            # (forwards.MAX_RATE_SE): a day out on the synthetic index, a standard error of 2.8 %.
+            why += ", or the expiry is too near for it to fix a rate"
         text += (
             f"; at {slope} of them the discount factor is the sidebar rate plus the spread over it that the other "
             "expiries' parity fits measured (the sidebar rate alone where none did), because their own fit could "
-            "not measure it: the slope of C − P in the strike was too uncertain (the strikes span too little) or "
-            f"implied a rate outside {_percent(RATE_LIMITS[0])} to {_percent(RATE_LIMITS[1])}"
+            f"not measure it: the slope of C − P in the strike was too uncertain ({why}) or implied a rate outside "
+            f"{_percent(RATE_LIMITS[0])} to {_percent(RATE_LIMITS[1])}"
         )
     rates = n - parity
     if rates:
