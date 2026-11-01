@@ -32,7 +32,7 @@ from scipy.special import ndtri
 from .. import black_scholes as bs
 from .. import clock
 from .. import strategies as strat
-from ..vol_surface.published import ONE_SD, TWO_SD, Expiry
+from ..vol_surface.published import ONE_SD, Expiry
 from . import cache, charts, charts_strategy, components, exports, surface_state, whatif
 from . import legs as lg
 from . import market as mk
@@ -96,6 +96,10 @@ DATED = {"Dated ⅓": 1 / 3, "Dated ⅔": 2 / 3}
 TILE_VALUE_PX = 19.25
 #: Points of the P&L chart's spot grid.
 GRID_POINTS = 600
+#: The chart's two price ranges at the front expiry: ±1σ (68.27%, "68%") and the central 95%, 2.5% to 97.5%, as the
+#: Pricing tab's RN 95%. The second was ±2σ, 95.45%, under the name "RN 95%": 4,894–6,388 on 18-Dec-26 where the
+#: smile's 2.5% and 97.5% quantiles are 4,921 and 6,379.
+RN_LEVELS = (("68%", ONE_SD), ("95%", 0.95))
 
 
 # --- The position ---------------------------------------------------------------------------------------------------
@@ -1155,13 +1159,14 @@ def _bands(ctx: _Context) -> list[charts_strategy.Band]:
     market, T = ctx.market, ctx.metrics.horizon
     if ctx.index and ctx.front is not None:
         to = _short_date(ctx.front.day)
-        for level, word in ((ONE_SD, "68%"), (TWO_SD, "95%")):
+        for word, level in RN_LEVELS:
             lo, hi = ctx.published.rn_range(ctx.front, level)
             out.append(charts_strategy.Band(lo, hi, f"RN {word} to {to}: {number(lo, 0)}–{number(hi, 0)} (smile)"))
         return out
     sd = market.volatility * math.sqrt(T)
     median = market.spot * math.exp((market.rate - market.dividend_yield) * T - 0.5 * sd * sd)
-    for n, word in ((1.0, "68%"), (2.0, "95%")):
+    for word, level in RN_LEVELS:
+        n = float(ndtri(0.5 + level / 2))  # 1 and 1.96 standard deviations of the log price
         lo, hi = median * math.exp(-n * sd), median * math.exp(n * sd)
         text = _level_text(lo, market.spot), _level_text(hi, market.spot)
         out.append(charts_strategy.Band(lo, hi, f"{word} at expiry: {text[0]}–{text[1]} (flat vol)"))

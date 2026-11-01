@@ -31,7 +31,7 @@ from options_analyzer.ui import legs as lg
 from options_analyzer.ui import market as mk
 from options_analyzer.ui.app import TABS
 from options_analyzer.ui.format import MINUS, md, money
-from options_analyzer.vol_surface.published import ONE_SD, TWO_SD, Expiry
+from options_analyzer.vol_surface.published import ONE_SD, Expiry
 
 NO_EDITS = {"edited_rows": {}, "added_rows": [], "deleted_rows": []}
 #: The Risk tab's default implied-vol dynamics in the VaR simulation, an index's (VIX-like).
@@ -451,7 +451,7 @@ def test_the_chart_draws_the_rn_ranges_the_straddle_move_and_the_reference_lines
     spec = _chart(at, "payoff_chart")
     names = [t.get("name") for t in spec["data"]]
     lo68, hi68 = published.rn_range(DEC, ONE_SD)
-    lo95, hi95 = published.rn_range(DEC, TWO_SD)
+    lo95, hi95 = published.rn_range(DEC, 0.95)
     # UI-13: the legend names the basis; the bounds are the smile's quantiles at 15.87% and 84.13% (5,491 and 6,162;
     # the spec's 5,492 and 6,167 were the fit before SF-4).
     assert names[:2] == [
@@ -460,6 +460,20 @@ def test_the_chart_draws_the_rn_ranges_the_straddle_move_and_the_reference_lines
     ]
     assert names[0] == "RN 68% to 18‑Dec: 5,491–6,162 (smile)"
     assert published.cdf(lo68, DEC) == pytest.approx((1 - ONE_SD) / 2, abs=1e-12)
+    # "RN 95%" holds 95%: the ±2σ range (95.45%, 4,894–6,388) bore the name. Its ends checked here against the
+    # Breeden-Litzenberger digital, P(S_T < K) = 1 + ∂C/∂K ÷ DF, of Black-Scholes-Merton at the smile's own vol and
+    # the expiry's parity carry, differenced over ±0.5 point. Tolerance 2e-4: the difference of a smooth smile over a
+    # 1-point step is good to about 1e-6, and the surface's quantile inversion to its own 1e-4 grid.
+    T = published.maturity(DEC)
+    DF = published.discount_factor(DEC)
+    r, q = mk.carry(published.forward(DEC), DF, published.spot, T)
+
+    def below(k: float, h: float = 0.5) -> float:
+        calls = [bs.price(published.spot, x, T, r, published.vol(x, DEC).vol, q) for x in (k - h, k + h)]
+        return 1.0 + (calls[1] - calls[0]) / (2 * h) / DF
+
+    assert (below(lo95), below(hi95)) == (pytest.approx(0.025, abs=2e-4), pytest.approx(0.975, abs=2e-4))
+    assert names[1] == "RN 95% to 18‑Dec: 4,921–6,379 (smile)"  # the audit's quantiles at 2.5% and 97.5%
     rects = [s for s in spec["layout"]["shapes"] if s["type"] == "rect"]
     assert [(r["x0"], r["x1"]) for r in rects] == [(lo68, hi68), (lo95, hi95)]
     # The straddle-implied move: the 5,830 straddle at mid over spot, two ticks on the x-axis, named in the legend
@@ -1259,6 +1273,9 @@ def test_payoff_band_is_the_one_sigma_range_of_the_price_at_expiry(vol):
     assert band["x0"] == pytest.approx(price.ppf(norm.cdf(-1.0)), rel=1e-9)
     assert band["x1"] == pytest.approx(price.ppf(norm.cdf(1.0)), rel=1e-9)
     assert _trace(spec, "68% at expiry")["name"].endswith("(flat vol)")
+    # The 95% band holds 95% of the price (2.5% to 97.5%), not the 95.45% of ±2σ.
+    wide = [shape for shape in spec["layout"]["shapes"] if shape["type"] == "rect"][1]
+    assert (wide["x0"], wide["x1"]) == (pytest.approx(price.ppf(0.025), rel=1e-9), pytest.approx(price.ppf(0.975)))
     # The chart's probability range starts 2.5 standard deviations below the median (it ends capped at 3 x 110).
     spots = _array(_trace(spec, "Expiry 365d")["x"])
     assert spots[0] == pytest.approx(price.ppf(norm.cdf(-2.5)), rel=1e-9)
