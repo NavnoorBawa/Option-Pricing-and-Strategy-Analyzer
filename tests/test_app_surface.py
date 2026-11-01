@@ -432,6 +432,23 @@ def test_the_tab_formats_numbers_only_through_the_standard_and_keeps_captions_sh
     assert own and all(len(c) <= 140 for c in own), [c for c in own if len(c) > 140]
 
 
+#: A roadmap item's code (SF-8, UI-26, RK-13): it means nothing to a trader and reads as unfinished work.
+ROADMAP_CODE = re.compile(r"\b[A-Z]{2}-\d+[a-z]?\b")
+
+
+def test_no_text_on_the_tab_names_a_roadmap_item(index):
+    shown = [e.value for e in (*index.caption, *index.markdown, *index.warning, *index.info)]
+    shown += [w.label for w in (*index.number_input, *index.selectbox, *index.toggle, *index.segmented_control)]
+    shown += [w.help or "" for w in (*index.number_input, *index.selectbox, *index.toggle, *index.segmented_control)]
+    assert tab_surface.FOOTER in shown
+    assert not [text for text in shown if ROADMAP_CODE.search(text)]
+
+
+def test_the_min_days_filter_shows_the_precision_of_its_half_day_step(index):
+    days = index.number_input(key="sf_days")
+    assert days.step == 0.5 and days.format == "%.1f"  # it read 0.00
+
+
 def test_the_exports_carry_their_provenance(index, monkeypatch):
     context = mk.index_market(AS_OF)
     rows = tab_surface._chain_rows(context.fit, *mk.INDEX_CARRY, iso=True)

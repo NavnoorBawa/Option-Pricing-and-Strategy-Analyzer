@@ -39,7 +39,7 @@ from ..market_data.synthetic import DEFAULT_CLOCK
 from ..vol_surface import diagnostics as dg
 from . import cache, charts, charts_surface, exports, surface_state, theme
 from . import market as mk
-from .components import card_row, table
+from .components import card_row, input_format, table
 from .components import col as column
 from .format import (
     MISSING,
@@ -87,10 +87,11 @@ QUOTES_LAYOUT = (
     "A table of quotes: Strike, Days (or Maturity in years) and ImpliedVol, or prices (Price, or Bid and Ask) with a "
     "call/put Type."
 )
-#: The footer: what the fit is, in one line.
+#: The footer: what the fit is, in one line, in a trader's words (no roadmap codes). "Wing cap |k| ≤ 1.5" was half
+#: the rule: the reach is four at-the-money standard deviations, at most 1.5, and Methodology › Surface gives it.
 FOOTER = (
-    "SVI per expiry (Gatheral 2004), Durrleman g ≥ 0, calendar w(k, T) non-decreasing; wing cap |k| ≤ "
-    f"{number(vs.svi.WING_CAP, 1)} (SF-8). Method: Methodology › Surface."
+    "SVI per expiry (Gatheral 2004), Durrleman g ≥ 0, calendar w(k, T) non-decreasing; Lee-bounded "
+    "wings. Method: Methodology › Surface."
 )
 #: The parametric surface's footer: no fit, one formula for every maturity (the SVI footer misdescribed it).
 FOOTER_SSVI = (
@@ -592,6 +593,7 @@ def _filters(inputs: Inputs, container) -> None:
             max_value=30.0,
             value=defaults["sf_days"],
             step=0.5,
+            format=input_format("days", 1),  # 0.0, 0.5, 1.0: the step's precision (Streamlit's default read 0.00)
             key="sf_days",
             persist_state="session",
             help="Expiries closer than this are left out (short expiry). LSEG's default is 2 days; here 0, because "
