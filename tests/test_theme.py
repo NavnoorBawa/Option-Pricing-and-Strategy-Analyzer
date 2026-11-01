@@ -151,6 +151,18 @@ def _mode(kind: str) -> dict:
     return THEME[kind]
 
 
+def test_every_server_setting_is_a_streamlit_option_and_messages_are_compressed():
+    # A misspelt key is ignored silently. CI runs this on the oldest supported Streamlit (1.65) too. Websocket
+    # compression halves the bytes of every rerun (the config's comment gives the measurements).
+    from streamlit import config as st_config
+
+    options = st_config._config_options_template
+    for section in ("server", "browser", "client"):
+        for key in CONFIG[section]:
+            assert f"{section}.{key}" in options, f"{section}.{key}"
+    assert CONFIG["server"]["enableWebsocketCompression"] is True
+
+
 def test_both_modes_have_exactly_ten_colours_in_every_chart_ramp():
     # With fewer than ten categorical colours Streamlit 1.64-1.66 leaves Plotly's colour placeholders unreplaced and
     # every chart falls back to Plotly's own colours; the diverging and sequential ramps have ten stops too.

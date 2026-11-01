@@ -7,6 +7,11 @@ maxUploadSize = 10
 # Serves the static/ folder next to the main script at app/static/: the self-hosted fonts below. The repository
 # root has a copy of options_analyzer/ui/static/fonts for `streamlit run main.py` (tests/test_theme.py checks it).
 enableStaticServing = true
+# Deflate every websocket message (per-message deflate, which Streamlit 1.65 and later serve through uvicorn). Bytes
+# on the wire, compression off then on, at 1,440 x 900 (?asof=2026-10-23T16:00): Strategy page load 159 then 83 KB,
+# a Strategy what-if step 143 then 76 KB, a Pricing strike step 58 then 25 KB, a Surface expiry step 75 then 37 KB.
+# Settle time on localhost did not change beyond its noise; on a 2 Mbit/s link 143 KB takes about 0.6 s.
+enableWebsocketCompression = true
 
 [browser]
 gatherUsageStats = false
