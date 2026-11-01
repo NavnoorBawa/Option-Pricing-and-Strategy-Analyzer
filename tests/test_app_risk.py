@@ -474,6 +474,13 @@ def test_the_ladder_zero_row_equals_the_tiles_and_rolls_to_the_next_session(inde
     assert _frame(_risk(lad_roll="+1w"), "Move")["Move"].str.fullmatch("0 · 30-Oct-26").any()
     decay = index.value(t=index.t - WEEKEND) - index.value()
     assert zero["P&L"] == round(decay) == 125  # the column's whole dollars
+    # Under a what-if the zero row is the what-if state (spot 5,684 on Fri 30-Oct), not "now", while the line reads
+    # its P&L against the value now; the help says which clock its σ steps count.
+    shifted = _risk(ws=-2, wd=5)
+    moves = _frame(shifted, "Move")["Move"]
+    assert "0 · what-if" in set(moves) and "0 · now" not in set(moves)
+    move_help = json.loads(next(d for d in shifted.dataframe if "Move" in d.value.columns).proto.columns)["Move"]
+    assert "a calendar day as Θ counts it (the VaR's day is a trading day, σ·√(1/252))" in move_help["help"]
 
 
 def test_small_greek_columns_keep_their_cents_as_the_tiles_do():

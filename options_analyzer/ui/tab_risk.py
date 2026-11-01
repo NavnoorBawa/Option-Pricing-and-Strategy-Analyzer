@@ -492,7 +492,8 @@ def _tile_cards(book: Book, t: Tiles) -> list[Card]:
             dollars(t.theta),
             f"∂V/∂t ÷ 365 at fixed vols: {exact(t.theta)} a calendar day. BE: the breakeven daily move that "
             f"½Γ pays for, 1% × √(|Θ| ÷ |Γ P&L 1%|) = {be}, against the implied daily move σ ATMF ÷ √365 = "
-            f"{pct(t.implied_move)} ({MISSING} when Θ and Γ have one sign). To the next session "
+            f"{pct(t.implied_move)}, a calendar day as Θ counts it (the VaR's day is a trading day, σ ÷ √252) "
+            f"({MISSING} when Θ and Γ have one sign). To the next session "
             f"({date_text(ns.date())} {ns:%H:%M}) by full revaluation: {exact(t.next_session)}; over one calendar day: "
             f"{exact(t.one_day)}.",
             # "BE", not the spec's "BE move": with it the six tiles need 1,162 px and wrap 3 + 3 in the 1,038 px main
@@ -697,9 +698,13 @@ def ladder_frame(book: Book, axis: str = "%", roll: str = "Today", second: bool 
         roll_days=roll_days,
         multiplier=book.units,
     )
-    # The zero row is "now" only without a roll; rolled, it is the decay to that date (+$125 to Mon 26-Oct-26 on the
-    # default iron condor at ASOF), so it names the date.
-    zero = "0 · now" if not roll_days else f"0 · {date_text((book.scenario_time() + timedelta(days=roll_days)).date())}"
+    # The zero row is "now" only without a roll and without a what-if; rolled, it is the decay to that date (+$125 to
+    # Mon 26-Oct-26 on the default iron condor at ASOF), so it names the date. Under a what-if it is the what-if state
+    # (?ws=-2&wd=5: spot 5,684 on Fri 30-Oct), which "0 · now" beside a P&L of 0 misnamed.
+    if roll_days:
+        zero = f"0 · {date_text((book.scenario_time() + timedelta(days=roll_days)).date())}"
+    else:
+        zero = "0 · what-if" if book.shifts.active else "0 · now"
     moves = []
     for shock, change in zip(frame["shock"], frame["spot_change"], strict=True):
         text = f"{signed(shock, 1 if shock % 1 else 0)}σ · {signed(100 * change, 2)}%" if sigma else shock_label(change)
@@ -734,8 +739,9 @@ LADDER_KINDS = {
 }
 LADDER_HELP = {
     "Spot": "Spot after the move.",
-    "Move": "The spot move: percent, or daily standard deviations σ·√(1/365) at {spot_vol}. 0 · now: no move; "
-    "rolled, 0 · the date rolled to.",
+    "Move": "The spot move: percent, or daily standard deviations σ·√(1/365) at {spot_vol}, a calendar day as Θ "
+    "counts it (the VaR's day is a trading day, σ·√(1/252)). 0 · now: no move; 0 · what-if: the what-if state; rolled, "
+    "0 · the date rolled to.",
     "P&L": "Full revaluation against the value now (at the what-if state), after the roll.",
     "$Δ": "Δ × S at the moved spot ($).",
     "Γ P&L 1%": "½Γ(0.01·S)² at the moved spot ($).",
