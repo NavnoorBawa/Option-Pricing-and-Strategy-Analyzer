@@ -109,7 +109,9 @@ def test_every_model_has_a_sidebar_label():
     assert model_config.SIDEBAR_MODELS == ("bsm", "alo")
 
 
-def test_the_index_shows_the_engine_disabled_at_european_and_says_why(index_app):
-    control = index_app.sidebar.segmented_control(key="model")
-    assert control.value == "bsm" and control.disabled
-    assert "SPX options are European-exercise" in control.help
+def test_the_index_names_its_engine_and_says_why_there_is_no_other(index_app):
+    # A disabled control greyed both engines (2.4:1, neither marked) and put its reason in help that a collapsed label
+    # never shows: the sidebar now says it in a caption, and draws no engine control.
+    assert not [c for c in index_app.sidebar.segmented_control if c.key == "model"]
+    assert model_config.EUROPEAN_ONLY in [c.value for c in index_app.sidebar.caption]
+    assert model_config.EUROPEAN_ONLY.startswith("European (BSM), the closed form: SPX options are European-exercise")

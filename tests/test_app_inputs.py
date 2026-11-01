@@ -352,15 +352,15 @@ def test_a_link_picks_a_listed_expiry(new_app, expiry, chosen, note):
 def test_the_index_offers_no_american_engine(new_app):
     at = new_app(preset=None, asof=ASOF, model="alo").run()
     _ok(at)
-    control = at.sidebar.segmented_control(key="model")
-    assert control.value == "bsm" and control.disabled  # shown at European, with help that says why
+    assert not [c for c in at.sidebar.segmented_control if c.key == "model"]  # a caption says why, in its place
+    assert any(c.value.startswith("European (BSM), the closed form") for c in at.sidebar.caption)
     assert [w.value for w in at.warning] == [
         "This link asks for the American engine, but options on the Synthetic index are European-exercise (as SPX "
         "options are), so European (BSM) is used. The American engine prices the Textbook market."
     ]
     tree = new_app(preset=None, asof=ASOF, model="Binomial tree").run()
     assert not tree.exception
-    assert tree.sidebar.segmented_control(key="model").value == "bsm"
+    assert any(c.value.startswith("European (BSM), the closed form") for c in tree.sidebar.caption)
     assert [w.value for w in tree.warning] == [
         "This link asks for a binomial tree, which now runs in the Pricing tab's Engine diagnostics (open below); "
         "the sidebar prices with European (BSM)."
