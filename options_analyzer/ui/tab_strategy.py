@@ -32,7 +32,7 @@ from scipy.special import ndtri
 from .. import black_scholes as bs
 from .. import clock
 from .. import strategies as strat
-from ..vol_surface.published import ONE_SD, TWO_SD, Expiry
+from ..vol_surface.published import ONE_SD, Expiry
 from . import cache, charts, charts_strategy, components, exports, surface_state, whatif
 from . import legs as lg
 from . import market as mk
@@ -94,8 +94,15 @@ DATED = {"Dated ⅓": 1 / 3, "Dated ⅔": 2 / 3}
 #: theme's 1.625rem, so that they fit beside the open sidebar at 1,440 px (spec 3.2's chart above the fold needs the
 #: room); once they wrap (a laptop, a phone) they take the theme's size.
 TILE_VALUE_PX = 19.25
-#: Points of the P&L chart's spot grid.
-GRID_POINTS = 600
+#: Points of the P&L chart's spot grid, besides the strikes in view (the expiry curve's kinks, so it stays exact).
+#: Seven traces carry their own x and y, so the grid sets the figure's size: at 600 points the default condor's chart
+#: was 106 KB of a 143 KB what-if rerun (the budget is 60 KB); at 301 it is 60 KB, and its curves differ from the
+#: 600-point ones by at most 0.004% of their range (measured on the default condor with a +0.5% what-if).
+GRID_POINTS = 301
+#: The chart's two price ranges at the front expiry: ±1σ (68.27%, "68%") and the central 95%, 2.5% to 97.5%, as the
+#: Pricing tab's RN 95%. The second was ±2σ, 95.45%, under the name "RN 95%": 4,894–6,388 on 18-Dec-26 where the
+#: smile's 2.5% and 97.5% quantiles are 4,921 and 6,379.
+RN_LEVELS = (("68%", ONE_SD), ("95%", 0.95))
 
 
 # --- The position ---------------------------------------------------------------------------------------------------
@@ -111,6 +118,7 @@ class Position:
     contracts: int
     multiplier: float
     book: lg.Book | None = field(default=None, compare=False)
+    carry: bool = False  # the premium financed at r (the builder's setting), for the maximum loss at expiry
 
     @property
     def units(self) -> float:
@@ -314,6 +322,7 @@ class _Choice:
     risk_neutral: bool
     drift: float  # % a year, the user's view
     carry: bool
+    notes: tuple[str, ...] = ()  # wings the template moved into the surface's reach (legs.index_template)
 
 
 def _published(inputs: Inputs):
@@ -352,6 +361,7 @@ def _choice(inputs: Inputs) -> _Choice:
     label = _control("strategy", _label(default_template(index)), str, labels.__contains__, _link_template)
     name = _name(label)
     expiry = None
+    notes: list[str] = []
     if index:
         _, expiry = _template_expiry(published)
         by = _control("strategy_strikes_by", BY_DELTA, str, (BY_DELTA, BY_WIDTH).__contains__)
@@ -378,6 +388,7 @@ def _choice(inputs: Inputs) -> _Choice:
                 short_delta=delta / 100.0,
                 wing=float(wing),
                 width=width,
+                notes=notes,
             )
     else:
         width_pct = _control("strategy_width_pct", None, float, _within((MIN_WIDTH_PCT, MAX_WIDTH_PCT)))
@@ -393,7 +404,7 @@ def _choice(inputs: Inputs) -> _Choice:
     carry = bool(st.session_state.get("carry", False))
     store = f"{inputs.preset}::{label}"
     return _Choice(name, label, base, store, expiry, int(contracts), float(multiplier), float(commission),
-                   risk_neutral, drift, carry)  # fmt: skip
+                   risk_neutral, drift, carry, tuple(notes))  # fmt: skip
 
 
 def _width(inputs: Inputs, width_pct: float | None) -> float:
@@ -710,7 +721,7 @@ def build_position(inputs: Inputs) -> Position | None:
     book = _price(inputs, choice, frame)
     if book.strategy is None or book.errors:
         return None
-    return Position(book.strategy, book.market, choice.contracts, choice.multiplier, book)
+    return Position(book.strategy, book.market, choice.contracts, choice.multiplier, book, choice.carry)
 
 
 # --- Structure steppers and row actions (UI-8): callbacks on the legs state ---------------------------------------
@@ -878,30 +889,66 @@ def _elapsed(ctx: _Context, sessions: int) -> float:
 BOUNDED_LEVEL = 0.999
 
 
-def worst_loss(ctx: _Context) -> tuple[float, tuple[float, float] | None]:
+def dividend_range(
+    strategy: strat.Strategy, market: strat.Market, horizon: float, published=None, front: Expiry | None = None
+) -> tuple[float, float] | None:
+    """The spot range the expiry tiles are read over when the position loses without bound only through the dividend
+    yield (a long calendar or diagonal under the index): the central :data:`BOUNDED_LEVEL` of the price at the front
+    expiry, risk-neutral from the smile when ``published`` and ``front`` are given, log-normal at the flat vol
+    otherwise. ``None`` for any other position, whose tiles read every spot."""
+    if not strat.unbounded_loss_from_dividends(strategy, market, horizon):
+        return None
+    if published is not None and front is not None:
+        lo, hi = published.rn_range(front, BOUNDED_LEVEL)
+        return float(lo), float(hi)
+    sd = market.volatility * math.sqrt(horizon)
+    median = market.spot * math.exp((market.rate - market.dividend_yield) * horizon - 0.5 * sd * sd)
+    z = float(ndtri(0.5 + BOUNDED_LEVEL / 2))
+    return median * math.exp(-z * sd), median * math.exp(z * sd)
+
+
+def max_loss(
+    strategy: strat.Strategy,
+    market: strat.Market,
+    metrics: strat.StrategyMetrics,
+    units: float,
+    carry: bool = False,
+    published=None,
+    front: Expiry | None = None,
+) -> tuple[float, tuple[float, float] | None]:
     """The position's maximum loss ($, positive) at the front expiry, and the spot range it was read over (None: every
-    spot).
+    spot). The Strategy tab's Max loss tile and the Risk tab's position line both read it, so the two agree.
 
     A long calendar or diagonal loses without bound only because a dividend yield makes its long back call gain less
     than $1 for each $1 rise: on the default index calendar the loss passes the debit near 3.4 × spot. A desk reads its
-    worst case as about the debit, so this loss is the worst P&L over the central :data:`BOUNDED_LEVEL` of the price
-    at the front expiry (risk-neutral from the smile under the index, log-normal at the flat vol otherwise), on 2,001
-    spots and every strike inside. Any other unbounded loss (a short call) stays infinite."""
-    m = ctx.metrics
-    if math.isfinite(m.max_loss) or not strat.unbounded_loss_from_dividends(ctx.entered, ctx.market):
-        return m.max_loss * ctx.units, None
-    market, T = ctx.market, m.horizon
-    if ctx.index and ctx.front is not None:
-        lo, hi = ctx.published.rn_range(ctx.front, BOUNDED_LEVEL)
-    else:
-        sd = market.volatility * math.sqrt(T)
-        median = market.spot * math.exp((market.rate - market.dividend_yield) * T - 0.5 * sd * sd)
-        z = float(ndtri(0.5 + BOUNDED_LEVEL / 2))
-        lo, hi = median * math.exp(-z * sd), median * math.exp(z * sd)
-    strikes = [k for k in ctx.entered.strikes if lo < k < hi]
+    worst case as about the debit, so this loss is the worst P&L over :func:`dividend_range`, on 2,001 spots and every
+    strike inside. Any other unbounded loss (a short call) stays infinite."""
+    within = None
+    if not math.isfinite(metrics.max_loss):
+        within = dividend_range(strategy, market, metrics.horizon, published, front)
+    if within is None:
+        return metrics.max_loss * units, None
+    lo, hi = within
+    strikes = [k for k in strategy.strikes if lo < k < hi]
     spots = np.unique(np.concatenate([np.linspace(lo, hi, 2001), strikes]))
-    values = strat.pnl(ctx.entered, market, spots, T, ctx.choice.carry) * ctx.units
-    return float(-np.min(values)), (float(lo), float(hi))
+    values = strat.pnl(strategy, market, spots, metrics.horizon, carry) * units
+    return float(-np.min(values)), within
+
+
+def position_max_loss(position: Position, inputs: Inputs) -> tuple[float, tuple[float, float] | None]:
+    """:func:`max_loss` of a position as the Strategy tab's tile reads it (entries fixed as :func:`_entered` fixes
+    them, the position's carry setting), for the Risk tab's position line."""
+    entered = _entered(position.strategy, position.market)
+    metrics = strat.analyze(entered, position.market, None, position.carry)
+    published = _published(inputs)
+    front = position.book.front if published is not None and position.book is not None else None
+    return max_loss(entered, position.market, metrics, position.units, position.carry, published, front)
+
+
+def worst_loss(ctx: _Context) -> tuple[float, tuple[float, float] | None]:
+    """:func:`max_loss` of the tab's position."""
+    published = ctx.published if ctx.index else None
+    return max_loss(ctx.entered, ctx.market, ctx.metrics, ctx.units, ctx.choice.carry, published, ctx.front)
 
 
 def _probability(ctx: _Context) -> tuple[float, str, float, float]:
@@ -933,9 +980,18 @@ def _tiles(ctx: _Context) -> None:
     m, units, market = ctx.metrics, ctx.units, ctx.market
     multi = len({p.label for p in ctx.book.live if p.kind != "stock"}) > 1
     cost = m.entry_cost * units
-    theo_cost = sum(p.quantity * p.theo for p in ctx.book.live) * units + ctx.entered.fees * units
+    fees = ctx.entered.fees * units
+    # The package's theo without the commissions, which the entry carries: with them in both, "the theo credit is
+    # $6,725.31, so entry at mid is −$56.31" did not add up against an entry of $6,687.00 (12 legs × $1.50 counted
+    # twice).
+    theo_cost = sum(p.quantity * p.theo for p in ctx.book.live) * units
     t0 = float(strat.pnl(ctx.entered, market, market.spot, 0.0)) * units
     basis = "mid" if ctx.index else "model value"
+    edge = (
+        f"{signed(t0 + fees, 2, '$')} against theo and, after {money(fees)} of commissions, {signed(t0, 2, '$')}"
+        if fees
+        else f"{signed(t0, 2, '$')} against theo"
+    )
     word = "credit" if cost < -0.005 else ("debit" if cost > 0.005 else "no premium")
     premium_tile: Card = (
         "Net premium",
@@ -947,8 +1003,7 @@ def _tiles(ctx: _Context) -> None:
             "help": md(
                 f"{premium(abs(m.entry_cost))} per share at {basis} ({money(abs(cost))} for the position, "
                 f"commissions included). The theo {'credit' if theo_cost < 0 else 'debit'} is "
-                f"{money(abs(theo_cost))}, so entry at {basis} is {signed(t0, 2, '$')} against theo: the T+0 P&L at "
-                "today's spot."
+                f"{money(abs(theo_cost))}, so entry at {basis} is {edge}: the T+0 P&L at today's spot."
             ),
         },
     )
@@ -1026,10 +1081,24 @@ def _tiles(ctx: _Context) -> None:
             {"delta": basis_front if multi else None, "delta_color": "off", "delta_arrow": "off",
              "help": md(f"The worst P&L at the {basis_front}: {worst}.{later}")},
         )  # fmt: skip
-    be = sorted(m.breakevens)
     spot = market.spot
+    # Over the Max loss tile's range: a diagonal under the index (q 1.27%) listed a second breakeven at 124,510
+    # (+2,046.7%), where the long back call's shortfall of e^(−qτ) per $1 rise has eaten the spread's width.
+    be = sorted(b for b in m.breakevens if within is None or within[0] <= b <= within[1])
+    outside = [b for b in m.breakevens if b not in be]
+    outside_text = (
+        f" Read within the {'RN ' if ctx.index else ''}99.9% range, as Max loss; beyond it: "
+        + ", ".join(f"{b:,.{breakeven_decimals(spot)}f} ({_pct_text(b / spot - 1)})" for b in outside)
+        + "."
+        if outside
+        else ""
+    )
     if not be:
-        be_tile: Card = ("Breakevens", "none", {"help": "The P&L at the front expiry never changes sign."})
+        be_tile: Card = (
+            "Breakevens",
+            "none",
+            {"help": f"The P&L at the front expiry never changes sign.{outside_text}"},
+        )
     else:
         nearest = sorted(sorted(be, key=lambda b: abs(b - spot))[:2])
         more = len(be) - len(nearest)
@@ -1040,7 +1109,8 @@ def _tiles(ctx: _Context) -> None:
             "Breakevens",
             value,
             {"delta": delta, "delta_color": "off", "delta_arrow": "off",
-             "help": f"Where the P&L at the front expiry changes sign, with the change from today's spot: {listing}."},
+             "help": f"Where the P&L at the front expiry changes sign, with the change from today's spot: {listing}."
+             f"{outside_text}"},
         )  # fmt: skip
     p, basis, mean, sd = _probability(ctx)
     prob_tile: Card = (
@@ -1072,12 +1142,12 @@ def _basis_text(basis: str) -> str:
     }[basis]
 
 
-def _empty_tiles() -> None:
+def _empty_tiles(reason: str = "No leg is on.") -> None:
     labels = ("Net premium", "Package", "Max profit", "Max loss", "Breakevens", "P(profit)")
     card_row(
         "strategy_tiles",
         ("strategy_tiles_a", "strategy_tiles_b", "strategy_tiles_c"),
-        [(label, MISSING, {"help": "No leg is on."}) for label in labels],
+        [(label, MISSING, {"help": reason}) for label in labels],
         one_line_px=TILE_VALUE_PX,
     )
 
@@ -1092,13 +1162,14 @@ def _bands(ctx: _Context) -> list[charts_strategy.Band]:
     market, T = ctx.market, ctx.metrics.horizon
     if ctx.index and ctx.front is not None:
         to = _short_date(ctx.front.day)
-        for level, word in ((ONE_SD, "68%"), (TWO_SD, "95%")):
+        for word, level in RN_LEVELS:
             lo, hi = ctx.published.rn_range(ctx.front, level)
             out.append(charts_strategy.Band(lo, hi, f"RN {word} to {to}: {number(lo, 0)}–{number(hi, 0)} (smile)"))
         return out
     sd = market.volatility * math.sqrt(T)
     median = market.spot * math.exp((market.rate - market.dividend_yield) * T - 0.5 * sd * sd)
-    for n, word in ((1.0, "68%"), (2.0, "95%")):
+    for word, level in RN_LEVELS:
+        n = float(ndtri(0.5 + level / 2))  # 1 and 1.96 standard deviations of the log price
         lo, hi = median * math.exp(-n * sd), median * math.exp(n * sd)
         text = _level_text(lo, market.spot), _level_text(hi, market.spot)
         out.append(charts_strategy.Band(lo, hi, f"{word} at expiry: {text[0]}–{text[1]} (flat vol)"))
@@ -1161,7 +1232,7 @@ def _chart(ctx: _Context, shifts: whatif.Shifts, range_choice: str, dated: list[
     curves = [
         charts_strategy.Curve(
             strat.pnl(ctx.entered, market, spots, T, carry) * units, f"Expiry {front_text}", "expiry",
-            f"exp {front_text}",
+            f"exp · {front_text}",
         )
     ]  # fmt: skip
     t0 = _elapsed(ctx, shifts.sessions)
@@ -1194,7 +1265,7 @@ def _chart(ctx: _Context, shifts: whatif.Shifts, range_choice: str, dated: list[
     if shifts.spot:
         x = spot * (1 + shifts.spot / 100)
         y = float(strat.pnl(shifted, shifted_market, x, t0, carry)) * units
-        scenario = (x, y, f"Scenario {_level_text(x, spot)}: {_signed_money(y)}")
+        scenario = (x, y, f"Scenario {_level_text(x, spot)}: {_signed_money(y)} vs entry")
     note = " · ".join(
         part
         for part in (
@@ -1575,6 +1646,22 @@ def _row_actions(ctx: _Context, grid: lg.Grid) -> None:
 # --- The tab ------------------------------------------------------------------------------------------------------
 
 
+def _empty_reason(book: lg.Book) -> str:
+    """Why there is no position to analyse, by cause: rows in error, every leg that is on expired, or no leg on."""
+    if book.errors:
+        return "Fix or switch off the rows in error: no number is shown until every leg that is on can be valued."
+    on = [p for p in book.legs if p.on]
+    if on and all(p.expired for p in on):
+        return "Every leg that is on has expired at this valuation time. Pick a template or a later expiry."
+    return "No legs are on. Pick a template or switch a leg on in the blotter."
+
+
+def _template_notes(choice: _Choice, frame: pd.DataFrame) -> None:
+    """The template's wings moved into the surface's reach (:func:`.legs.index_template`), while the legs follow it."""
+    if choice.notes and _same(frame, choice.base):
+        st.caption(f"Wings moved in to the farthest strikes the surface reaches: {', '.join(choice.notes)}.")
+
+
 def render(inputs: Inputs) -> None:
     """Draw the rest of the tab, below :func:`controls`: tiles, what-if strip, primary view, blotter and footer."""
     try:
@@ -1588,12 +1675,19 @@ def render(inputs: Inputs) -> None:
     published = _published(inputs)
     index = published is not None
     as_of = inputs.context.as_of if index else mk.last_close()
-    if book.strategy is None:
-        _empty_tiles()
-        st.info("No legs are on. Pick a template or switch a leg on in the blotter.")
-        _blotter(None, inputs, choice, state, frame, editor_key, book, None)
+    if book.strategy is None or book.errors:
+        # Rows in error: no number, as the Risk tab (build_position). The valid legs alone were analysed before, under
+        # the template's name: a same-day iron condor whose wings had no vol read Max loss "Unlimited" and the P&L
+        # of a naked strangle, the errors below the fold.
+        _empty_tiles(_empty_reason(book))
+        for message in book.errors:
+            st.error(message)
+        if not book.errors:
+            st.info(_empty_reason(book))
+        _template_notes(choice, frame)
+        _blotter(None, inputs, choice, state, frame, editor_key, None)
         return
-    position = Position(book.strategy, book.market, choice.contracts, choice.multiplier, book)
+    position = Position(book.strategy, book.market, choice.contracts, choice.multiplier, book, choice.carry)
     entered = _entered(book.strategy, book.market)
     metrics = strat.analyze(entered, book.market, None, choice.carry)
     if index and book.front is not None:
@@ -1602,6 +1696,7 @@ def render(inputs: Inputs) -> None:
         front_at = as_of + timedelta(days=metrics.horizon * 365)
     ctx = _Context(inputs, choice, book, position, published, as_of, front_at, entered, metrics)
     _tiles(ctx)
+    _template_notes(choice, frame)
     atm = book.market.volatility
     shifts = whatif.strip(
         spot=book.market.spot,
@@ -1643,11 +1738,11 @@ def render(inputs: Inputs) -> None:
         )  # fmt: skip
         _table(ctx, shifts, str(unit))
         profile = None
-    _blotter(ctx, inputs, choice, state, frame, editor_key, book, profile)
+    _blotter(ctx, inputs, choice, state, frame, editor_key, profile)
     _footer(ctx)
 
 
-def _blotter(ctx, inputs, choice, state, frame, editor_key, book, profile) -> None:
+def _blotter(ctx, inputs, choice, state, frame, editor_key, profile) -> None:
     published = _published(inputs)
     index = published is not None
     grid = lg.Grid(published, step=_width(inputs, None) if not index else 1.0)
@@ -1661,8 +1756,6 @@ def _blotter(ctx, inputs, choice, state, frame, editor_key, book, profile) -> No
         _steppers(ctx, grid, head, frame)
         if profile is not None:
             _download(ctx, profile, head)
-    for message in book.errors:
-        st.error(message)
     if choice.name != CUSTOM and not _same(frame, choice.base):
         st.caption(
             "Edited legs: kept as they are while the builder or the market changes. Reset legs to template (Edit) "
@@ -1719,12 +1812,12 @@ def _footer(ctx: _Context) -> None:
 
 
 def _valuation_note(inputs: Inputs, strategy: strat.Strategy) -> None:
-    """Under an American engine in the sidebar (the textbook market's ALO, or a tree from a caller), what early
-    exercise adds to the sidebar contract: the legs here are European Black-Scholes-Merton values. The ALO premium is
-    the engine's American value less the closed form; a tree's is its American less its European price on one lattice,
-    so that the tree's discretisation error cancels."""
+    """Under the sidebar's American engine (the textbook market's ALO), what early exercise adds to the sidebar
+    contract: the legs here are European Black-Scholes-Merton values. The premium is the engine's American value
+    less the closed form. The sidebar offers no tree (``model_config.SIDEBAR_MODELS``, UI spec Appendix B decision 8),
+    so the tree's branch, which no link could reach, is gone."""
     model = inputs.model
-    if not model.is_american:
+    if model.kind != "alo":
         return
     kinds = sorted(
         {
@@ -1749,35 +1842,20 @@ def _valuation_note(inputs: Inputs, strategy: strat.Strategy) -> None:
         )
         return
     try:
-        if model.kind == "alo":
-            where = "with the American engine (ALO)"
-            values = {
-                k: (cache.alo_value(S, K, T, r, sigma, q, k, model.scheme), bs.price(S, K, T, r, sigma, q, k))
-                for k in kinds
-            }
-        else:
-            where = "on this tree"
-            trees = {
-                style: cache.tree_results(S, K, T, r, sigma, q, model.steps, style == "American", model.tree_method)
-                for style in ("American", "European")
-            }
-            values = {k: (trees["American"][k].price, trees["European"][k].price) for k in kinds}
+        values = {
+            k: (cache.alo_value(S, K, T, r, sigma, q, k, model.scheme), bs.price(S, K, T, r, sigma, q, k))
+            for k in kinds
+        }
     except ValueError:
         return
     sentences = []
     for kind in kinds:
         american, european = values[kind]
-        sentence = (
+        sentences.append(
             f"For one {strat.strike_text(K)} {kind} (the sidebar contract), early exercise adds "
-            f"{money(american - european, 4)} per share {where}: {money(american, 4)} American against "
-            f"{money(european, 4)} European."
+            f"{money(american - european, 4)} per share with the American engine (ALO): {money(american, 4)} American "
+            f"against {money(european, 4)} European."
         )
-        if model.kind != "alo":
-            sentence += (
-                f" The strategy values it at {money(bs.price(S, K, T, r, sigma, q, kind), 4)}, its European "
-                "Black-Scholes-Merton value."
-            )
-        sentences.append(sentence)
     st.info(
         md("**Early exercise is not modelled here:** the legs are European BSM values. " + " ".join(sentences)),
         icon=":material/info:",

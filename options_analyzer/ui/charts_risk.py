@@ -246,11 +246,13 @@ def signed_ticks(values) -> list[float] | None:
     ([0.0, 5.0, 10.0], None)
     >>> signed_ticks([-1500.0, 10000.0])
     [-1000.0, 0.0, 1000.0, 2000.0, 3000.0, 4000.0, 5000.0, 6000.0, 7000.0, 8000.0, 9000.0, 10000.0]
+    >>> signed_ticks([-1e-12, 3e-12]) is None  # below the ticks' 10 decimals: five ticks all read 0.0
+    True
     """
     finite = [float(v) for v in values if math.isfinite(float(v))]
     lo, hi = min([*finite, 0.0]), max([*finite, 0.0])
     span = hi - lo
-    if span <= 0:
+    if span < 1e-8:  # the ticks are rounded to 10 decimals, so a narrower range gave repeated ticks
         return None
     unit = 10.0 ** math.floor(math.log10(span))
     fallback = None
@@ -310,11 +312,14 @@ def ladder_chart(
     fig = apply_layout(fig, None, "Spot", y_title, height=HEIGHT_SECONDARY, palette=colors)
     fig.update_layout(hovermode="closest")
     fig.update_xaxes(tickformat=",.0f")
-    ticks = signed_ticks(values)
+    # Every metric the chart draws is in dollars, so its ticks are read to the cent: a deep in-the-money spread's P&L
+    # column is float noise of about 1e-10 (the table shows 0.00), whose ticks (0, 1e-9, 2e-9) no count of decimals
+    # up to 6 wrote, and the search for one raised StopIteration. A column flat to the cent takes Plotly's ticks.
+    ticks = signed_ticks([round(float(v), 2) for v in values if math.isfinite(float(v))])
     if ticks is None:
         fig.update_yaxes(tickformat=",.0f")
     else:  # the step's decimals: 0.05 on the textbook contract's Θ column
-        decimals = next(d for d in range(7) if all(abs(t - round(t, d)) < 1e-9 for t in ticks))
+        decimals = next((d for d in range(7) if all(abs(t - round(t, d)) < 1e-9 for t in ticks)), 2)
         fig.update_yaxes(tickmode="array", tickvals=ticks, tickformat=f",.{decimals}f")
     return fig
 
@@ -343,10 +348,15 @@ def stress_bars(names: Sequence[str], values, *, palette: dict[str, str] | None 
     bar lost its last digit ("−$3,35") and one outside a negative bar ran over its scenario's name. In a margin of
     their own the amounts never meet a bar or a name at any width, and need no second colour (spec 2.6: text in the
     text colour on the background).
+
+    One precision for every amount, the stress table's (a money column: cents while the largest is below $1,000,
+    whole dollars from $1,000), as :func:`waterfall`'s labels: per amount (cents below $100), "Rates +200 bp −$57.08"
+    sat among whole dollars and beside the table's −57.
     """
     colors = palette or desk_theme.palette()
     values = [float(v) for v in values]
-    labels = [signed(v, 0 if abs(v) >= 100 else 2, "$") for v in values]
+    decimals = 2 if round(max((abs(v) for v in values), default=0.0), 2) < 1000 else 0
+    labels = [signed(v, decimals, "$") for v in values]
     column = int(np.ceil(AMOUNT_CHAR_WIDTH * max((len(t) for t in labels), default=0))) + AMOUNT_GAP
     fig = go.Figure(
         go.Bar(

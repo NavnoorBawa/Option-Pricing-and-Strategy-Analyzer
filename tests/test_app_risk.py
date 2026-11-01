@@ -33,7 +33,7 @@ from scipy.optimize import brentq
 from scipy.stats import norm
 from streamlit.testing.v1 import AppTest
 
-from options_analyzer import scenarios
+from options_analyzer import clock, scenarios
 from options_analyzer import strategies as strat
 from options_analyzer.ui import legs as lg
 from options_analyzer.ui import market as mk
@@ -176,6 +176,8 @@ def test_the_selector_has_six_reports_and_ladder_is_the_default():
     at = _risk()
     pills = at.get("button_group")
     report = next(p for p in pills if p.proto.id.endswith("-report") or "report" in p.proto.id)
+    # A single-choice view switch, the segmented control, as Surface's views (pills are for multi-select filters).
+    assert at.segmented_control(key="report").value == "Ladder" and not [p for p in at.pills if p.key == "report"]
     assert [o.content for o in report.proto.options] == list(tab_risk.REPORTS)
     assert _frame(at, "Move") is not None  # the Ladder's table
 
@@ -382,6 +384,24 @@ def test_a_position_on_two_expiries_names_each_leg_and_expiry_with_its_settlemen
     assert k == 5830
 
 
+@pytest.mark.parametrize("strategy", ["Long Call Calendar", "Diagonal (Poor Man's Covered Call)"])
+def test_the_position_line_reads_the_strategy_tabs_maximum_loss(strategy):
+    # With the index's dividend yield (1.27%) the long back call gains less than $1 per $1 rise, so the loss is
+    # unbounded only far above the strikes (the calendar's passes its debit near 3.4 × spot). The Strategy tile reads
+    # the worst P&L within the RN 99.9% range, the debit (−$8,500; −$51,065 for the diagonal); the line read
+    # "Unlimited" for the same position. Both now read the same loss over the same range, and it is the debit: the
+    # calls' value at the range's low end, 3,868, is below half a dollar a contract.
+    tiles = {
+        m.label: m
+        for m in _ok(make_app(preset=None, asof=ASOF, strategy=strategy, tab="Strategy").run(timeout=240)).metric
+    }
+    tile, premium = tiles["Max loss"], tiles["Net premium"]
+    assert tile.proto.delta == "RN 99.9% range" and premium.proto.delta == "debit"
+    assert tile.value == "−" + premium.value
+    line = _line(_risk(strategy=strategy))
+    assert line.endswith(f"max loss at expiry {tile.value.replace('$', chr(92) + '$')} in the RN 99.9% range")
+
+
 def test_tiles_follow_the_what_if_state(index):
     # ?ws=-2&wv=3&wd=5: spot −2%, +3 vol points on every leg's own vol, Friday 23-Oct 16:00 to Friday 30-Oct 16:00.
     at = _risk(ws=-2, wv=3, wd=5)
@@ -389,7 +409,7 @@ def test_tiles_follow_the_what_if_state(index):
     delta = index.greeks(s, t, vols)[0]
     assert _tiles(at)["$Δ"].value == tab_risk.dollars(delta * s)
     pnl = index.value(s, t, vols=vols) - index.value()
-    assert _line(at).endswith(f"what-if P&L {tab_risk.dollars(pnl)}".replace("$", "\\$"))
+    assert f"what-if P&L {tab_risk.dollars(pnl)} vs value now".replace("$", "\\$") in _line(at)
     assert any("T+5 · Fri 30‑Oct‑26" in s.label for s in at.slider if s.key == "wd")
 
 
@@ -406,11 +426,32 @@ def test_the_what_if_vol_shift_reaches_each_leg_by_its_mode(index, mode):
     assert tiles["$Δ"].value == tab_risk.dollars(delta * index.s)
     assert tiles["Vega ($/vp)"].value == tab_risk.dollars(vega / 100)
     pnl = index.value(vols=vols) - index.value()
-    assert _line(at).endswith(f"what-if P&L {tab_risk.dollars(pnl)}".replace("$", "\\$"))
+    assert f"what-if P&L {tab_risk.dollars(pnl)} vs value now".replace("$", "\\$") in _line(at)
     # Not the other mode's shift: relative moves each leg by all of the 10%, 1M-scaled by 8.57% of it.
     other = 1.0 if mode != "relative" else _damp(index.t)
     pnl = index.value(vols=[v * (1 + 0.10 * other) for v in index.vols]) - index.value()
-    assert not _line(at).endswith(f"what-if P&L {tab_risk.dollars(pnl)}".replace("$", "\\$"))
+    assert f"what-if P&L {tab_risk.dollars(pnl)} vs value now".replace("$", "\\$") not in _line(at)
+
+
+def test_one_scenario_reads_against_the_value_now_and_against_the_entry(index):
+    # ?ws=-2&wv=3&wd=5&wr=25 on the default iron condor: the Strategy chart marked "Scenario 5,684: −$400.61" (against
+    # the entry at mid) and the Risk line read "what-if P&L −$388" (against today's value), both under the same strip
+    # and neither saying against what. Both now name their basis, and Risk shows both; they differ by the T+0 P&L, the
+    # entry at the chain's mids against the legs' value now (written here from the closed form).
+    query = {"ws": -2, "wv": 3, "wd": 5, "wr": 25}
+    s, t, r, vols = index.s * 0.98, index.t - WEEK, index.r + 0.0025, [v + 0.03 for v in index.vols]
+    later = index.value(s, t, r, vols)
+    now, entry = later - index.value(), later + UNITS * index.credit()
+    assert round(now - entry, 2) == round(-index.value() - UNITS * index.credit(), 2) == 12.77  # the T+0 edge
+    line = _line(_risk(**query)).replace("\\$", "$")
+    assert line.endswith(f"what-if P&L {tab_risk.dollars(now)} vs value now, {tab_risk.dollars(entry)} vs entry")
+    assert (tab_risk.dollars(now), tab_risk.dollars(entry)) == ("−$388", "−$401")
+    strategy = _chart(_ok(make_app(preset=None, asof=ASOF, tab="Strategy", **query).run(timeout=240)), "payoff_chart")
+    marker = next(t for t in strategy["data"] if (t.get("name") or "").startswith("Scenario"))
+    assert marker["y"] == [pytest.approx(entry, abs=1e-6)]
+    labels = [a["text"] for a in strategy["layout"]["annotations"] if "Scenario" in a.get("text", "")]
+    labels += [str(marker.get("text", "")), str(marker.get("name", ""))]
+    assert any(text.endswith(f"{signed(entry, 2, '$')} vs entry") for text in labels), labels
 
 
 # --- the reports ------------------------------------------------------------------------------------------------------
@@ -435,6 +476,13 @@ def test_the_ladder_zero_row_equals_the_tiles_and_rolls_to_the_next_session(inde
     assert _frame(_risk(lad_roll="+1w"), "Move")["Move"].str.fullmatch("0 · 30-Oct-26").any()
     decay = index.value(t=index.t - WEEKEND) - index.value()
     assert zero["P&L"] == round(decay) == 125  # the column's whole dollars
+    # Under a what-if the zero row is the what-if state (spot 5,684 on Fri 30-Oct), not "now", while the line reads
+    # its P&L against the value now; the help says which clock its σ steps count.
+    shifted = _risk(ws=-2, wd=5)
+    moves = _frame(shifted, "Move")["Move"]
+    assert "0 · what-if" in set(moves) and "0 · now" not in set(moves)
+    move_help = json.loads(next(d for d in shifted.dataframe if "Move" in d.value.columns).proto.columns)["Move"]
+    assert "a calendar day as Θ counts it (the VaR's day is a trading day, σ·√(1/252))" in move_help["help"]
 
 
 def test_small_greek_columns_keep_their_cents_as_the_tiles_do():
@@ -482,7 +530,7 @@ def test_a_what_if_step_and_the_var_report_are_fast():
         assert time.perf_counter() - start < 3.0
     cache.value_at_risk.clear()
     start = time.perf_counter()
-    _ok(at.pills(key="report").set_value("VaR").run(timeout=240))
+    _ok(at.segmented_control(key="report").set_value("VaR").run(timeout=240))
     assert time.perf_counter() - start < 7.5
 
 
@@ -525,10 +573,13 @@ def test_the_stress_table_is_sorted_worst_first_with_readable_labels(index):
     # on the bars they were clipped or ran over the scenario names on a phone (tests/test_risk_e2e.py measures it).
     notes = chart["layout"]["annotations"]
     amounts = [n for n in notes if n["xanchor"] == "right"]
-    # From the amounts themselves, not the table's whole dollars: the rate shock's −$57.08 reads to the cent.
+    # One precision for every amount, the table's: whole dollars, the largest being $1,000 or more. Per amount, the
+    # rate shock read −$57.08 among whole dollars and beside the table's −57.
     pnl = [stresses[n] for n in table["Scenario"]]
     assert [n["y"] for n in amounts] == table["Scenario"].tolist()
-    assert [n["text"] for n in amounts] == [signed(v, 0 if abs(v) >= 100 else 2, "$") for v in pnl]
+    assert max(abs(v) for v in pnl) >= 1000 and min(abs(v) for v in pnl) < 100
+    assert [n["text"] for n in amounts] == [signed(v, 0, "$") for v in pnl]
+    assert [n["text"] for n in amounts] == [signed(v, 0, "$") for v in table["P&L"]]  # the table's figures
     assert all(n["xref"] == "paper" and n["x"] == 1.0 for n in amounts)
     # Each name above its bar at the plot's left edge, not as a tick label left of the plot: on a phone the tick
     # labels took 150 px and left the bars about 70.
@@ -572,6 +623,10 @@ def test_the_desk_grid_axes_and_its_cells(index, mode):
     z = _array(heat["z"])
     zero = "0 vp" if mode == "vp" else "0%"
     assert z[heat["y"].index(zero), heat["x"].index("5,800 (0%)")] == 0.0
+    # The printed cells have one precision: the no-move cell reads "0.0" beside "−0.6" in $k, not a bare "0".
+    texts = _chart(at, "sc_heatmap_True")["data"][1]["text"]
+    assert texts[heat["y"].index(zero) * 9 + 4] == "0.0" and "0" not in texts
+    assert all(re.fullmatch(r"[+−]?[\d,]+\.\d", t) for t in texts), texts
     # Every cell: each leg's own vol shocked by the mode (1M-scaled damped by the legs' 55.7 days), today.
     grid = _desk_grid(index, mode)
     expected = [[grid[(x, dv)] for x in tab_risk.DESK_SPOT] for dv in tab_risk.DESK_VOL[mode]]
@@ -632,12 +687,15 @@ def test_the_finra_grid_and_its_illustrative_requirement(index):
     assert "\\$150.00" in line
 
 
-def _dgt_var(delta: float, gamma: float, theta: float, s: float, sigma: float, confidence: float = 0.99) -> float:
-    """VaR (a loss, positive) of θh/252 + Δx + ½Γx² over one trading day, x ~ N(0, (Sσ√(1/252))²), found as the P&L
-    level q whose loss region has probability 1 − confidence: for Γ < 0 the two tails beyond the roots of the
-    quadratic, from the Normal distribution directly (no chi-square)."""
+def _dgt_var(
+    delta: float, gamma: float, theta: float, s: float, sigma: float, confidence: float = 0.99, years: float = 1 / 252
+) -> float:
+    """VaR (a loss, positive) of θt + Δx + ½Γx² over one trading day of variance, x ~ N(0, (Sσ√(1/252))²), and
+    ``years`` t of decay (default the trading day), found as the P&L level q whose loss region has probability
+    1 − confidence: for Γ < 0 the two tails beyond the roots of the quadratic, from the Normal distribution directly
+    (no chi-square)."""
     sd = s * sigma * math.sqrt(1 / 252)
-    decay = theta / 252
+    decay = theta * years
 
     def tail(q: float) -> float:
         # P&L(x) ≤ q  ⇔  ½Γx² + Δx + (θh − q) ≤ 0, outside the roots when Γ < 0.
@@ -664,16 +722,18 @@ def test_the_var_report(index):
     for label in ("VaR 99% 1D · MC", "ES 97.5% 1D · MC", "Spot-only VaR", "Spot-only ES"):
         assert cards[label].value.startswith("−"), label
     # The simulations are the library's (tests/test_risk.py checks the engine) on the four legs built here at their
-    # own surface vols, the spot paths at the ATMF vol; the DGT VaR is solved here from the Normal distribution.
+    # own surface vols, the spot paths at the ATMF vol; the DGT VaR is solved here from the Normal distribution. The
+    # options age on the tab's clock (audit quant-3): Friday 16:00 to Monday 16:00, three calendar days, one trading
+    # day of variance. On the library's clock (1/252 year of ageing) the cards read −$480, −$492, −$714, −$728, −$725.
     legs = tuple(strat.Leg(kind, n, k, index.t, v) for (n, kind, k), v in zip(LEGS, index.vols, strict=True))
     condor = strat.Strategy("Iron Condor", legs)
     market = strat.Market(index.s, index.r, index.atm, index.t, index.q)
     moving = risk.VaRConfig(0.99, 1, 100_000, seed=7, vol_of_vol=1.0, spot_vol_correlation=-0.7)
-    full = risk.value_at_risk(condor, market, moving, UNITS)
-    spot = risk.value_at_risk(condor, market, replace(moving, vol_of_vol=0.0), UNITS)
+    full = risk.value_at_risk(condor, market, moving, UNITS, WEEKEND)
+    spot = risk.value_at_risk(condor, market, replace(moving, vol_of_vol=0.0), UNITS, WEEKEND)
     es = (risk.tail_measures(full.pnl, 0.975)[1], risk.tail_measures(spot.pnl, 0.975)[1])
     delta, gamma, _, theta = index.greeks()
-    dgt = _dgt_var(delta, gamma, theta, index.s, index.atm)
+    dgt = _dgt_var(delta, gamma, theta, index.s, index.atm, years=WEEKEND)
     expected = {
         "VaR 99% 1D · MC": -full.var,
         "ES 97.5% 1D · MC": -es[0],
@@ -682,19 +742,25 @@ def test_the_var_report(index):
         "DGT VaR 99% 1D": -dgt,
     }
     # Every gap between the cards is $10 or more, so they are in whole dollars (the VaR's 95% simulation interval
-    # is −$471.51 to −$487.45: no cent of it is known), each amount to the cent in its help.
-    assert [round(v, 2) for v in expected.values()] == [-479.95, -492.32, -713.95, -727.60, -725.40]
+    # is −$409.27 to −$423.86: no cent of it is known), each amount to the cent in its help.
+    assert [round(v, 2) for v in expected.values()] == [-415.39, -428.27, -646.00, -659.92, -662.15]
     assert {label: cards[label].value for label in expected} == {k: tab_risk.dollars(v) for k, v in expected.items()}
-    assert [cards[label].value for label in expected] == ["−$480", "−$492", "−$714", "−$728", "−$725"]
+    assert [cards[label].value for label in expected] == ["−$415", "−$428", "−$646", "−$660", "−$662"]
     for label, amount in expected.items():
         assert tab_risk.exact(amount).replace("$", "\\$") in cards[label].help, label
-    assert "95% simulation interval −\\$471.51 to −\\$487.45" in cards["VaR 99% 1D · MC"].help
-    # The gaps from the amounts shown, so that the cards add up on screen: −$480 − (−$714), −$492 − (−$728) and
-    # −$714 − (−$725), the comparator taken like for like (implied vol frozen in both).
-    assert cards["VaR 99% 1D · MC"].delta == "+\\$234 vs spot only"
-    assert cards["ES 97.5% 1D · MC"].delta == "+\\$236 vs spot only"
+    assert "95% simulation interval −\\$409.27 to −\\$423.86" in cards["VaR 99% 1D · MC"].help
+    # The help says which clock ages the options and which counts the variance.
+    assert (
+        "The options age on the New York clock, 3 calendar days to 26-Oct-26 16:00 (1 session later); the spot's "
+        "variance counts trading days, σ²·h/252."
+    ) in cards["VaR 99% 1D · MC"].help
+    assert "with t the 3 calendar days the options age" in cards["DGT VaR 99% 1D"].help
+    # The gaps from the amounts shown, so that the cards add up on screen: −$415 − (−$646), −$428 − (−$660) and
+    # −$646 − (−$662), the comparator taken like for like (implied vol frozen in both).
+    assert cards["VaR 99% 1D · MC"].delta == "+\\$231 vs spot only"
+    assert cards["ES 97.5% 1D · MC"].delta == "+\\$232 vs spot only"
     gap = tab_risk.shown(-spot.var) - tab_risk.shown(-dgt)
-    assert cards["Non-linearity"].value == tab_risk.dollars(gap) == "+$11"
+    assert cards["Non-linearity"].value == tab_risk.dollars(gap) == "+$16"
     assert cards["Non-linearity"].delta == "spot only − DGT"
     # The spot vol is named where it is used: the front expiry's ATMF vol, not a leg's.
     assert "at 15.52%, the 18‑Dec‑26 AM ATMF vol" in cards["DGT VaR 99% 1D"].help
@@ -741,11 +807,14 @@ def _array(value) -> np.ndarray:
 
 def test_legs_that_settle_within_the_horizon_are_counted_and_leave_no_expansion():
     # A 1-day textbook call spread settles on day 1, the horizon itself: the caption counts its two legs (ported
-    # from the earlier Risk tab's test). Two days out (1.38 trading days) it outlives the horizon.
+    # from the earlier Risk tab's test). Two days out it settles within the horizon only when the next session is
+    # two calendar days away or more: the options age on the tab's clock from the last cash close (a Friday's
+    # Monday is three days away, a weekday's next session one), where 1/252 year (1.45 days) never reached it.
     at = _risk(report="VaR", preset="Textbook", days=1)
     basis = next(c.value for c in at.caption if "Monte Carlo" in c.value)
     assert basis.endswith(" 2 leg(s) settle before the horizon.")
-    assert not any("settle before" in c.value for c in _risk(report="VaR", preset="Textbook", days=2).caption)
+    two_days = any("settle before" in c.value for c in _risk(report="VaR", preset="Textbook", days=2).caption)
+    assert two_days == (_next_session_years(mk.last_close()) * 365 >= 2 - 1e-9)
     # A 3-day spread at a 5-day horizon: the expansion in today's Greeks is evaluated past expiry, where it read
     # "DGT VaR −$91.46" beside a full VaR of −$39.80 (the whole debit). The comparator, its gap and the
     # delta-normal VaR read – and say why.
@@ -780,6 +849,33 @@ def test_the_ladder_chart_has_a_tick_on_the_loss_side():
     assert (low, high) == (-7646, 120) and high < 0.1 * (high - low)
     assert min(ticks) < 0 == max(ticks) and min(ticks) >= low and len(ticks) >= 3
     assert yaxis["tickformat"] == ",.0f"
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        {"strike": "20"},  # the 20 / 22 call spread on spot 100: both legs deep in the money
+        {"strike": "500", "strategy": "Long Call"},  # far out of the money
+        {"strike": "20", "strategy": "Iron Condor"},
+    ],
+)
+def test_a_flat_ladder_draws_a_flat_chart(query):
+    # The P&L column is float noise of about 1e-10 here (the table shows 0): its ticks (0, 1e-9, 2e-9) fitted no count
+    # of decimals up to 6, and the default report raised StopIteration. Flat to the cent, the chart takes Plotly's own
+    # ticks in whole dollars.
+    at = _risk(preset="Textbook", **query)
+    ladder = _frame(at, "Move")
+    assert np.allclose(ladder["P&L"], 0.0, atol=0.005)
+    yaxis = _chart(at, "ladder_chart")["layout"]["yaxis"]
+    assert "tickvals" not in yaxis and yaxis["tickformat"] == ",.0f"
+
+
+def test_ladder_ticks_below_a_cent_are_flat():
+    from options_analyzer.ui import charts_risk
+
+    yaxis = charts_risk.ladder_chart([1.0, 2.0], [-1.2e-8, 4e-8], "P&L ($)", spot=1.0).layout.yaxis
+    assert yaxis.tickvals is None and yaxis.tickformat == ",.0f"
+    assert charts_risk.signed_ticks([-1e-12, 3e-12]) is None  # five ticks that all read 0.0, before
 
 
 def test_small_var_cards_are_to_the_cent_and_add_up_on_screen():
@@ -879,6 +975,9 @@ def test_the_explain_report_explains_the_what_if_move(index):
     labels = _chart(quiet, "explain_waterfall")["data"][0]["text"]
     assert decay > 0 and [label for label in labels if label] == [f"+${decay:.2f}"] * 2  # Θ and the total
     assert any("unexplained (0.0% of the P&L)" in c.value for c in quiet.caption)
+    # The caption at the table's precision: "Shapley splits +$125 exactly" sat under a table of 124.69.
+    caption = next(c.value for c in quiet.caption if "Shapley splits" in c.value).replace("\\$", "$")
+    assert f"Shapley splits +${decay:.2f} exactly" in caption and "Taylor leaves $0.00 unexplained" in caption
 
 
 def test_the_footer_states_each_legs_vol(index):
@@ -1054,18 +1153,33 @@ SPX_STRADDLE = {
 }
 
 
-def _var_configs(monkeypatch) -> list:
-    """The configuration of every VaR simulation from now on, in order (the cache is cleared, so none hides there)."""
+def _var_configs(monkeypatch, clocks: list | None = None) -> list:
+    """The configuration of every VaR simulation from now on, in order (the cache is cleared, so none hides there),
+    and in ``clocks`` the calendar years each ages the options by."""
     from options_analyzer import risk
     from options_analyzer.ui import cache
 
-    configs = []
+    configs, clocks = [], [] if clocks is None else clocks
     real = risk.value_at_risk
-    monkeypatch.setattr(
-        risk, "value_at_risk", lambda s, m, config, n=1.0: configs.append(config) or real(s, m, config, n)
-    )
+
+    def recorded(s, m, config, n=1.0, calendar_years=None):
+        configs.append(config)
+        clocks.append(calendar_years)
+        return real(s, m, config, n, calendar_years)
+
+    monkeypatch.setattr(risk, "value_at_risk", recorded)
     cache.value_at_risk.clear()
     return configs
+
+
+def _next_session_years(start: datetime) -> float:
+    """Calendar years from ``start`` to the same wall-clock time on the next NYSE trading day, counted here day by
+    day (the textbook market's VaR starts at the last cash close, so its clock depends on the day the test runs)."""
+    day = start.date()
+    while True:
+        day = date.fromordinal(day.toordinal() + 1)
+        if clock.is_trading_day(day):
+            return (day - start.date()).days / 365
 
 
 def test_var_simulates_index_vol_dynamics_beside_the_spot_only_var(monkeypatch):
@@ -1076,16 +1190,28 @@ def test_var_simulates_index_vol_dynamics_beside_the_spot_only_var(monkeypatch):
     from options_analyzer import risk
     from options_analyzer.strategies import Market, build_template
 
-    configs = _var_configs(monkeypatch)
+    clocks = []
+    configs = _var_configs(monkeypatch, clocks)
     at = _risk(report="VaR", **SPX_STRADDLE)
     moving = risk.VaRConfig(0.99, 1, 100_000, seed=7, vol_of_vol=1.0, spot_vol_correlation=-0.7)
     assert configs == [replace(moving, vol_of_vol=0.0), moving]
-    cards = {m.label: m for m in at.metric}
-    assert cards["VaR 99% 1D · MC"].value == "−$3,862" and cards["Spot-only VaR"].value == "−$2,833"
-    assert cards["VaR 99% 1D · MC"].delta == r"−\$1,029 vs spot only"  # Markdown, as the delta renders it
-    # ES at 97.5% (FRTB's level) off the same simulation: the mean of the 2,500 worst of 100,000.
+    # The tab ages the options on its clock, to the next session from its valuation time (the textbook market's is
+    # the last cash close: Friday to Monday is 3/365, a weekday to the next 1/365), and shows the same simulations.
+    years = _next_session_years(mk.last_close())
+    assert clocks == [pytest.approx(years, abs=1e-9)] * 2
+    runs = list(configs)
+    monkeypatch.undo()  # the library's own function again, which no longer records its calls
+    # The library's numbers, on its own clock (1/252 year of ageing): the panel's.
     straddle = build_template("Short Straddle", 5800, 580, 45 / 365)
-    run = risk.value_at_risk(straddle, Market(5800, 0.043, 0.16, 45 / 365, 0.013), moving, 100)
+    market = Market(5800, 0.043, 0.16, 45 / 365, 0.013)
+    assert [round(risk.value_at_risk(straddle, market, config, 100).var) for config in runs] == [2833, 3862]
+    spot_run, run = (risk.value_at_risk(straddle, market, config, 100, years) for config in runs)
+    cards = {m.label: m for m in at.metric}
+    assert cards["VaR 99% 1D · MC"].value == tab_risk.dollars(-run.var)
+    assert cards["Spot-only VaR"].value == tab_risk.dollars(-spot_run.var)
+    gap = tab_risk.difference(-run.var, -spot_run.var)
+    assert cards["VaR 99% 1D · MC"].delta == f"{gap} vs spot only".replace("$", "\\$")  # Markdown, as it renders
+    # ES at 97.5% (FRTB's level) off the same simulation: the mean of the 2,500 worst of 100,000.
     es = -np.sort(run.pnl)[:2_500].mean()
     assert cards["ES 97.5% 1D · MC"].value == tab_risk.dollars(-es)
     assert at.toggle(key="var_volmoves").value is True
@@ -1131,7 +1257,16 @@ def test_vol_moves_switched_off_show_the_spot_only_run_from_the_cache(monkeypatc
     assert len(configs) == 2  # the frozen run came from the cache
     labels = [m.label for m in at.metric if "VaR" in m.label or "ES" in m.label or m.label == "Non-linearity"]
     assert labels == ["VaR 99% 1D · MC", "ES 97.5% 1D · MC", "DGT VaR 99% 1D", "Non-linearity"]
-    assert next(m for m in at.metric if m.label == "VaR 99% 1D · MC").value == "−$2,833"
+    # The spot-only run's VaR (the panel's $2,833 on the library's 1/252-year clock; the tab's own clock here).
+    from options_analyzer import risk
+    from options_analyzer.strategies import Market, build_template
+
+    monkeypatch.undo()
+    straddle = build_template("Short Straddle", 5800, 580, 45 / 365)
+    frozen = risk.VaRConfig(0.99, 1, 100_000, seed=7, vol_of_vol=0.0, spot_vol_correlation=-0.7)
+    years = _next_session_years(mk.last_close())
+    spot_only = risk.value_at_risk(straddle, Market(5800, 0.043, 0.16, 45 / 365, 0.013), frozen, 100, years)
+    assert next(m for m in at.metric if m.label == "VaR 99% 1D · MC").value == tab_risk.dollars(-spot_only.var)
 
 
 def test_the_theta_tile_gives_the_decay_to_expiry_of_a_one_day_position():

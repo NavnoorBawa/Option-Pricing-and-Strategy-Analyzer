@@ -25,13 +25,13 @@ from streamlit.testing.v1 import AppTest
 from options_analyzer import black_scholes as bs
 from options_analyzer import clock, risk
 from options_analyzer import strategies as strat
-from options_analyzer.ui import charts, surface_state, tab_risk, tab_strategy
+from options_analyzer.ui import charts, charts_strategy, surface_state, tab_risk, tab_strategy
 from options_analyzer.ui import format as fmt
 from options_analyzer.ui import legs as lg
 from options_analyzer.ui import market as mk
 from options_analyzer.ui.app import TABS
 from options_analyzer.ui.format import MINUS, md, money
-from options_analyzer.vol_surface.published import ONE_SD, TWO_SD, Expiry
+from options_analyzer.vol_surface.published import ONE_SD, Expiry
 
 NO_EDITS = {"edited_rows": {}, "added_rows": [], "deleted_rows": []}
 #: The Risk tab's default implied-vol dynamics in the VaR simulation, an index's (VIX-like).
@@ -252,6 +252,26 @@ def test_the_default_tiles(published):
     assert "\\$155.00 per side" in _metric(at, "Package").proto.help  # half the 3.10 spread, × 100
 
 
+def test_the_net_premium_help_adds_up_with_commissions(published):
+    # 3 contracts at $1.50 a contract and leg: $18 of commissions on 12 contracts. The theo credit took them off as
+    # well, so "the theo credit is $6,725.31, so entry at mid is −$56.31" did not add up against $6,687.00 (the gap is
+    # −$38.31). The theo is now the legs' Black-Scholes-Merton value at their surface vols and the front expiry's
+    # carry, written here, without fees; entry at mid against it, and the T+0 P&L after the commissions.
+    at = _index(commission="1.5", contracts="3")
+    units, fees = 300.0, 12 * 1.5
+    mid = _quote_value(published, CONDOR_LEGS, units)  # −6,705: a credit
+    T = published.maturity(DEC)
+    r, q = mk.carry(published.forward(DEC), published.discount_factor(DEC), published.spot, T)
+    theo = units * sum(
+        n * bs.price(published.spot, k, T, r, published.vol(k, DEC).vol, q, kind) for kind, n, k in CONDOR_LEGS
+    )
+    text = _metric(at, "Net premium").proto.help.replace("\\$", "$")
+    assert f"(${-(mid + fees):,.2f} for the position, commissions included)" in text  # $6,687.00
+    edge, t0 = fmt.signed(theo - mid, 2, "$"), fmt.signed(theo - mid - fees, 2, "$")
+    assert f"The theo credit is ${-theo:,.2f}, so entry at mid is {edge} against theo and, after $18.00 of " in text
+    assert f"commissions, {t0}: the T+0 P&L at today's spot." in text
+
+
 def test_the_blotter_has_a_row_per_leg_and_a_total(published):
     at = _index()
     blotter = _blotter(at)
@@ -426,12 +446,24 @@ def test_the_table_view(published):
     assert z_pct.min() == pytest.approx(-100.0, abs=1e-9)  # the worst cell at expiry is the max loss
 
 
+def test_the_pnl_chart_fits_the_rerun_budget():
+    # A what-if step resent the P&L chart at 106 KB of a 143 KB rerun (the budget is 60 KB): 600 grid points in seven
+    # traces. At 301 points it is about 60 KB; the bound leaves 5 KB for a longer legend or a scenario marker. The
+    # expiry curve keeps every strike in view, so its kinks are exact.
+    at = _index(ws=0.5)
+    chart = next(c for c in at.get("plotly_chart") if c.proto.id.endswith("payoff_chart"))
+    assert len(chart.proto.spec) < 65_000
+    spec = json.loads(chart.proto.spec)
+    spots = _array(_trace(spec, "Expiry")["x"])
+    assert len(spots) <= tab_strategy.GRID_POINTS + 4 and {5300.0, 5400.0, 6150.0, 6250.0} <= set(spots)
+
+
 def test_the_chart_draws_the_rn_ranges_the_straddle_move_and_the_reference_lines(published):
     at = _index()
     spec = _chart(at, "payoff_chart")
     names = [t.get("name") for t in spec["data"]]
     lo68, hi68 = published.rn_range(DEC, ONE_SD)
-    lo95, hi95 = published.rn_range(DEC, TWO_SD)
+    lo95, hi95 = published.rn_range(DEC, 0.95)
     # UI-13: the legend names the basis; the bounds are the smile's quantiles at 15.87% and 84.13% (5,491 and 6,162;
     # the spec's 5,492 and 6,167 were the fit before SF-4).
     assert names[:2] == [
@@ -440,6 +472,20 @@ def test_the_chart_draws_the_rn_ranges_the_straddle_move_and_the_reference_lines
     ]
     assert names[0] == "RN 68% to 18‑Dec: 5,491–6,162 (smile)"
     assert published.cdf(lo68, DEC) == pytest.approx((1 - ONE_SD) / 2, abs=1e-12)
+    # "RN 95%" holds 95%: the ±2σ range (95.45%, 4,894–6,388) bore the name. Its ends checked here against the
+    # Breeden-Litzenberger digital, P(S_T < K) = 1 + ∂C/∂K ÷ DF, of Black-Scholes-Merton at the smile's own vol and
+    # the expiry's parity carry, differenced over ±0.5 point. Tolerance 2e-4: the difference of a smooth smile over a
+    # 1-point step is good to about 1e-6, and the surface's quantile inversion to its own 1e-4 grid.
+    T = published.maturity(DEC)
+    DF = published.discount_factor(DEC)
+    r, q = mk.carry(published.forward(DEC), DF, published.spot, T)
+
+    def below(k: float, h: float = 0.5) -> float:
+        calls = [bs.price(published.spot, x, T, r, published.vol(x, DEC).vol, q) for x in (k - h, k + h)]
+        return 1.0 + (calls[1] - calls[0]) / (2 * h) / DF
+
+    assert (below(lo95), below(hi95)) == (pytest.approx(0.025, abs=2e-4), pytest.approx(0.975, abs=2e-4))
+    assert names[1] == "RN 95% to 18‑Dec: 4,921–6,379 (smile)"  # the audit's quantiles at 2.5% and 97.5%
     rects = [s for s in spec["layout"]["shapes"] if s["type"] == "rect"]
     assert [(r["x0"], r["x1"]) for r in rects] == [(lo68, hi68), (lo95, hi95)]
     # The straddle-implied move: the 5,830 straddle at mid over spot, two ticks on the x-axis, named in the legend
@@ -449,9 +495,18 @@ def test_the_chart_draws_the_rn_ranges_the_straddle_move_and_the_reference_lines
     assert "straddle ±4.82%" in names and "straddle ±4.82%" not in texts
     ticks = [s["x0"] for s in spec["layout"]["shapes"] if s.get("line", {}).get("width") == 2]
     assert ticks == [pytest.approx(5800 * (1 - move)), pytest.approx(5800 * (1 + move))]
-    # The expiry, T+0 and two dated curves (⅓ and ⅔ of the 38 sessions to expiry), each named at its right end.
+    # The expiry, T+0 and two dated curves (⅓ and ⅔ of the 38 sessions to expiry), each named in the right margin at
+    # its right end's height, in two lines: inside the plot their boxes hid the curves' last 90 px and Plotly cut
+    # "01‑Dec" at the plot's edge.
     assert names[4:8] == ["Expiry 18‑Dec", "T+0", "T+13 · 11‑Nov", "T+26 · 01‑Dec"]
-    assert {"exp 18‑Dec", "T+0", "T+13 · 11‑Nov", "T+26 · 01‑Dec"} <= set(texts)
+    ends = {a["text"]: a for a in spec["layout"]["annotations"] if a.get("xref") == "paper" and a["x"] == 1.0}
+    assert set(ends) == {"exp<br>18‑Dec", "T+0", "T+13<br>11‑Nov", "T+26<br>01‑Dec"}
+    assert all(a["xanchor"] == "left" and "bgcolor" not in a for a in ends.values())
+    widest = max(charts_strategy._label_width(line) for text in ends for line in text.split("<br>"))
+    assert spec["layout"]["margin"]["r"] == charts.MARGIN["r"] + widest + charts_strategy.END_GAP
+    # In the curves' order at the right end, top to bottom: T+0, T+13, T+26, the expiry.
+    heights = [ends[t]["y"] for t in ("T+0", "T+13<br>11‑Nov", "T+26<br>01‑Dec", "exp<br>18‑Dec")]
+    assert heights == sorted(heights, reverse=True)
     # Strikes 100 points apart in a range of about 2,200 share a label, which a phone's 230 px plot needs.
     assert {"K 5,300/5,400", "K 6,150/6,250", "S 5,800", " F"} <= set(texts)
     assert sorted(_strike_lines(at)) == [5300.0, 5400.0, 6150.0, 6250.0]
@@ -461,9 +516,10 @@ def test_the_chart_draws_the_rn_ranges_the_straddle_move_and_the_reference_lines
     assert set(labels) == {f"BE 5,378<br>{MINUS}7.3%", "BE 6,172<br>+6.4%"}
     assert [labels[t]["xanchor"] for t in sorted(labels)] == ["right", "left"]
     assert all("bgcolor" in a for a in labels.values())
-    # The note: the same days as the builder's expiry menu, on the third line under S and F.
-    [note] = [a for a in spec["layout"]["annotations"] if a["text"] == "18‑Dec‑26 AM · 55d · RN smile"]
-    assert note["yshift"] == -28
+    # The note, after the spot axis's title (inside the plot, on a third line, it lay over S, F and the payoff on a
+    # phone): the same days as the builder's expiry menu.
+    assert spec["layout"]["xaxis2"]["title"]["text"] == "Spot · 18‑Dec‑26 AM · 55d · RN smile"
+    assert "18‑Dec‑26 AM · 55d · RN smile" not in texts
     menu = at.selectbox(key="strategy_expiry")
     assert menu.format_func(menu.value) == "18‑Dec‑26 AM · 55d"  # 55.73 days, floored as the what-if strip does
 
@@ -516,6 +572,35 @@ def test_a_calendar_reads_its_maximum_at_the_front_expiry_with_subtotals_per_exp
     assert np.isfinite(z).all() and -100.0 <= z[:, -1].min() < -99.0  # the 95% range's low end: -99.74%
 
 
+def test_a_diagonals_breakevens_are_read_over_the_max_loss_range():
+    # The index diagonal (+1 5,400C 19-Feb-27 / −1 6,150C 18-Dec-26) turns to a loss again only where the long back
+    # call's shortfall of 1 − e^(−qτ) per $1 rise has eaten the spread's width: 124,510, +2,046.7%, which the tile
+    # listed beside 5,851. The tile reads its breakevens over the Max loss tile's range and names the other in its
+    # help. The far root is checked here as a root of the expiry P&L, from the closed form at the back leg's own vol.
+    at = _index(strategy="Diagonal (Poor Man's Covered Call)")
+    loss, be = _metric(at, "Max loss"), _metric(at, "Breakevens")
+    lo, hi = (float(x.replace(",", "")) for x in re.search(r"to it, ([\d,]+)–([\d,]+)", loss.proto.help).groups())
+    shown = [float(x.replace(",", "")) for x in be.value.split(" / ")]
+    assert shown and all(lo <= b <= hi for b in shown)
+    assert len(shown) == 1 and be.proto.delta == "+0.9%"
+    far = float(re.search(r"beyond it: ([\d,.]+) \(", be.proto.help).group(1).replace(",", ""))
+    assert far > hi and "Read within the RN 99.9% range" in be.proto.help
+    context = mk.index_market(datetime.fromisoformat(ASOF))
+    published = surface_state.publish(context)
+    back = Expiry(date(2027, 2, 19), "AM")
+    # Every leg at the front expiry's parity carry (legs.price_index); far in the money the vol does not matter.
+    r, q = mk.carry(published.forward(DEC), published.discount_factor(DEC), context.spot, published.maturity(DEC))
+    t_back = published.maturity(back) - published.maturity(DEC)
+    entry = 510.65  # the debit per share at the chain's mids (the Net premium tile)
+    assert _metric(at, "Net premium").value == "$51,065"
+
+    def expiry_pnl(s):
+        long_call = bs.price(s, 5400.0, t_back, r, published.vol(5400.0, back).vol, q)
+        return long_call - max(s - 6150.0, 0.0) - entry
+
+    assert expiry_pnl(far * 0.999) > 0 > expiry_pnl(far * 1.001)
+
+
 def test_leg_edits_survive_a_visit_to_the_risk_tab_on_the_index():
     at = _edit(_index())
     editor = LegsEditor(at)
@@ -551,8 +636,9 @@ def test_the_empty_and_invalid_states():
     editor = LegsEditor(at)
     at = editor.edit({str(i): {"On": False} for i in range(4)})
     assert all(value == "–" for value, _ in _tiles(at).values())
-    assert any("No legs are on" in i.value for i in at.info)
-    # A zero quantity: one line under the editor naming the row; the other legs are analysed.
+    assert [i.value for i in at.info] == ["No legs are on. Pick a template or switch a leg on in the blotter."]
+    # A zero quantity: one line naming the row, and no number, as the Risk tab, which has no position to analyse.
+    # The other three legs were analysed before, under the template's name and with the error below the fold.
     editor = LegsEditor(_edit(_index()))
     editor.id = _editor_id(editor.at)
     editor.state = {**NO_EDITS, "edited_rows": {"0": {"Qty": 0}}}
@@ -562,7 +648,56 @@ def test_the_empty_and_invalid_states():
     assert [e.value for e in at.error] == [
         "Row 1: the quantity is zero; type a signed whole number, or switch the leg off."
     ]
-    assert _tiles(at)["Net premium"] == ("$4,815", "credit")
+    assert all(value == "–" for value, _ in _tiles(at).values())
+    assert not at.info  # the legs are on: "No legs are on" told the user to switch on legs that were
+    assert _metric(at, "Max loss").help.startswith("Fix or switch off the rows in error")
+    assert not at.get("plotly_chart")
+    _open(at, "Risk")
+    assert any("no position to analyse" in i.value for i in at.info)
+
+
+def test_a_strike_beyond_the_surface_leaves_every_tile_empty():
+    # The edit of the audit: the long 5,300 put moved to strike 1, far below the surface's reach. Analysed alone, the
+    # other three legs read "Max loss −$535,185" and P(profit) 77.3% for the "Iron Condor".
+    editor = LegsEditor(_edit(_index()))
+    editor.id = _editor_id(editor.at)
+    editor.state = {**NO_EDITS, "edited_rows": {"0": {"Strike": 1.0}}}
+    states = editor.at._tree.get_widget_states()
+    states.widgets.append(WidgetState(id=editor.id, string_value=json.dumps(editor.state)))
+    at = editor.at._run(states)
+    assert [e.value for e in at.error] == ["Row 1: the surface has no vol at 1 on 18‑Dec‑26 AM; type an IV override."]
+    assert all(value == "–" for value, _ in _tiles(at).values())
+
+
+def test_legs_all_expired_say_so():
+    # Edited legs keep their dates: at the 18-Dec-26 AM settlement's day at noon, every leg has settled. The tab
+    # said "No legs are on. ... switch a leg on", while the blotter marked each leg on and expired.
+    at = _edit(_index())
+    at = LegsEditor(at).edit({"0": {"Qty": 2}})
+    at.sidebar.datetime_input(key="asof").set_value(datetime(2026, 12, 18, 12, 0)).run()
+    _ok(at)
+    infos = [i.value for i in at.info]
+    assert "Every leg that is on has expired at this valuation time. Pick a template or a later expiry." in infos
+    assert not any("No legs are on" in i for i in infos)
+
+
+def test_a_same_day_template_keeps_its_wings_within_the_surfaces_reach():
+    # At noon on Friday 30-Oct-26 the same-day PM expiry lists 5,000 to 6,250, but the surface reaches 5,715 to
+    # 5,885 only. The iron condor's 100-point wings, 5,675 and 5,920, had no vol: two rows in error, and the tiles
+    # analysed a naked short strangle (Max loss "Unlimited"). The wings move in to the farthest strikes reached, and
+    # the maximum loss is the wider wing less the credit, from the Net premium tile.
+    at = _app(preset=None, asof="2026-10-30T12:00", expiry="2026-10-30", strategy_expiry="2026-10-30 PM")
+    assert at.caption and any(
+        c.value == "Wings moved in to the farthest strikes the surface reaches: 5,715 for 5,675 on 30‑Oct‑26 PM, "
+        "5,885 for 5,920 on 30‑Oct‑26 PM."
+        for c in at.caption
+    )
+    credit = float(_metric(at, "Net premium").value.lstrip("$"))  # cents below $1,000: $358.61
+    published = surface_state.publish(mk.index_market(datetime(2026, 10, 30, 12)))
+    same_day = Expiry(date(2026, 10, 30), "PM")
+    assert all(np.isfinite(published.vol(k, same_day).vol) for k in (5715.0, 5775.0, 5820.0, 5885.0))
+    wider = max(5775.0 - 5715.0, 5885.0 - 5820.0)
+    assert _metric(at, "Max loss").value == f"{MINUS}${100 * wider - credit:,.0f}"
 
 
 def test_a_stock_template_under_the_index_is_replaced_with_a_note():
@@ -824,13 +959,22 @@ def test_a_link_to_the_risk_tab_analyses_the_linked_template():
     _assert_heatmap_of(at, 200, condor)
     strategy = strat.Strategy("Iron Condor", strat.build_template("Iron Condor", 100, 10, 1.0).legs, fees=4 * 0.0065)
     # The VaR with the default index implied-vol dynamics, and beside it the spot-only VaR (implied vol frozen).
-    at.pills(key="report").set_value("VaR").run()
+    at.segmented_control(key="report").set_value("VaR").run()
     frozen = risk.VaRConfig(confidence=0.99, horizon_days=1, n_paths=100_000, seed=7)
+    # The options age on the tab's clock: from the last cash close to the next session's (the textbook market has no
+    # valuation time of its own), counted here day by day.
+    start = mk.last_close()
+    day = start.date()
+    while True:
+        day = date.fromordinal(day.toordinal() + 1)
+        if clock.is_trading_day(day):
+            break
+    years = (day - start.date()).days / 365
     for config, var_label in (
         (dataclasses.replace(frozen, **INDEX_VOL), "VaR 99% 1D · MC"),
         (frozen, "Spot-only VaR"),
     ):
-        var = risk.value_at_risk(strategy, strat.Market(100, 0.05, 0.2, 1.0), config, 200)
+        var = risk.value_at_risk(strategy, strat.Market(100, 0.05, 0.2, 1.0), config, 200, years)
         # The VaR cards are to the cent while every amount on them is below $1,000 (about $300 here).
         assert var.var < 900 and _metric(at, var_label).value == tab_risk.exact(-var.var)
     # The link now holds the menu's one parameter.
@@ -1160,6 +1304,9 @@ def test_payoff_band_is_the_one_sigma_range_of_the_price_at_expiry(vol):
     assert band["x0"] == pytest.approx(price.ppf(norm.cdf(-1.0)), rel=1e-9)
     assert band["x1"] == pytest.approx(price.ppf(norm.cdf(1.0)), rel=1e-9)
     assert _trace(spec, "68% at expiry")["name"].endswith("(flat vol)")
+    # The 95% band holds 95% of the price (2.5% to 97.5%), not the 95.45% of ±2σ.
+    wide = [shape for shape in spec["layout"]["shapes"] if shape["type"] == "rect"][1]
+    assert (wide["x0"], wide["x1"]) == (pytest.approx(price.ppf(0.025), rel=1e-9), pytest.approx(price.ppf(0.975)))
     # The chart's probability range starts 2.5 standard deviations below the median (it ends capped at 3 x 110).
     spots = _array(_trace(spec, "Expiry 365d")["x"])
     assert spots[0] == pytest.approx(price.ppf(norm.cdf(-2.5)), rel=1e-9)
@@ -1466,8 +1613,12 @@ def test_under_the_american_engine_the_note_gives_the_early_exercise_the_legs_ig
         )
         assert md(sentence) in note
     assert us - eu > 0.3  # the put's premium at r 5%, q 0: a real amount the legs leave out
-    # Under the closed form there is nothing to say.
-    assert not [i.value for i in _app(strategy="Long Straddle").info if "Early exercise" in i.value]
+    # Under the closed form there is nothing to say; nor under a link to a tree, which the sidebar reads as BSM (the
+    # note's tree branch, "on this tree", is gone with the sidebar's trees).
+    for model in (None, "Binomial tree", "binomial"):
+        at = _app(strategy="Long Straddle", **({"model": model} if model else {}))
+        assert at.sidebar.segmented_control(key="model").value == "bsm"
+        assert not [i.value for i in at.info if "Early exercise" in i.value]
 
 
 # --- Chart and label helpers ---------------------------------------------------------------------------------

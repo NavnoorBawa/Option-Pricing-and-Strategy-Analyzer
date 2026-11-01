@@ -1,5 +1,6 @@
 """The Strategy tab in Chromium (UI spec 3.2's Playwright tests, 2.11): the answer above the fold on a laptop, one
-line of tiles beside the open sidebar, a builder bar whose labels line up, curve labels inside the chart, and no
+line of tiles beside the open sidebar, a builder bar whose labels line up, curve labels in the chart's right margin,
+and no
 sideways scroll on a phone. On the synthetic index at the pinned valuation time, and on the textbook market.
 """
 
@@ -16,19 +17,18 @@ TEXTBOOK = "?tab=Strategy&preset=Textbook"
 
 #: Positions (px) on the page: the header strip, the price cards above the tabs (none since UI-1 moved them into the
 #: Pricing tab), the tiles, the payoff chart and its P&L row's plot area,
-#: the builder bar's labels, the tiles' tops and value sizes, the curve labels against the plot's right edge, and the
-#: page's scroll width.
+#: the builder bar's labels, the tiles' tops and value sizes, the curve labels against the plot's right edge and the
+#: chart's, and the page's scroll width.
 _LAYOUT = """() => {
   const box = sel => document.querySelector(sel)?.getBoundingClientRect() ?? null;
   const drag = box('.st-key-chart_payoff_chart .nsewdrag');
-  const ends = [...document.querySelectorAll('.st-key-chart_payoff_chart g.annotation')]
-    .filter(g => g.querySelector('text')?.getAttribute('text-anchor') === 'end')
-    .map(g => g.querySelector('text'))
-    .map(t => ({text: t.textContent, right: t.getBoundingClientRect().right}));
+  const ends = [...document.querySelectorAll('.st-key-chart_payoff_chart g.annotation text')]
+    .map(t => ({text: t.textContent, left: t.getBoundingClientRect().left, right: t.getBoundingClientRect().right}))
+    .filter(t => t.left >= drag.right - 0.5);
   return {
     header: box('.st-key-desk_header')?.bottom, cards: box('.st-key-price_cards')?.bottom ?? null,
     tiles: box('.st-key-strategy_tiles').top, chart: box('.st-key-chart_payoff_chart').top,
-    pnlBottom: drag.bottom, plotRight: drag.right, ends,
+    pnlBottom: drag.bottom, plotRight: drag.right, ends, chartRight: box('.st-key-chart_payoff_chart .main-svg').right,
     labels: [...document.querySelectorAll('.st-key-strategy_builder [data-testid=stWidgetLabel]')]
       .map(l => Math.round(l.getBoundingClientRect().top)),
     tileTops: [...document.querySelectorAll('.st-key-strategy_tiles [data-testid=stMetric]')]
@@ -68,9 +68,10 @@ def test_the_answer_is_above_the_fold_on_a_laptop(chromium, app_url, scheme):  #
         assert len(set(layout["tileTops"])) == 1 and layout["tileFonts"] == [19.25] * 6, layout
         # The builder bar's labels line up (a segmented control's sat 6 px lower).
         assert max(layout["labels"]) - min(layout["labels"]) <= 1, layout["labels"]
-        # Every curve label at the right end ends inside the plot area, in IBM Plex.
-        assert layout["plex"] and len(layout["ends"]) >= 4, layout
-        assert all(end["right"] <= layout["plotRight"] + 0.5 for end in layout["ends"]), layout
+        # The four curve labels (T+0, two dated curves, the expiry) in the right margin, in IBM Plex, whole: inside
+        # the plot their boxes hid the curves' last 90 px, and Plotly cut "01‑Dec" at the plot's edge.
+        assert layout["plex"] and len(layout["ends"]) == 4, layout
+        assert all(end["right"] <= layout["chartRight"] + 0.5 for end in layout["ends"]), layout
     finally:
         context.close()
 
@@ -91,8 +92,9 @@ def test_a_phone_has_no_sideways_scroll_and_tiles_in_pairs(chromium, app_url, qu
 
 def test_the_payoff_chart_labels_do_not_overprint_on_a_phone(chromium, app_url):  # noqa: F811
     # Spec 2.11 at 390 x 844: the strike labels read "K 5K 5,400", the note lay over S and F, and the straddle label
-    # over the curves' end labels. No two text labels of the P&L row overlap now, and every label but the lower
-    # breakeven's (which reaches into the axis margin, between the tick labels) is inside the plot.
+    # over the curves' end labels. No two text labels of the P&L row overlap now, the curves' labels are whole in the
+    # right margin, and every other label but the lower breakeven's (which reaches into the axis margin, between the
+    # tick labels) is inside the plot.
     context, page = _open(chromium, app_url + INDEX, width=390, height=844, scheme="light", touch=True)
     try:
         boxes = page.evaluate(
@@ -100,6 +102,7 @@ def test_the_payoff_chart_labels_do_not_overprint_on_a_phone(chromium, app_url):
               const drag = document.querySelector('.st-key-chart_payoff_chart .nsewdrag').getBoundingClientRect();
               const top = drag.top, bottom = drag.bottom;  // the first drag layer is the P&L row's
               return {plot: [drag.left, drag.right],
+                chart: document.querySelector('.st-key-chart_payoff_chart .main-svg').getBoundingClientRect().right,
                 labels: [...document.querySelectorAll('.st-key-chart_payoff_chart g.annotation')].map(g => {
                   const r = g.querySelector('text').getBoundingClientRect();
                   return {text: g.textContent, l: r.left, r: r.right, t: r.top, b: r.bottom};
@@ -112,21 +115,23 @@ def test_the_payoff_chart_labels_do_not_overprint_on_a_phone(chromium, app_url):
             for b in labels[i + 1 :]:
                 overlap = min(a["r"], b["r"]) - max(a["l"], b["l"]), min(a["b"], b["b"]) - max(a["t"], b["t"])
                 assert overlap[0] <= 0.5 or overlap[1] <= 0.5, (a, b)
-            if not a["text"].startswith("BE 5,378"):
+            if a["l"] >= boxes["plot"][1] - 0.5:  # a curve's label, in the right margin
+                assert a["r"] <= boxes["chart"] + 0.5, a
+            elif not a["text"].startswith("BE 5,378"):
                 assert boxes["plot"][0] - 0.5 <= a["l"] and a["r"] <= boxes["plot"][1] + 0.5, a
     finally:
         context.close()
 
 
 def test_the_table_view_prints_every_cell(chromium, app_url):  # noqa: F811
-    # UI-9: 17 spot rows by 13 dates, every cell's P&L printed: today at 5,800 the T+0 P&L, −13 (−$12.77), and at
-    # expiry inside the shorts the credit, +2,235.
+    # UI-9: 16 spot rows (over the 95% range; 17 over the ±2σ range it was) by 13 dates, every cell's P&L printed:
+    # today at 5,800 the T+0 P&L, −13 (−$12.77), and at expiry inside the shorts the credit, +2,235.
     context, page = _open(chromium, app_url + INDEX + "&st_view=Table", scheme="light")
     try:
         texts = page.evaluate(
             "() => [...document.querySelectorAll('.st-key-chart_pnl_table .heatmaplayer text')].map(t => t.textContent)"
         )
-        assert len(texts) == 17 * 13, len(texts)
+        assert len(texts) == 16 * 13, len(texts)
         assert "\u221213" in texts and "+2,235" in texts
         assert page.locator(".st-key-chart_payoff_chart").count() == 0
     finally:

@@ -3,9 +3,10 @@ date × spot P&L table (UI-9).
 
 Pure functions, data in and figure out, in the desk house style of :mod:`.charts`: time encodes as dash (the expiry
 curve solid in the text colour, T+0 solid in the accent, dated curves muted, dashed then dotted), each curve labelled
-at its right end; P&L areas only under the expiry curve; risk-neutral ranges as muted bands named with their basis in
-the legend; the straddle-implied move as two accent ticks on the x-axis; reference lines for spot (dashed), the
-forward (solid accent) and the strikes (dotted, labelled while at most six are in view).
+in the right margin at the height of its right end; P&L areas only under the expiry curve; risk-neutral ranges as
+muted bands named with their basis in the legend; the straddle-implied move as two accent ticks on the x-axis;
+reference lines for spot (dashed), the forward (solid accent) and the strikes (dotted, labelled while at most six are
+in view).
 """
 
 from __future__ import annotations
@@ -40,17 +41,17 @@ BREAKEVEN_EDGE = 0.12
 RN_OPACITY = (0.06, 0.03)
 #: Label size of reference lines and curve ends (px).
 SMALL = 10
-#: Room above the highest curve, as a share of the curves' span: three 14 px lines of labels (strikes; S and F; the
-#: note) and a margin, 49 px of about 270 px of plot, so h / (1.06 + h) = 49 / 270 gives h = 0.235.
-HEADROOM = 0.24
-#: The note's offset (px) below the plot's top: the third line, under the strike labels and S and F, which it
-#: overprinted on a phone, where the spot is about 140 px from the plot's left edge and the note 180 px wide.
-NOTE_SHIFT = -28
+#: Room above the highest curve, as a share of the curves' span: two 14 px lines of labels (strikes; S and F) and a
+#: margin, 35 px of about 270 px of plot, so h / (1.06 + h) = 35 / 270 gives h = 0.158. The note (expiry, days and
+#: basis) was a third line inside the plot (0.24 of headroom), over S, F and the payoff on a phone; it is the spot
+#: axis's title now.
+HEADROOM = 0.16
 #: Least distance between two curves' right-end labels, as a share of the curves' span, which the axis shows over
-#: 1.06 + HEADROOM = 1.30 spans: 13 px (a 10 px label's box) on a phone, whose P&L plot is 238 px tall under the
-#: four-line legend (13 × 1.30 / 238 = 0.071); about 16 px on a laptop's 280 px. At 0.05 the labels sat 9 px apart on
-#: a phone and overprinted.
-LABEL_GAP = 0.072
+#: 1.06 + HEADROOM = 1.22 spans: 26 px (a two-line 10 px label) on a phone, whose P&L plot is 238 px tall under the
+#: four-line legend (26 × 1.22 / 238 = 0.133).
+LABEL_GAP = 0.135
+#: Gap (px) between the plot's right edge and the curves' labels in the margin.
+END_GAP = 4
 #: Width (px) given to a right-aligned label per character, and its padding: IBM Plex Sans at 10 px averages about
 #: 5.6 px a character in these labels. Plotly sizes an annotation's box from the text as first drawn, before the
 #: web font has loaded, so a box sized by Plotly was narrower than the label in Plex and cut its right end at the
@@ -123,17 +124,17 @@ class Band:
     name: str
 
 
-def _vline(fig: go.Figure, x: float, line: dict) -> None:
+def _vline(x: float, line: dict) -> dict:
     """A vertical reference line through both rows (the P&L chart and its Greek strip): one shape on the shared x-axis
     from the bottom of the figure's plot area to its top. ``add_vline`` on a figure of subplots works out the axes of
     every subplot for each line: with it a what-if step's server run took about 0.25 s, with these shapes 0.22 s."""
-    fig.add_shape(type="line", x0=x, x1=x, xref="x", y0=0, y1=1, yref="paper", line=line)
+    return dict(type="line", x0=x, x1=x, xref="x", y0=0, y1=1, yref="paper", line=line)
 
 
-def _hline(fig: go.Figure, row: int, line: dict) -> None:
+def _hline(row: int, line: dict) -> dict:
     """The zero line across row ``row``."""
     axis = "" if row == 1 else str(row)
-    fig.add_shape(type="line", x0=0, x1=1, xref=f"x{axis} domain", y0=0.0, y1=0.0, yref=f"y{axis}", line=line)
+    return dict(type="line", x0=0, x1=1, xref=f"x{axis} domain", y0=0.0, y1=0.0, yref=f"y{axis}", line=line)
 
 
 def _strike_labels(strikes: Sequence[float], x_range: tuple[float, float], text) -> list[tuple[float, str]]:
@@ -195,7 +196,8 @@ def payoff_figure(
     scenario : (x, y, label), optional
         The what-if spot on the T+0 curve, marked.
     note : str
-        An 11 px muted annotation inside the plot at the top left (spec 2.7 item 8), on the third line.
+        The chart's context (expiry, days, basis), written after the spot axis's title: inside the plot at the top
+        left (spec 2.7 item 8) it lay over S, F and the payoff on a phone.
     x_range : (low, high), optional
         The x-axis range (spec 2.7 item 11's Range control); default: the grid.
     strike_text : callable
@@ -219,13 +221,18 @@ def payoff_figure(
     lo, hi = x_range or (float(spots[0]), float(spots[-1]))
     styles = {"expiry": (colors["text"], "solid"), "t0": (colors["accent"], "solid")}
     dated = iter(("dash", "dot", "dashdot"))
+    # The shapes and labels go in with one layout update at the end: add_shape and add_annotation revalidate the
+    # growing tuple at each call: the default condor's figure (12 shapes, 11 labels) took 79 ms one at a time and 47
+    # ms at once (the fastest of 15 runs; the same figure, its JSON compared, on three positions).
+    shapes: list[dict] = []
+    annotations: list[dict] = []
 
     # Risk-neutral ranges: muted bands behind everything, named in the legend with their basis.
     for band, opacity in zip(bands, RN_OPACITY, strict=False):
-        fig.add_shape(
+        shapes.append(dict(
             type="rect", x0=band.low, x1=band.high, xref="x", y0=0, y1=1, yref="y domain", fillcolor=colors["muted"],
-            opacity=opacity, line_width=0, layer="below",
-        )  # fmt: skip
+            opacity=opacity, line=dict(width=0), layer="below",
+        ))  # fmt: skip
         fig.add_trace(
             go.Scatter(
                 x=[None],
@@ -270,42 +277,46 @@ def payoff_figure(
             row=1,
             col=1,
         )
-        if inside.any():  # the right-end label, at the last point in view
+        if inside.any():  # the label of the curve's right end, at the last point in view
             j = int(np.flatnonzero(inside)[-1])
-            ends.append((float(curve.values[j]), curve.end, color, float(spots[j])))
+            ends.append((float(curve.values[j]), curve.end.replace(" · ", "<br>"), color))
+    # The labels sit in the right margin, left-aligned, at their curves' heights: inside the plot their boxes hid the
+    # last 90 px of the curves at 1,440 px (and the expiry's drop at the wing on a phone), and Plotly cut "01‑Dec" at
+    # the plot's edge. Two lines (``T+13`` over its date) keep the margin to the width of a date.
+    column = max((_label_width(line) for _, text, _ in ends for line in text.split("<br>")), default=0) + END_GAP
     if ends:
         shown = np.concatenate([np.asarray(c.values, dtype=float)[inside] for c in curves] + [np.zeros(1)])
         span = float(np.nanmax(shown) - np.nanmin(shown)) or 1.0
         floor = float(np.nanmin(shown)) - 0.04 * span  # the axis' lower end (see the range below), less a margin
         ceiling = float(np.nanmax(shown)) + 0.5 * span * LABEL_GAP  # half a label above the highest curve
         heights = _spread([e[0] for e in ends], span * LABEL_GAP, floor, ceiling)
-        for (_y, text, color, x), placed in zip(ends, heights, strict=True):
-            fig.add_annotation(
-                x=x, y=placed, text=text, xanchor="right", yanchor="middle", showarrow=False, align="right",
-                width=_label_width(text), font=dict(size=SMALL, color=color), bgcolor=colors["surface"], row=1, col=1,
-            )  # fmt: skip
-    _hline(fig, 1, dict(color=colors["rule"], width=charts.REFERENCE_WIDTH))
+        for (_y, text, color), placed in zip(ends, heights, strict=True):
+            annotations.append(dict(
+                x=1.0, y=placed, xref="paper", yref="y", text=text, xanchor="left", xshift=END_GAP, yanchor="middle",
+                showarrow=False, align="left", font=dict(size=SMALL, color=color),
+            ))  # fmt: skip
+    shapes.append(_hline(1, dict(color=colors["rule"], width=charts.REFERENCE_WIDTH)))
     # Reference lines across both rows (the strip shares the x-axis): spot, forward, strikes.
     for k in strikes:
         if lo <= k <= hi:
-            _vline(fig, k, dict(color=colors["muted"], width=charts.REFERENCE_WIDTH, dash="dot"))
+            shapes.append(_vline(k, dict(color=colors["muted"], width=charts.REFERENCE_WIDTH, dash="dot")))
     for x, label in _strike_labels(strikes, (lo, hi), strike_text):
-        fig.add_annotation(
+        annotations.append(dict(
             x=x, y=1.0, xref="x", yref="y domain", text=label, showarrow=False, yanchor="top",
-            font=dict(size=SMALL, color=colors["muted"]), bgcolor=colors["surface"], row=1, col=1,
-        )  # fmt: skip
-    _vline(fig, spot, dict(color=colors["muted"], width=charts.REFERENCE_WIDTH, dash="dash"))
-    fig.add_annotation(
+            font=dict(size=SMALL, color=colors["muted"]), bgcolor=colors["surface"],
+        ))  # fmt: skip
+    shapes.append(_vline(spot, dict(color=colors["muted"], width=charts.REFERENCE_WIDTH, dash="dash")))
+    annotations.append(dict(
         x=spot, y=1.0, xref="x", yref="y domain", text=f"S {strike_text(spot)}", showarrow=False, xanchor="right",
-        align="right", width=_label_width(f"S {strike_text(spot)}"), yanchor="top", yshift=-14, xshift=-2, row=1,
-        col=1, font=dict(size=SMALL, color=colors["muted"]),
-    )  # fmt: skip
+        align="right", width=_label_width(f"S {strike_text(spot)}"), yanchor="top", yshift=-14, xshift=-2,
+        font=dict(size=SMALL, color=colors["muted"]),
+    ))  # fmt: skip
     if forward is not None:
-        _vline(fig, forward, dict(color=colors["accent"], width=charts.REFERENCE_WIDTH))
-        fig.add_annotation(
+        shapes.append(_vline(forward, dict(color=colors["accent"], width=charts.REFERENCE_WIDTH)))
+        annotations.append(dict(
             x=forward, y=1.0, xref="x", yref="y domain", text=" F", showarrow=False, yanchor="top", yshift=-14,
             xanchor="left", font=dict(size=SMALL, color=colors["accent"]),
-        )  # fmt: skip
+        ))  # fmt: skip
     if breakevens:
         fig.add_trace(
             go.Scatter(
@@ -329,19 +340,19 @@ def payoff_figure(
                 left = (hi - x) < (x - lo)
             level, _, change = label.partition(" (")
             lines = (level, change.rstrip(")"))
-            fig.add_annotation(
-                x=x, y=0.0, text="<br>".join(lines), showarrow=False, xanchor="right" if left else "left",
-                align="right" if left else "left", yanchor="bottom", xshift=-5 if left else 5, yshift=8,
-                width=max(_label_width(t) for t in lines), font=dict(size=SMALL, color=colors["accent"]),
-                bgcolor=colors["surface"], row=1, col=1,
-            )  # fmt: skip
+            annotations.append(dict(
+                x=x, y=0.0, xref="x", yref="y", text="<br>".join(lines), showarrow=False,
+                xanchor="right" if left else "left", align="right" if left else "left", yanchor="bottom",
+                xshift=-5 if left else 5, yshift=8, width=max(_label_width(t) for t in lines),
+                font=dict(size=SMALL, color=colors["accent"]), bgcolor=colors["surface"],
+            ))  # fmt: skip
     if straddle is not None:
         s_lo, s_hi, s_label = straddle
         for x in (s_lo, s_hi):
-            fig.add_shape(
+            shapes.append(dict(
                 type="line", x0=x, x1=x, xref="x", y0=0.0, y1=0.035, yref="y domain",
-                line=dict(color=colors["accent"], width=2), row=1, col=1,
-            )  # fmt: skip
+                line=dict(color=colors["accent"], width=2),
+            ))  # fmt: skip
         fig.add_trace(
             go.Scatter(
                 x=[None], y=[None], mode="markers", name=s_label, hoverinfo="skip",
@@ -361,11 +372,6 @@ def payoff_figure(
             row=1,
             col=1,
         )  # fmt: skip
-    if note:
-        fig.add_annotation(
-            x=0.0, y=1.0, xref="x domain", yref="y domain", text=note, showarrow=False, xanchor="left",
-            yanchor="top", yshift=NOTE_SHIFT, align="left", font=dict(size=11, color=colors["muted"]), row=1, col=1,
-        )  # fmt: skip
     if strip is not None:
         values, title = strip
         fig.add_trace(
@@ -380,11 +386,12 @@ def payoff_figure(
             row=2,
             col=1,
         )
-        _hline(fig, 2, dict(color=colors["rule"], width=charts.REFERENCE_WIDTH))
+        shapes.append(_hline(2, dict(color=colors["rule"], width=charts.REFERENCE_WIDTH)))
         fig.update_yaxes(title_text=title, row=2, col=1, nticks=3, tickformat=",.0f")
+    fig.update_layout(shapes=shapes, annotations=annotations)
     height = PNL_HEIGHT + (STRIP_HEIGHT if strip is not None else 0)
     charts.style(fig, colors, height)
-    # Headroom above the curves for the three lines of labels at the plot's top (strikes; S and F; the note).
+    # Headroom above the curves for the two lines of labels at the plot's top (strikes; S and F).
     shown = np.concatenate([np.asarray(c.values, dtype=float)[inside] for c in curves] + [np.zeros(1)])
     low, high = float(np.nanmin(shown)), float(np.nanmax(shown))
     pad = (high - low) or max(abs(high), 1.0)
@@ -392,8 +399,8 @@ def payoff_figure(
         title_text="P&L ($)", row=1, col=1, tickformat="$,.0f", range=[low - 0.06 * pad, high + HEADROOM * pad]
     )
     fig.update_xaxes(range=[lo, hi], showspikes=True, spikemode="across", spikesnap="cursor", spikedash="dot")
-    fig.update_xaxes(title_text="Spot", row=rows, col=1, tickformat=",.0f")
-    fig.update_layout(margin=dict(t=40), legend=dict(font=dict(size=11)))
+    fig.update_xaxes(title_text="Spot" + (f" · {note}" if note else ""), row=rows, col=1, tickformat=",.0f")
+    fig.update_layout(margin=dict(t=40, r=charts.MARGIN["r"] + column), legend=dict(font=dict(size=11)))
     return fig
 
 

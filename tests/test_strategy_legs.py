@@ -143,6 +143,26 @@ def test_a_wing_never_lands_on_its_short_on_any_listed_expiry(published):
     assert lg.WING_POINTS == (50, 100, 150, 200)
 
 
+def test_a_same_day_template_moves_its_wings_into_the_surfaces_reach():
+    # At noon on the day of a PM expiry the chain lists 5,000 to 6,250 but the surface reaches 5,715 to 5,885: the
+    # condor's 100-point wings (5,675 and 5,920) had no vol, and the legs opened in error. Every template's strikes
+    # now have a vol, a wing moved in stays beyond the strike inside it, and each move is noted. At ASOF (above) no
+    # wing of any expiry, delta and wing width moves.
+    published = surface_state.publish(mk.index_market(datetime(2026, 10, 30, 12, 0)))
+    same_day = Expiry(date(2026, 10, 30), "PM")
+    reached = [k for k in published.strikes(same_day) if np.isfinite(published.vol(k, same_day).vol)]
+    assert (min(reached), max(reached)) == (5715.0, 5885.0)
+    notes = []
+    table = lg.index_template("Iron Condor", published, same_day, notes=notes)
+    assert list(table[lg.STRIKE]) == [5715.0, 5775.0, 5820.0, 5885.0]
+    assert notes == ["5,715 for 5,675 on 30‑Oct‑26 PM", "5,885 for 5,920 on 30‑Oct‑26 PM"]
+    for name in lg.index_templates():
+        strikes = lg.index_template(name, published, same_day)[lg.STRIKE]
+        assert all(np.isfinite(published.vol(k, same_day).vol) for k in strikes), name
+    butterfly = list(lg.index_template("Long Call Butterfly", published, same_day)[lg.STRIKE])
+    assert butterfly[0] < butterfly[1] < butterfly[2]  # the wings moved in, never onto the body
+
+
 def test_a_time_spread_puts_its_back_leg_on_the_listed_expiry_nearest_twice_the_front(published):
     table = lg.index_template("Long Call Calendar", published, DEC)
     assert list(table[lg.EXPIRY]) == ["18‑Dec‑26 AM", "19‑Feb‑27 AM"]  # 55.7 and 118.7 days

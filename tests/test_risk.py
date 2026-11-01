@@ -742,3 +742,65 @@ def test_tail_measures_reads_a_second_confidence_off_the_same_pnl():
     for test in doctest.DocTestFinder().find(risk.tail_measures, globs={"tail_measures": risk.tail_measures, "np": np}):
         runner.run(test)
     assert runner.tries == 1 and runner.failures == 0
+
+
+# --- Audit quant-3: the options aged on the calendar clock, the variance on the trading-day one ---------------------
+
+
+def test_calendar_years_age_the_options_and_leave_the_variance_on_trading_days():
+    # From a Friday close the next session is Monday's: one trading day of variance (h/252) but three calendar days
+    # of option life. The trading-day clock aged a 7-day short straddle by 1.45 days and credited $1,122 of decay at
+    # an unchanged spot, where the session is worth $2,501. With calendar_years the P&L is the straddle re-priced in
+    # closed form three calendar days later on the same Gaussian spot draws (one trading day of variance), as the
+    # frozen-vol test above rebuilds it.
+    K, r, q, sigma, T, h, cal = 5800.0, 0.043, 0.013, 0.16, 7 / 365, 1 / 252, 3 / 365
+    market = S.Market(5800, r, sigma, T, q)
+    z = np.random.default_rng(7).standard_normal(100_000)
+    spot = 5800.0 * np.exp((-q - 0.5 * sigma**2) * h + sigma * np.sqrt(h) * z)
+
+    def straddle(s, t):
+        return bs.price(s, K, t, r, sigma, q, "call") + bs.price(s, K, t, r, sigma, q, "put")
+
+    assert -100 * (straddle(5800.0, T - h) - straddle(5800.0, T)) == pytest.approx(1121.60, abs=0.01)
+    assert -100 * (straddle(5800.0, T - cal) - straddle(5800.0, T)) == pytest.approx(2501.41, abs=0.01)
+    config = risk.VaRConfig(0.99, 1, 100_000, "normal", seed=7)
+    res = risk.value_at_risk(STRADDLE, market, config, 100, calendar_years=cal)
+    np.testing.assert_allclose(res.pnl, -100 * (straddle(spot, T - cal) - straddle(5800.0, T)), rtol=0, atol=1e-8)
+    # The trading-day clock is kept without it, and is the same as passing h/252 (the documented library figures).
+    default = risk.value_at_risk(STRADDLE, market, config, 100)
+    np.testing.assert_array_equal(default.pnl, risk.value_at_risk(STRADDLE, market, config, 100, h).pnl)
+    assert (round(default.var), round(res.var)) == (5871, 5388)  # the module docstring's and the Methodology's
+    assert r"is worth \$2,501, and the one-day 99 % VaR is \$5,871 against \$5,388 on the calendar" in _methodology()
+    # The delta-normal VaR is the variance's alone: the same on both clocks.
+    assert res.delta_normal_var == default.delta_normal_var
+    # The comparator's decay takes the calendar time: theta × 3/365 instead of theta / 252.
+    greeks = S.position_greeks(STRADDLE, market)
+    dollar = [100 * float(greeks[name]) for name in ("delta", "gamma", "theta")]
+    assert res.delta_gamma == risk.delta_gamma_var(*dollar, 5800, sigma, 1, 0.99, theta_years=cal)
+    assert default.delta_gamma == risk.delta_gamma_var(*dollar, 5800, sigma, 1, 0.99)
+
+
+def test_calendar_years_settle_a_leg_that_expires_over_the_weekend():
+    # A call with two calendar days left at a Friday close expires before Monday's close: on the calendar clock it
+    # settles at the one-day horizon; on the trading-day clock (1/252 year, 1.45 days) it outlived the horizon.
+    market = S.Market(100, 0.05, 0.2, 2 / 365)
+    call = S.Strategy("Call", (S.Leg("call", 1, 100),))
+    config = risk.VaRConfig(0.99, 1, 50_000, "normal", seed=3)
+    assert risk.value_at_risk(call, market, config).settled_legs == 0
+    settled = risk.value_at_risk(call, market, config, calendar_years=3 / 365)
+    assert settled.settled_legs == 1
+    z = np.random.default_rng(3).standard_normal(50_000)
+    spot = 100 * np.exp((-0.5 * 0.04) / 252 + 0.2 * np.sqrt(1 / 252) * z)
+    expected = np.maximum(spot - 100, 0) - bs.price(100, 100, 2 / 365, 0.05, 0.2)
+    np.testing.assert_allclose(settled.pnl, expected, rtol=0, atol=1e-10)
+
+
+def test_delta_gamma_var_takes_the_decay_over_theta_years():
+    # Without gamma the VaR is the delta-normal VaR (variance over h/252) less theta × theta_years.
+    s = 100 * 0.2 * math.sqrt(1 / 252)
+    plain = risk.delta_gamma_var(100, 0.0, 365, 100, 0.2, 1, 0.99, theta_years=3 / 365)
+    assert plain.var == pytest.approx(100 * s * norm.ppf(0.99) - 3.0, rel=1e-14)
+    with pytest.raises(ValueError, match="theta_years must be positive"):
+        risk.delta_gamma_var(100, 0.0, 365, 100, 0.2, 1, 0.99, theta_years=0.0)
+    with pytest.raises(ValueError, match="calendar_years must be positive"):
+        risk.value_at_risk(STOCK, MARKET, risk.VaRConfig(0.99, 1, 1_000, seed=1), calendar_years=-1.0)

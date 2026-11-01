@@ -51,7 +51,8 @@ from .surface import VolSurface
 
 __all__ = ["ONE_SD", "TWO_SD", "Expiry", "PublishedSurface", "Quote", "SurfaceVol"]
 
-#: Probability inside one and two standard deviations of a normal: the "68%" and "95%" ranges, 68.27% and 95.45%.
+#: Probability inside one and two standard deviations of a normal, 68.27% and 95.45%. The Strategy chart's "68%"
+#: range is ONE_SD; its "95%" range, like the Pricing tab's, is the central 95% (level 0.95), not TWO_SD.
 ONE_SD = math.erf(1.0 / math.sqrt(2.0))
 TWO_SD = math.erf(2.0 / math.sqrt(2.0))
 _SQRT_2PI = math.sqrt(2.0 * math.pi)
@@ -437,7 +438,7 @@ class PublishedSurface:
 
     def rn_range(self, expiry, level: float = ONE_SD) -> tuple[float, float]:
         """The central risk-neutral range of S_T holding probability ``level``: the quantiles at ``(1 − level)/2``
-        and ``(1 + level)/2``. :data:`ONE_SD` (68.27%) and :data:`TWO_SD` (95.45%) are the chart's two ranges."""
+        and ``(1 + level)/2``. The Strategy chart's two ranges are :data:`ONE_SD` (68.27%) and 0.95."""
         lo, hi = self.quantile([(1.0 - level) / 2.0, (1.0 + level) / 2.0], expiry)
         return float(lo), float(hi)
 

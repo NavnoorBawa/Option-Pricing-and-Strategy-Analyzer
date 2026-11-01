@@ -13,7 +13,8 @@ chain. Under the textbook market a leg keeps days to expiry and the flat sidebar
 :func:`index_template` places a template's strikes the way a desk does (RK-9a): with strikes by delta, the short
 strikes are the listed strikes whose own delta, at their own surface vol, is nearest the target
 (``PublishedSurface.delta_strike``), and each wing sits on the first listed strike at least a number of index points
-beyond its short (:func:`beyond`), never on it;
+beyond its short (:func:`beyond`), never on it, and within the surface's reach (moved in, with a note, where the chain
+lists strikes the surface has no vol at: a same-day expiry);
 a template with legs at the money (a butterfly, a vertical) centres on the listed strike nearest the forward and sets
 its other strikes by the wing points.
 """
@@ -182,6 +183,7 @@ def index_template(
     short_delta: float = DEFAULT_SHORT_DELTA / 100,
     wing: float = DEFAULT_WING,
     width: float | None = None,
+    notes: list[str] | None = None,
 ) -> pd.DataFrame:
     """A template's legs on the listed chain (RK-9a).
 
@@ -198,6 +200,12 @@ def index_template(
     at or beyond its target (:func:`beyond`), so a wing is never nearer its body than the wing width and never on it.
     A time spread's back leg is on the listed expiry nearest twice the front's maturity (:func:`_back`).
 
+    A wing beyond the surface's reach would have no vol, and the legs no value: on a same-day expiry at midday the
+    chain lists 5,000 to 6,250 but the surface reaches 5,715 to 5,885, so the default iron condor's wings at 5,670 and
+    5,920 opened as two rows in error and the rest analysed as a naked strangle. Such a wing moves in to the farthest
+    listed strike the surface reaches beyond the strike inside it (nearer its body than the wing width), and ``notes``
+    says so.
+
     Parameters
     ----------
     name : str
@@ -213,6 +221,8 @@ def index_template(
         Wing width in index points.
     width : float, optional
         The strike spacing for ``strikes_by="width"``, in index points.
+    notes : list of str, optional
+        Receives one line for each wing moved into the surface's reach (``5,715 for 5,675 on 30‑Oct‑26 PM``).
 
     Returns
     -------
@@ -222,7 +232,8 @@ def index_template(
     Raises
     ------
     ValueError
-        If the template holds stock, or its strikes cannot be placed.
+        If the template holds stock, or its strikes cannot be placed (no strike within the surface's reach beyond the
+        one inside a wing).
     """
     template = strat.TEMPLATES[name]
     shape = _offsets(template)
@@ -241,17 +252,15 @@ def index_template(
     if strikes_by == "delta" and not centred:
         body[-1] = published.delta_strike(expiry, -short_delta, "put")
         body[1] = published.delta_strike(expiry, short_delta, "call")
-    rows = []
-    for leg, n, multiple in shape:
+    placed: dict[tuple[int, Expiry], float] = {}
+    # The centre and the shorts first, then the wings outward, so that a wing moved into the surface's reach knows the
+    # strike inside it.
+    for _, n, multiple in sorted(shape, key=lambda item: abs(item[1])):
         on = expiries[multiple]
         grid = published.strikes(on)
         sign = 1 if n > 0 else -1
-        if strikes_by == "width":
-            target = atm + n * float(width)  # type: ignore[arg-type]
-        elif centred:
-            target = atm + n * wing
-        else:
-            target = body[sign] + sign * (abs(n) - 1) * wing
+        step = float(width) if strikes_by == "width" else wing  # type: ignore[arg-type]
+        target = atm + n * step if strikes_by == "width" or centred else body[sign] + sign * (abs(n) - 1) * step
         if n == 0 or (strikes_by == "delta" and not centred and abs(n) == 1):
             k = snap(grid, target)  # the centre, or a short strike by delta: the listed strike nearest it
         else:
@@ -265,8 +274,36 @@ def index_template(
                     f"{name}: {expiry_text(*on)} lists no strike at or {where} {strike_text(target, math.nan)}, "
                     "where a wing would go. Pick narrower wings, a nearer delta or another expiry."
                 ) from None
-        rows.append(_row(leg.kind, leg.quantity, k, expiry=expiry_text(*on)))
+            if not np.isfinite(published.vol(k, on).vol):
+                k = _within_reach(published, on, placed.get((n - sign, on), target - sign * step), sign)
+                if k is None:
+                    where = "above" if sign > 0 else "below"
+                    raise ValueError(
+                        f"{name}: {expiry_text(*on)} has no strike within the surface's reach at or {where} "
+                        f"{strike_text(target, math.nan)}, where a wing would go. Pick narrower wings, a nearer delta "
+                        "or another expiry."
+                    )
+                if notes is not None:
+                    notes.append(
+                        f"{strike_text(k, math.nan)} for {strike_text(target, math.nan)} on {expiry_text(*on)}"
+                    )
+        placed[(n, on)] = k
+    rows = [
+        _row(leg.kind, leg.quantity, placed[(n, expiries[multiple])], expiry=expiry_text(*expiries[multiple]))
+        for leg, n, multiple in shape
+    ]
     return frame(rows)
+
+
+def _within_reach(published: PublishedSurface, expiry: Expiry, inner: float, side: int) -> float | None:
+    """The farthest listed strike of ``expiry`` beyond ``inner`` on ``side`` (+1 calls, −1 puts) at which the surface
+    has a vol; None if there is none."""
+    grid = published.strikes(expiry)
+    out = grid[grid > inner] if side > 0 else grid[grid < inner]
+    reached = [float(k) for k in out if np.isfinite(published.vol(float(k), expiry).vol)]
+    if not reached:
+        return None
+    return max(reached) if side > 0 else min(reached)
 
 
 def textbook_template(name: str, strike: float, width: float, expiry: float) -> pd.DataFrame:
