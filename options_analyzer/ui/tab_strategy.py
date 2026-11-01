@@ -36,14 +36,13 @@ from ..vol_surface.published import ONE_SD, TWO_SD, Expiry
 from . import cache, charts, charts_strategy, components, exports, surface_state, whatif
 from . import legs as lg
 from . import market as mk
-from .components import Card, card_row, link_match, table
+from .components import Card, card_row, link_match, link_shown, table
 from .format import (
     MINUS,
     MISSING,
     NB_HYPHEN,
     decay_label,
     md,
-    md_code,
     money,
     money_short,
     number,
@@ -217,16 +216,10 @@ def read_link(params: dict[str, list[str]]) -> list[str]:
         )
     elif asked.strip():
         notes.append(
-            f"This link asks for a strategy named {_shown(asked)}, which is not one of the templates, so it was "
+            f"This link asks for a strategy named {link_shown(asked)}, which is not one of the templates, so it was "
             "ignored."
         )
     return notes
-
-
-def _shown(value: str) -> str:
-    """A link's value as a note quotes it: in a code span, at most 40 characters (as the app's other link notes)."""
-    value = " ".join(value.split())
-    return md_code(value if len(value) <= 40 else value[:39] + "…")
 
 
 def _control(

@@ -19,11 +19,13 @@ from datetime import date, datetime
 import streamlit as st
 
 from .. import clock
+from ..market_data.synthetic import strike_interval
 from ..strategies import Market
 from . import market as mk
 from . import surface_state
 from .format import date as short_date
 from .format import level, pct
+from .format import strike as strike_text
 from .model_config import ModelConfig, model_sidebar  # code that imports ModelConfig from here keeps working
 
 #: The valuation times the index preset accepts (New York wall time): the clock's calendar runs 2000 to 2100, and
@@ -31,6 +33,24 @@ from .model_config import ModelConfig, model_sidebar  # code that imports ModelC
 ASOF_RANGE = (datetime(2000, 1, 3, 0, 0), datetime(2097, 12, 31, 23, 55))
 #: The textbook inputs (version 2's defaults), by widget key.
 TEXTBOOK = {"spot": 100.0, "strike": 100.0, "days": 365, "vol": 20.0, "rate": 5.0, "div": 0.0}
+#: The range each textbook input accepts, by widget key (the link reader checks a link's values against it).
+TEXTBOOK_LIMITS = {
+    "spot": (0.01, 1e7),
+    "strike": (0.01, 1e7),
+    "days": (1, 3650),
+    "vol": (0.1, 500.0),
+    "rate": (-5.0, 50.0),
+    "div": (0.0, 50.0),
+}
+#: What a link note calls each textbook input.
+TEXTBOOK_NAMES = {
+    "spot": "spot price",
+    "strike": "strike",
+    "days": "days to expiry",
+    "vol": "volatility",
+    "rate": "risk-free rate",
+    "div": "dividend yield",
+}
 #: Vol sources of the index preset's contract.
 SURFACE, OVERRIDE = "Surface", "Override"
 #: Session-state key: notes from the sidebar (an expiry moved to a listed one), shown once above the tabs.
@@ -80,6 +100,37 @@ class Inputs:
     @property
     def market(self) -> Market:
         return Market(self.spot, self.rate, self.volatility, self.expiry, self.dividend_yield)
+
+
+def index_strike_limits() -> tuple[float, float]:
+    """The index strike input's range: one listed interval to four times spot. The synthetic chain's spot is
+    :data:`.market.INDEX_SPOT` at every valuation time, so the range is known before the chain is built (the link
+    reader checks a link's strike against it)."""
+    step = float(strike_interval(mk.INDEX_SPOT, "index"))
+    return step, 4 * mk.INDEX_SPOT
+
+
+def snap_strike(strike: float) -> float:
+    """An index strike moved to the nearest strike on the listed interval near the money (5 points for SPX), as a
+    listed contract's strike is: 5,817.37 is priced as 5,815, not as a contract that does not exist."""
+    step = index_strike_limits()[0]
+    return float(step * round(strike / step))
+
+
+def _snap_typed_strike() -> None:
+    """A strike typed off the listed grid moves to the nearest listed one, with a note (the input box shows whole
+    points, so a typed 5,817.37 would read 5817 while it priced 5,817.37)."""
+    state = st.session_state
+    typed = state.get("strike")
+    if typed is None:
+        return
+    step, listed = index_strike_limits()[0], snap_strike(float(typed))
+    if listed != typed:
+        state["strike"] = listed
+        state[_NOTES] = [
+            f"{strike_text(float(typed), step)} is not a listed strike (every {step:g} points near the money), so the "
+            f"nearest listed one, {strike_text(listed, step)}, is used."
+        ]
 
 
 def _apply_preset() -> None:
@@ -211,8 +262,9 @@ def _index_market(sb, model: ModelConfig | None = None) -> Inputs:
         format="%.0f",
         key="strike",
         bind="query-params",
-        help=f"Listed every {step:g} points near the money. ATMF snaps to the listed strike nearest the expiry's "
-        "forward.",
+        on_change=_snap_typed_strike,
+        help=f"Listed every {step:g} points near the money; a strike typed between them moves to the nearest. ATMF "
+        "snaps to the listed strike nearest the expiry's forward.",
     )
     atm_col.button(
         "ATMF",
@@ -277,8 +329,8 @@ def _textbook_market(sb) -> Inputs:
     st.query_params.pop("expiry", None)
     spot = sb.number_input(
         "Spot price",
-        min_value=0.01,
-        max_value=1e7,
+        min_value=TEXTBOOK_LIMITS["spot"][0],
+        max_value=TEXTBOOK_LIMITS["spot"][1],
         value=TEXTBOOK["spot"],
         step=1.0,
         format="%.2f",
@@ -288,8 +340,8 @@ def _textbook_market(sb) -> Inputs:
     )
     strike = sb.number_input(
         "Strike price",
-        min_value=0.01,
-        max_value=1e7,
+        min_value=TEXTBOOK_LIMITS["strike"][0],
+        max_value=TEXTBOOK_LIMITS["strike"][1],
         value=TEXTBOOK["strike"],
         step=1.0,
         format="%.2f",
@@ -298,8 +350,8 @@ def _textbook_market(sb) -> Inputs:
     )
     days = sb.number_input(
         "Days to expiry",
-        min_value=1,
-        max_value=3650,
+        min_value=TEXTBOOK_LIMITS["days"][0],
+        max_value=TEXTBOOK_LIMITS["days"][1],
         value=TEXTBOOK["days"],
         step=1,
         key="days",
@@ -308,8 +360,8 @@ def _textbook_market(sb) -> Inputs:
     )
     vol_pct = sb.number_input(
         "Volatility (%)",
-        min_value=0.1,
-        max_value=500.0,
+        min_value=TEXTBOOK_LIMITS["vol"][0],
+        max_value=TEXTBOOK_LIMITS["vol"][1],
         value=TEXTBOOK["vol"],
         step=0.5,
         format="%.2f",
@@ -319,8 +371,8 @@ def _textbook_market(sb) -> Inputs:
     )
     rate_pct = sb.number_input(
         "Risk-free rate (%)",
-        min_value=-5.0,
-        max_value=50.0,
+        min_value=TEXTBOOK_LIMITS["rate"][0],
+        max_value=TEXTBOOK_LIMITS["rate"][1],
         value=TEXTBOOK["rate"],
         step=0.05,
         format="%.2f",
@@ -330,8 +382,8 @@ def _textbook_market(sb) -> Inputs:
     )
     div_pct = sb.number_input(
         "Dividend yield (%)",
-        min_value=0.0,
-        max_value=50.0,
+        min_value=TEXTBOOK_LIMITS["div"][0],
+        max_value=TEXTBOOK_LIMITS["div"][1],
         value=TEXTBOOK["div"],
         step=0.1,
         format="%.2f",

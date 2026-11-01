@@ -140,6 +140,13 @@ def test_the_index_market_reads_the_chain_back():
         ("2026-11-27", datetime(2026, 11, 27, 13, 0)),  # an early close
         ("2026-10-24", datetime(2026, 10, 23, 16, 0)),  # a Saturday: Friday's close
         ("1999-12-31T16:00", None),
+        # A date alone outside the calendar (2000 to 2100), or whose trading day before falls outside it, is out of
+        # range, not an error: these raised ValueError from the calendar and crashed the app.
+        ("1999-06-01", None),
+        ("2000-01-01", None),
+        ("2098-01-02", None),
+        ("2150-01-01", None),
+        ("2000-01-03", datetime(2000, 1, 3, 16, 0)),  # the first trading day it accepts
         ("noon", None),
     ],
 )
@@ -234,6 +241,84 @@ def test_a_link_sets_the_valuation_time(new_app, asof, shown, notes):
     _ok(at)
     assert at.sidebar.datetime_input(key="asof").value == (shown or mk.last_close())
     assert [w.value for w in at.warning] == notes
+
+
+@pytest.mark.parametrize("asof", ["1999-06-01", "2000-01-01", "2150-01-01"])
+def test_a_link_with_a_date_outside_the_calendar_gets_a_note(new_app, asof):
+    # These crashed the app with the calendar's ValueError (it covers 2000 to 2100).
+    at = new_app(preset=None, asof=asof).run()
+    _ok(at)
+    assert at.sidebar.datetime_input(key="asof").value == mk.last_close()
+    assert len(at.warning) == 1 and f"`{asof}`" in at.warning[0].value
+
+
+@pytest.mark.parametrize("value", ["inf", "-inf", "nan", "1e400"])
+@pytest.mark.parametrize(
+    ("key", "query", "default"),
+    [
+        ("contracts", {"preset": None, "asof": ASOF}, 1),
+        ("multiplier", {"preset": None, "asof": ASOF}, 100),
+        ("days", {}, 365),
+        ("wr", {"tab": "Risk"}, 0),
+    ],
+)
+def test_a_link_with_a_number_that_is_not_finite_gets_a_note(new_app, key, query, default, value):
+    # An integer input read int(float("inf")) from the URL and raised OverflowError on every run of every tab.
+    at = new_app(**query, **{key: value}).run()
+    _ok(at)
+    assert at.number_input(key=key).value == default
+    assert [w.value for w in at.warning if f"`{value}`" in w.value] != []
+    assert key not in at.query_params
+
+
+def test_a_link_with_a_number_out_of_range_gets_a_note(new_app):
+    at = new_app(preset=None, asof=ASOF, strike="100000").run()
+    _ok(at)
+    assert at.sidebar.number_input(key="strike").value == 5815.0  # ATMF
+    assert [w.value for w in at.warning] == [
+        "This link gives the strike as `100000`, which is not a number from 5 to 23,200, so the default is used."
+    ]
+
+
+#: Every parameter bound to a single-choice control or a number, per tab, that a link may hold empty.
+EMPTY_KEYS = {
+    "Pricing": ("pr_metric", "pr_x", "pr_range", "pr_chain_win", "pr_chain_stride", "pr_greeks", "strike", "vol_src"),
+    "Strategy": ("st_view", "st_range", "st_greek", "st_units", "strategy", "contracts", "multiplier", "commission"),
+    "Risk": ("report", "lad_axis", "lad_roll", "lad_metric", "ws", "wv", "wvmode", "wd", "wr"),
+}
+
+
+@pytest.mark.parametrize("tab", list(EMPTY_KEYS))
+def test_a_link_with_empty_values_means_no_parameters(new_app, tab):
+    # An empty value of a required control read as None: ?pr_metric= raised KeyError, ?pr_range= AttributeError.
+    at = new_app(preset=None, asof=ASOF, tab=tab, **dict.fromkeys(EMPTY_KEYS[tab], "")).run()
+    _ok(at)
+    assert not at.warning
+    assert not set(EMPTY_KEYS[tab]) & set(at.query_params)
+
+
+@pytest.mark.parametrize("report", ["Ladder", "Scenarios", "VaR"])
+def test_a_risk_report_link_with_empty_values_opens(new_app, report):
+    keys = ("lad_roll", "lad_metric", "sc_volmode", "var_model", "sc_view", "lad_axis")
+    at = new_app(preset=None, asof=ASOF, tab="Risk", report=report, **dict.fromkeys(keys, "")).run()
+    _ok(at)
+
+
+def test_a_strike_off_the_listed_grid_moves_to_the_nearest_listed_one(new_app):
+    # 5,817.37 priced a contract SPX does not list, while the box showed 5817.
+    at = new_app(preset=None, asof=ASOF, strike="5817.37").run()
+    _ok(at)
+    assert at.sidebar.number_input(key="strike").value == 5815.0
+    assert [w.value for w in at.warning] == [
+        "This link asks for the strike `5817.37`, which is not listed (every 5 points near the money), so the nearest "
+        "listed one, 5,815, is used."
+    ]
+    at.sidebar.number_input(key="strike").set_value(5838.0).run()
+    _ok(at)
+    assert at.sidebar.number_input(key="strike").value == 5840.0
+    assert [i.value for i in at.info] == [
+        "5,838 is not a listed strike (every 5 points near the money), so the nearest listed one, 5,840, is used."
+    ]
 
 
 @pytest.mark.parametrize(

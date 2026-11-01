@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from .format import MISSING, ROW_HEIGHT
+from .format import MISSING, ROW_HEIGHT, md_code
 
 #: Card text in the theme's IBM Plex Sans: values in Medium at 22.75 px (the theme's metricValueFontSize, 1.625rem
 #: of its 14 px base) and deltas in Regular at 12.25 px. Digits (tabular), "$", "+" and "−" are 0.6 em wide in Plex
@@ -362,6 +362,13 @@ def current_key(family: str, key: str) -> str:
 def _plain(text: str) -> str:
     """``text`` in lower case, with each run of characters other than letters and digits read as one space."""
     return " ".join(re.findall(r"[^\W_]+", text.casefold()))
+
+
+def link_shown(value: str) -> str:
+    """A link's value as a note quotes it: as typed, in a code span (no link, icon or formatting), at most 40
+    characters."""
+    value = " ".join(value.split())
+    return md_code(value if len(value) <= 40 else value[:39] + "…")
 
 
 def link_match(value: str, names: Iterable[str], *, aliases: Mapping[str, str] | None = None) -> str | None:
