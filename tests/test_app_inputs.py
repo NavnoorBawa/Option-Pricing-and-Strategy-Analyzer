@@ -297,6 +297,14 @@ def test_a_link_with_empty_values_means_no_parameters(new_app, tab):
     assert not set(EMPTY_KEYS[tab]) & set(at.query_params)
 
 
+def test_an_empty_textbook_parameter_is_no_parameter(new_app):
+    # A link with ?spot= and no preset is not a version-2 link: it opens the index, as a link without ?spot= does.
+    at = new_app(preset=None, asof=ASOF, spot="", days=" ").run()
+    _ok(at)
+    assert at.sidebar.selectbox(key="preset").value == mk.INDEX
+    assert not at.warning
+
+
 @pytest.mark.parametrize("report", ["Ladder", "Scenarios", "VaR"])
 def test_a_risk_report_link_with_empty_values_opens(new_app, report):
     keys = ("lad_roll", "lad_metric", "sc_volmode", "var_model", "sc_view", "lad_axis")

@@ -102,7 +102,9 @@ def _read_link() -> None:
         return
     state[_LINK_READ] = True
     link = {key: st.query_params.get_all(key) for key in st.query_params}
-    params = {key: list(values) for key, values in link.items()}
+    # An empty value (``?pr_metric=``) means no parameter: a required control would read it as no choice, None,
+    # which the tabs cannot use (it raised KeyError), and an empty ``?spot=`` is no textbook input.
+    params = {key: list(values) for key, values in link.items() if key in EMPTY_PARAMS or "".join(values).strip()}
     notes = []
     asked = params.pop("tab", [])
     if asked:
@@ -214,19 +216,16 @@ def _number_params(index: bool) -> dict[str, tuple[str, tuple[float, float] | No
 
 
 def _read_numbers(params: dict[str, list[str]]) -> list[str]:
-    """Drop, in place, the empty values of a link and the numbers its widgets cannot take, and return the notes.
+    """Drop, in place, the numbers of a link that its widgets cannot take, and return the notes.
 
-    An empty value (``?pr_metric=``) means no parameter: a required control would read it as no choice, None, which
-    the tabs cannot use (it raised KeyError). A number input or slider bound to the URL reads its parameter itself and
-    falls back to its default when the value is out of range, but an integer one turns ``inf`` (or ``1e400``) into
-    an int while it reads the link, which raises OverflowError on every run of every tab (the Strategy tab's
-    controls, ``contracts`` among them, are drawn on every run). So a value that is not a finite number in the
-    widget's range is dropped here, with a note, before any widget reads it. Under the index a strike off the
-    5-point grid is moved to the nearest strike on it, as a listed contract's strike is.
+    A number input or slider bound to the URL reads its parameter itself and falls back to its default when the
+    value is out of range, but an integer one turns ``inf`` (or ``1e400``) into an int while it reads the link, which
+    raises OverflowError on every run of every tab (the Strategy tab's controls, ``contracts`` among them, are drawn
+    on every run). So a value that is not a finite number in the widget's range is dropped here, with a note, before
+    any widget reads it. Under the index a strike off the 5-point grid is moved to the nearest strike on it, as a
+    listed contract's strike is.
     """
     notes = []
-    for key in [key for key, values in params.items() if key not in EMPTY_PARAMS and not "".join(values).strip()]:
-        params.pop(key)
     index = params.get("preset", [mk.INDEX])[-1] == mk.INDEX
     for key, (name, limits) in _number_params(index).items():
         if key not in params:
