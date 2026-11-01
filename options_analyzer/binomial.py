@@ -28,6 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from numpy.typing import ArrayLike
 
 from . import black_scholes as bs
 
@@ -76,8 +77,9 @@ class TreeResult:
     epsilon: float = float("nan")
 
 
-def _peizer_pratt(z: float, n: int) -> float:
-    """Peizer-Pratt method-2 inversion used by the Leisen-Reimer tree."""
+def _peizer_pratt(z: ArrayLike, n: int) -> np.ndarray | float:
+    """Peizer-Pratt method-2 inversion used by the Leisen-Reimer tree, elementwise (the synthetic chain's
+    escrowed-dividend trees use it over a vector of strikes)."""
     denom = n + 1.0 / 3.0 + 0.1 / (n + 1.0)
     return 0.5 + np.copysign(0.5, z) * np.sqrt(1.0 - np.exp(-((z / denom) ** 2) * (n + 1.0 / 6.0)))
 

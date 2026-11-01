@@ -368,12 +368,6 @@ def _ex_dates(
     return ex_dates
 
 
-def _peizer_pratt(z: np.ndarray, n: int) -> np.ndarray:
-    """Peizer-Pratt method-2 inversion of the normal distribution, as in the Leisen-Reimer tree."""
-    denom = n + 1.0 / 3.0 + 0.1 / (n + 1.0)
-    return 0.5 + np.copysign(0.5, z) * np.sqrt(1.0 - np.exp(-((z / denom) ** 2) * (n + 1.0 / 6.0)))
-
-
 def _escrowed_american_puts(
     escrowed: float,
     strikes: np.ndarray,
@@ -397,7 +391,7 @@ def _escrowed_american_puts(
     growth = math.exp(r * dt)
     sd = sigma * math.sqrt(T)
     d1 = (np.log(escrowed / K) + r * T) / sd + 0.5 * sd
-    p, p_star = _peizer_pratt(d1 - sd, steps), _peizer_pratt(d1, steps)
+    p, p_star = binomial._peizer_pratt(d1 - sd, steps), binomial._peizer_pratt(d1, steps)  # elementwise
     centred = np.minimum(np.minimum(p, 1.0 - p), np.minimum(p_star, 1.0 - p_star)) > 1e-12
     p_lr = np.where(centred, p, 0.5)
     u = np.where(centred, growth * p_star / p_lr, np.exp((r - 0.5 * sigma**2) * dt + sigma * math.sqrt(dt)))
