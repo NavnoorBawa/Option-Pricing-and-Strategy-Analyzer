@@ -170,7 +170,7 @@ foundation and each reviewed by an independent correctness and design pass befor
 - [ ] VL-1 QuantLib oracle tests for European prices and Greeks and for binomial trees (LBR and ALO oracles exist).
 - [ ] VL-2 Hypothesis property suite on the documented domain.
 - [ ] VL-3 CI hygiene: actions pinned to commit SHAs, zizmor clean, pre-commit, nox, macOS and Windows jobs.
-- [ ] VL-4 Typing gate (mypy, `py.typed`).
+- [ ] VL-4 Typing gate (mypy, `py.typed`). Done: `py.typed`, so type checkers read the package's annotations.
 - [ ] VL-5 Coverage gate and badge.
 - [ ] VL-6 Benchmarks tracked over time.
 - [ ] VL-7 Generated validation report in a model-risk structure, shown in Methodology › Validation.

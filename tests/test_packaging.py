@@ -147,3 +147,12 @@ def test_the_numerical_core_imports_only_its_declared_dependencies():
                 if name.split(".")[0] not in stdlib | _CORE_IMPORTS
             ]
     assert offences == []
+
+
+def test_the_package_is_marked_typed_and_ships_the_marker():
+    # Without py.typed (PEP 561), mypy skipped the installed package ("missing library stubs or py.typed marker")
+    # although most of its functions are annotated. CI's wheel check then confirms the marker is in the wheel.
+    tomllib = pytest.importorskip("tomllib")  # Python 3.11+
+    assert (ROOT / "options_analyzer" / "py.typed").is_file()
+    config = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "py.typed" in config["tool"]["setuptools"]["package-data"]["options_analyzer"]
