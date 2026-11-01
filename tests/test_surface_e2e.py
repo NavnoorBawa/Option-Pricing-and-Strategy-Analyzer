@@ -59,13 +59,15 @@ def test_the_smile_has_one_bar_per_used_quote_and_a_dashed_extrapolation(chromiu
 
 
 def test_the_tiles_and_the_smile_are_above_the_fold(chromium, app_url):  # noqa: F811
-    """At 1,440 × 900 with the sidebar open: the smile's top at most 560 px (the spec's budget; measured 492 px, and
-    595 px with the tiles in two rows of three), the six tiles on one line, and the page in the Smile view at most
-    2,000 px tall (measured 1,758 px; 3,111 px before the desk layout).
+    """At 1,440 × 900 with the sidebar open: the six tiles on one line, their top within the spec's 260 px, the
+    smile's within its 560 px, and the page in the Smile view short.
 
-    The tiles' top is measured at 313 px, not the spec's 260: the header's price cards and the tab bar, above every
-    tab since the desk foundation, end at 226 px, and the data panel takes 73 px (the source, its line in two lines
-    of small text, and Filters on one row; 339 px with the line on a row of its own). The bound here is 320 px."""
+    Measured (three loads, all alike): the tab bar ends at 126 px (the header holds no price cards since they moved
+    into the Pricing tab), the data panel starts at 133 px and takes 87 px (the source, its line in two lines of small
+    text, and Filters on one row), the tiles start at 220 px, the smile at 372 px, and the page is 1,640 px tall
+    (3,111 px before the desk layout). The bounds leave about one line of small text (20 px) for the tiles, 28 px for
+    the smile and 110 px (7%) for the page: the guards they replace (320, 560 and 2,000 px) still assumed the price
+    cards in the header and let 100 px or more of regression through."""
     page = _open(chromium, app_url)
     try:
         layout = page.evaluate(
@@ -79,8 +81,8 @@ def test_the_tiles_and_the_smile_are_above_the_fold(chromium, app_url):  # noqa:
             }"""
         )
         assert layout["count"] == 6 and layout["lines"] == 1, layout
-        assert layout["tiles"] <= 320 and layout["smile"] <= 560, layout
-        assert layout["height"] <= 2000, layout
+        assert layout["tiles"] <= 240 and layout["smile"] <= 400, layout
+        assert layout["height"] <= 1750, layout
     finally:
         page.context.close()
 
