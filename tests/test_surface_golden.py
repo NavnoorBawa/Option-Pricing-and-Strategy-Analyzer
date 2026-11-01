@@ -28,7 +28,9 @@ for (not cleaned, or a spot that is not positive), where the error and the Runti
 
 Two checks. The last bits of ``exp``, ``log`` and the BLAS kernels depend on the library versions and on the CPU, so
 bit-identity is only defined on the platform the fixture was recorded on: there, every output must be identical
-(the whole case, serialised, digests included). Everywhere, every text, count, shape and NaN must be identical and
+(the whole case, serialised, digests included). Those 108 tests (with the path-sensitive cases' RTOL check) are
+collected on the recording platform only, so a CI runner, where the versions and SIMD set differ, neither runs nor
+counts them; the RTOL check below is its golden test. Everywhere, every text, count, shape and NaN must be identical and
 every number but the raw SVI parameters must agree to a relative 1e-6 (absolute 1e-9 near zero), the array values one
 by one. Measured on the recording machine with NumPy's AVX-512 code paths and OpenBLAS's own kernel switched off
 (``NPY_DISABLE_CPU_FEATURES``, ``OPENBLAS_CORETYPE=Haswell``), and with NumPy 1.26, SciPy 1.11 and pandas 2.1, every
@@ -645,13 +647,23 @@ def test_every_name_of_the_flat_module_is_still_importable():
     assert set(star) - {"__builtins__"} == set(recorded["all"])
 
 
-@pytest.mark.parametrize("name", list(CASES))
+def _platform_differences() -> list[str]:
+    """What differs between this platform and the one the fixture was recorded on (empty on the recording one)."""
+    recorded, _ = _golden()
+    return [key for key, value in _environment().items() if recorded["environment"].get(key) != value]
+
+
+#: The checks that are defined on the recording platform only (bit-identity, and the path-sensitive cases within
+#: RTOL) are collected only there, rather than skipped everywhere else: off it, 108 skips stood in the test count
+#: of every CI job (python, numpy, scipy, pandas and the SIMD set all differ on a runner) for checks that never ran.
+ON_RECORDING_PLATFORM = not _platform_differences()
+
+
+@pytest.mark.parametrize("name", [name for name in CASES if ON_RECORDING_PLATFORM or name not in PATH_SENSITIVE])
 def test_outputs_agree_with_the_recording(name):
     """On any platform: every text, count and shape identical, every number within RTOL (ATOL near zero); the
-    path-sensitive cases (PATH_SENSITIVE) on the recording platform only."""
-    recorded, golden = _golden()
-    if name in PATH_SENSITIVE and any(recorded["environment"].get(k) != v for k, v in _environment().items()):
-        pytest.skip("its arbitrage-free search may end elsewhere off the recording platform; see PATH_SENSITIVE")
+    path-sensitive cases (PATH_SENSITIVE) on the recording platform only (elsewhere their invariants are checked)."""
+    _, golden = _golden()
     assert _differences(_outputs(name), golden[name], exact=False) == []
 
 
@@ -670,13 +682,12 @@ def test_path_sensitive_cases_keep_their_invariants(name):
     assert free or "No SVI smile free of static arbitrage was found" in notes or "arbitrage" in notes
 
 
-@pytest.mark.parametrize("name", list(CASES))
-def test_outputs_are_bit_identical_on_the_recording_platform(name):
-    recorded, golden = _golden()
-    differs = [key for key, value in _environment().items() if recorded["environment"].get(key) != value]
-    if differs:
-        pytest.skip(f"bit-identity is defined on the recording platform only; this one differs in {', '.join(differs)}")
-    assert _differences(_outputs(name), golden[name], exact=True) == []
+if ON_RECORDING_PLATFORM:  # elsewhere not collected at all (an empty parametrisation would still count a skip)
+
+    @pytest.mark.parametrize("name", list(CASES))
+    def test_outputs_are_bit_identical_on_the_recording_platform(name):
+        _, golden = _golden()
+        assert _differences(_outputs(name), golden[name], exact=True) == []
 
 
 if __name__ == "__main__":
