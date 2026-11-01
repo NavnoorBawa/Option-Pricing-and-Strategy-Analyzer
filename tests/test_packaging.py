@@ -1,6 +1,10 @@
-"""Packaging: the installed app keeps the repository's Streamlit settings and the launcher fails cleanly."""
+"""Packaging and the repository: the installed app keeps the repository's Streamlit settings, the launcher fails
+cleanly, the checkout holds no ignored files, and every library a test needs is installed by some requirements file."""
 
 import builtins
+import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -34,9 +38,6 @@ def test_launcher_without_streamlit_explains_the_app_extra(monkeypatch):
 
 def _git(*args: str) -> list[str]:
     """Lines of a git command run in the checkout; skips where there is no git repository (an unpacked sdist)."""
-    import shutil
-    import subprocess
-
     if shutil.which("git") is None or not (ROOT / ".git").exists():
         pytest.skip("needs a git checkout")
     result = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, check=True)
@@ -47,3 +48,46 @@ def test_no_tracked_file_is_one_that_gitignore_excludes():
     # Four logs of a failed local run (study_*.log, each one line naming a missing script by its local path) were
     # committed at the repository root; *.log is ignored now, and this catches any other ignored file that slips in.
     assert _git("ls-files", "--cached", "--ignored", "--exclude-standard") == []
+
+
+def _requirements(name: str) -> set[str]:
+    """Distribution names a requirements file lists itself (not through ``-r``), lower-cased."""
+    names = set()
+    for line in (ROOT / name).read_text(encoding="utf-8").splitlines():
+        line = line.split("#")[0].strip()
+        if line and not line.startswith("-"):
+            names.add(re.split(r"[<>=!~;\[ ]", line, maxsplit=1)[0].lower())
+    return names
+
+
+#: Where each library that a test skips without comes from: the requirements file that lists it, or the dependency
+#: that brings it. A test that skips on a library no CI job installs is a test that never runs in CI.
+_SKIPPED_WITHOUT = {
+    "brotli": ("brotli", "requirements-dev.txt"),
+    "fontTools.ttLib": ("fonttools", "requirements-dev.txt"),
+    "hypothesis": ("hypothesis", "requirements-dev.txt"),
+    "mpmath": ("mpmath", "requirements-dev.txt"),
+    "QuantLib": ("quantlib", "requirements-oracle.txt"),
+    "py_lets_be_rational": ("lets-be-rational", "requirements-oracle.txt"),
+    "xlsxwriter": ("xlsxwriter", "requirements.txt"),
+    "requests": ("streamlit", "requirements.txt"),  # a dependency of Streamlit's
+    "playwright.sync_api": None,  # the browser tests: installed by hand (CONTRIBUTING.md)
+    "tomllib": None,  # the standard library from Python 3.11
+}
+
+
+def test_every_library_a_test_skips_without_is_installed_by_a_requirements_file():
+    # The five font-metric tests skipped in every CI job because fontTools and brotli were in no requirements file.
+    # tests/test_harness.py names missing libraries on purpose, to check the skip guards.
+    pattern = re.compile(r"""importorskip\(\s*["']([\w.]+)["']""")
+    skipped = {
+        name
+        for path in sorted((ROOT / "tests").glob("**/*.py"))
+        if path.name != "test_harness.py"
+        for name in pattern.findall(path.read_text(encoding="utf-8"))
+    }
+    assert skipped <= set(_SKIPPED_WITHOUT), f"say where {sorted(skipped - set(_SKIPPED_WITHOUT))} comes from"
+    for module, source in _SKIPPED_WITHOUT.items():
+        if source is not None:
+            distribution, requirements = source
+            assert distribution in _requirements(requirements), f"{module}: {requirements} lacks {distribution}"

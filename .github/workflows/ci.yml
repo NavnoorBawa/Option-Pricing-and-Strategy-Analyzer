@@ -48,7 +48,10 @@ jobs:
           cache: pip
           cache-dependency-path: requirements*.txt
       - name: Install dependencies
-        run: pip install -r requirements-dev.txt
+        # The font-metric tests skip when fontTools or brotli does not import; here that stops the job instead.
+        run: |
+          pip install -r requirements-dev.txt
+          python -c "import brotli, fontTools.ttLib"
       - name: Run tests
         # One worker per CPU; --dist loadfile keeps each test file (and its Streamlit AppTests) on one worker.
         # Network canaries and browser tests run in their own workflows.
@@ -70,6 +73,7 @@ jobs:
           printf '%s\n' "numpy==1.26.*" "pandas==2.1.*" "scipy==1.11.*" "plotly==5.24.*" "streamlit==1.65.*" \
             "xlsxwriter==3.1.*" > "$RUNNER_TEMP/oldest.txt"
           pip install -r requirements-dev.txt -c "$RUNNER_TEMP/oldest.txt"
+          python -c "import brotli, fontTools.ttLib"
           pip list
       - name: Run tests
         run: pytest -n auto --dist loadfile -q -m "not network and not e2e"
