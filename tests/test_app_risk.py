@@ -382,6 +382,24 @@ def test_a_position_on_two_expiries_names_each_leg_and_expiry_with_its_settlemen
     assert k == 5830
 
 
+@pytest.mark.parametrize("strategy", ["Long Call Calendar", "Diagonal (Poor Man's Covered Call)"])
+def test_the_position_line_reads_the_strategy_tabs_maximum_loss(strategy):
+    # With the index's dividend yield (1.27%) the long back call gains less than $1 per $1 rise, so the loss is
+    # unbounded only far above the strikes (the calendar's passes its debit near 3.4 × spot). The Strategy tile reads
+    # the worst P&L within the RN 99.9% range, the debit (−$8,500; −$51,065 for the diagonal); the line read
+    # "Unlimited" for the same position. Both now read the same loss over the same range, and it is the debit: the
+    # calls' value at the range's low end, 3,868, is below half a dollar a contract.
+    tiles = {
+        m.label: m
+        for m in _ok(make_app(preset=None, asof=ASOF, strategy=strategy, tab="Strategy").run(timeout=240)).metric
+    }
+    tile, premium = tiles["Max loss"], tiles["Net premium"]
+    assert tile.proto.delta == "RN 99.9% range" and premium.proto.delta == "debit"
+    assert tile.value == "−" + premium.value
+    line = _line(_risk(strategy=strategy))
+    assert line.endswith(f"max loss at expiry {tile.value.replace('$', chr(92) + '$')} in the RN 99.9% range")
+
+
 def test_tiles_follow_the_what_if_state(index):
     # ?ws=-2&wv=3&wd=5: spot −2%, +3 vol points on every leg's own vol, Friday 23-Oct 16:00 to Friday 30-Oct 16:00.
     at = _risk(ws=-2, wv=3, wd=5)

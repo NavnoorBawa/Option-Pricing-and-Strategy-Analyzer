@@ -36,7 +36,7 @@ import streamlit as st
 
 from .. import attribution, clock, margin, risk, scenarios
 from .. import strategies as strat
-from . import cache, charts, charts_risk, whatif
+from . import cache, charts, charts_risk, tab_strategy, whatif
 from . import legs as lg
 from . import market as mk
 from .components import Card, card_row, table
@@ -567,10 +567,17 @@ def expiry_text(book: Book) -> str:
     return ", ".join(seen[k] for k in sorted(seen))
 
 
-def position_line(book: Book, max_loss: float) -> str:
+def position_line(book: Book, max_loss: float, within: tuple[float, float] | None = None) -> str:
     """The context line (UI spec 3.3 item 1): the position, its legs' expiries, its size and its maximum loss at the
-    front expiry; with a scenario, the what-if P&L against today."""
+    front expiry; with a scenario, the what-if P&L against today.
+
+    The maximum loss is the Strategy tab's Max loss tile (:func:`.tab_strategy.position_max_loss`): read ``within``
+    the 99.9% range to the front expiry when the loss grows without bound only through the dividend yield. The line
+    said "Unlimited" for the index's long call calendar, whose tile reads its debit, −$8,500.
+    """
     loss = "Unlimited" if math.isinf(max_loss) else dollars(-max_loss) if max_loss > 0 else "none"
+    if within is not None and max_loss > 0:
+        loss += f" in the {'RN ' if book.index else ''}99.9% range"
     # "at expiry": a stress revalues today, with its rate shock, and can lose more (the iron condor's GFC stress,
     # −$4,550 with r cut below zero, against a max loss of −$4,548 at expiry and today's rates).
     parts = [book.position.describe(), expiry_text(book), md(f"max loss at expiry {loss}")]
@@ -1531,8 +1538,7 @@ def render(position: Position | None, inputs: Inputs) -> None:
         horizon=_front(as_of, front_years),
     )
     book = make_book(position, inputs, shifts)
-    metrics = strat.analyze(position.strategy, position.market)
-    line.markdown(position_line(book, metrics.max_loss * position.units))
+    line.markdown(position_line(book, *tab_strategy.position_max_loss(position, inputs)))
     # Three pairs: one line of six on a laptop with the sidebar open, 2 + 2 + 2 on a phone (two groups of three went
     # 2 + 1 + 2 + 1 there).
     card_row("risk_tiles", ("risk_tiles_delta", "risk_tiles_vol", "risk_tiles_losses"), _tile_cards(book, tiles(book)))

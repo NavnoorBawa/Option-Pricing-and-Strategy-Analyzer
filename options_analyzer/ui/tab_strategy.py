@@ -111,6 +111,7 @@ class Position:
     contracts: int
     multiplier: float
     book: lg.Book | None = field(default=None, compare=False)
+    carry: bool = False  # the premium financed at r (the builder's setting), for the maximum loss at expiry
 
     @property
     def units(self) -> float:
@@ -710,7 +711,7 @@ def build_position(inputs: Inputs) -> Position | None:
     book = _price(inputs, choice, frame)
     if book.strategy is None or book.errors:
         return None
-    return Position(book.strategy, book.market, choice.contracts, choice.multiplier, book)
+    return Position(book.strategy, book.market, choice.contracts, choice.multiplier, book, choice.carry)
 
 
 # --- Structure steppers and row actions (UI-8): callbacks on the legs state ---------------------------------------
@@ -878,30 +879,66 @@ def _elapsed(ctx: _Context, sessions: int) -> float:
 BOUNDED_LEVEL = 0.999
 
 
-def worst_loss(ctx: _Context) -> tuple[float, tuple[float, float] | None]:
+def dividend_range(
+    strategy: strat.Strategy, market: strat.Market, horizon: float, published=None, front: Expiry | None = None
+) -> tuple[float, float] | None:
+    """The spot range the expiry tiles are read over when the position loses without bound only through the dividend
+    yield (a long calendar or diagonal under the index): the central :data:`BOUNDED_LEVEL` of the price at the front
+    expiry, risk-neutral from the smile when ``published`` and ``front`` are given, log-normal at the flat vol
+    otherwise. ``None`` for any other position, whose tiles read every spot."""
+    if not strat.unbounded_loss_from_dividends(strategy, market, horizon):
+        return None
+    if published is not None and front is not None:
+        lo, hi = published.rn_range(front, BOUNDED_LEVEL)
+        return float(lo), float(hi)
+    sd = market.volatility * math.sqrt(horizon)
+    median = market.spot * math.exp((market.rate - market.dividend_yield) * horizon - 0.5 * sd * sd)
+    z = float(ndtri(0.5 + BOUNDED_LEVEL / 2))
+    return median * math.exp(-z * sd), median * math.exp(z * sd)
+
+
+def max_loss(
+    strategy: strat.Strategy,
+    market: strat.Market,
+    metrics: strat.StrategyMetrics,
+    units: float,
+    carry: bool = False,
+    published=None,
+    front: Expiry | None = None,
+) -> tuple[float, tuple[float, float] | None]:
     """The position's maximum loss ($, positive) at the front expiry, and the spot range it was read over (None: every
-    spot).
+    spot). The Strategy tab's Max loss tile and the Risk tab's position line both read it, so the two agree.
 
     A long calendar or diagonal loses without bound only because a dividend yield makes its long back call gain less
     than $1 for each $1 rise: on the default index calendar the loss passes the debit near 3.4 × spot. A desk reads its
-    worst case as about the debit, so this loss is the worst P&L over the central :data:`BOUNDED_LEVEL` of the price
-    at the front expiry (risk-neutral from the smile under the index, log-normal at the flat vol otherwise), on 2,001
-    spots and every strike inside. Any other unbounded loss (a short call) stays infinite."""
-    m = ctx.metrics
-    if math.isfinite(m.max_loss) or not strat.unbounded_loss_from_dividends(ctx.entered, ctx.market):
-        return m.max_loss * ctx.units, None
-    market, T = ctx.market, m.horizon
-    if ctx.index and ctx.front is not None:
-        lo, hi = ctx.published.rn_range(ctx.front, BOUNDED_LEVEL)
-    else:
-        sd = market.volatility * math.sqrt(T)
-        median = market.spot * math.exp((market.rate - market.dividend_yield) * T - 0.5 * sd * sd)
-        z = float(ndtri(0.5 + BOUNDED_LEVEL / 2))
-        lo, hi = median * math.exp(-z * sd), median * math.exp(z * sd)
-    strikes = [k for k in ctx.entered.strikes if lo < k < hi]
+    worst case as about the debit, so this loss is the worst P&L over :func:`dividend_range`, on 2,001 spots and every
+    strike inside. Any other unbounded loss (a short call) stays infinite."""
+    within = None
+    if not math.isfinite(metrics.max_loss):
+        within = dividend_range(strategy, market, metrics.horizon, published, front)
+    if within is None:
+        return metrics.max_loss * units, None
+    lo, hi = within
+    strikes = [k for k in strategy.strikes if lo < k < hi]
     spots = np.unique(np.concatenate([np.linspace(lo, hi, 2001), strikes]))
-    values = strat.pnl(ctx.entered, market, spots, T, ctx.choice.carry) * ctx.units
-    return float(-np.min(values)), (float(lo), float(hi))
+    values = strat.pnl(strategy, market, spots, metrics.horizon, carry) * units
+    return float(-np.min(values)), within
+
+
+def position_max_loss(position: Position, inputs: Inputs) -> tuple[float, tuple[float, float] | None]:
+    """:func:`max_loss` of a position as the Strategy tab's tile reads it (entries fixed as :func:`_entered` fixes
+    them, the position's carry setting), for the Risk tab's position line."""
+    entered = _entered(position.strategy, position.market)
+    metrics = strat.analyze(entered, position.market, None, position.carry)
+    published = _published(inputs)
+    front = position.book.front if published is not None and position.book is not None else None
+    return max_loss(entered, position.market, metrics, position.units, position.carry, published, front)
+
+
+def worst_loss(ctx: _Context) -> tuple[float, tuple[float, float] | None]:
+    """:func:`max_loss` of the tab's position."""
+    published = ctx.published if ctx.index else None
+    return max_loss(ctx.entered, ctx.market, ctx.metrics, ctx.units, ctx.choice.carry, published, ctx.front)
 
 
 def _probability(ctx: _Context) -> tuple[float, str, float, float]:
@@ -1026,10 +1063,24 @@ def _tiles(ctx: _Context) -> None:
             {"delta": basis_front if multi else None, "delta_color": "off", "delta_arrow": "off",
              "help": md(f"The worst P&L at the {basis_front}: {worst}.{later}")},
         )  # fmt: skip
-    be = sorted(m.breakevens)
     spot = market.spot
+    # Over the Max loss tile's range: a diagonal under the index (q 1.27%) listed a second breakeven at 124,510
+    # (+2,046.7%), where the long back call's shortfall of e^(−qτ) per $1 rise has eaten the spread's width.
+    be = sorted(b for b in m.breakevens if within is None or within[0] <= b <= within[1])
+    outside = [b for b in m.breakevens if b not in be]
+    outside_text = (
+        f" Read within the {'RN ' if ctx.index else ''}99.9% range, as Max loss; beyond it: "
+        + ", ".join(f"{b:,.{breakeven_decimals(spot)}f} ({_pct_text(b / spot - 1)})" for b in outside)
+        + "."
+        if outside
+        else ""
+    )
     if not be:
-        be_tile: Card = ("Breakevens", "none", {"help": "The P&L at the front expiry never changes sign."})
+        be_tile: Card = (
+            "Breakevens",
+            "none",
+            {"help": f"The P&L at the front expiry never changes sign.{outside_text}"},
+        )
     else:
         nearest = sorted(sorted(be, key=lambda b: abs(b - spot))[:2])
         more = len(be) - len(nearest)
@@ -1040,7 +1091,8 @@ def _tiles(ctx: _Context) -> None:
             "Breakevens",
             value,
             {"delta": delta, "delta_color": "off", "delta_arrow": "off",
-             "help": f"Where the P&L at the front expiry changes sign, with the change from today's spot: {listing}."},
+             "help": f"Where the P&L at the front expiry changes sign, with the change from today's spot: {listing}."
+             f"{outside_text}"},
         )  # fmt: skip
     p, basis, mean, sd = _probability(ctx)
     prob_tile: Card = (
@@ -1593,7 +1645,7 @@ def render(inputs: Inputs) -> None:
         st.info("No legs are on. Pick a template or switch a leg on in the blotter.")
         _blotter(None, inputs, choice, state, frame, editor_key, book, None)
         return
-    position = Position(book.strategy, book.market, choice.contracts, choice.multiplier, book)
+    position = Position(book.strategy, book.market, choice.contracts, choice.multiplier, book, choice.carry)
     entered = _entered(book.strategy, book.market)
     metrics = strat.analyze(entered, book.market, None, choice.carry)
     if index and book.front is not None:

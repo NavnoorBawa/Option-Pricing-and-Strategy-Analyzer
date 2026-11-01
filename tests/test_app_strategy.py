@@ -516,6 +516,35 @@ def test_a_calendar_reads_its_maximum_at_the_front_expiry_with_subtotals_per_exp
     assert np.isfinite(z).all() and -100.0 <= z[:, -1].min() < -99.0  # the 95% range's low end: -99.74%
 
 
+def test_a_diagonals_breakevens_are_read_over_the_max_loss_range():
+    # The index diagonal (+1 5,400C 19-Feb-27 / −1 6,150C 18-Dec-26) turns to a loss again only where the long back
+    # call's shortfall of 1 − e^(−qτ) per $1 rise has eaten the spread's width: 124,510, +2,046.7%, which the tile
+    # listed beside 5,851. The tile reads its breakevens over the Max loss tile's range and names the other in its
+    # help. The far root is checked here as a root of the expiry P&L, from the closed form at the back leg's own vol.
+    at = _index(strategy="Diagonal (Poor Man's Covered Call)")
+    loss, be = _metric(at, "Max loss"), _metric(at, "Breakevens")
+    lo, hi = (float(x.replace(",", "")) for x in re.search(r"to it, ([\d,]+)–([\d,]+)", loss.proto.help).groups())
+    shown = [float(x.replace(",", "")) for x in be.value.split(" / ")]
+    assert shown and all(lo <= b <= hi for b in shown)
+    assert len(shown) == 1 and be.proto.delta == "+0.9%"
+    far = float(re.search(r"beyond it: ([\d,.]+) \(", be.proto.help).group(1).replace(",", ""))
+    assert far > hi and "Read within the RN 99.9% range" in be.proto.help
+    context = mk.index_market(datetime.fromisoformat(ASOF))
+    published = surface_state.publish(context)
+    back = Expiry(date(2027, 2, 19), "AM")
+    # Every leg at the front expiry's parity carry (legs.price_index); far in the money the vol does not matter.
+    r, q = mk.carry(published.forward(DEC), published.discount_factor(DEC), context.spot, published.maturity(DEC))
+    t_back = published.maturity(back) - published.maturity(DEC)
+    entry = 510.65  # the debit per share at the chain's mids (the Net premium tile)
+    assert _metric(at, "Net premium").value == "$51,065"
+
+    def expiry_pnl(s):
+        long_call = bs.price(s, 5400.0, t_back, r, published.vol(5400.0, back).vol, q)
+        return long_call - max(s - 6150.0, 0.0) - entry
+
+    assert expiry_pnl(far * 0.999) > 0 > expiry_pnl(far * 1.001)
+
+
 def test_leg_edits_survive_a_visit_to_the_risk_tab_on_the_index():
     at = _edit(_index())
     editor = LegsEditor(at)
