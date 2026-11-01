@@ -143,7 +143,13 @@ def test_the_tiles_at_the_default_index(index_app, default_index):
     assert (tiles["Call"].value, tiles["Put"].value) == (f"{call:.2f}", f"{put:.2f}") == ("97.81", "98.90")
     assert tiles["Call"].delta == f"{call / 5800:.2%} of S" == "1.69% of S"
     assert tiles["Straddle"].value == f"{call + put:.2f}" == "196.71"
-    assert tiles["Straddle"].delta == f"±{(call + put) / 5800:.2%}" == "±3.39%"
+    assert tiles["Straddle"].delta == f"±{(call + put) / 5800:.2%} of S" == "±3.39% of S"
+    # The tile's move is the straddle-implied one (premium / spot), not the move to a breakeven: the breakevens are
+    # K ± premium, asymmetric about spot, and the help names both.
+    low, high = d["K"] - (call + put), d["K"] + (call + put)
+    assert f"{low:,.2f} ({(low / 5800 - 1):.2%} of S)".replace("-", MINUS) in tiles["Straddle"].proto.help
+    assert f"{high:,.2f} (+{(high / 5800 - 1):.2%} of S)" in tiles["Straddle"].proto.help
+    assert "5,618.29 (−3.13% of S) and 6,011.71 (+3.65% of S)" in tiles["Straddle"].proto.help
     assert (tiles["Vol"].value, tiles["Vol"].delta) == (f"{d['sigma']:.2%}", "surface") == ("15.44%", "surface")
     # The forward this strike's pair implies, K + (C mid − P mid)/DF, against the expiry's parity forward.
     (cb, ca), (pb, pa) = d["book"]["call"], d["book"]["put"]

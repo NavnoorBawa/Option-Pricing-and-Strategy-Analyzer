@@ -544,17 +544,23 @@ def _tiles(inputs: Inputs, prices: Prices, market: Contract) -> None:
             )
         )
     straddle = prices.call + prices.put
+    # The straddle-implied move is the premium over spot, the desk's usual reading. It is not the move to either
+    # breakeven: those are K ± premium, which sit asymmetrically about spot unless K = S (at the default index,
+    # −3.13% and +3.65% against the tile's ±3.39%), so the help gives both.
+    low, high = K - straddle, K + straddle
     tiles = [
         *price_tiles,
         (
             "Straddle",
             premium(straddle),
             {
-                "delta": f"±{pct(straddle / S, 2)}",
+                "delta": f"±{pct(straddle / S, 2)} of S",
                 **off,
                 "help": md(
-                    f"Call + put = {premium(straddle, 6)}. As a share of spot, the move to expiry at which the long "
-                    "straddle breaks even."
+                    f"Call + put = {premium(straddle, 6)}; as a share of spot, the straddle-implied move to expiry. "
+                    f"The long straddle breaks even at expiry at K ± premium: {level(low)} "
+                    f"({signed((low / S - 1) * 100, 2)}% of S) and {level(high)} ({signed((high / S - 1) * 100, 2)}% "
+                    "of S), before the premium's financing."
                 ),
             },
         ),
