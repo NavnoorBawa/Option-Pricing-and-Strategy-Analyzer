@@ -621,10 +621,16 @@ class _Puts(NamedTuple):
 def _tree_puts(
     value: np.ndarray, live: np.ndarray, S: np.ndarray, K: np.ndarray, T: float, r: float, sigma: float, q: float
 ) -> np.ndarray:
-    """The fallback: :func:`binomial.extrapolated_price` for the live rows of ``value`` (changed in place). It costs
-    two Leisen-Reimer trees (2,001 and 4,003 steps), about 60 ms, per option."""
+    """The fallback: :func:`binomial.extrapolated_price` for the live rows of ``value`` (changed in place), which holds
+    the no-arbitrage floor max(European, intrinsic) on entry. It costs two Leisen-Reimer trees (2,001 and 4,003
+    steps), about 60 ms, per option.
+
+    The tree's value is kept at or above the floor: where early exercise is worth nothing the extrapolated tree can
+    land a rounding error below the European value (−6.7e-16 on a put with S 133, K 20, T 1, r 2.2e-16, σ 100 %),
+    a negative early-exercise premium."""
     for i in np.flatnonzero(live):
-        value[i] = binomial.extrapolated_price(S[i], K[i], T, r, sigma, q, "put", True, _TREE_STEPS)
+        tree = binomial.extrapolated_price(S[i], K[i], T, r, sigma, q, "put", True, _TREE_STEPS)
+        value[i] = max(tree, value[i])
     return value
 
 

@@ -205,6 +205,14 @@ def test_the_value_lies_between_the_no_arbitrage_bounds(S, K, T, r, q, sigma, ki
     assert details.value <= binomial.american_upper_bound(S, K, T, r, q, kind)
 
 
+def test_the_tree_fallback_never_prices_below_the_european_value():
+    # Found by the bounds property above: at r = 2.2e-16 the boundary does not converge, the tree values the put,
+    # and the extrapolated tree came out 6.7e-16 below the European value (a negative early-exercise premium).
+    details = am.price_details(133.0, 20.0, 1.0, 2.220446049250313e-16, 1.0, 0.0, option_type="put")
+    assert details.method == "tree" and details.fallback_reason == "not converged"
+    assert details.value >= details.european and details.premium >= 0.0
+
+
 @pytest.mark.parametrize("scheme", sorted(am.SCHEMES))
 def test_the_value_is_monotone_in_volatility_expiry_and_strike(scheme):
     """Non-decreasing in sigma and T, and in K for a put (non-increasing for a call), along lines of +-10 % in
