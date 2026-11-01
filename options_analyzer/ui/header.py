@@ -1,6 +1,6 @@
 """The desk header strip: what is on screen, and the app's actions.
 
-One row above the price cards, ``st.container(horizontal=True, key="desk_header")``, holds:
+One row above the tabs, ``st.container(horizontal=True, key="desk_header")``, holds:
 
 * the identity block: the "Options Analytics" brand and the contract ticker in IBM Plex Mono
   (:func:`ticker`, ``S 100.00 · K 100.00 · 26-Oct-27 (365d) · σ 20.00% · r 5.00% · q 0.00% · F 105.13``);
@@ -174,7 +174,7 @@ def model_badge(model: ModelConfig) -> str:
     Parameters
     ----------
     model : ModelConfig
-        The model of the price cards.
+        The pricing model of the Pricing and IV tabs.
 
     Returns
     -------

@@ -33,7 +33,7 @@ ASOF_RANGE = (datetime(2000, 1, 3, 0, 0), datetime(2097, 12, 31, 23, 55))
 TEXTBOOK = {"spot": 100.0, "strike": 100.0, "days": 365, "vol": 20.0, "rate": 5.0, "div": 0.0}
 #: Vol sources of the index preset's contract.
 SURFACE, OVERRIDE = "Surface", "Override"
-#: Session-state key: notes from the sidebar (an expiry moved to a listed one), shown once above the price cards.
+#: Session-state key: notes from the sidebar (an expiry moved to a listed one), shown once above the tabs.
 _NOTES = "market_notes"
 
 
