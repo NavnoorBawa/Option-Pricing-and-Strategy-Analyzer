@@ -409,7 +409,7 @@ def _upload_source(inputs: Inputs, upload) -> Shown | None:
         st.error("The uploaded file is not a text CSV.")
         return None
     if fit is None:
-        st.error(f"Could not build a surface from {md_code(name)}: {error}")
+        st.error(f"Could not build a surface from {md_code(name)}: {_sentence(error)}")
         for message in messages:
             st.caption(message)
         return None
@@ -437,6 +437,23 @@ def _upload_source(inputs: Inputs, upload) -> Shown | None:
         name,
         vendor,
     )
+
+
+def _sentence(reason: object) -> str:
+    """A reader's reason as the end of a sentence: with its full stop (the readers' messages have none).
+
+    >>> _sentence("found columns: foo, bar"), _sentence("no valid rows remain."), _sentence(" 3 rows ")
+    ('found columns: foo, bar.', 'no valid rows remain.', '3 rows.')
+    """
+    text = str(reason).strip()
+    return text if text.endswith((".", "!", "?")) else f"{text}."
+
+
+def _layout_list(container, lead: str) -> None:
+    """The layouts an upload is read in, one line each under ``lead``: the empty state's, and under a file that
+    matched none of them."""
+    lines = "\n".join(f"- :small[{line}]" for line in (*LAYOUTS, QUOTES_LAYOUT))
+    container.markdown(f":small[{lead}]\n{lines}")
 
 
 def _dropped_reading(messages, fit: dg.ChainFit) -> int:
@@ -471,13 +488,19 @@ def _quotes_table_source(
         st.error("The uploaded file is not a UTF-8 text CSV.")
         return None
     except (vs.QuoteParseError, ValueError, pd.errors.ParserError) as exc:
-        st.error(f"Could not build a surface from this file: {exc}")
+        # Every file that gets here failed the three chain layouts too (read_chain refused it): say so, and keep the
+        # layouts on screen, so that a chain short of one column is not told only what a table of quotes needs.
+        st.error(
+            "Could not build a surface from this file. It is in none of the three chain layouts; read as a table of "
+            f"quotes, {_sentence(exc)}"
+        )
+        _layout_list(st, "The layouts the app reads:")
         return None
     for message in messages:
         if isinstance(message, vs.QuoteWarning):  # a unit was guessed: the surface may be read wrongly
             st.warning(message)
     if error or surface is None:
-        st.error(f"Could not build a surface from this file: {error}")
+        st.error(f"Could not build a surface from this file: {_sentence(error)}")
         for message in messages:
             if not isinstance(message, vs.QuoteWarning):
                 st.caption(message)
@@ -714,8 +737,7 @@ def _data_panel(inputs: Inputs) -> Shown | None:
         kept = st.session_state.get("quotes_upload")
         upload = _uploader(panel, compact=kept is not None)
         if upload is None:
-            lines = "\n".join(f"- :small[{line}]" for line in (*LAYOUTS, QUOTES_LAYOUT))
-            panel.markdown(f":small[Upload a chain: a CSV file in one of these layouts.]\n{lines}")
+            _layout_list(panel, "Upload a chain: a CSV file in one of these layouts.")
             if inputs.context is not None:
                 panel.button("Use synthetic", key="surface_use_synthetic", on_click=_use_synthetic)
             return None

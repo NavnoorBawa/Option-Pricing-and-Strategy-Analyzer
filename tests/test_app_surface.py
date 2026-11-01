@@ -596,6 +596,20 @@ def test_a_malformed_file_names_the_columns_found_and_needed(app):
     assert any("found columns: Price, When" in e.value for e in app.error)
 
 
+def test_a_file_in_no_layout_says_so_and_keeps_the_layouts_on_screen(app):
+    # The error named only what a table of quotes needs, without a full stop, and the list of layouts went away.
+    _upload(app, b"foo,bar\n1,2\n")
+    assert not app.exception
+    [error] = app.error
+    assert error.value == (
+        "Could not build a surface from this file. It is in none of the three chain layouts; read as a table of "
+        "quotes, the file needs a Strike column and a Maturity column (in years) or a Days column; found columns: "
+        "foo, bar."
+    )
+    text = next(m.value for m in app.markdown if m.value.startswith(":small[The layouts the app reads:"))
+    assert text.count("\n- ") == len(tab_surface.LAYOUTS) + 1 == 4
+
+
 def test_quotes_far_from_the_sidebar_spot_are_flagged(app):
     quotes = vol_surface.sample_quotes(5000, 0.05, 0.0).rename(columns={"Maturity": "Maturity (years)"})
     _upload(app, _csv(quotes))
