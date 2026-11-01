@@ -424,11 +424,16 @@ def extrapolated_price(
     """Converged value: Richardson extrapolation of Leisen-Reimer trees with ``steps`` and twice as many.
 
     With early exercise the Leisen-Reimer error is usually close to ``c / n``, so ``(n2 V2 - n1 V1) / (n2 - n1)``
-    removes its leading term: at the defaults the result agrees with the 20,000-step references in the tests to
-    about 1e-5. Where the tree's error is irregular (e.g. a put at very low volatility with a high rate, or
-    several hundred percent volatility over years) the extrapolation is only about as accurate as the finer
-    tree. The result is kept within the no-arbitrage bounds of an American option (see :func:`_american_bounds`).
-    European values use the closed form.
+    removes its leading term. Against QuantLib's QdFp engine at strict settings (``tests/oracle/test_ql_alo.py``),
+    at the defaults it agrees to 1e-5 or better on ordinary inputs (measured 7e-9 to 6.1e-6, from three months to
+    five years), but only to a few 1e-4 deep in the money at multi-year, high-carry inputs: a 120 put on 100 over
+    three years at r 8 % and q 4 % is 2.6e-4 low at 40 % vol, and 3.3e-4 low at 15 %, where the value is clamped
+    onto the intrinsic 20 (the Andersen-Lake-Offengenden engine of :mod:`.american` is within 1.6e-5 of both).
+    Where the tree's error is irregular (e.g. a put at very low volatility with a high rate, or several hundred
+    percent volatility over years) the extrapolation is only about as accurate as the finer tree. The result is kept
+    within the no-arbitrage bounds of an American option (see :func:`_american_bounds`). It is the value
+    :func:`.american.price` falls back to where the exercise region has two boundaries. European values use the
+    closed form.
     """
     european = float(bs.price(S, K, T, r, sigma, q, option_type))
     if not american:
