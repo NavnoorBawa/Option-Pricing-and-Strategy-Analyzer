@@ -35,7 +35,6 @@ import streamlit as st
 from streamlit.delta_generator import DeltaGenerator
 from streamlit.errors import StreamlitAPIException
 
-from ..binomial import METHODS
 from ..market_data.synthetic import SYNTHETIC_LABEL
 from . import market as mk
 from . import surface_state
@@ -61,8 +60,6 @@ SHARE_NOTE = (
 )
 #: The keyboard shortcut of the Methodology button (Streamlit shows Option for Alt on a Mac).
 METHODOLOGY_SHORTCUT = "Alt+Shift+M"
-#: Short names of the binomial lattices for the badge.
-_LATTICE = {"crr": "CRR", "lr": "LR"}
 #: The ticker's items are joined by a no-break space, a middle dot and a space: a line can end after the dot only.
 _SEPARATOR = "\xa0· "
 #: The identity block's text in static/desk.css, in rem of the theme's 14 px root, where the ticker's lines start
@@ -174,36 +171,33 @@ def model_badge(model: ModelConfig) -> str:
     Parameters
     ----------
     model : ModelConfig
-        The pricing model of the Pricing and IV tabs.
+        The pricing model of the Pricing and IV tabs: one of the sidebar's two engines
+        (:data:`.model_config.SIDEBAR_MODELS`). The trees and Monte Carlo run only in the Pricing tab's Engine
+        diagnostics, which name their engine in full (:attr:`.ModelConfig.label`).
 
     Returns
     -------
     str
-        ``BSM · closed form``, ``LR tree · 2,000 steps · American``, ``MC · 1,000,000 paths · AV+CV`` or
-        ``ALO · accurate · American``: a Monte Carlo simulation names the variance reductions in use, which its
-        standard error includes: antithetic variates (AV) and a control variate (CV); the American engine of
-        Andersen, Lake and Offengenden (ALO) names its scheme. The badge's tooltip spells the model out.
+        ``BSM · closed form`` or ``ALO · accurate · American``: the American engine of Andersen, Lake and Offengenden
+        (ALO) names its scheme. The badge's tooltip spells the model out.
+
+    Raises
+    ------
+    ValueError
+        For a diagnostics engine, which the header never shows.
 
     Examples
     --------
-    >>> model_badge(ModelConfig(kind="binomial", steps=2000, american=True))
-    'LR tree · 2,000 steps · American'
-    >>> model_badge(ModelConfig(kind="monte_carlo", n_paths=1_000_000))
-    'MC · 1,000,000 paths · AV+CV'
-    >>> model_badge(ModelConfig(kind="monte_carlo", antithetic=False, control_variate=False))
-    'MC · 100,000 paths'
+    >>> model_badge(ModelConfig())
+    'BSM · closed form'
     >>> model_badge(ModelConfig(kind="alo", scheme="high"))
     'ALO · high · American'
     """
-    if model.kind == "binomial":
-        lattice = _LATTICE.get(model.tree_method, METHODS[model.tree_method])
-        return f"{lattice} tree · {model.steps:,} steps · {'American' if model.american else 'European'}"
-    if model.kind == "monte_carlo":
-        reductions = "+".join(name for name, on in (("AV", model.antithetic), ("CV", model.control_variate)) if on)
-        return f"MC · {model.n_paths:,} paths" + (f" · {reductions}" if reductions else "")
     if model.kind == "alo":
         return f"ALO · {model.scheme} · American"
-    return "BSM · closed form"
+    if model.kind == "bsm":
+        return "BSM · closed form"
+    raise ValueError(f"the header names the sidebar's engines only, not {model.label!r}")
 
 
 def share_link(base: str | None, params: Mapping[str, Sequence[str]]) -> str:
@@ -284,11 +278,11 @@ def render(inputs: Inputs, *, on_methodology: Callable[[], None]) -> DeltaGenera
     ...     from options_analyzer.ui import header
     ...     from options_analyzer.ui.inputs import Inputs
     ...     from options_analyzer.ui.model_config import ModelConfig
-    ...     market = Inputs(100.0, 100.0, 365, 0.2, 0.05, 0.0, ModelConfig(kind="binomial", steps=2000))
+    ...     market = Inputs(100.0, 100.0, 365, 0.2, 0.05, 0.0, ModelConfig(kind="alo"))
     ...     header.render(market, on_methodology=lambda: None)
     >>> at = AppTest.from_function(page).run()
     >>> at.markdown[0].value.split(" S")[0], at.markdown[1].value, at.button[0].label
-    ('**Options Analytics**', ':gray-badge[LR tree · 2,000 steps · European]', 'Methodology')
+    ('**Options Analytics**', ':gray-badge[ALO · accurate · American]', 'Methodology')
     """
     text = ticker(inputs)
     # The width of the identity block's two-line layout, which static/desk.css reads to keep the action group
@@ -313,12 +307,15 @@ def render(inputs: Inputs, *, on_methodology: Callable[[], None]) -> DeltaGenera
         )
     if inputs.vol_overridden:
         assert inputs.surface_vol is not None
-        gap = (inputs.volatility - inputs.surface_vol) * 100
+        if np.isfinite(inputs.surface_vol):
+            gap = (inputs.volatility - inputs.surface_vol) * 100
+            typed_over = f"over the surface's {pct(inputs.surface_vol, 2)} ({gap:+.2f} vp)".replace("-", MINUS)
+        else:  # a strike beyond the surface's reach, which only a typed vol can price
+            typed_over = "where the surface gives no vol (beyond its reach at this expiry)"
         actions.badge(
             "OVERRIDE",
             color="yellow",  # amber: user state (UI spec 2.6); orange is the put colour
-            help=f"σ {pct(inputs.volatility, 2)} typed over the surface's {pct(inputs.surface_vol, 2)} "
-            f"({gap:+.2f} vp).".replace("-", MINUS),
+            help=f"σ {pct(inputs.volatility, 2)} typed {typed_over}.",
         )
     fit_changes = surface_state.settings().changes()
     if fit_changes:  # a fit setting away from its default (the Surface tab's Filters popover): user state

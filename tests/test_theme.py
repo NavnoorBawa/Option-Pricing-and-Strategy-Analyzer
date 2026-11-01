@@ -151,6 +151,18 @@ def _mode(kind: str) -> dict:
     return THEME[kind]
 
 
+def test_every_server_setting_is_a_streamlit_option_and_messages_are_compressed():
+    # A misspelt key is ignored silently. CI runs this on the oldest supported Streamlit (1.65) too. Websocket
+    # compression halves the bytes of every rerun (the config's comment gives the measurements).
+    from streamlit import config as st_config
+
+    options = st_config._config_options_template
+    for section in ("server", "browser", "client"):
+        for key in CONFIG[section]:
+            assert f"{section}.{key}" in options, f"{section}.{key}"
+    assert CONFIG["server"]["enableWebsocketCompression"] is True
+
+
 def test_both_modes_have_exactly_ten_colours_in_every_chart_ramp():
     # With fewer than ten categorical colours Streamlit 1.64-1.66 leaves Plotly's colour placeholders unreplaced and
     # every chart falls back to Plotly's own colours; the diverging and sequential ramps have ten stops too.
@@ -341,6 +353,7 @@ DESK_TESTIDS = {
     "stMetric", "stMetricLabel", "stMetricValue", "stMarkdownContainer", "stTooltipIcon", "stMultiSelect",
     "stNumberInput", "stNumberInputStepUp", "stNumberInputStepDown", "stNumberInputContainer", "stDateTimeInputField",
     "stDateInputField", "stTextInputRootElement", "stSelectbox", "stElementContainer", "stElementToolbar",
+    "stLayoutWrapper",  # the box around a keyed container (1.65 and 1.66): hiding it leaves no gap
 }  # fmt: skip
 #: Attributes other than data-testid: a multiselect's chips have no test id of their own, and the Methodology's
 #: anchors are elements with an id.
@@ -1034,10 +1047,10 @@ _TILE_DELTAS = """() => [...document.querySelectorAll('.st-key-pricing_tiles [da
 @pytest.mark.slow
 @pytest.mark.parametrize("width", [1440, 1024, 390])
 def test_the_pricing_tiles_deltas_are_never_cut_off(chromium, app_url, width):
-    # The six tiles' deltas ("pair −0.29 bp", "±3.39%", "AM settle") are modelled never narrower than their
-    # max-content width, so none ends in an ellipsis, and at most 3 px wider (the model takes "±", which its table of
-    # Plex widths lacks, at the widest character: 2.3 px over on "±3.39%"); on a desktop with the sidebar open the
-    # six stay on one line (UI spec 2.9: at most six tiles a row).
+    # The six tiles' deltas ("pair −0.29 bp", "±3.39% of S", "AM settle") are modelled never narrower than their
+    # max-content width, so none ends in an ellipsis, and at most 3 px wider (the model lacked "±" and took it at the
+    # widest character, "%": 4 px over on the straddle's delta); on a desktop with the sidebar open the six stay on
+    # one line (UI spec 2.9: at most six tiles a row).
     from options_analyzer.ui import components
 
     for query in ("?asof=2026-10-23T16:00", "?preset=Textbook&model=American+%28ALO%29"):

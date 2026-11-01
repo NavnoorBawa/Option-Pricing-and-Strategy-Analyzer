@@ -10,12 +10,33 @@ import numpy as np
 import streamlit as st
 
 from .. import __version__, clock
-from . import header, tab_iv, tab_methodology, tab_pricing, tab_risk, tab_strategy, tab_surface, theme
+from . import (
+    header,
+    surface_state,
+    tab_iv,
+    tab_methodology,
+    tab_pricing,
+    tab_risk,
+    tab_strategy,
+    tab_surface,
+    theme,
+    whatif,
+)
+from . import legs as lg
 from . import market as mk
-from .components import link_match
-from .format import md_code
+from .components import link_match, link_shown
+from .format import MINUS
 from .format import strike as strike_text
-from .inputs import ASOF_RANGE, Inputs, market_notes, sidebar
+from .inputs import (
+    ASOF_RANGE,
+    TEXTBOOK_LIMITS,
+    TEXTBOOK_NAMES,
+    Inputs,
+    index_strike_limits,
+    market_notes,
+    sidebar,
+    snap_strike,
+)
 from .model_config import ALO_SCHEMES, MODEL_ALIASES, MODELS, ModelConfig
 
 REPO_URL = "https://github.com/NavnoorBawa/Option-Pricing-and-Strategy-Analyzer"
@@ -42,17 +63,10 @@ TEXTBOOK_PARAMS = ("spot", "days", "rate", "div")
 #: The settings of version 2's tree and Monte Carlo models, which a link to them carried (``?model=Monte+Carlo&paths=
 #: 250%2C000``): the Engine diagnostics set their own, so the link reader drops them with the model.
 LEGACY_ENGINE_PARAMS = ("tree", "steps", "style", "paths", "seed", "antithetic", "control_variate")
+#: The one parameter bound to the URL whose empty value means something: the Strategy tab's Dated curves, none chosen.
+EMPTY_PARAMS = ("st_dates",)
 #: Session-state keys: the link was read (on the session's first run), and its notes, shown once.
 _LINK_READ, _LINK_NOTES = "link_read", "link_notes"
-#: Session-state key: the header's Methodology button was clicked, so this run opens the Methodology drawer.
-_DRAWER = "methodology_drawer"
-
-
-def _shown(value: str) -> str:
-    """A link's value as a note quotes it: as typed, in a code span (no link, icon or formatting), at most 40
-    characters."""
-    value = " ".join(value.split())
-    return md_code(value if len(value) <= 40 else value[:39] + "…")
 
 
 def _link_asof(value: str) -> datetime | None:
@@ -67,6 +81,10 @@ def _link_asof(value: str) -> datetime | None:
     except ValueError:
         return None
     if len(value.strip()) == 10:  # a date alone
+        # Checked before the calendar is asked: it covers 2000 to 2100 and raises outside it, and the trading day
+        # before 1 January 2000 falls in 1999.
+        if not ASOF_RANGE[0].date() <= moment.date() <= ASOF_RANGE[1].date():
+            return None
         moment = clock.market_close(clock.previous_trading_day(moment.date())).replace(tzinfo=None)
     elif moment.tzinfo is not None:
         moment = clock.to_new_york(moment)
@@ -94,14 +112,16 @@ def _read_link() -> None:
         return
     state[_LINK_READ] = True
     link = {key: st.query_params.get_all(key) for key in st.query_params}
-    params = {key: list(values) for key, values in link.items()}
+    # An empty value (``?pr_metric=``) means no parameter: a required control would read it as no choice, None,
+    # which the tabs cannot use (it raised KeyError), and an empty ``?spot=`` is no textbook input.
+    params = {key: list(values) for key, values in link.items() if key in EMPTY_PARAMS or "".join(values).strip()}
     notes = []
     asked = params.pop("tab", [])
     if asked:
         tab = link_match(asked[-1], TABS, aliases=TAB_ALIASES)
         if tab is None and asked[-1].strip():
             notes.append(
-                f"This link asks for a tab named {_shown(asked[-1])}, which does not exist, so the {TABS[0]} tab "
+                f"This link asks for a tab named {link_shown(asked[-1])}, which does not exist, so the {TABS[0]} tab "
                 "is open."
             )
         if tab not in (None, TABS[0]):  # the first tab has no parameter
@@ -119,7 +139,8 @@ def _read_link() -> None:
             elif value.strip():
                 what = "pricing model" if key == "model" else key
                 notes.append(
-                    f"This link asks for a {what} named {_shown(value)}, which does not exist, so {default} is used."
+                    f"This link asks for a {what} named {link_shown(value)}, which does not exist, so {default} is "
+                    "used."
                 )
     # A version-2 link to a tree or to Monte Carlo (UI spec 2.4): those engines are diagnostics now, so the link opens
     # the closed form with the Pricing tab's Engine diagnostics open. Their settings are dropped with the model.
@@ -152,7 +173,7 @@ def _read_link() -> None:
                 params["preset"] = [preset]
         elif value.strip():
             notes.append(
-                f"This link asks for a market named {_shown(value)}, which does not exist, so the {mk.PRESETS[0]} "
+                f"This link asks for a market named {link_shown(value)}, which does not exist, so the {mk.PRESETS[0]} "
                 "market is used."
             )
     elif any(key in params for key in TEXTBOOK_PARAMS):
@@ -172,15 +193,110 @@ def _read_link() -> None:
             params["asof"] = [f"{moment:%Y-%m-%dT%H:%M}"]
         elif value.strip():
             notes.append(
-                f"This link asks for a valuation time {_shown(value)}, which is not a date and time between 2000 "
-                "and 2097 (2026-10-23T16:00), so the last close is used."
+                f"This link asks for a valuation time {link_shown(value)}, which is not a date and time between 2000 "
+                f"and {ASOF_RANGE[1].year} (2026-10-23T16:00), so the last close is used."
             )
+    notes += _read_numbers(params)
+    notes += _read_strategy_expiry(params)
     # The Strategy tab's template: ?strategy=<name> and the two menus of earlier links (tab_strategy.read_link).
     notes += tab_strategy.read_link(params)
     state[_LINK_NOTES] = notes
     if params != link:
         st.query_params.from_dict(params)
         st.rerun()
+
+
+def _number_params(index: bool) -> dict[str, tuple[str, tuple[float, float] | None]]:
+    """The parameters bound to a number input or a slider of numbers: what a note calls each, and the range its widget
+    accepts (None where the range depends on another setting: the vol shift's on its mode, the date's on the
+    expiry; the widget checks those itself)."""
+    textbook = {key: (name, TEXTBOOK_LIMITS[key]) for key, name in TEXTBOOK_NAMES.items()}
+    common = {
+        "contracts": ("contracts", tab_strategy.CONTRACTS),
+        "multiplier": ("shares per contract", tab_strategy.MULTIPLIER),
+        "commission": ("commission per contract", tab_strategy.COMMISSION),
+        "strategy_width_pct": ("strike width", (tab_strategy.MIN_WIDTH_PCT, tab_strategy.MAX_WIDTH_PCT)),
+        "ws": ("what-if spot move", whatif.SPOT_LIMITS),
+        "wv": ("what-if vol shift", None),
+        "wd": ("what-if date", None),
+        "wr": ("what-if rate shift", whatif.BP_LIMITS),
+    }
+    if not index:
+        return {**textbook, **common}
+    return {"strike": ("strike", index_strike_limits()), "vol": textbook["vol"], **common}
+
+
+def _read_numbers(params: dict[str, list[str]]) -> list[str]:
+    """Drop, in place, the numbers of a link that its widgets cannot take, and return the notes.
+
+    A number input or slider bound to the URL reads its parameter itself and falls back to its default when the
+    value is out of range, but an integer one turns ``inf`` (or ``1e400``) into an int while it reads the link, which
+    raises OverflowError on every run of every tab (the Strategy tab's controls, ``contracts`` among them, are drawn
+    on every run). So a value that is not a finite number in the widget's range is dropped here, with a note, before
+    any widget reads it. Under the index a strike off the 5-point grid is moved to the nearest strike on it, as a
+    listed contract's strike is.
+    """
+    notes = []
+    index = params.get("preset", [mk.INDEX])[-1] == mk.INDEX
+    for key, (name, limits) in _number_params(index).items():
+        if key not in params:
+            continue
+        value = params[key][-1]
+        try:
+            number = float(value)
+        except ValueError:
+            number = math.nan
+        if math.isfinite(number) and (limits is None or limits[0] <= number <= limits[1]):
+            if index and key == "strike":
+                listed = snap_strike(number)
+                if listed != number:
+                    params[key] = [f"{listed:g}"]
+                    notes.append(
+                        f"This link asks for the strike {link_shown(value)}, which is not listed (every "
+                        f"{limits[0]:g} points near the money), so the nearest listed one, "
+                        f"{strike_text(listed, limits[0])}, is used."
+                    )
+            continue
+        params.pop(key)
+        wanted = "a finite number" if limits is None else f"a number from {limits[0]:,g} to {limits[1]:,g}"
+        wanted = wanted.replace("-", MINUS)
+        notes.append(
+            f"This link gives the {name} as {link_shown(value)}, which is not {wanted}, so the default is used."
+        )
+    return notes
+
+
+def _read_strategy_expiry(params: dict[str, list[str]]) -> list[str]:
+    """Check, in place, the Strategy template's expiry in a link (``?strategy_expiry=2026-12-18 AM``) and return the
+    notes. One that is not an expiry is dropped, and one not listed at the link's valuation time moves to the next
+    listed one (the default when none is later), as the tab moves it (``tab_strategy._template_expiry``), but with a
+    note, as the sidebar's expiry gets one: both fell back silently. The textbook market has no listed expiries."""
+    if "strategy_expiry" not in params or params.get("preset", [mk.INDEX])[-1] != mk.INDEX:
+        return []
+    value = params["strategy_expiry"][-1]
+    try:
+        asked = tab_strategy._parse_expiry_param(value)
+    except ValueError:
+        params.pop("strategy_expiry")
+        return [
+            f"This link gives the Strategy expiry as {link_shown(value)}, which is not an expiry (2026-12-18 AM), so "
+            "the monthly nearest 45 days is used."
+        ]
+    asof = params.get("asof")
+    # The market the sidebar builds next, at the default fit settings (cached: no extra fit), and its published
+    # surface (about 30 ms, once a session, for a link that names a Strategy expiry).
+    context = mk.index_market(datetime.fromisoformat(asof[-1]) if asof else mk.last_close())
+    published = surface_state.publish(context)
+    order = lg.listed(published)
+    if asked in order:
+        return []
+    later = [e for e in order if e.day >= asked.day]
+    chosen = later[0] if later else lg.default_expiry(published)
+    params["strategy_expiry"] = [tab_strategy._expiry_param(chosen)]
+    return [
+        f"This link asks for the Strategy expiry {link_shown(value)}, which is not listed at this valuation time, so "
+        f"{lg.expiry_text(*chosen)} is used."
+    ]
 
 
 def beyond_reach(inputs: Inputs) -> str:
@@ -208,11 +324,6 @@ def beyond_reach(inputs: Inputs) -> str:
     )
 
 
-def _open_methodology() -> None:
-    """Ask the next run to open the Methodology drawer (the header's Methodology button)."""
-    st.session_state[_DRAWER] = True
-
-
 def run() -> None:
     """One script run of the app: the page settings, stylesheet and logo, the sidebar, the header strip and the open
     tab. The shell draws no price cards (UI-1): the Pricing tab owns its headline tiles."""
@@ -238,7 +349,7 @@ def run() -> None:
     if not math.isfinite(inputs.volatility):
         # A strike beyond the surface's reach at the focus expiry (typed in the sidebar, or from a link): the tabs
         # cannot price it, so the page says why and stops, rather than fail inside the formulas.
-        header.render(inputs, on_methodology=_open_methodology)
+        header.render(inputs, on_methodology=tab_methodology.open_drawer)
         st.error(beyond_reach(inputs), icon=":material/error:")
         st.stop()
 
@@ -251,8 +362,8 @@ def run() -> None:
         fallback = f"{inputs.model.label}: {exc} Showing Black-Scholes-Merton values instead."
         inputs = replace(inputs, model=replace(inputs.model, kind="bsm"))
         prices = tab_pricing.compute_prices(inputs)
-    share = header.render(inputs, on_methodology=_open_methodology)
-    drawer = st.session_state.pop(_DRAWER, False)
+    share = header.render(inputs, on_methodology=tab_methodology.open_drawer)
+    drawer = st.session_state.pop(tab_methodology.DRAWER_ASKED, False)
     for note in st.session_state.pop(_LINK_NOTES, ()):
         st.warning(note, icon=":material/link_off:")
     for note in market_notes():

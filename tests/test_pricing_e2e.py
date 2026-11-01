@@ -78,6 +78,34 @@ def _call(page) -> str:
     return card.locator("[data-testid=stMetricValue]").inner_text()
 
 
+#: Which of the ladder's two column sets shows, its box, and the gap to the caption under it.
+_LADDER = """() => {
+  const shown = ['pricing_ladder', 'pricing_ladder_phone']
+    .filter(k => document.querySelector('.st-key-' + k).offsetParent !== null);
+  const box = document.querySelector('.st-key-' + shown[0]).getBoundingClientRect();
+  const caption = [...document.querySelectorAll('[data-testid=stCaptionContainer]')]
+    .find(c => c.innerText.includes('strikes,')).getBoundingClientRect();
+  return {shown, left: box.left, right: box.right, gap: caption.top - box.bottom};
+}"""
+
+
+@pytest.mark.parametrize(
+    ("width", "height", "shown"),
+    [(1440, 900, "pricing_ladder"), (641, 900, "pricing_ladder"), (390, 844, "pricing_ladder_phone")],
+)
+def test_a_phone_shows_the_ladder_with_its_strike_first(chromium, app_url, width, height, shown):  # noqa: F811
+    # At 390 px the mirrored ladder showed five call columns before the strike, which the screen's edge cut. Below
+    # 641 px the stylesheet shows the phone's set instead (strike first and pinned: tests/test_app_pricing.py), and
+    # only one set takes room: the gap to the caption is the column's usual 1rem (14 px), not twice it.
+    page = _open(chromium, app_url + INDEX, width=width, height=height)
+    try:
+        ladder = page.evaluate(_LADDER)
+        assert ladder["shown"] == [shown], ladder
+        assert ladder["right"] <= width and ladder["gap"] == pytest.approx(14, abs=1), ladder
+    finally:
+        page.close()
+
+
 def test_a_click_on_a_chain_row_prices_its_strike(chromium, app_url):  # noqa: F811
     # UI spec 3.1 acceptance: clicking the 5,850 row changes the context line to 5,850 and the CALL tile. The grid
     # draws on a canvas: the row's selection box is in its first column, rows 28 px under a 28 px header and 3 px of

@@ -81,11 +81,12 @@ def tree_prices(S, K, T, r, sigma, q, steps, american, method) -> dict:
 
 
 @st.cache_data(show_spinner=False, max_entries=32)
-def tree_convergence(S, K, T, r, sigma, q, max_steps, american) -> tuple[dict, dict]:
-    """Call and put values on both lattices for step counts up to ``max_steps``, and converged references.
-
-    Returns ``(series, references)``: ``series[kind][lattice name] = (steps used, values)`` and
-    ``references[kind]`` (closed form for European exercise, an extrapolated Leisen-Reimer tree for American).
+def tree_convergence(S, K, T, r, sigma, q, max_steps, american) -> dict:
+    """Call and put values on both lattices for step counts up to ``max_steps``: ``series[kind][lattice name] =
+    (steps used, values)``. The Pricing tab measures them against its engine table's reference (the closed form, or
+    the American engine's high scheme), so no reference is computed here: the extrapolated Leisen-Reimer trees it
+    once returned were thrown away, and took 0.19 s of the 0.39 s a new contract cost (S = K = 100, one year,
+    American, 501 steps).
     """
     max_steps = max(int(max_steps), 10)
     grid = np.unique(np.r_[np.geomspace(10, max_steps, 40).astype(int), max_steps])
@@ -103,10 +104,7 @@ def tree_convergence(S, K, T, r, sigma, q, max_steps, american) -> tuple[dict, d
             # Leisen-Reimer rounds an even step count up to the next odd one: plot it where it was evaluated.
             used = grid | 1 if method == "lr" else grid
             series[kind][name] = (used, np.array([safe_price(kind, n, method) for n in grid]))
-    references = {
-        kind: binomial.extrapolated_price(S, K, T, r, sigma, q, kind, american=american) for kind in ("call", "put")
-    }
-    return series, references
+    return series
 
 
 @st.cache_data(show_spinner=False, max_entries=32)

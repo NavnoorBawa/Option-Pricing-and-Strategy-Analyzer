@@ -140,6 +140,16 @@ def test_the_index_market_reads_the_chain_back():
         ("2026-11-27", datetime(2026, 11, 27, 13, 0)),  # an early close
         ("2026-10-24", datetime(2026, 10, 23, 16, 0)),  # a Saturday: Friday's close
         ("1999-12-31T16:00", None),
+        # A date alone outside the calendar (2000 to 2100), or whose trading day before falls outside it, is out of
+        # range, not an error: these raised ValueError from the calendar and crashed the app.
+        ("1999-06-01", None),
+        ("2000-01-01", None),
+        ("2098-01-02", None),
+        ("2150-01-01", None),
+        ("2000-01-03", datetime(2000, 1, 3, 16, 0)),  # the first trading day it accepts
+        # From 2067 an expiry two years out would be labelled '69 or later, which reads as 1969 (the %y pivot).
+        ("2066-12-31T16:00", datetime(2066, 12, 31, 16, 0)),
+        ("2067-01-03T16:00", None),
         ("noon", None),
     ],
 )
@@ -223,7 +233,7 @@ def test_a_link_to_a_market_that_does_not_exist_opens_the_index_with_a_note(new_
             "yesterday",
             None,
             [
-                "This link asks for a valuation time `yesterday`, which is not a date and time between 2000 and 2097 "
+                "This link asks for a valuation time `yesterday`, which is not a date and time between 2000 and 2066 "
                 "(2026-10-23T16:00), so the last close is used."
             ],
         ),
@@ -234,6 +244,108 @@ def test_a_link_sets_the_valuation_time(new_app, asof, shown, notes):
     _ok(at)
     assert at.sidebar.datetime_input(key="asof").value == (shown or mk.last_close())
     assert [w.value for w in at.warning] == notes
+
+
+@pytest.mark.parametrize("asof", ["1999-06-01", "2000-01-01", "2150-01-01"])
+def test_a_link_with_a_date_outside_the_calendar_gets_a_note(new_app, asof):
+    # These crashed the app with the calendar's ValueError (it covers 2000 to 2100).
+    at = new_app(preset=None, asof=asof).run()
+    _ok(at)
+    assert at.sidebar.datetime_input(key="asof").value == mk.last_close()
+    assert len(at.warning) == 1 and f"`{asof}`" in at.warning[0].value
+
+
+@pytest.mark.parametrize("value", ["inf", "-inf", "nan", "1e400"])
+@pytest.mark.parametrize(
+    ("key", "query", "default"),
+    [
+        ("contracts", {"preset": None, "asof": ASOF}, 1),
+        ("multiplier", {"preset": None, "asof": ASOF}, 100),
+        ("days", {}, 365),
+        ("wr", {"tab": "Risk"}, 0),
+    ],
+)
+def test_a_link_with_a_number_that_is_not_finite_gets_a_note(new_app, key, query, default, value):
+    # An integer input read int(float("inf")) from the URL and raised OverflowError on every run of every tab.
+    at = new_app(**query, **{key: value}).run()
+    _ok(at)
+    assert at.number_input(key=key).value == default
+    assert [w.value for w in at.warning if f"`{value}`" in w.value] != []
+    assert key not in at.query_params
+
+
+def test_a_link_with_a_number_out_of_range_gets_a_note(new_app):
+    at = new_app(preset=None, asof=ASOF, strike="100000").run()
+    _ok(at)
+    assert at.sidebar.number_input(key="strike").value == 5815.0  # ATMF
+    assert [w.value for w in at.warning] == [
+        "This link gives the strike as `100000`, which is not a number from 5 to 23,200, so the default is used."
+    ]
+
+
+#: Every parameter bound to a single-choice control or a number, per tab, that a link may hold empty.
+EMPTY_KEYS = {
+    "Pricing": ("pr_metric", "pr_x", "pr_range", "pr_chain_win", "pr_chain_stride", "pr_greeks", "strike", "vol_src"),
+    "Strategy": ("st_view", "st_range", "st_greek", "st_units", "strategy", "contracts", "multiplier", "commission"),
+    "Risk": ("report", "lad_axis", "lad_roll", "lad_metric", "ws", "wv", "wvmode", "wd", "wr"),
+}
+
+
+@pytest.mark.parametrize("tab", list(EMPTY_KEYS))
+def test_a_link_with_empty_values_means_no_parameters(new_app, tab):
+    # An empty value of a required control read as None: ?pr_metric= raised KeyError, ?pr_range= AttributeError.
+    at = new_app(preset=None, asof=ASOF, tab=tab, **dict.fromkeys(EMPTY_KEYS[tab], "")).run()
+    _ok(at)
+    assert not at.warning
+    assert not set(EMPTY_KEYS[tab]) & set(at.query_params)
+
+
+def test_an_empty_textbook_parameter_is_no_parameter(new_app):
+    # A link with ?spot= and no preset is not a version-2 link: it opens the index, as a link without ?spot= does.
+    at = new_app(preset=None, asof=ASOF, spot="", days=" ").run()
+    _ok(at)
+    assert at.sidebar.selectbox(key="preset").value == mk.INDEX
+    assert not at.warning
+
+
+@pytest.mark.parametrize("report", ["Ladder", "Scenarios", "VaR"])
+def test_a_risk_report_link_with_empty_values_opens(new_app, report):
+    keys = ("lad_roll", "lad_metric", "sc_volmode", "var_model", "sc_view", "lad_axis")
+    at = new_app(preset=None, asof=ASOF, tab="Risk", report=report, **dict.fromkeys(keys, "")).run()
+    _ok(at)
+
+
+def test_a_strike_off_the_listed_grid_moves_to_the_nearest_listed_one(new_app):
+    # 5,817.37 priced a contract SPX does not list, while the box showed 5817.
+    at = new_app(preset=None, asof=ASOF, strike="5817.37").run()
+    _ok(at)
+    assert at.sidebar.number_input(key="strike").value == 5815.0
+    assert [w.value for w in at.warning] == [
+        "This link asks for the strike `5817.37`, which is not listed (every 5 points near the money), so the nearest "
+        "listed one, 5,815, is used."
+    ]
+    at.sidebar.number_input(key="strike").set_value(5838.0).run()
+    _ok(at)
+    assert at.sidebar.number_input(key="strike").value == 5840.0
+    assert [i.value for i in at.info] == [
+        "5,838 is not a listed strike (every 5 points near the money), so the nearest listed one, 5,840, is used."
+    ]
+
+
+def test_an_expiry_the_surface_filters_leave_out_says_so(new_app):
+    # With Filters > Min days 30, 20-Nov-26 (27.7 days) is listed but not fitted: the note said it was "not a listed
+    # expiry at this valuation time", blaming the chain for a setting of the Surface tab.
+    at = new_app(preset=None, asof=ASOF, tab="Surface").run()
+    _ok(at)
+    assert at.sidebar.selectbox(key="expiry").value == "2026-11-20"
+    at.session_state["sf_days"] = 30.0
+    at.run()
+    _ok(at)
+    assert at.sidebar.selectbox(key="expiry").value == "2026-11-27"
+    assert [i.value for i in at.info if "expiry" in i.value] == [
+        "20-Nov-26 is listed, but the Surface tab's filters (expiries from 30 days) leave it out of the fit, so the "
+        "nearest fitted expiry, 27-Nov-26, is used."
+    ]
 
 
 @pytest.mark.parametrize(
@@ -259,15 +371,15 @@ def test_a_link_picks_a_listed_expiry(new_app, expiry, chosen, note):
 def test_the_index_offers_no_american_engine(new_app):
     at = new_app(preset=None, asof=ASOF, model="alo").run()
     _ok(at)
-    control = at.sidebar.segmented_control(key="model")
-    assert control.value == "bsm" and control.disabled  # shown at European, with help that says why
+    assert not [c for c in at.sidebar.segmented_control if c.key == "model"]  # a caption says why, in its place
+    assert any(c.value.startswith("European (BSM), the closed form") for c in at.sidebar.caption)
     assert [w.value for w in at.warning] == [
         "This link asks for the American engine, but options on the Synthetic index are European-exercise (as SPX "
         "options are), so European (BSM) is used. The American engine prices the Textbook market."
     ]
     tree = new_app(preset=None, asof=ASOF, model="Binomial tree").run()
     assert not tree.exception
-    assert tree.sidebar.segmented_control(key="model").value == "bsm"
+    assert any(c.value.startswith("European (BSM), the closed form") for c in tree.sidebar.caption)
     assert [w.value for w in tree.warning] == [
         "This link asks for a binomial tree, which now runs in the Pricing tab's Engine diagnostics (open below); "
         "the sidebar prices with European (BSM)."
@@ -297,6 +409,23 @@ def test_atmf_snaps_the_strike_to_the_forward(new_app):
     at.sidebar.button(key="strike_atmf").click().run()
     forward = float(mk.index_market(AT).expiry_row(date(2027, 1, 15))["forward"])
     assert at.sidebar.number_input(key="strike").value == 5 * round(forward / 5) == 5840.0
+
+
+def test_a_strike_beyond_the_surface_draws_no_override_badge(new_app):
+    # Both vols were NaN there and math.isclose(nan, nan) is False, so the amber OVERRIDE badge showed, with a tooltip
+    # that read "+nan vp", while the vol source was still Surface.
+    at = new_app(preset=None, asof=ASOF, strike="9000").run()
+    assert len(at.error) == 1 and "gives no vol at the strike 9,000" in at.error[0].value
+    assert not any("OVERRIDE" in b for b in _badges(at))
+
+
+def test_vol_overridden_reads_a_missing_surface_vol():
+    model = header.ModelConfig()
+    typed = header.Inputs(5800.0, 9000.0, 28.0, 0.30, 0.04, 0.01, model, mk.INDEX, surface_vol=math.nan)
+    assert typed.vol_overridden  # a typed vol where the surface gives none: user state
+    assert not header.Inputs(5800.0, 9000.0, 28.0, math.nan, 0.04, 0.01, model, surface_vol=math.nan).vol_overridden
+    assert not header.Inputs(5800.0, 5815.0, 28.0, 0.15, 0.04, 0.01, model, surface_vol=0.15).vol_overridden
+    assert not header.Inputs(100.0, 100.0, 365, 0.2, 0.05, 0.0, model).vol_overridden  # textbook: no surface
 
 
 def test_an_override_vol_is_marked(new_app):
@@ -347,3 +476,37 @@ def test_the_textbook_header_keeps_its_contract_ticker(new_app):
     assert _plain(at.markdown[0].value).startswith("**Options Analytics** S 100.00 · K 100.00 · ")
     assert not any("SYNTHETIC" in b for b in _badges(at))
     assert header.SHARE_NOTE and TEXTBOOK["preset"] == mk.TEXTBOOK
+
+
+@pytest.mark.parametrize(
+    ("asked", "chosen", "note"),
+    [
+        ("2026-12-18 AM", "2026-12-18 AM", None),
+        ("1990-01-19 PM", "2026-10-30 PM", "This link asks for the Strategy expiry `1990-01-19 PM`, which is not "
+                                           "listed at this valuation time, so 30‑Oct‑26 PM is used."),
+        ("2035-01-19 AM", "2026-12-18 AM", "This link asks for the Strategy expiry `2035-01-19 AM`, which is not "
+                                           "listed at this valuation time, so 18‑Dec‑26 AM is used."),
+        ("garbage", "2026-12-18 AM", "This link gives the Strategy expiry as `garbage`, which is not an expiry "
+                                     "(2026-12-18 AM), so the monthly nearest 45 days is used."),
+        ("2026-12-18 XM", "2026-12-18 AM", "This link gives the Strategy expiry as `2026-12-18 XM`, which is not an "
+                                           "expiry (2026-12-18 AM), so the monthly nearest 45 days is used."),
+    ],
+)  # fmt: skip
+def test_a_link_with_a_strategy_expiry_not_listed_gets_a_note(new_app, asked, chosen, note):
+    # These fell back silently, while the sidebar's expiry says why it moved.
+    at = new_app(preset=None, asof=ASOF, tab="Strategy", strategy_expiry=asked).run()
+    _ok(at)
+    day, settlement = chosen.split()
+    assert at.selectbox(key="strategy_expiry").value == (date.fromisoformat(day), settlement)
+    assert [w.value for w in at.warning] == ([note] if note else [])
+
+
+def test_every_expiry_label_reads_as_its_own_century():
+    # At the last valuation time accepted, the furthest listed expiry's two-digit year still reads as 20xx under the
+    # usual pivot (strptime's %y): at 2097-12-31 the chain labelled 31-Jan-98, which reads as 1998.
+    from options_analyzer.ui.inputs import ASOF_RANGE
+
+    context = mk.index_market(ASOF_RANGE[1].replace(hour=16, minute=0))
+    for expiry in context.expiries["expiry"]:
+        label = _plain(mk.expiry_label(context.expiry_row(expiry))).split()[0]
+        assert datetime.strptime(label, "%d-%b-%y").date() == expiry, label

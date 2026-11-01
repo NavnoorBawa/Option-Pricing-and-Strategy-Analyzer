@@ -143,7 +143,13 @@ def test_the_tiles_at_the_default_index(index_app, default_index):
     assert (tiles["Call"].value, tiles["Put"].value) == (f"{call:.2f}", f"{put:.2f}") == ("97.81", "98.90")
     assert tiles["Call"].delta == f"{call / 5800:.2%} of S" == "1.69% of S"
     assert tiles["Straddle"].value == f"{call + put:.2f}" == "196.71"
-    assert tiles["Straddle"].delta == f"±{(call + put) / 5800:.2%}" == "±3.39%"
+    assert tiles["Straddle"].delta == f"±{(call + put) / 5800:.2%} of S" == "±3.39% of S"
+    # The tile's move is the straddle-implied one (premium / spot), not the move to a breakeven: the breakevens are
+    # K ± premium, asymmetric about spot, and the help names both.
+    low, high = d["K"] - (call + put), d["K"] + (call + put)
+    assert f"{low:,.2f} ({(low / 5800 - 1):.2%} of S)".replace("-", MINUS) in tiles["Straddle"].proto.help
+    assert f"{high:,.2f} (+{(high / 5800 - 1):.2%} of S)" in tiles["Straddle"].proto.help
+    assert "5,618.29 (−3.13% of S) and 6,011.71 (+3.65% of S)" in tiles["Straddle"].proto.help
     assert (tiles["Vol"].value, tiles["Vol"].delta) == (f"{d['sigma']:.2%}", "surface") == ("15.44%", "surface")
     # The forward this strike's pair implies, K + (C mid − P mid)/DF, against the expiry's parity forward.
     (cb, ca), (pb, pa) = d["book"]["call"], d["book"]["put"]
@@ -281,6 +287,41 @@ def test_the_order_control_adds_second_and_third_order_greeks(app, order, rows):
     assert _number(table.loc["Vanna", "Call (BSM)"]) == pytest.approx(vanna, rel=5e-3)  # 3 significant digits
 
 
+def test_third_order_greeks_are_in_the_gamma_the_table_shows(index_app, default_index):
+    # At the index (S = 5,800, not 100) the table shows Γ 1% = Γ·S/100. Speed, zomma and color were in raw Γ per
+    # point of spot, 58 times smaller than a change in that Γ 1%. Reference: the closed-form gamma written out here,
+    # Γ = e^{−qT}·φ(d1)/(Sσ√T), turned into Γ 1% and differenced: by a 1% move in S (central, ±0.01%, then scaled
+    # to 1%), by ±0.01 vol point (scaled to 1 point) and by ±1 minute (per calendar day, t = −T). Tolerance 5e-3
+    # relative: the table shows 3 significant digits, rounded by at most 5e-3 relative; the differences are good to
+    # about 1e-6.
+    d = default_index
+    index_app.segmented_control(key="pr_greeks").set_value("+3rd").run()
+    _ok(index_app)
+    table = _frame(index_app, "tbl_pricing_greeks").value.set_index("Greek")
+    inputs = _inputs_of(index_app)
+    S, K, T, r, q, sigma = inputs.spot, inputs.strike, inputs.expiry, inputs.rate, inputs.dividend_yield, d["sigma"]
+
+    def gamma_1pct(s=S, v=sigma, t=T):
+        d1 = (math.log(s / K) + (r - q + v * v / 2) * t) / (v * math.sqrt(t))
+        return math.exp(-q * t) * math.exp(-d1 * d1 / 2) / math.sqrt(2 * math.pi) / (s * v * math.sqrt(t)) * s / 100
+
+    h, minute = 1e-4, 1 / 525_600
+    expected = {
+        "Speed": (gamma_1pct(s=S * (1 + h)) - gamma_1pct(s=S * (1 - h))) / (2 * h) / 100,
+        "Zomma": (gamma_1pct(v=sigma + h) - gamma_1pct(v=sigma - h)) / (2 * h) / 100,
+        "Color": (gamma_1pct(t=T - minute) - gamma_1pct(t=T + minute)) / (2 * minute) / 365,
+    }
+    assert table.loc["Speed", "Unit"] == "Γ 1% per 1% move in S"
+    assert table.loc["Zomma", "Unit"] == "Γ 1% per vol point"
+    assert table.loc["Color", "Unit"] == "Γ 1% per calendar day"
+    for row, value in expected.items():
+        for column in ("Call (BSM)", "Put (BSM)"):  # one gamma, so one speed, zomma and color for both
+            shown = table.loc[row, column]
+            assert "e" not in shown, (row, shown)  # plain decimals, as the rest of the column
+            assert _number(shown) == pytest.approx(value, rel=5e-3), (row, column)
+    assert table.loc["Ultima", "Unit"] == "volga per vol point"  # the table's row is Volga, not vomma
+
+
 def test_p_itm_comes_from_the_smile(index_app, default_index):
     # Breeden-Litzenberger by a central difference of call values on the smile (each strike at its own surface
     # vol, 0.5 points either side): P(S_T > K) = −∂C/∂K ÷ DF. The difference's error is O(h²) of the density's
@@ -369,6 +410,28 @@ def test_the_profile_defaults_to_value_against_spot_over_ten_percent(index_app):
         tab_pricing.contract(_inputs_of(index_app)).expiry, 0.95
     )
     assert (x[0], x[-1]) == (pytest.approx(lo), pytest.approx(hi))
+    # "RN 95%" holds 95%, not the 95.45% of ±2σ (the Strategy chart's range): P(S_T < K) = 1 + ∂C/∂K / DF, the
+    # Breeden-Litzenberger digital, from Black-76 at the smile's own vol, differenced over ±0.5 point here, reads
+    # 2.5% at the low end and 97.5% at the high one. Tolerance 2e-4: the central difference of a smooth smile over a
+    # 1-point step is good to about 1e-6, and the surface's quantile inversion to its own 1e-4 grid.
+    market = tab_pricing.contract(_inputs_of(index_app))
+    T, F, DF = market.surface.maturity(market.expiry), market.forward, market.discount
+
+    def below(k: float, h: float = 0.5) -> float:
+        call = [_black(F, s, T, DF, market.surface.vol(s, market.expiry).vol, "call") for s in (k - h, k + h)]
+        return 1.0 + (call[1] - call[0]) / (2 * h) / DF
+
+    assert (below(x[0]), below(x[-1])) == (pytest.approx(0.025, abs=2e-4), pytest.approx(0.975, abs=2e-4))
+
+
+def test_the_textbook_rn_range_is_the_lognormal_95_percent_range(app):
+    # Under the textbook market the range is lognormal at the flat vol: F·exp(−σ²T/2 ± z σ√T) with z = Φ⁻¹(0.975).
+    app.segmented_control(key="pr_range").set_value("RN 95%").run()
+    x = _values(_chart(app, "pricing_profile")["data"][0]["x"])
+    F, sigma, T = 100.0 * math.exp(0.05), 0.20, 1.0
+    z = 1.959963984540054  # Φ⁻¹(0.975)
+    centre = F * math.exp(-0.5 * sigma**2 * T)
+    assert (x[0], x[-1]) == (pytest.approx(centre * math.exp(-z * sigma)), pytest.approx(centre * math.exp(z * sigma)))
 
 
 def _inputs_of(at: AppTest):
@@ -466,6 +529,28 @@ def test_the_chain_window_and_stride(index_app):
     assert all(k % 50 == 0 or k == 5815.0 for k in _frame(index_app, "tbl_pricing_chain_").value["Strike"])
 
 
+def test_the_phone_ladder_puts_the_strike_first(index_app, default_index):
+    # On a 390 px phone the mirrored ladder showed five call columns and cut the strike at the edge. Its phone set
+    # (shown by the stylesheet below 641 px, tests/test_pricing_e2e.py) leads with the strike, pinned, then the call's
+    # mid, IV and Δ and the put's Δ, IV and mid, one row per strike of the ladder.
+    desk, phone = _frame(index_app, "tbl_pricing_chain_"), _frame(index_app, "tbl_pricing_ladder_phone_")
+    assert list(phone.value.columns) == ["Strike", "Mark", "C Mid", "C IV", "C Δ", "P Δ", "P IV", "P Mid"]
+    assert json.loads(phone.proto.columns)["Strike"]["pinned"] is True
+    np.testing.assert_array_equal(phone.value["Strike"], desk.value["Strike"])
+    for name in ("C IV", "C Δ", "P Δ", "P IV"):
+        np.testing.assert_array_equal(phone.value[name], desk.value[name])
+    row = phone.value.set_index("Strike").loc[5815.0]
+    (cb, ca), (pb, pa) = default_index["book"]["call"], default_index["book"]["put"]
+    assert row["Mark"] == "←"
+    # An offer only (no bid) has no mid, not half its ask: the "All" window lists the far wings' zero bids.
+    index_app.segmented_control(key="pr_chain_win").set_value("All").run()
+    desk, phone = _frame(index_app, "tbl_pricing_chain_").value, _frame(index_app, "tbl_pricing_ladder_phone_").value
+    for side in ("C", "P"):
+        np.testing.assert_array_equal(phone[f"{side} Mid"].isna(), desk[f"{side} Bid"].isna())
+    assert phone["C Mid"].isna().any() or phone["P Mid"].isna().any()
+    assert (row["C Mid"], row["P Mid"]) == (pytest.approx((cb + ca) / 2), pytest.approx((pb + pa) / 2))
+
+
 def test_chain_strikes_auto_stride():
     listed = np.arange(5400.0, 6101.0, 5.0)
     assert list(tab_pricing.chain_strikes(listed, 5800.0, 5850.0, "Auto", 5812.0)) == [
@@ -477,15 +562,31 @@ def test_chain_strikes_auto_stride():
 
 def test_a_click_on_a_chain_row_sets_the_strike(monkeypatch):
     # AppTest cannot fire on_select (UI spec 2.8): the callback is tested directly. A click on the 5,850 row.
-    state = {"strike": 5815.0, "tbl_pricing_chain_5815.0": {"selection": {"rows": [2], "columns": []}}}
+    state = {"strike": 5815.0, "tbl_pricing_chain_0": {"selection": {"rows": [2], "columns": []}}}
     monkeypatch.setattr(tab_pricing.st, "session_state", state)
-    tab_pricing.on_chain_select("tbl_pricing_chain_5815.0", (5800.0, 5815.0, 5850.0))
+    tab_pricing.on_chain_select("tbl_pricing_chain_0", (5800.0, 5815.0, 5850.0))
     assert state["strike"] == 5850.0 and state[tab_pricing._CHAIN_MOVED] is True
+    assert state[tab_pricing._CHAIN_CLICKS] == 1  # the next run's grid starts with no selection
     # No selection (a click that clears it) leaves the strike.
     state = {"strike": 5815.0, "k": {"selection": {"rows": [], "columns": []}}}
     monkeypatch.setattr(tab_pricing.st, "session_state", state)
     tab_pricing.on_chain_select("k", (5800.0,))
     assert state == {"strike": 5815.0, "k": {"selection": {"rows": [], "columns": []}}}
+
+
+def test_a_strike_step_keeps_the_ladders_grids(new_app):
+    # The grids' keys held the strike, so every strike step (sidebar, or a link) remounted both of them; only a handled
+    # click starts new ones now.
+    at = new_app(**INDEX).run()
+
+    def keys():
+        return {d.proto.id.rsplit("-", 1)[-1] for d in at.dataframe if "tbl_pricing_" in d.proto.id}
+
+    before = keys()
+    at.sidebar.number_input(key="strike").increment().run()
+    _ok(at)
+    assert at.sidebar.number_input(key="strike").value == 5820.0
+    assert keys() == before and {"tbl_pricing_chain_0", "tbl_pricing_ladder_phone_0"} <= before
 
 
 def test_a_click_on_a_row_beyond_the_surface_leaves_the_strike(monkeypatch):
@@ -547,6 +648,17 @@ def test_the_diagnostic_engines_run_only_while_their_expander_is_open(new_app, m
     assert calls["tree_timed"] == 3 and calls["mc_timed"] == 1 and calls["tree_convergence"] == 1
     assert calls["mc_convergence"] == 1
     assert "alo_timed" not in calls  # the index is European: no American engine rows
+
+
+def test_the_convergence_chart_computes_no_reference_it_does_not_draw(monkeypatch):
+    # The chart measures the trees against the engine table's reference; cache.tree_convergence also extrapolated
+    # Leisen-Reimer trees for a reference of its own (0.19 s a contract), which the tab threw away.
+    def refused(*args, **kwargs):
+        raise AssertionError("an extrapolated reference was computed")
+
+    monkeypatch.setattr(cache.binomial, "extrapolated_price", refused)
+    series = cache.tree_convergence(101.0, 99.0, 0.75, 0.04, 0.25, 0.01, 61, True)
+    assert set(series) == {"call", "put"} and len(series["call"]) == 2  # both lattices
 
 
 def test_the_engine_comparison_against_the_closed_form(new_app):
@@ -637,13 +749,33 @@ def test_every_caption_of_the_tab_is_at_most_140_characters(new_app, query):
     assert captions and all(len(c) <= 140 for c in captions), [c for c in captions if len(c) > 140]
 
 
+def _default_k_over_f() -> str:
+    """The default contract's K/F, from the chain's parity forward: 5,815 over 20-Nov-26's forward, in percent."""
+    forward = float(mk.index_market(AT).expiry_row(date(2026, 11, 20))["forward"])
+    return f"{5815.0 / forward * 100:.2f}%"
+
+
 def test_the_footer_names_the_engine_and_the_time_basis(index_app):
+    assert _default_k_over_f() == "100.02%"  # 1 decimal read it 100.0%, the sidebar 1.0002
     assert any(
         c.value == "BSM · European · T to Fri 20‑Nov 09:30 ET = minutes/525,600 · σ from the surface at K/F "
-        "100.0% · per share"
+        "100.02% · per share"
         for c in index_app.caption
     )
     assert index_app.button(key="pricing_methodology").label == "Methodology"
+
+
+def test_one_k_over_f_in_the_sidebar_the_pricing_tab_and_the_surface_readout(new_app):
+    # The sidebar wrote K/F as 1.0002 while the Pricing tab and the Surface readout wrote 100.0%.
+    at = new_app(**INDEX, tab="Surface").run()
+    assert not at.exception
+    k_over_f = f"K/F {_default_k_over_f()}"
+    assert any(k_over_f in c.value for c in at.sidebar.caption)
+    assert any(f"({k_over_f}," in c.value for c in at.main.caption)  # the Surface readout
+    vol_tile = next(m for m in new_app(**INDEX).run().metric if m.label == "Vol")
+    assert f"at {k_over_f} " in vol_tile.help
+    texts = [c.value for c in at.caption] + [vol_tile.help]
+    assert not [t for t in texts if re.search(r"K/F (1\.\d{4}|\d+\.\d%)", t)]
 
 
 @pytest.mark.parametrize("module", [tab_pricing, tab_iv])
@@ -905,3 +1037,20 @@ def test_exercise_boundary_colours_follow_the_option_type():
     call, put = (days, np.array([130.0, 120.0])), (days, np.array([80.0, 90.0]))
     both = charts.exercise_boundary_chart({"Call boundary": call, "Put boundary": put}, 100.0)
     assert {t.name: t.line.color for t in both.data} == {"Call boundary": charts.CALL, "Put boundary": charts.PUT}
+
+
+@pytest.mark.parametrize(("spot", "strike"), [("0.01", "0.01"), ("10000000", "0.01")])
+def test_the_iv_tab_opens_inside_the_bounds_of_an_extreme_contract(new_app, spot, strike):
+    # On a $0.01 spot and strike the bounds are 0.00049 and 0.01: in cents the price started at 0.00 and the tab
+    # opened on "Price 0.00 is below the no-arbitrage floor $0.00". On a spot of 1e7 the cap rounded to itself and
+    # the tab opened on "Price 10,000,000.00 is at or above the cap $10,000,000.00".
+    at = new_app(tab="IV", spot=spot, strike=strike).run()
+    _ok(at)
+    S, K = float(spot), float(strike)
+    lower, upper = max(S - K * math.exp(-0.05), 0.0), S  # q = 0: the call's no-arbitrage bounds, one year at 5%
+    price = next(n for n in at.number_input if n.label == "Price")
+    assert lower <= price.value < upper, (lower, price.value, upper)
+    if S < 0.1:
+        # Quoted to two significant digits of the cap (three decimals), in steps of a tenth of a cent.
+        assert (price.proto.format, price.proto.step) == ("%.3f", pytest.approx(0.001))
+        assert _tiles(at)["Bounds"].delta == f"floor {lower:.3f}"

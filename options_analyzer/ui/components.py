@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from .format import MISSING, ROW_HEIGHT
+from .format import MISSING, ROW_HEIGHT, md_code
 
 #: Card text in the theme's IBM Plex Sans: values in Medium at 22.75 px (the theme's metricValueFontSize, 1.625rem
 #: of its 14 px base) and deltas in Regular at 12.25 px. Digits (tabular), "$", "+" and "−" are 0.6 em wide in Plex
@@ -40,7 +40,7 @@ _CHAR_EM = {",": 0.29, ".": 0.29, " ": 0.236, "-": 0.401, "%": 0.947, "M": 0.814
 #: character counts as the widest of them, "%".
 _LABEL_PX, _LABEL_TRACKING_EM = 10.08, 0.06
 _LABEL_CHAR_EM = {
-    **dict.fromkeys("0123456789+×−", 0.6),
+    **dict.fromkeys("0123456789+×−±", 0.6),
     "A": 0.641, "B": 0.653, "C": 0.621, "D": 0.671, "E": 0.583, "F": 0.559, "G": 0.695, "H": 0.707, "I": 0.4,
     "J": 0.51, "K": 0.634, "L": 0.501, "M": 0.812, "N": 0.707, "O": 0.708, "P": 0.606, "Q": 0.708, "R": 0.64,
     "S": 0.581, "T": 0.572, "U": 0.678, "V": 0.609, "W": 0.891, "X": 0.613, "Y": 0.593, "Z": 0.58,
@@ -362,6 +362,13 @@ def current_key(family: str, key: str) -> str:
 def _plain(text: str) -> str:
     """``text`` in lower case, with each run of characters other than letters and digits read as one space."""
     return " ".join(re.findall(r"[^\W_]+", text.casefold()))
+
+
+def link_shown(value: str) -> str:
+    """A link's value as a note quotes it: as typed, in a code span (no link, icon or formatting), at most 40
+    characters."""
+    value = " ".join(value.split())
+    return md_code(value if len(value) <= 40 else value[:39] + "…")
 
 
 def link_match(value: str, names: Iterable[str], *, aliases: Mapping[str, str] | None = None) -> str | None:

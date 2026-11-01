@@ -2,9 +2,13 @@
 
 * Rates $r$ and dividend yield $q$ are continuously compounded.
 * Greeks are shown per calendar day (theta, charm, veta, color), per volatility point (vega, vanna, zomma),
-  per 1 % rate move (rho) and per \$1 move in the underlying (delta, gamma, speed). Every time Greek is the
-  change as calendar time *passes*: theta is usually negative for a long option (deep in-the-money puts and
-  calls on high-dividend stocks can gain value as time passes).
+  per 1 % rate move (rho) and per \$1 move in the underlying (delta). Gamma is shown as *Γ 1 %*, the change in
+  delta for a 1 % move in the underlying, ${\Gamma S/100}$, and the third order is in that unit: zomma and color
+  are the change in Γ 1 % per volatility point and per day, and speed its change for a 1 % move,
+  ${S(\Gamma + S\,\partial\Gamma/\partial S)/10^4}$. On the Risk tab gamma is a dollar amount, the P&L
+  ${\tfrac12\Gamma(0.01S)^2}$ of a 1 % move. Every time Greek is the change as calendar time *passes*: theta is
+  usually negative for a long option (deep in-the-money puts and calls on high-dividend stocks can gain value as
+  time passes).
 * Theta per day is theta / 365, the instantaneous rate. The *1-day decay* reprices instead: the value with one
   calendar day less to expiry, spot and implied volatility unchanged, minus the value now. An option that expires
   within the day is worth its intrinsic value at the current spot, so it loses its whole time value: the

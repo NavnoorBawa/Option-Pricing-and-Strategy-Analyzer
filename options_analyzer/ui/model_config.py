@@ -47,10 +47,10 @@ MODEL_ALIASES = {
 }
 #: The schemes of the American engine (``american.SCHEMES``), with their sidebar labels, which a link gives too.
 ALO_SCHEMES = {name: name.capitalize() for name in SCHEMES}
-#: Why the index offers no American engine: the help of the disabled control.
+#: Why the index offers no American engine: the sidebar's caption in place of the engine control.
 EUROPEAN_ONLY = (
-    "SPX options are European-exercise (Cboe), so the synthetic index is priced by the closed form only. The "
-    "American engine prices the Textbook market. Trees and Monte Carlo are in the Pricing tab's Engine diagnostics."
+    "European (BSM), the closed form: SPX options are European-exercise (Cboe). The American engine prices the "
+    "Textbook market; trees and Monte Carlo are in the Pricing tab's Engine diagnostics."
 )
 
 PATH_CHOICES = (10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000)
@@ -110,8 +110,10 @@ def model_sidebar(*, european_only: bool = False) -> ModelConfig:
     Parameters
     ----------
     european_only : bool
-        The contract is European-exercise (the synthetic index: SPX options are). The control is shown at European
-        and disabled, with help that says why.
+        The contract is European-exercise (the synthetic index: SPX options are). A caption names the engine and
+        says why there is no other (:data:`EUROPEAN_ONLY`) in place of the control. Disabled, the control greyed
+        both options (2.4:1 contrast, neither marked as chosen), and its reason was help on a collapsed label, which
+        draws no help icon, so nothing on screen said why.
 
     Returns
     -------
@@ -130,6 +132,9 @@ def model_sidebar(*, european_only: bool = False) -> ModelConfig:
     state = st.session_state
     if state.get("model") not in (None, *SIDEBAR_MODELS) or (european_only and state.get("model") == "alo"):
         state["model"] = "bsm"  # the American engine, from the textbook market, or an engine of an older session
+    if european_only:
+        sb.caption(EUROPEAN_ONLY)
+        return ModelConfig(kind="bsm")
     kind = sb.segmented_control(
         "Engine",
         SIDEBAR_MODELS,
@@ -138,11 +143,8 @@ def model_sidebar(*, european_only: bool = False) -> ModelConfig:
         format_func=MODELS.get,
         key="model",
         bind="query-params",
-        disabled=european_only,
         label_visibility="collapsed",
-        help=EUROPEAN_ONLY
-        if european_only
-        else "European (BSM): the closed form, exact for European exercise. American (ALO): early exercise by the "
+        help="European (BSM): the closed form, exact for European exercise. American (ALO): early exercise by the "
         "Andersen-Lake-Offengenden engine. Trees and Monte Carlo are in the Pricing tab's Engine diagnostics.",
     )
     if kind != "alo":

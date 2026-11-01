@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import functools
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -38,7 +39,7 @@ from ..american import AmericanPrice
 from ..monte_carlo import RELIABLE_PATHS, RELIABLE_SAMPLES, MonteCarloResult
 from ..strategies import ONE_DAY
 from ..vol_surface.published import Expiry, PublishedSurface, Quote
-from . import cache, charts, charts_pricing, surface_state, whatif
+from . import cache, charts, charts_pricing, surface_state, tab_methodology, whatif
 from . import market as mk
 from .components import card_row, cents_places, current_key, table
 from .format import (
@@ -76,8 +77,10 @@ DIAGNOSTICS = "pricing_diag"
 _CHAIN_MOVED = "pricing_chain_moved"
 #: Session-state key: why a click on the chain ladder did not move the strike (a row beyond the surface's reach).
 _CHAIN_NOTE = "pricing_chain_note"
-#: Session-state key of the header's Methodology button (``app.DRAWER``): the footer's button sets it too.
-DRAWER = "methodology_drawer"
+#: Session-state key: the clicks the chain ladder has handled, which its widget keys hold. A handled click starts a
+#: new grid, whose selection is empty (Streamlit cannot clear a table's selection otherwise), and nothing else does:
+#: with the strike in the key, every strike step remounted both grids.
+_CHAIN_CLICKS = "pricing_chain_clicks"
 #: The headline tiles' row and its three pairs: 6 across on a desktop, 4 + 2 on a laptop with the sidebar open and
 #: 2 + 2 + 2 on a phone. (Groups of three, UI spec 2.9's 3 + 3, cannot hold three cards on a 390 px phone: their
 #: values and deltas, "5,813.91" over "pair −0.29 bp", need about 130 px a card, so the groups went 2 + 1 twice, four
@@ -546,17 +549,23 @@ def _tiles(inputs: Inputs, prices: Prices, market: Contract) -> None:
             )
         )
     straddle = prices.call + prices.put
+    # The straddle-implied move is the premium over spot, the desk's usual reading. It is not the move to either
+    # breakeven: those are K ± premium, which sit asymmetrically about spot unless K = S (at the default index,
+    # −3.13% and +3.65% against the tile's ±3.39%), so the help gives both.
+    low, high = K - straddle, K + straddle
     tiles = [
         *price_tiles,
         (
             "Straddle",
             premium(straddle),
             {
-                "delta": f"±{pct(straddle / S, 2)}",
+                "delta": f"±{pct(straddle / S, 2)} of S",
                 **off,
                 "help": md(
-                    f"Call + put = {premium(straddle, 6)}. As a share of spot, the move to expiry at which the long "
-                    "straddle breaks even."
+                    f"Call + put = {premium(straddle, 6)}; as a share of spot, the straddle-implied move to expiry. "
+                    f"The long straddle breaks even at expiry at K ± premium: {level(low)} "
+                    f"({signed((low / S - 1) * 100, 2)}% of S) and {level(high)} ({signed((high / S - 1) * 100, 2)}% "
+                    "of S), before the premium's financing."
                 ),
             },
         ),
@@ -904,6 +913,7 @@ def on_chain_select(
     rows = (selection.get("selection") or {}).get("rows") or []
     if not rows:
         return
+    state[_CHAIN_CLICKS] = state.get(_CHAIN_CLICKS, 0) + 1  # the next run draws a fresh grid, with no selection
     row = int(rows[0])
     chosen = float(strikes[row])
     if priced is not None and not priced[row]:
@@ -989,11 +999,18 @@ def chain_vols(inputs: Inputs, market: Contract, strikes: np.ndarray) -> np.ndar
     return np.full(strikes.shape, inputs.volatility)
 
 
-def chain_frame(inputs: Inputs, market: Contract, strikes: np.ndarray, vols: np.ndarray | None = None) -> pd.DataFrame:
+def chain_frame(
+    inputs: Inputs, market: Contract, strikes: np.ndarray, vols: np.ndarray | None = None, *, phone: bool = False
+) -> pd.DataFrame:
     """The ladder's rows: calls (bid, ask, theo, mid IV, Δ), the strike and a mark on the Pricing strike's row, then
     puts mirrored. Theo is the engine's value at each strike's surface vol (index) or at the flat vol (textbook);
     without quotes (textbook) the bid, ask and IV columns are left out. ``vols``: :func:`chain_vols`, if read
-    already."""
+    already.
+
+    ``phone``: the phone's column set (:data:`PHONE_LADDER`), the strike and its mark first, then the call's mid, IV
+    and Δ and the put's Δ, IV and mid (theo for mid without quotes). The mirrored ladder is about 770 px wide; on a
+    390 px phone it showed five call columns and cut the strike at the edge, and a pinned strike would be drawn
+    first on a desktop too."""
     S, K, T, r, _sigma, q = _args(inputs)
     vols = chain_vols(inputs, market, strikes) if vols is None else vols
     # Beyond the surface's reach the vol is NaN (on the default 20-Nov expiry the nine listed strikes 4,150 to 4,550,
@@ -1022,22 +1039,67 @@ def chain_frame(inputs: Inputs, market: Contract, strikes: np.ndarray, vols: np.
             side |= {
                 "Bid": np.array([qt.bid if qt.bid > 0 else np.nan for qt in quotes]),
                 "Ask": np.array([qt.ask for qt in quotes]),
+                # An offer only has no mid (its IV reads "–" too), not half the ask.
+                "Mid": np.array([qt.mid if qt.bid > 0 else np.nan for qt in quotes]),
                 "IV": np.array([qt.iv_mid for qt in quotes]) * 100,
             }
         sides[kind] = side
+    marks = ["←" if abs(k - K) < 1e-9 else "" for k in strikes]
+    if phone:
+        names = PHONE_LADDER if market.listed else ("Theo", "Δ")
+        return pd.DataFrame(
+            {
+                "Strike": strikes,
+                "Mark": marks,
+                **{f"C {name}": sides["call"][name] for name in names},
+                **{f"P {name}": sides["put"][name] for name in reversed(names)},
+            }
+        )
     order = ("Bid", "Ask", "Theo", "IV", "Δ") if market.listed else ("Theo", "Δ")
     data = {f"C {name}": sides["call"][name] for name in order}
     data["Strike"] = strikes
     # The Pricing strike's row: an arrow at its strike (UI spec 3.1 item 5 draws a left-pointing triangle, U+25C2,
     # which IBM Plex Sans lacks).
-    data["Mark"] = ["←" if abs(k - K) < 1e-9 else "" for k in strikes]
+    data["Mark"] = marks
     # Mirrored the OMON way: the puts read outwards from the strike, Δ · IV · Theo · Bid · Ask.
     mirror = ("Δ", "IV", "Theo", "Bid", "Ask") if market.listed else ("Δ", "Theo")
     data |= {f"P {name}": sides["put"][name] for name in mirror}
     return pd.DataFrame(data)
 
 
-_CHAIN_KINDS = {"Bid": "premium", "Ask": "premium", "Theo": "premium", "IV": "vol", "Δ": "delta"}
+_CHAIN_KINDS = {"Bid": "premium", "Ask": "premium", "Mid": "premium", "Theo": "premium", "IV": "vol", "Δ": "delta"}
+#: The call's columns of the phone's ladder (:func:`chain_frame`), which the put's mirror: the market's mid and its
+#: implied vol, and the delta, without the bid, ask and theo that pushed the strike off a 390 px screen.
+PHONE_LADDER = ("Mid", "IV", "Δ")
+
+
+def _ladder_columns(
+    frame: pd.DataFrame, engine: str, listed: bool
+) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+    """The kinds, help and labels of a ladder frame's columns (:func:`chain_frame`), for :func:`.components.table`."""
+    kinds, help_text, labels = {}, {}, {}
+    for column in frame.columns:
+        if column in ("Strike", "Mark"):
+            continue
+        side, name = column.split(" ", 1)
+        option = "call" if side == "C" else "put"
+        kinds[column] = _CHAIN_KINDS[name]
+        # Each side's headers name it ("Call bid" to "Put ask"): the two halves share their column names.
+        labels[column] = f"{option.capitalize()} {name if name in ('IV', 'Δ') else name.lower()}"
+        help_text[column] = {
+            "Bid": f"The chain's {option} bid, $ per share.",
+            "Ask": f"The chain's {option} ask, $ per share.",
+            "Mid": f"The chain's {option} mid, $ per share.",
+            "Theo": f"{engine} {option} value at the strike's "
+            + ("surface vol, $ per share. – beyond the surface's reach." if listed else "flat vol, $ per share."),
+            "IV": f"Black-76 implied vol of the {option} mid. – for an offer only.",
+            "Δ": f"{engine} {option} delta at the strike's "
+            + ("surface vol. – beyond the surface's reach." if listed else "flat vol."),
+        }[name]
+    kinds |= {"Strike": "strike", "Mark": "text"}
+    help_text |= {"Strike": "The strike. Click a row to price it.", "Mark": "← marks the Pricing strike."}
+    labels |= {"Mark": " "}
+    return kinds, help_text, labels
 
 
 @st.fragment
@@ -1081,48 +1143,31 @@ def _chain(inputs: Inputs, market: Contract) -> None:
             grid = np.arange(math.ceil(lo / step) * step, hi + 1e-9, step)
         strikes = np.unique(np.r_[grid, inputs.strike])
     vols = chain_vols(inputs, market, strikes)
-    frame = chain_frame(inputs, market, strikes, vols)
     engine = engine_name(inputs)
-    kinds, help_text, labels = {}, {}, {}
-    for column in frame.columns:
-        if column in ("Strike", "Mark"):
-            continue
-        side, name = column.split(" ", 1)
-        option = "call" if side == "C" else "put"
-        kinds[column] = _CHAIN_KINDS[name]
-        # Each side's headers name it ("Call bid" to "Put ask"): the two halves share their column names.
-        labels[column] = f"{option.capitalize()} {name if name in ('IV', 'Δ') else name.lower()}"
-        help_text[column] = {
-            "Bid": f"The chain's {option} bid, $ per share.",
-            "Ask": f"The chain's {option} ask, $ per share.",
-            "Theo": f"{engine} {option} value at the strike's "
-            + (
-                "surface vol, $ per share. – beyond the surface's reach." if market.listed else "flat vol, $ per share."
-            ),
-            "IV": f"Black-76 implied vol of the {option} mid. – for an offer only.",
-            "Δ": f"{engine} {option} delta at the strike's "
-            + ("surface vol. – beyond the surface's reach." if market.listed else "flat vol."),
-        }[name]
-    kinds |= {"Strike": "strike", "Mark": "text"}
-    help_text |= {"Strike": "The strike. Click a row to price it.", "Mark": "← marks the Pricing strike."}
-    labels |= {"Mark": " "}
-    key = current_key("tbl_pricing_chain_", f"tbl_pricing_chain_{inputs.strike!r}")
-    table(
-        frame,
-        kinds,
-        help_text,
-        labels=labels,
-        key=key,
-        pin=False,  # a pinned column would be drawn first, and the ladder is mirrored about its strike
-        selection_mode="single-row",
-        on_select=functools.partial(
-            on_chain_select,
-            key=key,
-            strikes=tuple(float(k) for k in strikes),
-            priced=tuple(bool(v) for v in np.isfinite(vols)),
-            step=step,
-        ),
-    )
+    # Two column sets of one ladder, of which the stylesheet shows one (static/desk.css): mirrored about the strike
+    # from a 641 px screen, and on a phone the strike first, pinned, with mid, IV and Δ either side. Both run the same
+    # callback.
+    for family, phone in (("tbl_pricing_chain_", False), ("tbl_pricing_ladder_phone_", True)):
+        frame = chain_frame(inputs, market, strikes, vols, phone=phone)
+        key = current_key(family, f"{family}{st.session_state.get(_CHAIN_CLICKS, 0)}")
+        kinds, help_text, labels = _ladder_columns(frame, engine, market.listed)
+        with st.container(key="pricing_ladder_phone") if phone else st.container(key="pricing_ladder"):
+            table(
+                frame,
+                kinds,
+                help_text,
+                labels=labels,
+                key=key,
+                pin=phone,  # a pinned column is drawn first: the mirrored ladder pins none
+                selection_mode="single-row",
+                on_select=functools.partial(
+                    on_chain_select,
+                    key=key,
+                    strikes=tuple(float(k) for k in strikes),
+                    priced=tuple(bool(v) for v in np.isfinite(vols)),
+                    step=step,
+                ),
+            )
     if note := st.session_state.pop(_CHAIN_NOTE, None):
         st.warning(note, icon=":material/block:")
     span = f"{strike(float(strikes[0]), step)}–{strike(float(strikes[-1]), step)}"
@@ -1133,17 +1178,40 @@ def _chain(inputs: Inputs, market: Contract) -> None:
 
 # --- The Greeks table -------------------------------------------------------------------------------------------
 
-#: Rows of the Greeks table after the first order: (order, name in black_scholes.GREEKS, label).
+#: Rows of the Greeks table after the first order: (order, name in black_scholes.GREEKS, label, unit). Each unit
+#: names a row the table shows: the third order is in Γ 1%, the table's gamma, not the raw Γ per point of spot it
+#: never shows (58 times smaller at the default index, so a zomma of −0.000105 read as a change in the Γ 1% of
+#: +0.0937 above it was 58 times too small). :func:`higher_order` does the scaling.
 _HIGHER = (
-    (2, "vanna", "Vanna"),
-    (2, "vomma", "Volga"),
-    (2, "charm", "Charm"),
-    (2, "veta", "Veta"),
-    (3, "speed", "Speed"),
-    (3, "zomma", "Zomma"),
-    (3, "color", "Color"),
-    (3, "ultima", "Ultima"),
+    (2, "vanna", "Vanna", "Δ per vol point"),
+    (2, "vomma", "Volga", "vega per vol point"),
+    (2, "charm", "Charm", "Δ per calendar day"),
+    (2, "veta", "Veta", "vega per calendar day"),
+    (3, "speed", "Speed", "Γ 1% per 1% move in S"),
+    (3, "zomma", "Zomma", "Γ 1% per vol point"),
+    (3, "color", "Color", "Γ 1% per calendar day"),
+    (3, "ultima", "Ultima", "volga per vol point"),
 )
+
+
+def higher_order(name: str, greeks: Mapping[str, float], spot: float) -> float:
+    """A second- or third-order Greek of ``black_scholes.greeks`` (raw model units) in the Greeks table's unit
+    (:data:`_HIGHER`).
+
+    The second order and ultima take ``black_scholes.GREEKS``' display scale. Zomma and color are derivatives of
+    Γ 1% = Γ·S/100, so they take S/100 on top of it. Speed is the change in Γ 1% for a 1% move in S:
+    (S/100)·∂(Γ·S/100)/∂S = S·(Γ + S·speed)/10⁴. At S = 100 zomma and color are unchanged and speed is
+    speed + Γ/100.
+
+    >>> raw = {"gamma": 0.02, "speed": -1e-4, "zomma": 0.05, "color": -0.01}
+    >>> [round(higher_order(n, raw, 100.0), 8) for n in ("speed", "zomma", "color")]
+    [0.0001, 0.0005, -2.74e-05]
+    """
+    value = float(greeks[name])
+    if name == "speed":
+        return spot * (float(greeks["gamma"]) + spot * value) / 1e4
+    scaled = value * bs.GREEKS[name].scale
+    return scaled * spot / 100.0 if name in ("zomma", "color") else scaled
 
 
 def p_itm(inputs: Inputs, market: Contract) -> tuple[dict[str, float], dict[str, float], str]:
@@ -1225,13 +1293,13 @@ def greeks_frame(
     decay_row |= {header: _money_greek(value, places) for header, value in decays.items()}
     at = next(i for i, row in enumerate(rows) if row["Greek"] == "Θ") + (0 if leads else 1)
     rows.insert(at, decay_row)
-    for row_order, name, label in _HIGHER:
+    for row_order, name, label, unit in _HIGHER:
         if row_order > order:
             continue
-        row = {"Greek": label, "Unit": bs.GREEKS[name].unit}
+        row = {"Greek": label, "Unit": unit}
         for header, source, kind in columns:
-            value = source[kind].get(name) if source is bsm or not alo else None
-            row[header] = MISSING if value is None else _sig(float(value) * bs.GREEKS[name].scale)
+            known = source is bsm or not alo
+            row[header] = _sig(higher_order(name, source[kind], S)) if known else MISSING
         rows.append(row)
     rn, flat, basis = p_itm(inputs, market)
     row = {"Greek": "P(ITM)", "Unit": f"at expiry, {basis}"}
@@ -1286,7 +1354,9 @@ def _greeks(inputs: Inputs, prices: Prices, market: Contract) -> None:
     }
     for column in frame.columns[1:-1]:
         source = "Closed-form European (Black-Scholes-Merton), per share." if "BSM ref" in column else engine
-        config[column] = st.column_config.TextColumn(column, help=md(source), alignment="right")
+        # 110 px: the automatic width fitted the widest value to the cell's edges (Ultima's −0.0000136 touched both
+        # borders, and a clipped color read ")0.0000292"); this leaves its padding.
+        config[column] = st.column_config.TextColumn(column, help=md(source), alignment="right", width=110)
     st.dataframe(
         frame,
         key="tbl_pricing_greeks",
@@ -1397,7 +1467,8 @@ def _diagnostic_settings(inputs: Inputs) -> tuple[ModelConfig, ModelConfig]:
 def engine_rows(inputs: Inputs, tree: ModelConfig, mc: ModelConfig) -> tuple[pd.DataFrame, str]:
     """The engine comparison (UI spec 3.1 item 7): each engine's call and put, their difference from the reference
     and the milliseconds they took. The reference is the closed form for European exercise and the American engine
-    at its high scheme for American (it is within 4e−10 of QuantLib's QdFp, ``docs/methods/american_alo.md``)."""
+    at its high scheme for American: on the 4,495 puts of Healy's grid it is within 5.4e−8 (RMSE 1.8e−9) of QuantLib's
+    QdFp at its strict tanh-sinh scheme (``docs/methods/american_alo.md``)."""
     S, K, T, r, sigma, q = _args(inputs)
     american_ = _alo(inputs)
     rows = []
@@ -1446,7 +1517,7 @@ def _convergence(inputs: Inputs, tree: ModelConfig, ref_name: str, reference: di
     put errors are one (European exercise: the tree keeps put-call parity, so they differ by a constant) draws one
     line, ``LR call and put``: the put's line hid the call's."""
     S, K, T, r, sigma, q = _args(inputs)
-    series, _ = cache.tree_convergence(S, K, T, r, sigma, q, tree.steps, tree.american)
+    series = cache.tree_convergence(S, K, T, r, sigma, q, tree.steps, tree.american)
     lines = {}
     for name in series["call"]:
         short = "LR" if name.startswith("Leisen") else "CRR"
@@ -1628,10 +1699,6 @@ def _diagnostics(inputs: Inputs, prices: Prices) -> None:
 # --- The tab ----------------------------------------------------------------------------------------------------
 
 
-def _open_methodology() -> None:
-    st.session_state[DRAWER] = True
-
-
 def footer_text(inputs: Inputs, market: Contract) -> str:
     """The footer line: the engine, the time basis, the vol's source and the unit."""
     engine = "ALO · American" if _alo(inputs) else "BSM · European"
@@ -1674,4 +1741,4 @@ def render(inputs: Inputs, prices: Prices) -> None:
             _diagnostics(inputs, prices)
     foot = st.container(horizontal=True, key="pricing_footer", vertical_alignment="center", gap="small")
     foot.caption(footer_text(inputs, market))
-    foot.button("Methodology", key="pricing_methodology", type="tertiary", on_click=_open_methodology)
+    foot.button("Methodology", key="pricing_methodology", type="tertiary", on_click=tab_methodology.open_drawer)
