@@ -77,6 +77,10 @@ DIAGNOSTICS = "pricing_diag"
 _CHAIN_MOVED = "pricing_chain_moved"
 #: Session-state key: why a click on the chain ladder did not move the strike (a row beyond the surface's reach).
 _CHAIN_NOTE = "pricing_chain_note"
+#: Session-state key: the clicks the chain ladder has handled, which its widget keys hold. A handled click starts a
+#: new grid, whose selection is empty (Streamlit cannot clear a table's selection otherwise), and nothing else does:
+#: with the strike in the key, every strike step remounted both grids.
+_CHAIN_CLICKS = "pricing_chain_clicks"
 #: The headline tiles' row and its three pairs: 6 across on a desktop, 4 + 2 on a laptop with the sidebar open and
 #: 2 + 2 + 2 on a phone. (Groups of three, UI spec 2.9's 3 + 3, cannot hold three cards on a 390 px phone: their
 #: values and deltas, "5,813.91" over "pair −0.29 bp", need about 130 px a card, so the groups went 2 + 1 twice, four
@@ -909,6 +913,7 @@ def on_chain_select(
     rows = (selection.get("selection") or {}).get("rows") or []
     if not rows:
         return
+    state[_CHAIN_CLICKS] = state.get(_CHAIN_CLICKS, 0) + 1  # the next run draws a fresh grid, with no selection
     row = int(rows[0])
     chosen = float(strikes[row])
     if priced is not None and not priced[row]:
@@ -1143,7 +1148,7 @@ def _chain(inputs: Inputs, market: Contract) -> None:
     # callback.
     for family, phone in (("tbl_pricing_chain_", False), ("tbl_pricing_ladder_phone_", True)):
         frame = chain_frame(inputs, market, strikes, vols, phone=phone)
-        key = current_key(family, f"{family}{inputs.strike!r}")
+        key = current_key(family, f"{family}{st.session_state.get(_CHAIN_CLICKS, 0)}")
         kinds, help_text, labels = _ladder_columns(frame, engine, market.listed)
         with st.container(key="pricing_ladder_phone") if phone else st.container(key="pricing_ladder"):
             table(

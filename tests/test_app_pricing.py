@@ -556,15 +556,31 @@ def test_chain_strikes_auto_stride():
 
 def test_a_click_on_a_chain_row_sets_the_strike(monkeypatch):
     # AppTest cannot fire on_select (UI spec 2.8): the callback is tested directly. A click on the 5,850 row.
-    state = {"strike": 5815.0, "tbl_pricing_chain_5815.0": {"selection": {"rows": [2], "columns": []}}}
+    state = {"strike": 5815.0, "tbl_pricing_chain_0": {"selection": {"rows": [2], "columns": []}}}
     monkeypatch.setattr(tab_pricing.st, "session_state", state)
-    tab_pricing.on_chain_select("tbl_pricing_chain_5815.0", (5800.0, 5815.0, 5850.0))
+    tab_pricing.on_chain_select("tbl_pricing_chain_0", (5800.0, 5815.0, 5850.0))
     assert state["strike"] == 5850.0 and state[tab_pricing._CHAIN_MOVED] is True
+    assert state[tab_pricing._CHAIN_CLICKS] == 1  # the next run's grid starts with no selection
     # No selection (a click that clears it) leaves the strike.
     state = {"strike": 5815.0, "k": {"selection": {"rows": [], "columns": []}}}
     monkeypatch.setattr(tab_pricing.st, "session_state", state)
     tab_pricing.on_chain_select("k", (5800.0,))
     assert state == {"strike": 5815.0, "k": {"selection": {"rows": [], "columns": []}}}
+
+
+def test_a_strike_step_keeps_the_ladders_grids(new_app):
+    # The grids' keys held the strike, so every strike step (sidebar, or a link) remounted both of them; only a handled
+    # click starts new ones now.
+    at = new_app(**INDEX).run()
+
+    def keys():
+        return {d.proto.id.rsplit("-", 1)[-1] for d in at.dataframe if "tbl_pricing_" in d.proto.id}
+
+    before = keys()
+    at.sidebar.number_input(key="strike").increment().run()
+    _ok(at)
+    assert at.sidebar.number_input(key="strike").value == 5820.0
+    assert keys() == before and {"tbl_pricing_chain_0", "tbl_pricing_ladder_phone_0"} <= before
 
 
 def test_a_click_on_a_row_beyond_the_surface_leaves_the_strike(monkeypatch):
