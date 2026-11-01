@@ -118,8 +118,14 @@ class Position:
         return self.contracts * self.multiplier
 
     def describe(self) -> str:
+        """The position in a few words, the start of the Risk tab's context line: under the index the legs as a desk
+        writes them, each with its listed expiry only when the legs have more than one (the line that follows names
+        every expiry with its time left: four copies of ``18‑Dec‑26 AM`` took an iron condor to three lines on a
+        phone); under the textbook market the legs' labels."""
         if self.book is not None and self.book.front is not None:  # the index: listed expiries, legs as a desk writes
-            parts = [_leg_short(p) for p in self.book.live]
+            live = self.book.live
+            dated = len({p.expiry for p in live if p.kind != "stock"}) > 1
+            parts = [_leg_short(p, dated) for p in live]
             size = f"{number(self.contracts, 0)} × {number(self.multiplier, 0)}"
             return md(f"**{self.strategy.name}** — {' / '.join(parts)} · {size}")
         legs = ", ".join(strat.leg_labels(self.strategy, self.market))
@@ -127,12 +133,14 @@ class Position:
         return md(f"**{self.strategy.name}** — {legs} · {size} multiplier")
 
 
-def _leg_short(p: lg.PricedLeg) -> str:
-    """``+1 5,300P 18‑Dec‑26 AM`` (``+1 102.5C 365d`` in the textbook market, ``+100 shares``)."""
+def _leg_short(p: lg.PricedLeg, expiry: bool = True) -> str:
+    """``+1 5,300P 18‑Dec‑26 AM`` (``+1 102.5C 365d`` in the textbook market, ``+100 shares``); ``+1 5,300P`` without
+    the ``expiry``. The quantity and the strike are joined by a no-break space: a phone broke the Risk tab's line
+    between them (``… / +1`` above ``6,250C · 1 × 100``)."""
     qty = signed(p.quantity, 0) if p.quantity else "0"
     if p.kind == "stock":
         return f"{qty} share{'s' if abs(p.quantity) != 1 else ''}"
-    return f"{qty} {strike(p.strike, math.nan)}{p.kind[0].upper()} {p.label}"
+    return f"{qty} {strike(p.strike, math.nan)}{p.kind[0].upper()}" + (f" {p.label}" if expiry else "")
 
 
 # --- Templates and the builder's values --------------------------------------------------------------------------

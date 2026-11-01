@@ -1,11 +1,21 @@
 """The Risk tab in the desk layout (UI spec 3.3, BK-1, UI-10): the position line, the six pinned tiles, the report
 selector and its six reports, on the synthetic index at the pinned valuation time and on the textbook market.
 
-Numbers are checked against Black-Scholes-Merton written here from the textbook formulas (scipy's normal
-distribution), at the market the sidebar publishes (the default expiry's parity forward and discount factor, the
-surface vol at the strike): not against the package's pricer. The spec's example numbers are those of an iron
-condor that the Strategy tab of this branch does not build (its default is the v2 Bull Call Spread, here 5,815 /
-5,915 on 20-Nov-26 AM), so the goldens below are this branch's, each recomputed independently.
+Under the index the tab analyses the Strategy tab's default, the spec's iron condor: +1 5,300P / −1 5,400P / −1 6,150C
+/ +1 6,250C on 18-Dec-26 AM, 1 × 100, each leg at its own vol. Numbers are checked against Black-Scholes-Merton
+written here from the textbook formulas (scipy's normal distribution, calls and puts), each leg at the vol the
+published surface gives at its strike and expiry (``surface_state.publish(context).vol(K, expiry)``) and at the carry
+of that expiry's parity forward and discount factor (``market.carry``): not against the package's pricer.
+
+The spec's example numbers (3.3, its measured goldens) are of this position at this valuation time. Those this build
+reproduces are asserted as the spec writes them: vega −$306 with 1M −$225, Θ +$41 with BE 0.77% vs 0.81%, and the
+worst grid cell at +10% · −10 vp. The others differ, and the spec does not record how they were computed (its $Δ is
+of 3.37 index units of delta, against the 3.25 of the legs at their own surface vols here): the tab's $Δ −$18,871
+against the spec's −$19,525, Γ P&L 1% −$69 against −$68, the worst grid −$7,683 against −$7,663, the max loss
+−$7,765 against −$7,760, the FINRA requirement −$3,141 against −$3,160. The goldens below are this build's, each
+recomputed here.
+Under the textbook preset the Strategy tab's default is still version 2's 100 / 110 call spread at the flat sidebar
+vol, and its goldens are unchanged.
 """
 
 from __future__ import annotations
@@ -14,22 +24,36 @@ import json
 import math
 import re
 from datetime import date, datetime
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from _apptest import ASOF, make_app
+from scipy.optimize import brentq
 from scipy.stats import norm
 from streamlit.testing.v1 import AppTest
 
 from options_analyzer import scenarios
+from options_analyzer import strategies as strat
+from options_analyzer.ui import legs as lg
 from options_analyzer.ui import market as mk
-from options_analyzer.ui import tab_risk
+from options_analyzer.ui import surface_state, tab_risk, whatif
 from options_analyzer.ui.format import signed
 from options_analyzer.ui.tab_risk import GridAxes
+from options_analyzer.ui.tab_strategy import Position
+from options_analyzer.vol_surface.published import Expiry
 
-#: The default Strategy position under the index preset at ASOF: 1 × 100 of a 5,815 / 5,915 call spread.
-LEGS = ((1.0, 5815.0), (-1.0, 5915.0))
+#: The default Strategy position under the index preset at ASOF: 1 × 100 of the spec's iron condor (quantity, kind,
+#: strike) on the AM monthly nearest 45 days.
+EXPIRY = Expiry(date(2026, 12, 18), "AM")
+LEGS = ((1.0, "put", 5300.0), (-1.0, "put", 5400.0), (-1.0, "call", 6150.0), (1.0, "call", 6250.0))
 UNITS = 100.0
+#: Friday 23-Oct 16:00 to Friday 30-Oct 16:00 (T+5) and to Monday 26-Oct 16:00 (the next session), in years.
+WEEK, WEEKEND = 7 / 365, 3 / 365
+#: One month, the reference tenor of the 1M-scaled vol shocks, and their damping exponent.
+ONE_MONTH, DECAY = 30 / 365, 0.25
+#: The no-break space that keeps a leg's quantity with its strike in the position line.
+NBSP = "\u00a0"
 
 
 def _ok(at: AppTest) -> AppTest:
@@ -61,60 +85,88 @@ def _frame(at: AppTest, column: str):
     return next(d.value for d in at.dataframe if column in d.value.columns)
 
 
+def _line(at: AppTest) -> str:
+    return next(m.value for m in at.markdown if "max loss" in m.value)
+
+
+def _shown(text: str) -> str:
+    """A tile's dollar amount as Python formats it: ``−$18,871`` is ``-18,871``, ``+$41`` is ``41``."""
+    return text.replace("$", "").lstrip("+").replace("−", "-")
+
+
 # --- an independent Black-Scholes-Merton ------------------------------------------------------------------------------
-
-
-class Index:
-    """The sidebar's market at ASOF, read from the published context: spot, the 20-Nov-26 expiry's years to
-    settlement, the carry of its parity forward and discount factor, and the surface vol at 5,815."""
-
-    def __init__(self) -> None:
-        context = mk.index_market(datetime.fromisoformat(ASOF))
-        row = context.expiry_row(date(2026, 11, 20))
-        self.context = context
-        self.s = context.spot
-        self.t = float(row["maturity"])
-        self.r, self.q = mk.carry(float(row["forward"]), float(row["discount_factor"]), self.s, self.t)
-        self.vol = float(context.surface.implied_vol_at(5815.0 / self.s, self.t, extrapolate=True))
-
-
-@pytest.fixture(scope="module")
-def index() -> Index:
-    return Index()
 
 
 def _d1(s, k, t, r, q, v):
     return (math.log(s / k) + (r - q + 0.5 * v * v) * t) / (v * math.sqrt(t))
 
 
-def _call(s, k, t, r, q, v):
+def _price(kind, s, k, t, r, q, v):
+    """A European call or put; its intrinsic value once expired (``t`` ≤ 0)."""
     if t <= 0:
-        return max(s - k, 0.0)
+        return max(s - k, 0.0) if kind == "call" else max(k - s, 0.0)
     d1 = _d1(s, k, t, r, q, v)
-    return s * math.exp(-q * t) * norm.cdf(d1) - k * math.exp(-r * t) * norm.cdf(d1 - v * math.sqrt(t))
+    d2 = d1 - v * math.sqrt(t)
+    if kind == "call":
+        return s * math.exp(-q * t) * norm.cdf(d1) - k * math.exp(-r * t) * norm.cdf(d2)
+    return k * math.exp(-r * t) * norm.cdf(-d2) - s * math.exp(-q * t) * norm.cdf(-d1)
 
 
-def _greeks(s, k, t, r, q, v):
-    """Delta, gamma, vega (per 1.00) and theta (∂V/∂t per year) of a call, from the closed forms."""
+def _greeks(kind, s, k, t, r, q, v):
+    """Delta, gamma, vega (per 1.00) and theta (∂V/∂t per year) of a call or a put, from the closed forms."""
     d1 = _d1(s, k, t, r, q, v)
     d2 = d1 - v * math.sqrt(t)
     eq, er = math.exp(-q * t), math.exp(-r * t)
-    delta = eq * norm.cdf(d1)
     gamma = eq * norm.pdf(d1) / (s * v * math.sqrt(t))
     vega = s * eq * norm.pdf(d1) * math.sqrt(t)
-    theta = -s * eq * norm.pdf(d1) * v / (2 * math.sqrt(t)) - r * k * er * norm.cdf(d2) + q * s * eq * norm.cdf(d1)
-    return delta, gamma, vega, theta
+    decay = -s * eq * norm.pdf(d1) * v / (2 * math.sqrt(t))
+    if kind == "call":
+        return eq * norm.cdf(d1), gamma, vega, decay - r * k * er * norm.cdf(d2) + q * s * eq * norm.cdf(d1)
+    return -eq * norm.cdf(-d1), gamma, vega, decay + r * k * er * norm.cdf(-d2) - q * s * eq * norm.cdf(-d1)
 
 
-def _book(s, t, r, q, v, legs=LEGS):
-    return UNITS * sum(n * _call(s, k, t, r, q, v) for n, k in legs)
+def _damp(tau: float) -> float:
+    """The share of a one-month vol shock that a leg with ``tau`` years left takes: min(1, (τ / 1M)^−0.25)."""
+    return min(1.0, (max(tau, 1e-8) / ONE_MONTH) ** -DECAY)
 
 
-def _book_greeks(s, t, r, q, v, legs=LEGS):
-    totals = np.zeros(4)
-    for n, k in legs:
-        totals += n * np.array(_greeks(s, k, t, r, q, v))
-    return UNITS * totals
+class Index:
+    """The market at ASOF, read from the published surface: spot, the 18-Dec-26 AM expiry's years to settlement, the
+    carry of its parity forward and discount factor, each leg's surface vol at its strike and the ATMF vol."""
+
+    def __init__(self) -> None:
+        context = mk.index_market(datetime.fromisoformat(ASOF))
+        published = surface_state.publish(context)
+        self.context, self.published = context, published
+        self.s = context.spot
+        self.t = published.maturity(EXPIRY)
+        self.forward = published.forward(EXPIRY)
+        self.r, self.q = mk.carry(self.forward, published.discount_factor(EXPIRY), self.s, self.t)
+        self.vols = tuple(published.vol(k, EXPIRY).vol for _, _, k in LEGS)
+        self.atm = published.vol(self.forward, EXPIRY).vol
+
+    def value(self, s=None, t=None, r=None, vols=None, legs=LEGS) -> float:
+        """The position's value ($, 1 × 100): each leg at its own vol."""
+        s, t, r = self.s if s is None else s, self.t if t is None else t, self.r if r is None else r
+        vols = self.vols if vols is None else vols
+        return UNITS * sum(n * _price(kind, s, k, t, r, self.q, v) for (n, kind, k), v in zip(legs, vols, strict=True))
+
+    def greeks(self, s=None, t=None, vols=None) -> np.ndarray:
+        """Delta, gamma, vega and theta of the position ($ units, 1 × 100)."""
+        s, t, vols = self.s if s is None else s, self.t if t is None else t, self.vols if vols is None else vols
+        totals = np.zeros(4)
+        for (n, kind, k), v in zip(LEGS, vols, strict=True):
+            totals += n * np.array(_greeks(kind, s, k, t, self.r, self.q, v))
+        return UNITS * totals
+
+    def credit(self) -> float:
+        """The structure's credit per share at the chain's mids, the legs' entries."""
+        return -sum(n * self.published.quote(EXPIRY, k, kind).mid for n, kind, k in LEGS)
+
+
+@pytest.fixture(scope="module")
+def index() -> Index:
+    return Index()
 
 
 # --- the report selector and what each report computes ----------------------------------------------------------------
@@ -158,11 +210,12 @@ def test_only_the_selected_report_computes(monkeypatch):
 
 
 def test_the_default_tiles_are_the_closed_form_values(index):
-    # Measured goldens of this branch's default position, each recomputed here: $Δ = Δ·S, Γ P&L 1% = ½Γ(0.01S)²,
-    # vega per vol point, Θ = ∂V/∂t ÷ 365. Tolerance: the tile's own rounding (whole dollars).
+    # $Δ = Δ·S, Γ P&L 1% = ½Γ(0.01S)², vega per vol point, Θ = ∂V/∂t ÷ 365, each leg at its own surface vol (12.06%
+    # for the 6,250 call to 20.56% for the 5,300 put; the ATMF vol, 15.52%, is no leg's). Tolerance: the tile's own
+    # rounding (whole dollars). Vega and Θ are the spec's; $Δ and Γ P&L 1% differ from it (module docstring).
     at = _risk()
     tiles = _tiles(at)
-    delta, gamma, vega, theta = _book_greeks(index.s, index.t, index.r, index.q, index.vol)
+    delta, gamma, vega, theta = index.greeks()
     expected = {
         "$Δ": delta * index.s,
         "Γ P&L 1%": 0.5 * gamma * (0.01 * index.s) ** 2,
@@ -172,93 +225,192 @@ def test_the_default_tiles_are_the_closed_form_values(index):
     for label, value in expected.items():
         assert tiles[label].value == tab_risk.dollars(value), label
     assert [tiles[k].value for k in ("$Δ", "Γ P&L 1%", "Vega ($/vp)", "Θ ($/day)")] == [
-        "+$90,506",
-        "+$19",
-        "+$45",
-        "−$20",
+        "−$18,871",
+        "−$69",
+        "−$306",
+        "+$41",
     ]
+    assert [round(v, 4) for v in index.vols] == [0.2056, 0.1963, 0.1270, 0.1206] and round(index.atm, 4) == 0.1552
+    # At the ATMF vol, the one vol the footer named before, the four legs read another position: $Δ −$12,363.
+    flat = index.greeks(vols=(index.atm,) * 4)
+    assert tab_risk.dollars(flat[0] * index.s) == "−$12,363" != tiles["$Δ"].value
+    # The vega tile's 1M slot: each leg's vega weighted √(1M/τ), the spec's −$225.
+    one_month = tab_risk.dollars(vega / 100 * math.sqrt(ONE_MONTH / index.t))
+    assert tiles["Vega ($/vp)"].delta == f"1M {one_month}".replace("$", "\\$") == "1M −\\$225"  # Markdown
     # No statistic of a simulation or a history in a pinned tile (spec section 5 item 19).
     assert not any("VaR" in m.label or "ES " in m.label for m in tiles.values())
 
 
 def test_the_delta_tile_counts_es_contracts_at_the_december_forward(index):
     at = _risk()
-    delta = _book_greeks(index.s, index.t, index.r, index.q, index.vol)[0]
+    delta = index.greeks()[0]
     forward = float(index.context.expiry_row(date(2026, 12, 18))["forward"])
     contracts = delta / (50.0 * forward / index.s)
-    assert _tiles(at)["$Δ"].delta == f"{contracts:+.2f} ES" == "+0.31 ES"
+    # The spec's −0.07 ES is of its −3.37 index units; the legs at their own vols hold −3.25.
+    assert _tiles(at)["$Δ"].delta == f"{contracts:+.2f} ES".replace("-", "−") == "−0.06 ES"
+    assert f"Δ {signed(delta, 2)} index units" in _tiles(at)["$Δ"].help  # −3.25: 100 × −0.0325
     assert tab_risk.es_contract(datetime(2026, 10, 23, 16)) == date(2026, 12, 18)
 
 
 def test_the_theta_tile_gives_the_breakeven_move_against_the_implied_move(index):
-    # BE = 1% × √(|Θ| ÷ |Γ P&L 1%|), defined since Θ < 0 < Γ; implied = σ ATMF ÷ √365 at the front expiry, both per
-    # calendar day. The ATMF vol is the surface's at K = F.
+    # BE = 1% × √(|Θ| ÷ |Γ P&L 1%|), defined since Γ < 0 < Θ (the short condor earns theta); implied = σ ATMF ÷ √365
+    # at the front expiry, both per calendar day. The ATMF vol is the surface's at K = F. Both are the spec's.
     at = _risk()
-    _, gamma, _, theta = _book_greeks(index.s, index.t, index.r, index.q, index.vol)
+    _, gamma, _, theta = index.greeks()
     be = 0.01 * math.sqrt(abs(theta / 365) / abs(0.5 * gamma * (0.01 * index.s) ** 2))
-    forward = index.s * math.exp((index.r - index.q) * index.t)
-    atm = float(index.context.surface.implied_vol_at(forward / index.s, index.t, extrapolate=True))
-    assert _tiles(at)["Θ ($/day)"].delta == f"BE {be:.2%} vs {atm / math.sqrt(365):.2%}" == "BE 1.02% vs 0.81%"
-    # Θ to the next session (Mon 26-Oct 16:00, three calendar days) by full revaluation, in the help.
-    decay = _book(index.s, index.t - 3 / 365, index.r, index.q, index.vol) - _book(
-        index.s, index.t, index.r, index.q, index.vol
-    )
-    assert f"{abs(decay):,.2f}" in _tiles(at)["Θ ($/day)"].help
+    assert _tiles(at)["Θ ($/day)"].delta == f"BE {be:.2%} vs {index.atm / math.sqrt(365):.2%}" == "BE 0.77% vs 0.81%"
+    # Θ to the next session (Mon 26-Oct 16:00, three calendar days) by full revaluation, in the help: +$124.69
+    # (the spec's +$126 differs).
+    decay = index.value(t=index.t - WEEKEND) - index.value()
+    assert f"{abs(decay):,.2f}" == "124.69" and f"{abs(decay):,.2f}" in _tiles(at)["Θ ($/day)"].help
+
+
+def _desk_grid(index: Index, mode: str = "vp", vols=None, t=None) -> dict:
+    """The desk grid (spot move %, vol shock) → P&L, each leg's vol shocked by the mode: vol points added, a share of
+    its own vol, or a share of one-month vol damped by its own time left."""
+    vols = index.vols if vols is None else vols
+    t = index.t if t is None else t
+    today = index.value()
+    grid = {}
+    for dv in tab_risk.DESK_VOL[mode]:
+        if mode == "vp":
+            shocked = [v + dv / 100 for v in vols]
+        elif mode == "relative":
+            shocked = [v * (1 + dv / 100) for v in vols]
+        else:
+            shocked = [v * (1 + dv / 100 * _damp(t)) for v in vols]
+        for x in tab_risk.DESK_SPOT:
+            grid[(x, dv)] = index.value(s=index.s * (1 + x / 100), t=t, vols=shocked) - today
+    return grid
+
+
+def _stresses(index: Index, s=None, t=None, vols=None) -> dict:
+    """Every named stress, instantaneous, from the state (s, t, vols): spot moved, each leg's vol multiplied (a
+    one-month shock damped by the leg's own time left), the rate shifted; against today's value at that state."""
+    s, t, vols = index.s if s is None else s, index.t if t is None else t, index.vols if vols is None else vols
+    base = index.value(s=s, t=t, vols=vols)
+    out = {}
+    for sc in tab_risk.ALL_STRESSES:
+        damp = _damp(t) if sc.one_month_vol_shock else 1.0
+        shocked = [v * (1 + (sc.vol_multiplier - 1) * damp) for v in vols]
+        out[sc.name] = index.value(s * (1 + sc.spot_change), t, index.r + sc.rate_change, shocked) - base
+    return out
 
 
 def test_the_worst_grid_and_worst_stress_tiles(index):
     at = _risk()
     tiles = _tiles(at)
-    today = _book(index.s, index.t, index.r, index.q, index.vol)
-    grid = {
-        (x, dv): _book(index.s * (1 + x / 100), index.t, index.r, index.q, index.vol + dv / 100) - today
-        for x in tab_risk.DESK_SPOT
-        for dv in tab_risk.DESK_VOL["vp"]
-    }
+    grid = _desk_grid(index)
     worst = min(grid.values())
-    assert tiles["Worst grid"].value == tab_risk.dollars(worst) == "−$4,096"
-    # Of the cells equal to it to the dollar (−10% and −7.5% at −10 vp), the one nearest the no-move cell: the
-    # smallest spot move that reaches the loss, not the first in row order.
+    # The spec's cell (+10%, −10 vp), now −$7,683: spot at 6,380, past both calls, every leg's vol 10 points down.
+    assert tiles["Worst grid"].value == tab_risk.dollars(worst) == "−$7,683"
+    (x, dv) = min(grid, key=grid.get)
+    assert (x, dv) == (10.0, -10.0)
+    assert tiles["Worst grid"].delta == f"{tab_risk.shock_label(x / 100)} · {tab_risk.vol_label(dv, 'vp')}"
+    assert tiles["Worst grid"].delta == "+10% · −10 vp"
+    assert sum(round(v) == round(worst) for v in grid.values()) == 1 and "one of" not in tiles["Worst grid"].help
+    # The worst stress: each leg's vol × the VIX ratio, damped by its 55.7 days to (55.7 / 30)^−0.25 = 0.857 of it.
+    # The financial crisis (−$7,749.58) and the dot-com bust (−$7,749.00) are 58 cents apart, both near the max loss.
+    stresses = _stresses(index)
+    name, loss = min(stresses.items(), key=lambda item: item[1])
+    assert name == "Global Financial Crisis (2007–09)" and stresses["Dot-com bust (2000–02)"] - loss < 1.0
+    assert tiles["Worst stress"].value == tab_risk.dollars(loss) == "−$7,750"
+    assert tiles["Worst stress"].delta == name.split(" (")[0]
+    assert f"{name}, {tab_risk.exact(loss)}".replace("$", "\\$") in tiles["Worst stress"].help
+
+
+def test_ties_in_the_worst_grid_go_to_the_smallest_spot_move(index):
+    # The 5,815 / 5,915 call spread on 20-Nov-26 AM (the index's default before the iron condor, by link), each leg
+    # at its own surface vol there (15.44% and 14.19%): far enough down it is worth nothing to the dollar, so four
+    # cells equal its loss (−5%, −7.5% and −10% at −10 vp, −10% at −5 vp). The tile names the one with the smallest
+    # spot move, not the first in row order.
+    key = Expiry(date(2026, 11, 20), "AM")
+    at = _risk(strategy="Bull Call Spread", strategy_expiry="2026-11-20 AM")
+    t = index.published.maturity(key)
+    r, q = mk.carry(index.published.forward(key), index.published.discount_factor(key), index.s, t)
+    legs = ((1.0, "call", 5815.0), (-1.0, "call", 5915.0))
+    vols = [index.published.vol(k, key).vol for _, _, k in legs]
+
+    def value(s, dv):
+        return UNITS * sum(n * _price(kind, s, k, t, r, q, v + dv) for (n, kind, k), v in zip(legs, vols, strict=True))
+
+    today = value(index.s, 0.0)
+    grid = {(x, dv): value(index.s * (1 + x / 100), dv / 100) - today for x in tab_risk.DESK_SPOT
+            for dv in tab_risk.DESK_VOL["vp"]}  # fmt: skip
+    worst = min(grid.values())
     ties = [cell for cell, value in grid.items() if round(value) == round(worst)]
     x, dv = min(ties, key=lambda cell: (abs(cell[0]), abs(cell[1])))
-    assert len(ties) == 2 and (x, dv) == (-7.5, -10.0)
-    assert tiles["Worst grid"].delta == f"{tab_risk.shock_label(x / 100)} · {tab_risk.vol_label(dv, 'vp')}"
-    assert "one of 2 cells equal to the dollar" in tiles["Worst grid"].help
-    stresses = {}
-    for sc in tab_risk.ALL_STRESSES:
-        damp = min(1.0, (index.t / (30 / 365)) ** -0.25) if sc.one_month_vol_shock else 1.0
-        vol = index.vol * (1 + (sc.vol_multiplier - 1) * damp)
-        stresses[sc.name] = (
-            _book(index.s * (1 + sc.spot_change), index.t, index.r + sc.rate_change, index.q, vol) - today
-        )
-    name, loss = min(stresses.items(), key=lambda item: item[1])
-    assert tiles["Worst stress"].value == tab_risk.dollars(loss)
-    assert tiles["Worst stress"].delta == name.split(" (")[0]
+    assert len(ties) == 4 and (x, dv) == (-5.0, -10.0)
+    tile = _tiles(at)["Worst grid"]
+    assert tile.value == tab_risk.dollars(worst)
+    assert tile.delta == f"{tab_risk.shock_label(x / 100)} · {tab_risk.vol_label(dv, 'vp')}" == "−5% · −10 vp"
+    assert "one of 4 cells equal to the dollar" in tile.help
+    assert _line(at).startswith(
+        f"**Bull Call Spread** — +1{NBSP}5,815C / −1{NBSP}5,915C · 1 × 100 · 20‑Nov‑26 AM (27d 17h) · "
+    )
 
 
 def test_the_position_line_names_legs_expiry_size_and_max_loss(index):
     at = _risk()
-    line = next(m.value for m in at.markdown if "max loss" in m.value)
-    # The spread's maximum loss is its premium: 100 × (C(5,815) − C(5,915)).
-    premium = _book(index.s, index.t, index.r, index.q, index.vol)
-    assert line == (
-        "**Bull Call Spread** — Long 1 × 5,815 Call, Short 1 × 5,915 Call · 1 × 100 multiplier · "
-        f"20‑Nov‑26 AM (27d 17h) · max loss at expiry −\\${premium:,.0f}"
+    # The condor's maximum loss at expiry is a wing's width less the credit taken at the chain's mids (the legs'
+    # entries): 100 × (100 − 22.35). The spec's −$7,760 would be a credit of 22.40.
+    credit = index.credit()
+    loss = UNITS * (max(5400.0 - 5300.0, 6250.0 - 6150.0) - credit)
+    assert round(credit, 2) == 22.35
+    # One expiry for the four legs: named once, with its settlement and the time left (55.73 days, floored). Each
+    # leg's quantity keeps to its strike (a no-break space), so a phone breaks the line between legs.
+    assert _line(at) == (
+        f"**Iron Condor** — +1{NBSP}5,300P / −1{NBSP}5,400P / −1{NBSP}6,150C / +1{NBSP}6,250C · 1 × 100 · "
+        f"18‑Dec‑26 AM ({math.floor(index.t * 365)}d) · max loss at expiry −\\${loss:,.0f}"
     )
-    textbook = next(m.value for m in _risk(preset="Textbook").markdown if "max loss" in m.value)
+    assert "−\\$7,765" in _line(at)
+    textbook = _line(_risk(preset="Textbook"))
     assert "· 365d ·" in textbook  # the textbook market counts days, not dates
 
 
+def test_a_position_on_two_expiries_names_each_leg_and_expiry_with_its_settlement(index):
+    # A call calendar under the index: the front leg on the default expiry, the back leg on the AM monthly nearest
+    # twice its maturity (19-Feb-27, 118.7 days), both at the listed strike nearest the December forward. The line
+    # read "18‑Dec‑26 (55d), 19‑Feb‑27 (118d)" before, the dates read back from years without their settlements.
+    k = 5 * round(index.forward / 5)
+    line = _line(_risk(strategy="Long Call Calendar"))
+    back = index.published.maturity(Expiry(date(2027, 2, 19), "AM"))
+    assert line.startswith(
+        f"**Long Call Calendar** — −1{NBSP}{k:,.0f}C 18‑Dec‑26 AM / +1{NBSP}{k:,.0f}C 19‑Feb‑27 AM · 1 × 100 · "
+        f"18‑Dec‑26 AM ({math.floor(index.t * 365)}d), 19‑Feb‑27 AM ({math.floor(back * 365)}d) · max loss at expiry "
+    )
+    assert k == 5830
+
+
 def test_tiles_follow_the_what_if_state(index):
-    # ?ws=-2&wv=3&wd=5: Friday 23-Oct 16:00 to Friday 30-Oct 16:00 is seven calendar days.
+    # ?ws=-2&wv=3&wd=5: spot −2%, +3 vol points on every leg's own vol, Friday 23-Oct 16:00 to Friday 30-Oct 16:00.
     at = _risk(ws=-2, wv=3, wd=5)
-    s, t, v = index.s * 0.98, index.t - 7 / 365, index.vol + 0.03
-    delta = _book_greeks(s, t, index.r, index.q, v)[0]
+    s, t, vols = index.s * 0.98, index.t - WEEK, [v + 0.03 for v in index.vols]
+    delta = index.greeks(s, t, vols)[0]
     assert _tiles(at)["$Δ"].value == tab_risk.dollars(delta * s)
-    line = next(m.value for m in at.markdown if "max loss" in m.value)
-    pnl = _book(s, t, index.r, index.q, v) - _book(index.s, index.t, index.r, index.q, index.vol)
-    assert line.endswith(f"what-if P&L {tab_risk.dollars(pnl)}".replace("$", "\\$"))
+    pnl = index.value(s, t, vols=vols) - index.value()
+    assert _line(at).endswith(f"what-if P&L {tab_risk.dollars(pnl)}".replace("$", "\\$"))
     assert any("T+5 · Fri 30‑Oct‑26" in s.label for s in at.slider if s.key == "wd")
+
+
+@pytest.mark.parametrize("mode", ["relative", "1M-scaled"])
+def test_the_what_if_vol_shift_reaches_each_leg_by_its_mode(index, mode):
+    # +10% in each mode: relative scales each leg's own vol by 1.10 (the 5,300 put 20.56% to 22.62%, the 6,250 call
+    # 12.06% to 13.26%); 1M-scaled by 1 + 10% × (55.7 / 30)^−0.25, 8.57% of each. The tiles and the what-if P&L
+    # are those of the legs so moved, against their values today.
+    at = _risk(wv=10, wvmode=mode)
+    weight = 1.0 if mode == "relative" else _damp(index.t)
+    vols = [v * (1 + 0.10 * weight) for v in index.vols]
+    delta, _, vega, _ = index.greeks(vols=vols)
+    tiles = _tiles(at)
+    assert tiles["$Δ"].value == tab_risk.dollars(delta * index.s)
+    assert tiles["Vega ($/vp)"].value == tab_risk.dollars(vega / 100)
+    pnl = index.value(vols=vols) - index.value()
+    assert _line(at).endswith(f"what-if P&L {tab_risk.dollars(pnl)}".replace("$", "\\$"))
+    # Not the other mode's shift: relative moves each leg by all of the 10%, 1M-scaled by 8.57% of it.
+    other = 1.0 if mode != "relative" else _damp(index.t)
+    pnl = index.value(vols=[v * (1 + 0.10 * other) for v in index.vols]) - index.value()
+    assert not _line(at).endswith(f"what-if P&L {tab_risk.dollars(pnl)}".replace("$", "\\$"))
 
 
 # --- the reports ------------------------------------------------------------------------------------------------------
@@ -271,16 +423,18 @@ def test_the_ladder_zero_row_equals_the_tiles_and_rolls_to_the_next_session(inde
     tiles = _tiles(at)
     assert zero["P&L"] == 0
     for column, label in (("$Δ", "$Δ"), ("Γ P&L 1%", "Γ P&L 1%"), ("Vega", "Vega ($/vp)"), ("Θ", "Θ ($/day)")):
-        assert f"{zero[column]:,.0f}" == tiles[label].value.replace("$", "").lstrip("+").replace("−", "-"), column
+        assert f"{zero[column]:,.0f}" == _shown(tiles[label].value), column
     assert zero["Move"] == "0 · now"
+    # Each row is the position revalued at its spot (a percent move), each leg at its own vol: to the dollar, the
+    # column's precision (components.table rounds what it sends).
+    for x, (_, row) in zip(scenarios.DEFAULT_LADDER_SHOCKS, ladder.iterrows(), strict=True):
+        assert row["P&L"] == round(index.value(s=index.s * (1 + x / 100)) - index.value()), row["Move"]
     rolled = _frame(_risk(lad_roll="Next session"), "Move")
     zero = rolled[rolled["Move"].str.startswith("0")].iloc[0]
     assert zero["Move"] == "0 · 26-Oct-26"  # Friday 16:00 to Monday 16:00: "now" read as no decay
     assert _frame(_risk(lad_roll="+1w"), "Move")["Move"].str.fullmatch("0 · 30-Oct-26").any()
-    decay = _book(index.s, index.t - 3 / 365, index.r, index.q, index.vol) - _book(
-        index.s, index.t, index.r, index.q, index.vol
-    )
-    assert zero["P&L"] == pytest.approx(decay, abs=1.0)  # the column's whole dollars
+    decay = index.value(t=index.t - WEEKEND) - index.value()
+    assert zero["P&L"] == round(decay) == 125  # the column's whole dollars
 
 
 def test_small_greek_columns_keep_their_cents_as_the_tiles_do():
@@ -297,7 +451,7 @@ def test_small_greek_columns_keep_their_cents_as_the_tiles_do():
     assert ladder.value["Vega"].abs().max() >= 10 and config["Vega"]["type_config"]["format"] == "%,.0f"
     assert config["Γ P&L 1%"]["label"] == "Γ P&L 1% ($)" and config["Θ"]["label"] == "Θ ($/day)"
     assert config["Θ"]["type_config"]["format"] == "%,.2f" and config["$Δ"]["type_config"]["format"] == "%,.0f"
-    # Under the index the same columns stay in whole dollars.
+    # Under the index the same columns stay in whole dollars (the condor's Θ reaches +$43, its Γ P&L 1% −$69).
     index_ladder = next(d for d in _risk().dataframe if "Move" in d.value.columns)
     assert json.loads(index_ladder.proto.columns)["Θ"]["type_config"]["format"] == "%,.0f"
 
@@ -332,14 +486,26 @@ def test_a_what_if_step_and_the_var_report_are_fast():
     assert time.perf_counter() - start < 7.5
 
 
-def test_the_ladder_in_sigma_and_second_order():
-    ladder = _frame(_risk(lad_axis="σ", lad_order="+2nd"), "Move")
+def test_the_ladder_in_sigma_and_second_order(index):
+    # A σ step is a daily standard deviation of spot at the front expiry's ATMF vol (15.52%), the market's one vol,
+    # which the help names: no leg of the condor is at it.
+    at = _risk(lad_axis="σ", lad_order="+2nd")
+    ladder = _frame(at, "Move")
     assert len(ladder) == len(tab_risk.LADDER_SIGMA)
     assert {"Vanna", "Volga", "Charm"} <= set(ladder.columns)
-    assert ladder["Move"].iloc[0].startswith("−3σ · −")
+    sd = index.atm * math.sqrt(1 / 365)
+    spots = [index.s * math.exp(k * sd) for k in tab_risk.LADDER_SIGMA]
+    assert ladder["Spot"].tolist() == [round(s, 2) for s in spots]  # the level column's cents
+    assert ladder["Move"].iloc[0] == f"−3σ · {signed(100 * math.expm1(-3 * sd), 2)}%" == "−3σ · −2.41%"
+    named = f"{index.atm:.2%}, the 18‑Dec‑26 AM ATMF vol"
+    assert named == "15.52%, the 18‑Dec‑26 AM ATMF vol"
+    assert named in json.loads(next(d for d in at.dataframe if "Move" in d.value.columns).proto.columns)["Move"]["help"]
+    assert any(named in c.proto.help for c in at.get("button_group") if c.proto.id.endswith("lad_axis"))
+    textbook = _risk(preset="Textbook", lad_axis="σ")
+    assert any("20.00%, the sidebar vol" in c.proto.help for c in textbook.get("button_group"))
 
 
-def test_the_stress_table_is_sorted_worst_first_with_readable_labels():
+def test_the_stress_table_is_sorted_worst_first_with_readable_labels(index):
     at = _risk(report="Stress")
     table = _frame(at, "Scenario")
     assert table["P&L"].is_monotonic_increasing
@@ -347,6 +513,11 @@ def test_the_stress_table_is_sorted_worst_first_with_readable_labels():
     assert "IV damped" not in table.columns and "IV shock damped" not in table.columns
     # P&L second, Source last: a phone shows the first three columns, and P&L sat seventh, off-screen.
     assert list(table.columns) == ["Scenario", "P&L", "Spot", "1M vol", "Rate", "Days", "Source"]
+    # Each P&L is the condor's, each leg's vol multiplied by the stress (damped by its own 55.7 days when the stress
+    # is a one-month shock), in the order of the independent values.
+    stresses = _stresses(index)
+    assert table["Scenario"].tolist() == sorted(stresses, key=stresses.get)
+    assert table["P&L"].tolist() == [round(stresses[n]) for n in table["Scenario"]]  # the column's dollars
     chart = _chart(at, "stress_chart")
     bars = chart["data"][0]
     assert list(bars["y"]) == table["Scenario"].tolist()
@@ -354,7 +525,8 @@ def test_the_stress_table_is_sorted_worst_first_with_readable_labels():
     # on the bars they were clipped or ran over the scenario names on a phone (tests/test_risk_e2e.py measures it).
     notes = chart["layout"]["annotations"]
     amounts = [n for n in notes if n["xanchor"] == "right"]
-    pnl = table["P&L"].to_numpy(float)
+    # From the amounts themselves, not the table's whole dollars: the rate shock's −$57.08 reads to the cent.
+    pnl = [stresses[n] for n in table["Scenario"]]
     assert [n["y"] for n in amounts] == table["Scenario"].tolist()
     assert [n["text"] for n in amounts] == [signed(v, 0 if abs(v) >= 100 else 2, "$") for v in pnl]
     assert all(n["xref"] == "paper" and n["x"] == 1.0 for n in amounts)
@@ -367,29 +539,67 @@ def test_the_stress_table_is_sorted_worst_first_with_readable_labels():
     assert "text" not in bars
 
 
-def test_the_desk_grid_axes_and_its_zero_cell():
-    at = _risk(report="Scenarios")
+def _one_month_vol(index: Index) -> float:
+    """The surface's one-month ATMF vol at ASOF, located at the forward of the front expiry's carry."""
+    forward_ratio = math.exp((index.r - index.q) * ONE_MONTH)
+    return float(index.context.surface.implied_vol_at(forward_ratio, ONE_MONTH, extrapolate=True))
+
+
+def test_the_stress_tables_one_month_vol_is_at_the_what_if_state(index):
+    # The 1M vol column is the stress's multiplier on the 1M ATMF vol the stress meets, the what-if's. With +3 vp it
+    # read today's 15.38% under the index (+7.69 vp for the vol spike, as at rest) but the shifted sidebar vol under
+    # the textbook market (+11.50 vp).
+    one_month = _one_month_vol(index)
+    for query, sigma in (({}, one_month), ({"wv": 3}, one_month + 0.03)):
+        table = _frame(_risk(report="Stress", **query), "Scenario").set_index("Scenario")
+        assert table.loc["Vol spike (IV +50%)", "1M vol"] == round(100 * 0.5 * sigma, 2)  # the column's 0.01 vp
+    assert round(100 * 0.5 * one_month, 2) == 7.69 and round(100 * 0.5 * (one_month + 0.03), 2) == 9.19
+    textbook = _frame(_risk(report="Stress", preset="Textbook", wv=3), "Scenario").set_index("Scenario")
+    assert textbook.loc["Vol spike (IV +50%)", "1M vol"] == round(100 * 0.5 * 0.23, 2)
+    # 1M-scaled: the one-month vol takes the whole shift (the damping is 1 at one month), whatever the front's tenor.
+    scaled = _frame(_risk(report="Stress", preset="Textbook", wv=10, wvmode="1M-scaled"), "Scenario")
+    assert scaled.set_index("Scenario").loc["Vol spike (IV +50%)", "1M vol"] == round(100 * 0.5 * 0.22, 2)
+
+
+@pytest.mark.parametrize("mode", list(tab_risk.DESK_VOL))
+def test_the_desk_grid_axes_and_its_cells(index, mode):
+    at = _risk(report="Scenarios", sc_volmode=mode)
     heat = _chart(at, "sc_heatmap_True")["data"][0]
-    assert all(label.endswith("vp") for label in heat["y"])
+    unit = "vp" if mode == "vp" else "%"
+    assert all(label.endswith(unit) for label in heat["y"])
     assert len(heat["x"]) == 9 and len(heat["y"]) == 7
     assert all(re.fullmatch(r"[0-9,]+ \([+−]?[0-9.]+%\)", label) for label in heat["x"]), heat["x"]
     z = _array(heat["z"])
-    assert z[heat["y"].index("0 vp"), heat["x"].index("5,800 (0%)")] == 0.0
+    zero = "0 vp" if mode == "vp" else "0%"
+    assert z[heat["y"].index(zero), heat["x"].index("5,800 (0%)")] == 0.0
+    # Every cell: each leg's own vol shocked by the mode (1M-scaled damped by the legs' 55.7 days), today.
+    grid = _desk_grid(index, mode)
+    expected = [[grid[(x, dv)] for x in tab_risk.DESK_SPOT] for dv in tab_risk.DESK_VOL[mode]]
+    assert z == pytest.approx(np.array(expected), abs=1e-6)
 
 
-def test_the_spot_by_date_grid_uses_trading_dates():
+def test_the_spot_by_date_grid_uses_trading_dates(index):
     heat = _chart(_risk(report="Scenarios", sc_axes="Spot × Date"), "sc_heatmap_False")["data"][0]
-    assert heat["y"][0].startswith("T+0 · Fri 23‑Oct") and heat["y"][-1].endswith("exp")
     assert not any("Day " in label for label in heat["y"])
-    # Thanksgiving (26-Nov) is no session, and the last rows are daily up to the 20-Nov expiry.
-    assert heat["y"][-6:] == [
-        "T+15 · Fri 13‑Nov",
-        "T+16 · Mon 16‑Nov",
-        "T+17 · Tue 17‑Nov",
-        "T+18 · Wed 18‑Nov",
-        "T+19 · Thu 19‑Nov",
-        "T+20 · Fri 20‑Nov exp",
+    # 39 sessions to the 18-Dec expiry: today, every ten sessions, then each of the last five. Thanksgiving (26-Nov)
+    # is no session: T+30 is Monday 7-Dec, where counting it would make it Friday 4-Dec.
+    assert heat["y"] == [
+        "T+0 · Fri 23‑Oct",
+        "T+10 · Fri 06‑Nov",
+        "T+20 · Fri 20‑Nov",
+        "T+30 · Mon 07‑Dec",
+        "T+35 · Mon 14‑Dec",
+        "T+36 · Tue 15‑Dec",
+        "T+37 · Wed 16‑Dec",
+        "T+38 · Thu 17‑Dec",
+        "T+39 · Fri 18‑Dec exp",
     ]
+    z = _array(heat["z"])
+    today = index.value()
+    spots = [index.s * (1 + x / 100) for x in tab_risk.DESK_SPOT]
+    assert z[0] == pytest.approx([index.value(s=s) - today for s in spots], abs=1e-6)
+    # The last row is the expiry's close, after the AM settlement at the open: every leg at its intrinsic value.
+    assert z[-1] == pytest.approx([index.value(s=s, t=0.0) - today for s in spots], abs=1e-6)
 
 
 def test_a_long_dated_spot_by_date_grid_keeps_a_few_rows_with_their_years():
@@ -406,35 +616,100 @@ def test_the_finra_grid_and_its_illustrative_requirement(index):
     heat = _chart(at, "sc_heatmap_margin")["data"][0]
     assert len(heat["x"]) == 10
     assert heat["x"][0].endswith("(−8%)") and heat["x"][-1].endswith("(+6%)")
-    today = _book(index.s, index.t, index.r, index.q, index.vol)
-    worst = _book(index.s * 0.92, index.t, index.r, index.q, index.vol) - today
+    # Ten points from −8% to +6% (FINRA 4210(g)(2)(F), SPX), vols unchanged: the condor loses most at +6%, where its
+    # short call spread is nearer (the spec's −$3,160 differs).
+    today = index.value()
+    points = np.linspace(-0.08, 0.06, 10)
+    pnl = [index.value(s=index.s * (1 + x)) - today for x in points]
+    assert _array(heat["z"])[0] == pytest.approx(pnl, abs=1e-6)
+    worst = min(pnl)
+    assert pnl.index(worst) == 9
     line = next(m.value for m in at.markdown if "Requirement" in m.value)
     assert "illustrative" in line and "4210(g)(7)(B)" in line
-    assert f"−\\${abs(worst):,.0f} at −8%" in line
-    assert "−\\$3,947 at −8%" in line
+    assert f"{tab_risk.dollars(worst)} at +6%".replace("$", "\\$") in line
+    assert "−\\$3,141 at +6%" in line and f"\\${-worst:,.0f}, the greater" in line
+    # The minimum: four listed contracts at $0.375 × 100 each, $150.00, which the largest loss exceeds.
+    assert "\\$150.00" in line
+
+
+def _dgt_var(delta: float, gamma: float, theta: float, s: float, sigma: float, confidence: float = 0.99) -> float:
+    """VaR (a loss, positive) of θh/252 + Δx + ½Γx² over one trading day, x ~ N(0, (Sσ√(1/252))²), found as the P&L
+    level q whose loss region has probability 1 − confidence: for Γ < 0 the two tails beyond the roots of the
+    quadratic, from the Normal distribution directly (no chi-square)."""
+    sd = s * sigma * math.sqrt(1 / 252)
+    decay = theta / 252
+
+    def tail(q: float) -> float:
+        # P&L(x) ≤ q  ⇔  ½Γx² + Δx + (θh − q) ≤ 0, outside the roots when Γ < 0.
+        a, b, c = 0.5 * gamma, delta, decay - q
+        root = math.sqrt(b * b - 4 * a * c)
+        x1, x2 = sorted(((-b - root) / (2 * a), (-b + root) / (2 * a)))
+        return norm.cdf(x1 / sd) + norm.sf(x2 / sd) - (1 - confidence)
+
+    assert gamma < 0
+    top = decay - delta**2 / (2 * gamma)  # the vertex: the largest P&L, far beyond the distribution here
+    bottom = decay - abs(delta) * 12 * sd + 0.5 * gamma * (12 * sd) ** 2  # twelve standard deviations out
+    return -brentq(tail, bottom, top - 1e-6 * abs(top), xtol=1e-10)
 
 
 def test_the_var_report(index):
+    from dataclasses import replace
+
+    from options_analyzer import risk
+
     at = _risk(report="VaR")
     hist = _chart(at, "var_hist")
     assert hist["layout"]["yaxis"]["title"]["text"] == "Probability (%)"
     cards = {m.label: m for m in at.metric}
     for label in ("VaR 99% 1D · MC", "ES 97.5% 1D · MC", "Spot-only VaR", "Spot-only ES"):
         assert cards[label].value.startswith("−"), label
-    # The comparator's gap is taken like for like, to the spot-only run (implied vol frozen in both), and from the
-    # amounts shown, so that the three tiles add up on screen: −$1,922 − (−$1,978) = +$56.
-    gap = tab_risk.shown(_amount(cards["Spot-only VaR"].value)) - _amount(cards["DGT VaR 99% 1D"].value)
-    assert cards["Non-linearity"].value == tab_risk.dollars(gap)
+    # The simulations are the library's (tests/test_risk.py checks the engine) on the four legs built here at their
+    # own surface vols, the spot paths at the ATMF vol; the DGT VaR is solved here from the Normal distribution.
+    legs = tuple(strat.Leg(kind, n, k, index.t, v) for (n, kind, k), v in zip(LEGS, index.vols, strict=True))
+    condor = strat.Strategy("Iron Condor", legs)
+    market = strat.Market(index.s, index.r, index.atm, index.t, index.q)
+    moving = risk.VaRConfig(0.99, 1, 100_000, seed=7, vol_of_vol=1.0, spot_vol_correlation=-0.7)
+    full = risk.value_at_risk(condor, market, moving, UNITS)
+    spot = risk.value_at_risk(condor, market, replace(moving, vol_of_vol=0.0), UNITS)
+    es = (risk.tail_measures(full.pnl, 0.975)[1], risk.tail_measures(spot.pnl, 0.975)[1])
+    delta, gamma, _, theta = index.greeks()
+    dgt = _dgt_var(delta, gamma, theta, index.s, index.atm)
+    expected = {
+        "VaR 99% 1D · MC": -full.var,
+        "ES 97.5% 1D · MC": -es[0],
+        "Spot-only VaR": -spot.var,
+        "Spot-only ES": -es[1],
+        "DGT VaR 99% 1D": -dgt,
+    }
+    # Every gap between the cards is $10 or more, so they are in whole dollars (the VaR's 95% simulation interval
+    # is −$471.51 to −$487.45: no cent of it is known), each amount to the cent in its help.
+    assert [round(v, 2) for v in expected.values()] == [-479.95, -492.32, -713.95, -727.60, -725.40]
+    assert {label: cards[label].value for label in expected} == {k: tab_risk.dollars(v) for k, v in expected.items()}
+    assert [cards[label].value for label in expected] == ["−$480", "−$492", "−$714", "−$728", "−$725"]
+    for label, amount in expected.items():
+        assert tab_risk.exact(amount).replace("$", "\\$") in cards[label].help, label
+    assert "95% simulation interval −\\$471.51 to −\\$487.45" in cards["VaR 99% 1D · MC"].help
+    # The gaps from the amounts shown, so that the cards add up on screen: −$480 − (−$714), −$492 − (−$728) and
+    # −$714 − (−$725), the comparator taken like for like (implied vol frozen in both).
+    assert cards["VaR 99% 1D · MC"].delta == "+\\$234 vs spot only"
+    assert cards["ES 97.5% 1D · MC"].delta == "+\\$236 vs spot only"
+    gap = tab_risk.shown(-spot.var) - tab_risk.shown(-dgt)
+    assert cards["Non-linearity"].value == tab_risk.dollars(gap) == "+$11"
     assert cards["Non-linearity"].delta == "spot only − DGT"
-    # The models simulate from the leg vol: no statistic of a history, so none is tagged SYN HIST; the line under
+    # The spot vol is named where it is used: the front expiry's ATMF vol, not a leg's.
+    assert "at 15.52%, the 18‑Dec‑26 AM ATMF vol" in cards["DGT VaR 99% 1D"].help
+    assert "Spot moves at 15.52%, the 18‑Dec‑26 AM ATMF vol; each leg re-priced at its own vol" in cards[
+        "VaR 99% 1D · MC"
+    ].help.replace("\\", "")
+    basis = next(c.value for c in at.caption if "Monte Carlo" in c.value)
+    assert basis == "Normal Monte Carlo, 100,000 paths, seed 7; spot vol 15.52%, vol of vol 100%, correlation −0.70."
+    # The models simulate from today's vols: no statistic of a history, so none is tagged SYN HIST; the line under
     # the report points to the backtests on the synthetic history.
     assert not any("SYN HIST" in label for label in cards)
     line = next(c.value for c in at.caption if "SYN HIST" in c.value)
     assert line.startswith("SYN HIST · ") and "Methodology" in line
     # The default model with the default vol dynamics: the Methodology's backtest of it, 31 exceptions against 20.2.
     assert "31 exceptions at 99% vs 20.2 expected, amber" in line
-    # The VaR, ES and spot-only numbers are read off the cached simulations with the Milestone 1 defaults.
-    assert "vs spot only" in cards["VaR 99% 1D · MC"].delta
     # The bars are shares of all outcomes in percent: they add up to the share inside the plotted range.
     bars = _bars(hist)
     assert 99.0 < bars.sum() <= 100.0 + 1e-9
@@ -459,6 +734,8 @@ def _array(value) -> np.ndarray:
         if shape is not None:
             array = array.reshape([int(n) for n in str(shape).split(",")] if isinstance(shape, str) else shape)
         return array
+    if isinstance(value, list) and value and isinstance(value[0], (list, dict)):
+        return np.array([_array(row) for row in value], dtype=float)
     return np.asarray(value, dtype=float)
 
 
@@ -492,13 +769,16 @@ def test_the_quoted_backtest_is_the_one_day_var_only():
 
 
 def test_the_ladder_chart_has_a_tick_on_the_loss_side():
-    # Plotly's own step was 5,000 for P&L from −$4,096 to +$5,871: no tick below zero, no loss readable.
+    # Plotly's own step was 5,000 for P&L from −$4,096 to +$5,871: no tick below zero, no loss readable. The condor's
+    # ladder runs from −$7,646 (+20%) to +$120 (−1%): ticks down from 0 in the loss, none above it, which the data
+    # reach by less than a tenth of the range (charts_risk.signed_ticks).
     at = _risk()
     ladder = _frame(at, "Move")
     yaxis = _chart(at, "ladder_chart")["layout"]["yaxis"]
     ticks = yaxis["tickvals"]
-    assert ladder["P&L"].min() < 0 and min(ticks) < 0 < max(ticks)
-    assert min(ticks) >= ladder["P&L"].min() and max(ticks) <= ladder["P&L"].max()
+    low, high = ladder["P&L"].min(), ladder["P&L"].max()
+    assert (low, high) == (-7646, 120) and high < 0.1 * (high - low)
+    assert min(ticks) < 0 == max(ticks) and min(ticks) >= low and len(ticks) >= 3
     assert yaxis["tickformat"] == ",.0f"
 
 
@@ -541,47 +821,152 @@ def test_the_quoted_backtest_is_the_methodologys_and_follows_the_vol_dynamics():
     assert "Not backtested" in next(c.value for c in _ok(at).caption if "SYN HIST" in c.value)
 
 
-def test_the_vega_report_buckets_add_up_to_the_vega_tile():
+def _bucket(kind: str, k: float, index: Index, v: float) -> str:
+    """A leg's strike bucket: the delta bucket whose undiscounted put delta N(−d1) is nearest the leg's own, at its
+    own vol."""
+    put_delta = norm.cdf(-_d1(index.s, k, index.t, index.r, index.q, v))
+    centres = {"10Δp": 0.10, "25Δp": 0.25, "ATM": 0.50, "25Δc": 0.75, "10Δc": 0.90}
+    return min(centres, key=lambda name: abs(centres[name] - put_delta))
+
+
+def test_the_vega_report_buckets_add_up_to_the_vega_tile(index):
     at = _risk(report="Vega")
     table = _frame(at, "Expiry")
     total = table[table["Expiry"] == "Total"]["Total"].iloc[0]
-    assert f"{total:+,.0f}" == _tiles(at)["Vega ($/vp)"].value.replace("$", "")
-    # Only the buckets the heatmap draws, and the total: the 20-Nov legs listed nine rows of zeros around them.
-    assert table["Expiry"].tolist() == ["14–30d", "Total"]
+    assert f"{total:,.0f}" == _shown(_tiles(at)["Vega ($/vp)"].value) == "-306"
+    # Only the buckets the heatmap draws, and the total: the 18-Dec legs listed nine rows of zeros around them.
+    assert table["Expiry"].tolist() == ["30–60d", "Total"]
     assert list(table.columns) == ["Expiry", "10Δp", "25Δp", "ATM", "25Δc", "10Δc", "Total"]
-    # The 20-Nov legs (27.7 days) sit in 14-30d: the long 5,815 at the money, the short 5,915 in 25Δc.
-    row = table[table["Expiry"] == "14–30d"].iloc[0]
-    assert row["ATM"] > 0 > row["25Δc"]
+    # The 18-Dec legs (55.7 days) sit in 30–60d. By delta at their own vols, the 5,300 and 5,400 puts (put deltas
+    # N(−d1) 0.11 and 0.15) both go to 10Δp and the 6,150 and 6,250 calls (0.86 and 0.93) both to 10Δc: each pair is
+    # a long wing and a short body, whose vegas net to −$102 and −$204.
+    buckets = {k: _bucket(kind, k, index, v) for (_, kind, k), v in zip(LEGS, index.vols, strict=True)}
+    assert buckets == {5300.0: "10Δp", 5400.0: "10Δp", 6150.0: "10Δc", 6250.0: "10Δc"}
+    vegas = {k: n * _greeks(kind, index.s, k, index.t, index.r, index.q, v)[2] for (n, kind, k), v in
+             zip(LEGS, index.vols, strict=True)}  # fmt: skip
+    row = table[table["Expiry"] == "30–60d"].iloc[0]
+    for column in ("10Δp", "25Δp", "ATM", "25Δc", "10Δc"):
+        expected = sum(vega for k, vega in vegas.items() if buckets[k] == column)
+        assert row[column] == round(expected), column  # the column's whole dollars
+    assert row["10Δc"] < row["10Δp"] < 0
 
 
 def test_the_explain_report_explains_the_what_if_move(index):
     at = _risk(report="Explain", ws=-2, wv=3, wd=5)
     table = _frame(at, "Term")
-    total = _book(index.s * 0.98, index.t - 7 / 365, index.r, index.q, index.vol + 0.03) - _book(
-        index.s, index.t, index.r, index.q, index.vol
-    )
+    s, t, vols = index.s * 0.98, index.t - WEEK, [v + 0.03 for v in index.vols]
+    total = index.value(s, t, vols=vols) - index.value()
     full = table[table["Term"] == "Full revaluation"]["P&L"].iloc[0]
-    assert full == pytest.approx(total, abs=0.5)
+    assert full == round(total, 2)  # the column's cents
     terms = table[table["Term"] != "Full revaluation"]["P&L"]
-    assert terms.sum() == pytest.approx(full, abs=len(terms) * 0.5)  # each row rounded to the dollar
+    assert terms.sum() == pytest.approx(full, abs=len(terms) * 0.005)  # each row rounded to the cent
+    # The vega term is each leg's vega times its own +3 vp, at today's market.
+    vega = index.greeks()[2]
+    assert table.set_index("Term").loc["Vega", "P&L"] == round(vega * 0.03, 2)
     shapley = _frame(_risk(report="Explain", ws=-2, wv=3, wd=5, ex_method="Shapley"), "Term")
     assert shapley["Term"].tolist() == ["Spot", "Vol", "Time", "Rate", "Full revaluation"]
-    # With a total of $1,000 or more the waterfall's labels are in whole dollars, as the table is.
+    # With every amount below $1,000 the waterfall's labels are to the cent, as the table is.
     labels = [label for label in _chart(at, "explain_waterfall")["data"][0]["text"] if label]
-    assert abs(full) >= 1000 and all(re.fullmatch(r"[+−]\$[\d,]+", label) for label in labels), labels
+    assert abs(full) < 1000 and all(re.fullmatch(r"[+−]\$[\d,]+\.\d\d", label) for label in labels), labels
     # No shift set: the what-if has nothing to explain, so the report explains the next session (Friday 16:00 to
     # Monday 16:00, three calendar days, nothing else moving) and says that Θ carries it all.
     quiet = _risk(report="Explain")
     assert any(c.value.startswith("No what-if shift is set: only time moves") for c in quiet.caption)
-    decay = _book(index.s, index.t - 3 / 365, index.r, index.q, index.vol) - _book(
-        index.s, index.t, index.r, index.q, index.vol
-    )
+    decay = index.value(t=index.t - WEEKEND) - index.value()
     full = _frame(quiet, "Term").set_index("Term").loc["Full revaluation", "P&L"]
-    assert full == pytest.approx(decay, abs=0.005)  # the column's cents
+    assert full == round(decay, 2)  # the column's cents
     # Only time moves, so every other term is zero and carries no label; the time decay by repricing is exact.
     labels = _chart(quiet, "explain_waterfall")["data"][0]["text"]
-    assert decay < 0 and [label for label in labels if label] == [f"−${-decay:.2f}"] * 2  # Θ and the total
+    assert decay > 0 and [label for label in labels if label] == [f"+${decay:.2f}"] * 2  # Θ and the total
     assert any("unexplained (0.0% of the P&L)" in c.value for c in quiet.caption)
+
+
+def test_the_footer_states_each_legs_vol(index):
+    # The footer named one vol for every leg, the front expiry's ATMF vol ("BSM European legs at 15.52% (the
+    # contract's surface vol)"), at which no leg of the condor is valued. It now gives the legs' own vols, read off
+    # the surface at their strikes, and the sidebar vol on the textbook market.
+    footer = [c.value for c in _risk().tabs[2].caption if c.value.startswith("Full revaluation")]
+    low, high = min(index.vols), max(index.vols)
+    assert footer == [
+        f"Full revaluation · BSM European legs at their surface IVs, {low:.2%} to {high:.2%} · sticky strike · 4 legs "
+        "· 1 × 100"
+    ]
+    assert f"{index.atm:.2%}" not in footer[0] and "12.06% to 20.56%" in footer[0]
+    textbook = [c.value for c in _risk(preset="Textbook").tabs[2].caption if c.value.startswith("Full revaluation")]
+    assert textbook == [
+        "Full revaluation · BSM European legs at the sidebar vol, 20.00% · sticky strike · 2 legs · 1 × 100"
+    ]
+
+
+def test_the_footer_counts_ivs_typed_over_the_surface(index):
+    # A typed IV replaces a leg's surface vol (legs.price_index marks it "override"): the footer counts it and its
+    # range takes it in. Under the textbook market a leg's typed IV shows beside the sidebar vol.
+    table = lg.index_template("Iron Condor", index.published, EXPIRY)
+    table.loc[0, lg.IV] = 25.0
+    book = lg.price_index(table, index.published, index.context.as_of, name="Iron Condor")
+    assert tab_risk.leg_vols(Position(book.strategy, book.market, 1, 100.0, book)) == (
+        f"their surface IVs (1 typed over), {min(index.vols):.2%} to 25.00%"
+    )
+    table.loc[:, lg.IV] = 18.0
+    book = lg.price_index(table, index.published, index.context.as_of, name="Iron Condor")
+    assert tab_risk.leg_vols(Position(book.strategy, book.market, 1, 100.0, book)) == "their typed IVs, 18.00%"
+    market = strat.Market(100.0, 0.05, 0.20, 1.0)
+    rows = lg.textbook_template("Bull Call Spread", 100.0, 10.0, 1.0)
+    rows.loc[1, lg.IV] = 22.5
+    book = lg.price_textbook(rows, market, 100.0)
+    typed = tab_risk.leg_vols(Position(book.strategy, market, 1, 100.0, book))
+    assert typed == "20.00% to 22.50% (1 typed, sidebar 20.00%)"
+
+
+def test_each_leg_moves_by_its_own_vol_and_its_own_time_left(index):
+    # A calendar on two listed expiries, each leg at its own surface vol: −1 5,830C 18-Dec-26 AM (55.7 days) and
+    # +1 5,830C 19-Feb-27 AM (118.7 days), valued at the December carry as the Strategy tab values every leg (the
+    # carry is the market's: legs.price_index). A one-month vol shock moves each leg by the share its own time left
+    # gives it, at the what-if date as at rest.
+    back = Expiry(date(2027, 2, 19), "AM")
+    expiries = (index.t, index.published.maturity(back))
+    vols = (index.published.vol(5830.0, EXPIRY).vol, index.published.vol(5830.0, back).vol)
+    calendar = ((-1.0, "call", 5830.0), (1.0, "call", 5830.0))
+    legs = tuple(strat.Leg(kind, n, k, T, v) for (n, kind, k), T, v in zip(calendar, expiries, vols, strict=True))
+    market = strat.Market(index.s, index.r, index.atm, index.t, index.q)
+    position = Position(strat.Strategy("Long Call Calendar", legs), market, 1, 100.0)
+    inputs = SimpleNamespace(context=index.context)
+
+    def value(s, taus, sigmas, r=index.r):
+        return UNITS * sum(
+            n * _price(kind, s, k, T, r, index.q, v) for (n, kind, k), T, v in zip(calendar, taus, sigmas, strict=True)
+        )
+
+    # The what-if: +10% 1M-scaled and T+5. Each leg keeps its own time left, 7 days less, and takes 10% × its damping.
+    shifts = whatif.Shifts(vol=10.0, mode="1M-scaled", sessions=5)
+    book = tab_risk.make_book(position, inputs, shifts)
+    taus = [T - WEEK for T in expiries]
+    moved = [v * (1 + 0.10 * _damp(tau)) for v, tau in zip(vols, taus, strict=True)]
+    assert [leg.expiry for leg in book.strategy.legs] == pytest.approx(taus, abs=1e-12)
+    assert [leg.volatility for leg in book.strategy.legs] == pytest.approx(moved, abs=1e-12)
+    assert _damp(taus[0]) > _damp(taus[1])  # the front leg moves more
+    # The stresses at the what-if state: each one-month shock damped by each leg's own time left at that date.
+    table = tab_risk.stress_frame(book, tab_risk.STRESS_GROUPS[:2], False, True, None).set_index("Scenario")
+    base = value(index.s, taus, moved)
+    for sc in tab_risk.ALL_STRESSES:
+        sigmas = [v * (1 + (sc.vol_multiplier - 1) * (_damp(tau) if sc.one_month_vol_shock else 1.0))
+                  for v, tau in zip(moved, taus, strict=True)]  # fmt: skip
+        expected = value(index.s * (1 + sc.spot_change), taus, sigmas, index.r + sc.rate_change) - base
+        assert table.loc[sc.name, "P&L"] == pytest.approx(expected, abs=1e-6), sc.name
+    assert tab_risk.tiles(book).worst_stress == pytest.approx(table["P&L"].min(), abs=1e-9)
+    # Today's desk grid in the 1M-scaled mode and the explain of a stress damp by each leg's time left today.
+    today = tab_risk.make_book(position, inputs, whatif.Shifts())
+    grid = tab_risk.desk_grid(today, "1M-scaled")
+    for i, shock in enumerate(tab_risk.DESK_VOL["1M-scaled"]):
+        sigmas = [v * (1 + shock / 100 * _damp(T)) for v, T in zip(vols, expiries, strict=True)]
+        for j, x in enumerate(tab_risk.DESK_SPOT):
+            expected = value(index.s * (1 + x / 100), expiries, sigmas) - value(index.s, expiries, vols)
+            assert grid[i, j] == pytest.approx(expected, abs=1e-6), (shock, x)
+    covid = next(sc for sc in tab_risk.ALL_STRESSES if sc.name.startswith("COVID"))
+    move = tab_risk.explain_target(today, covid.name)
+    assert move["vols"] == pytest.approx(
+        [v * (1 + (covid.vol_multiplier - 1) * _damp(T)) for v, T in zip(vols, expiries, strict=True)], abs=1e-12
+    )
 
 
 @pytest.mark.parametrize("report", tab_risk.REPORTS)

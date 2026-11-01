@@ -521,7 +521,8 @@ def test_leg_edits_survive_a_visit_to_the_risk_tab_on_the_index():
     editor = LegsEditor(at)
     at = editor.edit({"1": {"IV (%)": 25.0}, "3": {"Strike": 6300.0}})
     _open(at, "Risk")
-    assert "+1 6,300C 18‑Dec‑26 AM" in _analysed(at)
+    # The legs share one expiry, which the line names once with its time left (tab_strategy.Position.describe).
+    assert "+1\u00a06,300C · 1 × 100 · 18‑Dec‑26 AM (55d) ·" in _analysed(at)
     _open(at, "Strategy")
     at.segmented_control(key="st_blotter").set_value("View").run()
     frame = _blotter(at).value
@@ -538,7 +539,7 @@ def test_index_legs_keep_their_dates_when_the_valuation_time_moves(published):
     at.sidebar.datetime_input(key="asof").set_value(later).run()
     _ok(at)
     _open(at, "Risk")
-    assert "+2 5,300P 18‑Dec‑26 AM" in _analysed(at)
+    assert "+2\u00a05,300P /" in _analysed(at) and "· 18‑Dec‑26 AM (48d) ·" in _analysed(at)  # 55.7 days less a week
     expected = clock.time_to_expiry(later, DEC.day, style="AM")
     assert expected == pytest.approx(published.maturity(DEC) - 7 / 365, abs=1e-12)  # a week of calendar time
     built = _built(preset=None, asof="2026-10-30T16:00")

@@ -1,16 +1,18 @@
 ## Risk
 
 ### Scenarios and stress tests
-Every scenario re-prices all legs at the shocked spot, implied volatility, rate and remaining time. Historical
-analogues take each episode between two closes: the S&P 500 move (to 0.1%), the ratio of the VIX closes as the
-implied-vol multiplier (the VXO for 1987) and the change in the Fed funds target (the midpoint of the target range
-from December 2008), with the VIX, VXO and Fed funds data from FRED (series VIXCLS, VXOCLS, DFEDTAR, DFEDTARL and
-DFEDTARU). The Fed scenario uses the published 2026 severely adverse paths from their Q4 2025 jump-off: equities
-−57.8% at the Q3 2026 trough, the VIX from 26.4 to its Q2 2026 peak of 72.0 (a multiplier of 2.73) and the 3-month
-Treasury rate from 3.7% to 0.1%. It applies the VIX peak and the equity trough at once, although the Fed's paths
-reach them a quarter apart. Every description quotes its dates and levels, and a test checks them, and the Fed
-figures above, against the sources. The rate shock shifts the model's risk-free rate: by the change in the Fed
-funds target for a historical analogue, by the change in the 3-month Treasury rate for the Fed scenario. The vol
+Every scenario re-prices all legs at the shocked spot, implied volatility, rate and remaining time, each leg at its
+own expiry and implied vol: under the synthetic index the published surface's at its strike and expiry (unless an IV
+is typed over it), on the textbook market the sidebar vol. Historical analogues take each episode between two
+closes: the S&P 500 move (to 0.1%), the ratio of the VIX closes as the implied-vol multiplier (the VXO for 1987) and
+the change in the Fed funds target (the midpoint of the target range from December 2008), with the VIX, VXO and Fed
+funds data from FRED (series VIXCLS, VXOCLS, DFEDTAR, DFEDTARL and DFEDTARU). The Fed scenario uses the published
+2026 severely adverse paths from their Q4 2025 jump-off: equities −57.8% at the Q3 2026 trough, the VIX from 26.4
+to its Q2 2026 peak of 72.0 (a multiplier of 2.73) and the 3-month Treasury rate from 3.7% to 0.1%. It applies the
+VIX peak and the equity trough at once, although the Fed's paths reach them a quarter apart. Every description
+quotes its dates and levels, and a test checks them, and the Fed figures above, against the sources. The rate
+shock shifts the model's risk-free rate: by the change in the Fed funds target for a historical analogue, by the
+change in the 3-month Treasury rate for the Fed scenario. The vol
 ratio multiplies each leg's current implied vol; it does not set implied vol to the index's level. The Fed's VIX
 is the highest close of each quarter, so its shock is the ratio of two spikes, and a one-month leg marked at a
 calm 15% goes to 41%, not to the Fed's 72%. Those implied-vol shocks are one-month shocks, damped for longer
@@ -25,6 +27,8 @@ an equity or a narrow-based index, 4210(g)(2)(F)), vols unchanged, and the great
 minimum of \$0.375 times the multiplier a contract (4210(g)(7)(B)). It has no offsets between product groups and
 no house add-ons: it is not a broker's requirement. The ladder's Θ is ∂V/∂t ÷ 365 at fixed vols; where it misstates
 a day's decay by more than 10 % (within days of expiry) the Θ tile gives the day's decay by repricing instead.
+The ladder's σ steps are daily standard deviations of spot at one vol, the front expiry's at-the-money-forward vol
+(the sidebar vol on the textbook market); no leg is valued at it unless it is that leg's own.
 
 ### Value-at-Risk and Expected Shortfall
 Full revaluation on simulated spot and implied-vol paths:
@@ -36,6 +40,10 @@ Full revaluation on simulated spot and implied-vol paths:
   return through a Gaussian copula (so the multiplier keeps mean one under fat tails) and damped for longer
   tenors. They are on by default, with index (VIX-like) dynamics: vol of vol 100 % a year and spot–vol
   correlation −0.7.
+
+Spot is simulated at the front expiry's at-the-money-forward vol (the sidebar vol on the textbook market), the
+$\sigma$ below; each leg is re-priced at its own implied vol, times the simulated one-month vol multiplier damped
+for its tenor.
 
 With implied-vol moves on, the tab shows the spot-only VaR and ES beside the result: the same simulated spot
 paths (one seed) re-priced with implied vol frozen, so the gap between the two is what the implied-vol moves
