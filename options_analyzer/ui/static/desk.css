@@ -249,6 +249,24 @@
   }
 }
 
+/* The chain ladder in one of its two column sets (tab_pricing._chain): mirrored about the strike from a 641 px
+   screen; on a phone the strike first, pinned, with mid, IV and delta either side. The mirrored ladder is about
+   770 px wide: on a 390 px phone it showed five call columns and cut the strike at the edge. The layout wrapper
+   around each is hidden, not the container, so that the hidden one leaves no gap of its own. */
+[data-testid='stLayoutWrapper']:has(> .st-key-pricing_ladder_phone) {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  [data-testid='stLayoutWrapper']:has(> .st-key-pricing_ladder) {
+    display: none;
+  }
+
+  [data-testid='stLayoutWrapper']:has(> .st-key-pricing_ladder_phone) {
+    display: flex;
+  }
+}
+
 /* --- Surface tab --------------------------------------------------------------------------------------------- */
 
 /* The name of the kept quotes file is a code span in a caption, which Streamlit draws at 0.75em (9.2 px against

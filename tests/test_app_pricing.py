@@ -529,6 +529,22 @@ def test_the_chain_window_and_stride(index_app):
     assert all(k % 50 == 0 or k == 5815.0 for k in _frame(index_app, "tbl_pricing_chain_").value["Strike"])
 
 
+def test_the_phone_ladder_puts_the_strike_first(index_app, default_index):
+    # On a 390 px phone the mirrored ladder showed five call columns and cut the strike at the edge. Its phone set
+    # (shown by the stylesheet below 641 px, tests/test_pricing_e2e.py) leads with the strike, pinned, then the call's
+    # mid, IV and Δ and the put's Δ, IV and mid, one row per strike of the ladder.
+    desk, phone = _frame(index_app, "tbl_pricing_chain_"), _frame(index_app, "tbl_pricing_ladder_phone_")
+    assert list(phone.value.columns) == ["Strike", "Mark", "C Mid", "C IV", "C Δ", "P Δ", "P IV", "P Mid"]
+    assert json.loads(phone.proto.columns)["Strike"]["pinned"] is True
+    np.testing.assert_array_equal(phone.value["Strike"], desk.value["Strike"])
+    for name in ("C IV", "C Δ", "P Δ", "P IV"):
+        np.testing.assert_array_equal(phone.value[name], desk.value[name])
+    row = phone.value.set_index("Strike").loc[5815.0]
+    (cb, ca), (pb, pa) = default_index["book"]["call"], default_index["book"]["put"]
+    assert row["Mark"] == "←"
+    assert (row["C Mid"], row["P Mid"]) == (pytest.approx((cb + ca) / 2), pytest.approx((pb + pa) / 2))
+
+
 def test_chain_strikes_auto_stride():
     listed = np.arange(5400.0, 6101.0, 5.0)
     assert list(tab_pricing.chain_strikes(listed, 5800.0, 5850.0, "Auto", 5812.0)) == [

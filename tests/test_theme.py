@@ -341,6 +341,7 @@ DESK_TESTIDS = {
     "stMetric", "stMetricLabel", "stMetricValue", "stMarkdownContainer", "stTooltipIcon", "stMultiSelect",
     "stNumberInput", "stNumberInputStepUp", "stNumberInputStepDown", "stNumberInputContainer", "stDateTimeInputField",
     "stDateInputField", "stTextInputRootElement", "stSelectbox", "stElementContainer", "stElementToolbar",
+    "stLayoutWrapper",  # the box around a keyed container (1.65 and 1.66): hiding it leaves no gap
 }  # fmt: skip
 #: Attributes other than data-testid: a multiselect's chips have no test id of their own, and the Methodology's
 #: anchors are elements with an id.
