@@ -241,14 +241,14 @@ def test_frozen_implied_vol_understates_the_var_of_a_short_straddle_by_27_percen
     text = " ".join((Path(risk.__file__).parent / "ui" / "methodology" / "risk.md").read_text(encoding="utf-8").split())
     assert "100,000 paths, seed 7, the app's default" in text
     assert rf"VaR is \${moving.var:,.0f} with implied-vol moves and \${frozen.var:,.0f} without them" in text
-    assert f"understates it by {100 * (1 - frozen.var / moving.var):.0f} %" in text
+    assert f"understates it by {100 * (1 - frozen.var / moving.var):.0f}%" in text
     gaps = [
         1
         - risk.value_at_risk(STRADDLE, SPX, risk.VaRConfig(0.99, 1, 100_000, seed=seed), 100).var
         / risk.value_at_risk(STRADDLE, SPX, risk.VaRConfig(0.99, 1, 100_000, seed=seed, **INDEX_VOL), 100).var
         for seed in range(10)
     ]
-    assert f"({100 * min(gaps):.0f} % to {100 * max(gaps):.0f} % over seeds 0 to 9)" in text
+    assert f"({100 * min(gaps):.0f}% to {100 * max(gaps):.0f}% over seeds 0 to 9)" in text
 
 
 @pytest.mark.parametrize(
@@ -578,7 +578,7 @@ def test_delta_gamma_var_is_within_5_percent_of_full_revaluation_at_one_day():
         gaps[name] = res.delta_gamma.var / res.var - 1
     worst = max(abs(gap) for gap in gaps.values())
     assert worst <= 0.05, gaps
-    assert f"the one-day gap is at most {100 * worst:.1f} %" in _methodology()
+    assert f"the one-day gap is at most {100 * worst:.1f}%" in _methodology()
 
 
 def test_the_gap_to_full_revaluation_shows_what_the_quadratic_leaves_out():
@@ -590,7 +590,7 @@ def test_the_gap_to_full_revaluation_shows_what_the_quadratic_leaves_out():
     res = risk.value_at_risk(strategy, DG_MARKET, risk.VaRConfig(0.99, 1, 400_000, seed=7), 100)
     assert res.delta_gamma.var > 1.05 * res.var_ci95[1]
     gap = res.delta_gamma.var / res.var - 1
-    assert f"on a put ratio backspread it is {100 * gap:.0f} %, since its gamma grows" in _methodology()
+    assert f"on a put ratio backspread it is {100 * gap:.0f}%, since its gamma grows" in _methodology()
 
 
 def test_beyond_a_few_days_the_gap_is_the_time_decay_that_theta_leaves_out():
@@ -615,7 +615,7 @@ def test_beyond_a_few_days_the_gap_is_the_time_decay_that_theta_leaves_out():
     full, quadratic = f"{res.var:,.0f}", f"{res.delta_gamma.var:,.0f}"
     assert (
         rf"full revaluation loses \${-decay:,.0f} at an unchanged spot, about its worst outcome, where "
-        rf"${{\theta h/252}}$ says \${-linear:,.0f}, and the 99 % VaR is \${full} by full revaluation against "
+        rf"${{\theta h/252}}$ says \${-linear:,.0f}, and the 99% VaR is \${full} by full revaluation against "
         rf"\${quadratic} delta-gamma-theta" in _methodology()
     )
 
@@ -722,7 +722,7 @@ def test_the_methodology_quotes_the_comparator_on_the_index_straddle():
     # seed 7, the app's default): full revaluation $2,833, delta-gamma-theta $2,882, delta-normal $1,016.
     res = risk.value_at_risk(STRADDLE, SPX, risk.VaRConfig(0.99, 1, 100_000, seed=7), 100)
     assert (
-        rf"the one-day 99 % VaR is \${res.delta_gamma.var:,.0f} delta-gamma-theta and \${res.var:,.0f} by full "
+        rf"the one-day 99% VaR is \${res.delta_gamma.var:,.0f} delta-gamma-theta and \${res.var:,.0f} by full "
         rf"revaluation (\${res.delta_normal_var:,.0f} delta-normal)" in _methodology()
     )
 

@@ -88,10 +88,12 @@ QUOTES_LAYOUT = (
     "call/put Type."
 )
 #: The footer: what the fit is, in one line, in a trader's words (no roadmap codes). "Wing cap |k| ≤ 1.5" was half
-#: the rule: the reach is four at-the-money standard deviations, at most 1.5, and Methodology › Surface gives it.
+#: the rule: the reach is four at-the-money standard deviations, at most 1.5, and Methodology › Surface gives it. The
+#: citation is the arbitrage-free SVI calibration's, which References lists (Gatheral's 2004 slides have no stable
+#: link to list).
 FOOTER = (
-    "SVI per expiry (Gatheral 2004), Durrleman g ≥ 0, calendar w(k, T) non-decreasing; Lee-bounded "
-    "wings. Method: Methodology › Surface."
+    "SVI per expiry (Gatheral and Jacquier 2014), Durrleman g ≥ 0, w(k, T) non-decreasing in T; Lee-bounded wings. "
+    "Method: Methodology › Surface."
 )
 #: The parametric surface's footer: no fit, one formula for every maturity (the SVI footer misdescribed it).
 FOOTER_SSVI = (

@@ -819,16 +819,16 @@ def test_the_methodology_quotes_the_measured_power():
     # and sizes: 10,000 paths for Christoffersen, 100,000 histories for Z2, standard errors 0.005 and 0.0015).
     text = _text(RISK_METHODOLOGY)
     size, power = bt.power_kupiec(250, 0.01, 0.01), bt.power_kupiec(250, 0.02, 0.01)
-    assert f"rejects a correct model {100 * size:.1f} % of the time" in text
-    assert f"only {100 * power:.0f} % of the time; ten years (2,520 days) raise that to 98.7 %" in text
+    assert f"rejects a correct model {100 * size:.1f}% of the time" in text
+    assert f"only {100 * power:.0f}% of the time; ten years (2,520 days) raise that to 98.7%" in text
     assert f"{100 * bt.power_kupiec(2_520, 0.02, 0.01):.1f}" == "98.7"
     green = 1 - bt.power_traffic_light(250, 0.02).amber_or_red
-    assert f"leaves that model green {100 * green:.0f} % of the time" in text
+    assert f"leaves that model green {100 * green:.0f}% of the time" in text
     clustered = bt.power_christoffersen(250, 0.01, 0.25).independence
-    assert f"a quarter of the time in only {100 * clustered:.0f} % of such years" in text
+    assert f"a quarter of the time in only {100 * clustered:.0f}% of such years" in text
     wide, fat = bt.power_z2(250, 0.025, scale=1.2), bt.power_z2(250, 0.025, dof=5)
-    assert f"20 % above the model's in {100 * wide:.0f} % of years" in text
-    assert f"at the model's variance, in only {100 * fat:.0f} %" in text
+    assert f"20% above the model's in {100 * wide:.0f}% of years" in text
+    assert f"at the model's variance, in only {100 * fat:.0f}%" in text
 
 
 def _risk_methodology_backtest_sentence(frozen: int, default: int, scaled: int) -> str:
