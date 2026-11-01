@@ -1039,7 +1039,8 @@ def chain_frame(
             side |= {
                 "Bid": np.array([qt.bid if qt.bid > 0 else np.nan for qt in quotes]),
                 "Ask": np.array([qt.ask for qt in quotes]),
-                "Mid": np.array([qt.mid for qt in quotes]),
+                # An offer only has no mid (its IV reads "–" too), not half the ask.
+                "Mid": np.array([qt.mid if qt.bid > 0 else np.nan for qt in quotes]),
                 "IV": np.array([qt.iv_mid for qt in quotes]) * 100,
             }
         sides[kind] = side

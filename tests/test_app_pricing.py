@@ -542,6 +542,12 @@ def test_the_phone_ladder_puts_the_strike_first(index_app, default_index):
     row = phone.value.set_index("Strike").loc[5815.0]
     (cb, ca), (pb, pa) = default_index["book"]["call"], default_index["book"]["put"]
     assert row["Mark"] == "←"
+    # An offer only (no bid) has no mid, not half its ask: the "All" window lists the far wings' zero bids.
+    index_app.segmented_control(key="pr_chain_win").set_value("All").run()
+    desk, phone = _frame(index_app, "tbl_pricing_chain_").value, _frame(index_app, "tbl_pricing_ladder_phone_").value
+    for side in ("C", "P"):
+        np.testing.assert_array_equal(phone[f"{side} Mid"].isna(), desk[f"{side} Bid"].isna())
+    assert phone["C Mid"].isna().any() or phone["P Mid"].isna().any()
     assert (row["C Mid"], row["P Mid"]) == (pytest.approx((cb + ca) / 2), pytest.approx((pb + pa) / 2))
 
 
