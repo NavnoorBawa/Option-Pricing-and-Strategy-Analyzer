@@ -55,8 +55,6 @@ LEGACY_ENGINE_PARAMS = ("tree", "steps", "style", "paths", "seed", "antithetic",
 EMPTY_PARAMS = ("st_dates",)
 #: Session-state keys: the link was read (on the session's first run), and its notes, shown once.
 _LINK_READ, _LINK_NOTES = "link_read", "link_notes"
-#: Session-state key: the header's Methodology button was clicked, so this run opens the Methodology drawer.
-_DRAWER = "methodology_drawer"
 
 
 def _link_asof(value: str) -> datetime | None:
@@ -280,11 +278,6 @@ def beyond_reach(inputs: Inputs) -> str:
     )
 
 
-def _open_methodology() -> None:
-    """Ask the next run to open the Methodology drawer (the header's Methodology button)."""
-    st.session_state[_DRAWER] = True
-
-
 def run() -> None:
     """One script run of the app: the page settings, stylesheet and logo, the sidebar, the header strip and the open
     tab. The shell draws no price cards (UI-1): the Pricing tab owns its headline tiles."""
@@ -310,7 +303,7 @@ def run() -> None:
     if not math.isfinite(inputs.volatility):
         # A strike beyond the surface's reach at the focus expiry (typed in the sidebar, or from a link): the tabs
         # cannot price it, so the page says why and stops, rather than fail inside the formulas.
-        header.render(inputs, on_methodology=_open_methodology)
+        header.render(inputs, on_methodology=tab_methodology.open_drawer)
         st.error(beyond_reach(inputs), icon=":material/error:")
         st.stop()
 
@@ -323,8 +316,8 @@ def run() -> None:
         fallback = f"{inputs.model.label}: {exc} Showing Black-Scholes-Merton values instead."
         inputs = replace(inputs, model=replace(inputs.model, kind="bsm"))
         prices = tab_pricing.compute_prices(inputs)
-    share = header.render(inputs, on_methodology=_open_methodology)
-    drawer = st.session_state.pop(_DRAWER, False)
+    share = header.render(inputs, on_methodology=tab_methodology.open_drawer)
+    drawer = st.session_state.pop(tab_methodology.DRAWER_ASKED, False)
     for note in st.session_state.pop(_LINK_NOTES, ()):
         st.warning(note, icon=":material/link_off:")
     for note in market_notes():

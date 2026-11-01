@@ -38,7 +38,7 @@ from ..american import AmericanPrice
 from ..monte_carlo import RELIABLE_PATHS, RELIABLE_SAMPLES, MonteCarloResult
 from ..strategies import ONE_DAY
 from ..vol_surface.published import Expiry, PublishedSurface, Quote
-from . import cache, charts, charts_pricing, surface_state, whatif
+from . import cache, charts, charts_pricing, surface_state, tab_methodology, whatif
 from . import market as mk
 from .components import card_row, cents_places, current_key, table
 from .format import (
@@ -76,8 +76,6 @@ DIAGNOSTICS = "pricing_diag"
 _CHAIN_MOVED = "pricing_chain_moved"
 #: Session-state key: why a click on the chain ladder did not move the strike (a row beyond the surface's reach).
 _CHAIN_NOTE = "pricing_chain_note"
-#: Session-state key of the header's Methodology button (``app.DRAWER``): the footer's button sets it too.
-DRAWER = "methodology_drawer"
 #: The headline tiles' row and its three pairs: 6 across on a desktop, 4 + 2 on a laptop with the sidebar open and
 #: 2 + 2 + 2 on a phone. (Groups of three, UI spec 2.9's 3 + 3, cannot hold three cards on a 390 px phone: their
 #: values and deltas, "5,813.91" over "pair −0.29 bp", need about 130 px a card, so the groups went 2 + 1 twice, four
@@ -1628,10 +1626,6 @@ def _diagnostics(inputs: Inputs, prices: Prices) -> None:
 # --- The tab ----------------------------------------------------------------------------------------------------
 
 
-def _open_methodology() -> None:
-    st.session_state[DRAWER] = True
-
-
 def footer_text(inputs: Inputs, market: Contract) -> str:
     """The footer line: the engine, the time basis, the vol's source and the unit."""
     engine = "ALO · American" if _alo(inputs) else "BSM · European"
@@ -1674,4 +1668,4 @@ def render(inputs: Inputs, prices: Prices) -> None:
             _diagnostics(inputs, prices)
     foot = st.container(horizontal=True, key="pricing_footer", vertical_alignment="center", gap="small")
     foot.caption(footer_text(inputs, market))
-    foot.button("Methodology", key="pricing_methodology", type="tertiary", on_click=_open_methodology)
+    foot.button("Methodology", key="pricing_methodology", type="tertiary", on_click=tab_methodology.open_drawer)

@@ -33,11 +33,11 @@ from ..implied_vol import (
     lowest_tree_volatility,
     no_arbitrage_bounds,
 )
-from . import cache, charts, charts_pricing
+from . import cache, charts, charts_pricing, tab_methodology
 from .components import card_row, current_key
 from .format import MISSING, md, money, number, premium, vol, vol_change
 from .inputs import Inputs
-from .tab_pricing import DRAWER, context_line, contract
+from .tab_pricing import context_line, contract
 
 #: The tiles' row and its three pairs, which wrap as the Pricing tab's do (``tab_pricing.TILES``): the quote's IV BID
 #: and IV ASK, then IV MID beside SURFACE (the two that mid vs fit compares), then VEGA and BOUNDS. In the spec's
@@ -318,11 +318,7 @@ def render(inputs: Inputs) -> None:
         else "Let's Be Rational (Jäckel 2015)"
     )
     foot.caption(f"{method} · bounds checked first · per share")
-    foot.button("Methodology", key="iv_methodology", type="tertiary", on_click=_open_methodology)
-
-
-def _open_methodology() -> None:
-    st.session_state[DRAWER] = True
+    foot.button("Methodology", key="iv_methodology", type="tertiary", on_click=tab_methodology.open_drawer)
 
 
 def chart_window(ivs: list[float], mid: float, sigma: float) -> tuple[float, float]:

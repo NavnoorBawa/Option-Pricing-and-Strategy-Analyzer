@@ -244,6 +244,17 @@ def test_opened_from_risk_the_drawers_first_section_is_risk_and_open(new_app):
     assert first.label == "Risk" and first.proto.expanded
 
 
+@pytest.mark.parametrize(("tab", "key", "section"), [("Pricing", "pricing_methodology", "Pricing engines"),
+                                                     ("IV", "iv_methodology", "Implied vol")])  # fmt: skip
+def test_a_tab_footers_methodology_button_opens_the_same_drawer(new_app, tab, key, section):
+    # One callback (tab_methodology.open_drawer) serves the header's button and each tab footer's.
+    at = new_app(tab=tab).run()
+    at.button(key=key).click().run()
+    _ok(at)
+    first = _of_type(_dialog(at), "expander")[0]
+    assert first.label == section and first.proto.expanded
+
+
 def test_the_header_button_has_a_keyboard_shortcut_named_in_its_tooltip(app):
     # The UI spec (sections 2.4 and 3.6): Alt+Shift+M opens the drawer. The browser test presses it
     # (tests/test_theme.py); the stylesheet hides Streamlit's hint inside the button, so the tooltip names it.

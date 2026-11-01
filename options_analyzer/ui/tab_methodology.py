@@ -389,6 +389,16 @@ def render() -> None:
         st.html(_ANCHORS, unsafe_allow_javascript=True)
 
 
+#: Session-state key: a Methodology button was clicked (the header's, or a tab footer's), so the next run opens the
+#: drawer (the app pops it).
+DRAWER_ASKED = "methodology_drawer"
+
+
+def open_drawer() -> None:
+    """Ask the next run to open the Methodology drawer: the callback of every Methodology button."""
+    st.session_state[DRAWER_ASKED] = True
+
+
 @st.dialog("Methodology", position="right", width="large", icon=":material/menu_book:")
 def drawer(tab: str) -> None:
     """The Methodology in a drawer on the right, at full height, over the open tab, which stays as it was.
