@@ -34,7 +34,7 @@ from ..implied_vol import (
     no_arbitrage_bounds,
 )
 from . import cache, charts, charts_pricing, tab_methodology
-from .components import card_row, current_key
+from .components import card_row, cents_places, current_key
 from .format import MISSING, md, money, number, premium, vol, vol_change
 from .inputs import Inputs
 from .tab_pricing import context_line, contract
@@ -47,9 +47,8 @@ TILES = ("iv_tiles", ("iv_tiles_quote", "iv_tiles_mid", "iv_tiles_context"))
 #: The index's tick (Cboe SPX: $0.05 below $3, $0.10 from $3); the textbook market's cent.
 INDEX_TICKS = ((3.0, 0.05), (math.inf, 0.10))
 TEXTBOOK_TICK = 0.01
-#: The quote inputs' format: cents, as the chain quotes them; and their width, px: a seven-character price
-#: ("1,606.90") with the steppers. Stretched, they ran 300 to 615 px wide on a laptop.
-PRICE_FORMAT = "%.2f"
+#: The quote inputs' width, px: a seven-character price ("1,606.90") with the steppers. Stretched, they ran 300 to
+#: 615 px wide on a laptop. They show cents, as the chain quotes them (finer for a sub-dime textbook contract).
 PRICE_WIDTH = 150
 #: Half the chart's vol range about the mid's implied vol (:func:`chart_window`): 1 vol point, where an SPX
 #: month's 0.17-point spread puts the bid and the ask about 20 px apart on the 360 px chart.
@@ -205,11 +204,25 @@ def render(inputs: Inputs) -> None:
     # at 40.01, below the bound, an error on opening the tab.
     # Nor at or above the cap: at 500% vol over five years the call is worth 99.999998 on a spot of 100, which would
     # round to the cap, 100.00.
-    floor_cents = math.ceil(lower * 100 - 1e-9) / 100
-    cap_cents = math.floor(upper * 100 - 1e-9) / 100
+    # A sub-dime textbook contract is quoted to two significant digits of its cap (components.cents_places): on a
+    # spot and strike of $0.01 the bounds are 0.00049 and 0.01, and in cents the price started at 0.00, below the
+    # floor, with an error that read "0.00 is below the floor $0.00".
+    places = 2 if listed else cents_places(upper)
+    unit = 10.0**-places
+    floor_cents = round(math.ceil(round(lower / unit, 6)) * unit, places)
+    cap_cents = round(math.floor(round(upper / unit, 6)) * unit, places)
+    if cap_cents >= upper:  # the cap itself is no price: on a spot of 1e7 a cent below it, not 10,000,000.00
+        cap_cents = round(cap_cents - unit, places)
 
     def cents(value: float) -> float:
-        return min(max(round(value, 2), floor_cents), cap_cents)
+        if floor_cents > cap_cents:  # no price on the grid lies inside the bounds: the model value, unrounded
+            return value
+        return min(max(round(value, places), floor_cents), cap_cents)
+
+    price_format = f"%.{places}f"
+
+    def step(price: float) -> float:
+        return tick(price, listed) if places == 2 else unit
 
     if single:
         start = cents(model_value) if quote is None else quote.ask if offer_only else quote.mid
@@ -217,8 +230,8 @@ def render(inputs: Inputs) -> None:
             "Price",
             min_value=0.0,
             value=float(start),
-            step=tick(start, listed),
-            format=PRICE_FORMAT,
+            step=step(start),
+            format=price_format,
             key=current_key("iv_price|", f"iv_price|{identity}"),
             persist_state="session",
             width=PRICE_WIDTH,
@@ -232,8 +245,8 @@ def render(inputs: Inputs) -> None:
             "Bid",
             min_value=0.0,
             value=None if bid0 is None else float(bid0),
-            step=tick(ask0 if bid0 is None else bid0, listed),
-            format=PRICE_FORMAT,
+            step=step(ask0 if bid0 is None else bid0),
+            format=price_format,
             key=current_key("iv_bid|", f"iv_bid|{identity}"),
             persist_state="session",
             placeholder="no bid",
@@ -244,8 +257,8 @@ def render(inputs: Inputs) -> None:
             "Ask",
             min_value=0.0,
             value=float(ask0),
-            step=tick(ask0, listed),
-            format=PRICE_FORMAT,
+            step=step(ask0),
+            format=price_format,
             key=current_key("iv_ask|", f"iv_ask|{identity}"),
             persist_state="session",
             width=PRICE_WIDTH,
@@ -264,29 +277,28 @@ def render(inputs: Inputs) -> None:
     ]
     errors = []
     for s in solved:
+        shown = premium(s.price, places)
         if s.problem == "below":
-            errors.append(
-                f"{s.label} {premium(s.price)} is below the no-arbitrage floor {money(lower, 2)} ({floor_name})"
-            )
+            errors.append(f"{s.label} {shown} is below the no-arbitrage floor {money(lower, places)} ({floor_name})")
         elif s.problem == "above":
-            errors.append(f"{s.label} {premium(s.price)} is at or above the no-arbitrage cap {money(upper, 2)}")
+            errors.append(f"{s.label} {shown} is at or above the no-arbitrage cap {money(upper, places)}")
         elif s.problem == "below_zero_vol":
             errors.append(
-                f"{s.label} {premium(s.price)} is below {money(model_price(0.0), 2)}, the American value at zero vol, "
-                "the least any vol gives"
+                f"{s.label} {shown} is below {money(model_price(0.0), places)}, the American value at zero vol, the "
+                "least any vol gives"
             )
         elif s.problem == "no_time_value":
             st.warning(_no_time_value_text(s.price, lower, max(S, K), american, option_type))
         elif s.problem:
-            errors.append(f"{s.label} {premium(s.price)}: {s.problem}")
+            errors.append(f"{s.label} {shown}: {s.problem}")
     if len(prices) == 3 and prices[0][1] > prices[2][1]:
-        errors.append(f"the bid {premium(prices[0][1])} is above the ask {premium(prices[2][1])}")
+        errors.append(f"the bid {premium(prices[0][1], places)} is above the ask {premium(prices[2][1], places)}")
     if errors:
         st.error(md("No implied vol: " + "; ".join(errors) + "."))
 
     by_label = {s.label: s for s in solved}
     mid = by_label.get("Mid", by_label.get("Price"))
-    _tiles(inputs, market, by_label, mid, single, american, alo, (lower, upper), floor_name, option_type)
+    _tiles(inputs, market, by_label, mid, single, american, alo, (lower, upper), floor_name, option_type, places)
 
     low, high = chart_window([s.iv for s in solved], math.nan if mid is None else mid.iv, sigma)
     if american and alo:
@@ -395,8 +407,9 @@ def _vega(inputs: Inputs, iv: float, option_type: str, american: bool, alo: bool
     return float(bs.greeks(S, K, T, r, max(iv, 1e-6), q, option_type)["vega"]) / 100
 
 
-def _tiles(inputs, market, by_label, mid, single, american, alo, bounds, floor_name, option_type) -> None:
-    """IV BID, IV MID (IV in single-price mode), IV ASK, SURFACE, VEGA and BOUNDS."""
+def _tiles(inputs, market, by_label, mid, single, american, alo, bounds, floor_name, option_type, places=2) -> None:
+    """IV BID, IV MID (IV in single-price mode), IV ASK, SURFACE, VEGA and BOUNDS, with prices and bounds to
+    ``places`` decimals (more than cents for a sub-dime contract)."""
     lower, upper = bounds
     off = {"delta_color": "off", "delta_arrow": "off"}
 
@@ -409,12 +422,13 @@ def _tiles(inputs, market, by_label, mid, single, american, alo, bounds, floor_n
         if solved is None:
             return (label, MISSING, {"help": "Single price: no bid or ask to invert."})
         if np.isfinite(solved.iv):
-            return (label, vol(solved.iv), {"help": f"Implied vol of {premium(solved.price)}."})
+            return (label, vol(solved.iv), {"help": f"Implied vol of {premium(solved.price, places)}."})
+        shown = premium(solved.price, places)
         why = {
-            "below": f"{premium(solved.price)} is below the no-arbitrage floor {money(lower, 2)} ({floor_name}).",
-            "above": f"{premium(solved.price)} is at or above the no-arbitrage cap {money(upper, 2)}.",
-            "no_time_value": f"{premium(solved.price)} has no time value.",
-            "below_zero_vol": f"{premium(solved.price)} is below the American value at zero vol.",
+            "below": f"{shown} is below the no-arbitrage floor {money(lower, places)} ({floor_name}).",
+            "above": f"{shown} is at or above the no-arbitrage cap {money(upper, places)}.",
+            "no_time_value": f"{shown} has no time value.",
+            "below_zero_vol": f"{shown} is below the American value at zero vol.",
         }.get(solved.problem, f"No implied vol: {solved.problem}.")
         return (label, MISSING, {"help": md(why)})
 
@@ -468,9 +482,11 @@ def _tiles(inputs, market, by_label, mid, single, american, alo, bounds, floor_n
             "Bounds",
             state,
             {
-                "delta": f"floor {premium(lower)}",
+                "delta": f"floor {premium(lower, places)}",
                 **off,
-                "help": md(f"No-arbitrage bounds: {money(lower, 2)} ({floor_name}) ≤ price < {money(upper, 2)}."),
+                "help": md(
+                    f"No-arbitrage bounds: {money(lower, places)} ({floor_name}) ≤ price < {money(upper, places)}."
+                ),
             },
         )
     )

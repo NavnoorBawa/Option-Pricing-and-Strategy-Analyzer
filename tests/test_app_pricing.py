@@ -1015,3 +1015,20 @@ def test_exercise_boundary_colours_follow_the_option_type():
     call, put = (days, np.array([130.0, 120.0])), (days, np.array([80.0, 90.0]))
     both = charts.exercise_boundary_chart({"Call boundary": call, "Put boundary": put}, 100.0)
     assert {t.name: t.line.color for t in both.data} == {"Call boundary": charts.CALL, "Put boundary": charts.PUT}
+
+
+@pytest.mark.parametrize(("spot", "strike"), [("0.01", "0.01"), ("10000000", "0.01")])
+def test_the_iv_tab_opens_inside_the_bounds_of_an_extreme_contract(new_app, spot, strike):
+    # On a $0.01 spot and strike the bounds are 0.00049 and 0.01: in cents the price started at 0.00 and the tab
+    # opened on "Price 0.00 is below the no-arbitrage floor $0.00". On a spot of 1e7 the cap rounded to itself and
+    # the tab opened on "Price 10,000,000.00 is at or above the cap $10,000,000.00".
+    at = new_app(tab="IV", spot=spot, strike=strike).run()
+    _ok(at)
+    S, K = float(spot), float(strike)
+    lower, upper = max(S - K * math.exp(-0.05), 0.0), S  # q = 0: the call's no-arbitrage bounds, one year at 5%
+    price = next(n for n in at.number_input if n.label == "Price")
+    assert lower <= price.value < upper, (lower, price.value, upper)
+    if S < 0.1:
+        # Quoted to two significant digits of the cap (three decimals), in steps of a tenth of a cent.
+        assert (price.proto.format, price.proto.step) == ("%.3f", pytest.approx(0.001))
+        assert _tiles(at)["Bounds"].delta == f"floor {lower:.3f}"
