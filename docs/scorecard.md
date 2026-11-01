@@ -68,6 +68,18 @@ The numbers a desk would have caught first (docs/improvement-guide.md section 2)
 | Local vol at listed monthly expiries, noise-free SSVI quotes, largest error | 2.1 vol points at the front (secants between expiries) | 0.10 vol point (dw/dT from the smiles' scaling), with a per-maturity error estimate |
 | Tree decay against the closed form (501 steps, σ 20 %, strikes 80–120, 2 days to 10 years) | Not shown | Leisen–Reimer within 4.0e-6; Cox–Ross–Rubinstein within 1.5 % (interpolated trees; the same steps were off by 8.5 %) |
 
+The desk redesign of every tab, measured in Chromium on one machine with one script (v3.0.0 on its only market, the
+textbook one; now on the default synthetic index at 23-Oct-26 16:00):
+
+| Measure (1,440 × 900, sidebar open) | v3.0.0 | Now |
+| --- | --- | --- |
+| Risk tab: page height; top of its first headline number | 4,612 px; 4,092 px (three VaR cards under six charts) | 837 px; 299 px (six pinned tiles, one report at a time) |
+| Risk tab on a 390 px phone: page height | 5,630 px | 1,781 px |
+| Strategy tab: top of the summary tiles; top of the payoff chart | 672 px; 1,002 px | 207 px; 455 px (the spec's limits: 320 and 480) |
+| Surface tab: page height; top of the smile | 2,611 px; 712 px | 1,388 px; 372 px |
+| Time from opening a tab to an idle page, first visit | 2.5 to 6.4 s | 2.6 to 3.4 s |
+| Numbers written by hand in the tabs (the DK-4 lint) | Not checked | None: every tab formats through the number standard, enforced by a test |
+
 ## Free-resources ledger
 
 Everything the project uses is free.
