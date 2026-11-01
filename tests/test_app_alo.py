@@ -577,6 +577,7 @@ def test_without_dividends_only_the_put_has_a_boundary_and_the_caption_says_why(
     assert any("No call boundary: with no dividend yield" in c.value for c in at.caption)
 
 
+@pytest.mark.slow  # 26 s: the fallback values each option on two extrapolated trees, and the diagnostics run theirs
 def test_a_fallback_to_the_tree_is_stated_plainly(new_app):
     # A call at a negative rate without dividends is exercised early; at 500 % volatility over five years the
     # engine's boundary iteration does not converge, and the call is valued on the tree.
