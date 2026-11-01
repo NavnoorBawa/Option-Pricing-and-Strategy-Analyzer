@@ -995,8 +995,10 @@ def test_the_monte_carlo_interval_narrows_as_one_over_root_n(new_app):
     paths = [1562, 6250, 25000, 100000]
     runs = [monte_carlo.price_european(100, 100, 1.0, 0.05, 0.2, 0.0, n_paths=n, seed=42) for n in paths]
     expected = {kind: [2 * 1.96 * run[kind].std_error for run in runs] for kind in ("call", "put")}
-    # With the control variate the call and the put differ by a constant on the same draws: one error, one line.
-    assert expected["call"] == expected["put"] and "Call" not in traces
+    # With the control variate the call and the put differ by a constant on the same draws: one error, one line (equal
+    # to rounding: on Python 3.10 with numpy 1.26 the two standard errors differ in the last bit, 2e-17 of 0.069).
+    np.testing.assert_allclose(expected["call"], expected["put"], rtol=1e-12)
+    assert "Call" not in traces
     assert list(_values(traces["Call and put"]["x"])) == paths
     np.testing.assert_allclose(_values(traces["Call and put"]["y"]), expected["call"], rtol=1e-12)
     guide = _values(traces["1/√N"]["y"])
