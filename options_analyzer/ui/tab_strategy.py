@@ -124,7 +124,7 @@ class Position:
         phone); under the textbook market the legs' labels."""
         if self.book is not None and self.book.front is not None:  # the index: listed expiries, legs as a desk writes
             live = self.book.live
-            dated = len({p.label for p in live if p.kind != "stock"}) > 1
+            dated = len({p.expiry for p in live if p.kind != "stock"}) > 1
             parts = [_leg_short(p, dated) for p in live]
             size = f"{number(self.contracts, 0)} × {number(self.multiplier, 0)}"
             return md(f"**{self.strategy.name}** — {' / '.join(parts)} · {size}")

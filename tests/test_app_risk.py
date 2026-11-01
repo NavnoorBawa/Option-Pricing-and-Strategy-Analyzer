@@ -7,11 +7,13 @@ written here from the textbook formulas (scipy's normal distribution, calls and 
 published surface gives at its strike and expiry (``surface_state.publish(context).vol(K, expiry)``) and at the carry
 of that expiry's parity forward and discount factor (``market.carry``): not against the package's pricer.
 
-The spec's example numbers (3.3) are of this position at this valuation time but were measured on an earlier fit.
-Those this build reproduces are asserted as the spec writes them: vega −$306 with 1M −$225, Θ +$41 with BE 0.77% vs
-0.81%, and the worst grid cell at +10% · −10 vp. The rest moved with the fit (the tab's $Δ −$18,871 against the
-spec's −$19,525, Γ P&L 1% −$69 against −$68, the worst grid −$7,683 against −$7,663, the max loss −$7,765 against
-−$7,760, the FINRA requirement −$3,141 at +6% against −$3,160), and are this build's goldens, each recomputed here.
+The spec's example numbers (3.3, its measured goldens) are of this position at this valuation time. Those this build
+reproduces are asserted as the spec writes them: vega −$306 with 1M −$225, Θ +$41 with BE 0.77% vs 0.81%, and the
+worst grid cell at +10% · −10 vp. The others differ, and the spec does not record how they were computed (its $Δ is
+of 3.37 index units of delta, against the 3.25 of the legs at their own surface vols here): the tab's $Δ −$18,871
+against the spec's −$19,525, Γ P&L 1% −$69 against −$68, the worst grid −$7,683 against −$7,663, the max loss
+−$7,765 against −$7,760, the FINRA requirement −$3,141 against −$3,160. The goldens below are this build's, each
+recomputed here.
 Under the textbook preset the Strategy tab's default is still version 2's 100 / 110 call spread at the flat sidebar
 vol, and its goldens are unchanged.
 """
@@ -210,7 +212,7 @@ def test_only_the_selected_report_computes(monkeypatch):
 def test_the_default_tiles_are_the_closed_form_values(index):
     # $Δ = Δ·S, Γ P&L 1% = ½Γ(0.01S)², vega per vol point, Θ = ∂V/∂t ÷ 365, each leg at its own surface vol (12.06%
     # for the 6,250 call to 20.56% for the 5,300 put; the ATMF vol, 15.52%, is no leg's). Tolerance: the tile's own
-    # rounding (whole dollars). Vega and Θ are the spec's; $Δ and Γ P&L 1% moved with the fit (module docstring).
+    # rounding (whole dollars). Vega and Θ are the spec's; $Δ and Γ P&L 1% differ from it (module docstring).
     at = _risk()
     tiles = _tiles(at)
     delta, gamma, vega, theta = index.greeks()
@@ -258,7 +260,7 @@ def test_the_theta_tile_gives_the_breakeven_move_against_the_implied_move(index)
     be = 0.01 * math.sqrt(abs(theta / 365) / abs(0.5 * gamma * (0.01 * index.s) ** 2))
     assert _tiles(at)["Θ ($/day)"].delta == f"BE {be:.2%} vs {index.atm / math.sqrt(365):.2%}" == "BE 0.77% vs 0.81%"
     # Θ to the next session (Mon 26-Oct 16:00, three calendar days) by full revaluation, in the help: +$124.69
-    # (the spec's +$126 moved with the fit).
+    # (the spec's +$126 differs).
     decay = index.value(t=index.t - WEEKEND) - index.value()
     assert f"{abs(decay):,.2f}" == "124.69" and f"{abs(decay):,.2f}" in _tiles(at)["Θ ($/day)"].help
 
@@ -300,7 +302,7 @@ def test_the_worst_grid_and_worst_stress_tiles(index):
     tiles = _tiles(at)
     grid = _desk_grid(index)
     worst = min(grid.values())
-    # The spec's cell (+10%, −10 vp), now −$7,683: the short call spread at its widest, its legs at their lowest vols.
+    # The spec's cell (+10%, −10 vp), now −$7,683: spot at 6,380, past both calls, every leg's vol 10 points down.
     assert tiles["Worst grid"].value == tab_risk.dollars(worst) == "−$7,683"
     (x, dv) = min(grid, key=grid.get)
     assert (x, dv) == (10.0, -10.0)
@@ -318,9 +320,10 @@ def test_the_worst_grid_and_worst_stress_tiles(index):
 
 
 def test_ties_in_the_worst_grid_go_to_the_smallest_spot_move(index):
-    # The 5,815 / 5,915 call spread on 20-Nov-26 AM (the index's default before the iron condor, by link): at −10 vp
-    # it is worth almost nothing from −5% down, so four cells equal its loss to the dollar. The tile names the one
-    # with the smallest spot move, not the first in row order. Each leg at its own surface vol on 20-Nov.
+    # The 5,815 / 5,915 call spread on 20-Nov-26 AM (the index's default before the iron condor, by link), each leg
+    # at its own surface vol there (15.44% and 14.19%): far enough down it is worth nothing to the dollar, so four
+    # cells equal its loss (−5%, −7.5% and −10% at −10 vp, −10% at −5 vp). The tile names the one with the smallest
+    # spot move, not the first in row order.
     key = Expiry(date(2026, 11, 20), "AM")
     at = _risk(strategy="Bull Call Spread", strategy_expiry="2026-11-20 AM")
     t = index.published.maturity(key)
@@ -350,7 +353,7 @@ def test_ties_in_the_worst_grid_go_to_the_smallest_spot_move(index):
 def test_the_position_line_names_legs_expiry_size_and_max_loss(index):
     at = _risk()
     # The condor's maximum loss at expiry is a wing's width less the credit taken at the chain's mids (the legs'
-    # entries): 100 × (100 − 22.35). The spec's −$7,760 was of a credit of 22.40.
+    # entries): 100 × (100 − 22.35). The spec's −$7,760 would be a credit of 22.40.
     credit = index.credit()
     loss = UNITS * (max(5400.0 - 5300.0, 6250.0 - 6150.0) - credit)
     assert round(credit, 2) == 22.35
@@ -614,7 +617,7 @@ def test_the_finra_grid_and_its_illustrative_requirement(index):
     assert len(heat["x"]) == 10
     assert heat["x"][0].endswith("(−8%)") and heat["x"][-1].endswith("(+6%)")
     # Ten points from −8% to +6% (FINRA 4210(g)(2)(F), SPX), vols unchanged: the condor loses most at +6%, where its
-    # short call spread is nearer (the spec's −$3,160 moved with the fit).
+    # short call spread is nearer (the spec's −$3,160 differs).
     today = index.value()
     points = np.linspace(-0.08, 0.06, 10)
     pnl = [index.value(s=index.s * (1 + x)) - today for x in points]
@@ -835,7 +838,7 @@ def test_the_vega_report_buckets_add_up_to_the_vega_tile(index):
     assert table["Expiry"].tolist() == ["30–60d", "Total"]
     assert list(table.columns) == ["Expiry", "10Δp", "25Δp", "ATM", "25Δc", "10Δc", "Total"]
     # The 18-Dec legs (55.7 days) sit in 30–60d. By delta at their own vols, the 5,300 and 5,400 puts (put deltas
-    # N(−d1) 0.08 and 0.15) both go to 10Δp and the 6,150 and 6,250 calls (0.86 and 0.94) both to 10Δc: each pair is
+    # N(−d1) 0.11 and 0.15) both go to 10Δp and the 6,150 and 6,250 calls (0.86 and 0.93) both to 10Δc: each pair is
     # a long wing and a short body, whose vegas net to −$102 and −$204.
     buckets = {k: _bucket(kind, k, index, v) for (_, kind, k), v in zip(LEGS, index.vols, strict=True)}
     assert buckets == {5300.0: "10Δp", 5400.0: "10Δp", 6150.0: "10Δc", 6250.0: "10Δc"}

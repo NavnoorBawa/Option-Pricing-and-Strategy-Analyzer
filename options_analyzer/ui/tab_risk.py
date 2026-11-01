@@ -1209,7 +1209,8 @@ def _var(book: Book) -> None:
     # alone (and by fatter tails under a Student-t or GARCH model). Against the spot-plus-vol VaR the gap would mix
     # in the vega risk: on the default iron condor at the pinned valuation time (ASOF in tests/_apptest.py), +$245
     # against the full VaR (−$480, implied vol moving) but +$11 against the spot-only one (−$714; DGT −$725).
-    # The amounts shown are subtracted (whole dollars, or cents below $1,000), so that the cards add up on screen.
+    # The amounts shown are subtracted (whole dollars, or cents where a gap is below $10), so that the cards add up on
+    # screen.
     gap = None if dg is None else difference(-spot_var, -dg.var, cents)
     comparator = f"Spot-only VaR {MINUS} DGT VaR" if with_vol else f"VaR {MINUS} DGT VaR"
     cards += [
