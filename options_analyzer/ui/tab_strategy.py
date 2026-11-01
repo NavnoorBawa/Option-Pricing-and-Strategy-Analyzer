@@ -1257,7 +1257,7 @@ def _chart(ctx: _Context, shifts: whatif.Shifts, range_choice: str, dated: list[
     if shifts.spot:
         x = spot * (1 + shifts.spot / 100)
         y = float(strat.pnl(shifted, shifted_market, x, t0, carry)) * units
-        scenario = (x, y, f"Scenario {_level_text(x, spot)}: {_signed_money(y)}")
+        scenario = (x, y, f"Scenario {_level_text(x, spot)}: {_signed_money(y)} vs entry")
     note = " · ".join(
         part
         for part in (

@@ -407,7 +407,7 @@ def test_tiles_follow_the_what_if_state(index):
     delta = index.greeks(s, t, vols)[0]
     assert _tiles(at)["$Δ"].value == tab_risk.dollars(delta * s)
     pnl = index.value(s, t, vols=vols) - index.value()
-    assert _line(at).endswith(f"what-if P&L {tab_risk.dollars(pnl)}".replace("$", "\\$"))
+    assert f"what-if P&L {tab_risk.dollars(pnl)} vs value now".replace("$", "\\$") in _line(at)
     assert any("T+5 · Fri 30‑Oct‑26" in s.label for s in at.slider if s.key == "wd")
 
 
@@ -424,11 +424,32 @@ def test_the_what_if_vol_shift_reaches_each_leg_by_its_mode(index, mode):
     assert tiles["$Δ"].value == tab_risk.dollars(delta * index.s)
     assert tiles["Vega ($/vp)"].value == tab_risk.dollars(vega / 100)
     pnl = index.value(vols=vols) - index.value()
-    assert _line(at).endswith(f"what-if P&L {tab_risk.dollars(pnl)}".replace("$", "\\$"))
+    assert f"what-if P&L {tab_risk.dollars(pnl)} vs value now".replace("$", "\\$") in _line(at)
     # Not the other mode's shift: relative moves each leg by all of the 10%, 1M-scaled by 8.57% of it.
     other = 1.0 if mode != "relative" else _damp(index.t)
     pnl = index.value(vols=[v * (1 + 0.10 * other) for v in index.vols]) - index.value()
-    assert not _line(at).endswith(f"what-if P&L {tab_risk.dollars(pnl)}".replace("$", "\\$"))
+    assert f"what-if P&L {tab_risk.dollars(pnl)} vs value now".replace("$", "\\$") not in _line(at)
+
+
+def test_one_scenario_reads_against_the_value_now_and_against_the_entry(index):
+    # ?ws=-2&wv=3&wd=5&wr=25 on the default iron condor: the Strategy chart marked "Scenario 5,684: −$400.61" (against
+    # the entry at mid) and the Risk line read "what-if P&L −$388" (against today's value), both under the same strip
+    # and neither saying against what. Both now name their basis, and Risk shows both; they differ by the T+0 P&L, the
+    # entry at the chain's mids against the legs' value now (written here from the closed form).
+    query = {"ws": -2, "wv": 3, "wd": 5, "wr": 25}
+    s, t, r, vols = index.s * 0.98, index.t - WEEK, index.r + 0.0025, [v + 0.03 for v in index.vols]
+    later = index.value(s, t, r, vols)
+    now, entry = later - index.value(), later + UNITS * index.credit()
+    assert round(now - entry, 2) == round(-index.value() - UNITS * index.credit(), 2) == 12.77  # the T+0 edge
+    line = _line(_risk(**query)).replace("\\$", "$")
+    assert line.endswith(f"what-if P&L {tab_risk.dollars(now)} vs value now, {tab_risk.dollars(entry)} vs entry")
+    assert (tab_risk.dollars(now), tab_risk.dollars(entry)) == ("−$388", "−$401")
+    strategy = _chart(_ok(make_app(preset=None, asof=ASOF, tab="Strategy", **query).run(timeout=240)), "payoff_chart")
+    marker = next(t for t in strategy["data"] if (t.get("name") or "").startswith("Scenario"))
+    assert marker["y"] == [pytest.approx(entry, abs=1e-6)]
+    labels = [a["text"] for a in strategy["layout"]["annotations"] if "Scenario" in a.get("text", "")]
+    labels += [str(marker.get("text", "")), str(marker.get("name", ""))]
+    assert any(text.endswith(f"{signed(entry, 2, '$')} vs entry") for text in labels), labels
 
 
 # --- the reports ------------------------------------------------------------------------------------------------------

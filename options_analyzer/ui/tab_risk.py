@@ -582,10 +582,27 @@ def position_line(book: Book, max_loss: float, within: tuple[float, float] | Non
     # −$4,550 with r cut below zero, against a max loss of −$4,548 at expiry and today's rates).
     parts = [book.position.describe(), expiry_text(book), md(f"max loss at expiry {loss}")]
     if book.shifts.active:
-        today = float(strat.position_value(book.position.strategy, book.position.market))
-        now = float(strat.position_value(book.strategy, book.market))
-        parts.append(md(f"what-if P&L {dollars(book.units * (now - today))}"))
+        parts.append(md(f"what-if P&L {dollars(what_if_pnl(book))} vs value now, {dollars(what_if_pnl(book, True))} "
+                        "vs entry"))  # fmt: skip
     return " · ".join(part for part in parts if part)
+
+
+def what_if_pnl(book: Book, entry: bool = False) -> float:
+    """The position's P&L ($) at the what-if state: against its value now (the tab's basis, as every report), or with
+    ``entry`` against what was paid, the commissions and the carry included, as the Strategy tab's chart marks the
+    scenario. The two differ by the T+0 P&L, the entry's edge against the value now: one scenario read −$388 on Risk
+    and −$400.61 on Strategy (default iron condor, ?ws=-2&wv=3&wd=5&wr=25), both named "what-if" and neither saying
+    against what."""
+    position = book.position
+    now = float(strat.position_value(book.strategy, book.market))
+    if not entry:
+        return book.units * (now - float(strat.position_value(position.strategy, position.market)))
+    paid = strat.entry_cost(position.strategy, position.market)
+    if position.carry:  # financed at the what-if rate to the what-if date, as strategies.pnl finances it
+        front = strat.front_expiry(position.strategy, position.market)
+        t = min(clock.year_fraction(book.as_of, book.scenario_time()), front) if book.shifts.sessions else 0.0
+        paid *= math.exp(book.market.rate * t)
+    return book.units * (now - paid)
 
 
 # --- UI-10: a scenario cell into the what-if strip ------------------------------------------------------------------
