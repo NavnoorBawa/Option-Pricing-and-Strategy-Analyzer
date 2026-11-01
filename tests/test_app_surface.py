@@ -272,6 +272,28 @@ def test_the_call_delta_axis_runs_from_90_to_10_delta(new_app):
     assert hi < 25  # the 20-Nov-26 smile between 0.90 and 0.10 delta (about 12% to 21% at the mids)
 
 
+def test_the_call_delta_axis_is_the_spot_delta_at_each_strikes_fitted_vol():
+    # The reference: e^{−qT} N(d₁) = F·DF/S · N(d₁), d₁ = (ln F/K + ½σ²T)/(σ√T), with each strike's vol read off the
+    # surface and the expiry's parity forward and discount factor; 1e-12 is a few ulps of N(d₁).
+    context = mk.index_market(AS_OF)
+    rows = tab_surface._chain_rows(context.fit, *mk.INDEX_CARRY, iso=True)
+    prov = exports.Provenance(exports.SYNTHETIC, exports.SYNTHETIC_SOURCE, AS_OF, "Black-76", seed=0)
+    shown = tab_surface.Shown(
+        tab_surface.CHAIN, context.surface, context.fit, rows, *mk.INDEX_CARRY, AS_OF, "", (), prov, True
+    )
+    for focus in (0, 3, len(rows) - 1):
+        row = rows.iloc[focus]
+        T, F, DF = float(row["maturity"]), float(row["forward"]), float(row["discount_factor"])
+        strikes = F * np.exp(np.linspace(-0.15, 0.08, 12))
+        sigma = np.array([context.surface.implied_vol_at(k / context.spot, T, extrapolate=True) for k in strikes])
+        d1 = (np.log(F / strikes) + 0.5 * sigma**2 * T) / (sigma * np.sqrt(T))
+        expected = F * DF / context.spot * np.array([0.5 * math.erfc(-d / math.sqrt(2)) for d in d1])
+        inside = np.isfinite(sigma)  # the surface reads no vol beyond a short expiry's reach; the axis's wings do
+        assert inside.sum() >= 9
+        delta = tab_surface._call_delta(shown, focus)(strikes)
+        np.testing.assert_allclose(delta[inside], expected[inside], rtol=0, atol=1e-12)
+
+
 def test_the_smile_draws_one_bid_ask_bar_per_used_quote_and_dashes_the_extrapolated_fit(index):
     smile = _smile(index)
     bars = [t for t in smile["data"] if "bid–ask" in (t.get("name") or "")]

@@ -31,7 +31,6 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 import streamlit as st
-from scipy.special import ndtr
 
 from .. import clock
 from .. import vol_surface as vs
@@ -992,17 +991,13 @@ def _smile_data(shown: Shown, focus: int) -> charts_surface.SmileData:
 
 
 def _call_delta(shown: Shown, focus: int):
-    """Strikes to their call delta (spot convention) at the focus expiry's fitted vol, for the Call Δ axis."""
+    """Strikes to their call delta (spot convention) at the focus expiry's fitted vol, for the Call Δ axis: the
+    expiry table's own delta (``dg._call_delta``, its confidence measure's), read at the strikes' ln(K/F)."""
     surface, row = shown.surface, shown.rows.iloc[focus]
     T, forward = float(row["maturity"]), float(row["forward"])
-    carry = forward * float(row["discount_factor"]) / (surface.spot if surface.spot is not None else forward)
 
     def delta(strikes):
-        y = np.log(np.asarray(strikes, dtype=float) / forward)
-        w = dg.smile_variance(surface, T, y)[0]
-        with np.errstate(all="ignore"):
-            root = np.sqrt(w)
-            return carry * ndtr(-y / root + 0.5 * root)
+        return dg._call_delta(surface, T, np.log(np.asarray(strikes, dtype=float) / forward), shown.rate)
 
     return delta
 
