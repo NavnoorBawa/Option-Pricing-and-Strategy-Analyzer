@@ -94,8 +94,11 @@ DATED = {"Dated ⅓": 1 / 3, "Dated ⅔": 2 / 3}
 #: theme's 1.625rem, so that they fit beside the open sidebar at 1,440 px (spec 3.2's chart above the fold needs the
 #: room); once they wrap (a laptop, a phone) they take the theme's size.
 TILE_VALUE_PX = 19.25
-#: Points of the P&L chart's spot grid.
-GRID_POINTS = 600
+#: Points of the P&L chart's spot grid, besides the strikes in view (the expiry curve's kinks, so it stays exact).
+#: Seven traces carry their own x and y, so the grid sets the figure's size: at 600 points the default condor's chart
+#: was 106 KB of a 143 KB what-if rerun (the budget is 60 KB); at 301 it is 60 KB, and its curves differ from the
+#: 600-point ones by at most 0.004% of their range (measured on the default condor with a +0.5% what-if).
+GRID_POINTS = 301
 #: The chart's two price ranges at the front expiry: ±1σ (68.27%, "68%") and the central 95%, 2.5% to 97.5%, as the
 #: Pricing tab's RN 95%. The second was ±2σ, 95.45%, under the name "RN 95%": 4,894–6,388 on 18-Dec-26 where the
 #: smile's 2.5% and 97.5% quantiles are 4,921 and 6,379.

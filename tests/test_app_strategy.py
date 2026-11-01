@@ -446,6 +446,18 @@ def test_the_table_view(published):
     assert z_pct.min() == pytest.approx(-100.0, abs=1e-9)  # the worst cell at expiry is the max loss
 
 
+def test_the_pnl_chart_fits_the_rerun_budget():
+    # A what-if step resent the P&L chart at 106 KB of a 143 KB rerun (the budget is 60 KB): 600 grid points in seven
+    # traces. At 301 points it is about 60 KB; the bound leaves 5 KB for a longer legend or a scenario marker. The
+    # expiry curve keeps every strike in view, so its kinks are exact.
+    at = _index(ws=0.5)
+    chart = next(c for c in at.get("plotly_chart") if c.proto.id.endswith("payoff_chart"))
+    assert len(chart.proto.spec) < 65_000
+    spec = json.loads(chart.proto.spec)
+    spots = _array(_trace(spec, "Expiry")["x"])
+    assert len(spots) <= tab_strategy.GRID_POINTS + 4 and {5300.0, 5400.0, 6150.0, 6250.0} <= set(spots)
+
+
 def test_the_chart_draws_the_rn_ranges_the_straddle_move_and_the_reference_lines(published):
     at = _index()
     spec = _chart(at, "payoff_chart")
