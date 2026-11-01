@@ -375,6 +375,28 @@ def test_the_profile_defaults_to_value_against_spot_over_ten_percent(index_app):
         tab_pricing.contract(_inputs_of(index_app)).expiry, 0.95
     )
     assert (x[0], x[-1]) == (pytest.approx(lo), pytest.approx(hi))
+    # "RN 95%" holds 95%, not the 95.45% of ±2σ (the Strategy chart's range): P(S_T < K) = 1 + ∂C/∂K / DF, the
+    # Breeden-Litzenberger digital, from Black-76 at the smile's own vol, differenced over ±0.5 point here, reads
+    # 2.5% at the low end and 97.5% at the high one. Tolerance 2e-4: the central difference of a smooth smile over a
+    # 1-point step is good to about 1e-6, and the surface's quantile inversion to its own 1e-4 grid.
+    market = tab_pricing.contract(_inputs_of(index_app))
+    T, F, DF = market.surface.maturity(market.expiry), market.forward, market.discount
+
+    def below(k: float, h: float = 0.5) -> float:
+        call = [_black(F, s, T, DF, market.surface.vol(s, market.expiry).vol, "call") for s in (k - h, k + h)]
+        return 1.0 + (call[1] - call[0]) / (2 * h) / DF
+
+    assert (below(x[0]), below(x[-1])) == (pytest.approx(0.025, abs=2e-4), pytest.approx(0.975, abs=2e-4))
+
+
+def test_the_textbook_rn_range_is_the_lognormal_95_percent_range(app):
+    # Under the textbook market the range is lognormal at the flat vol: F·exp(−σ²T/2 ± z σ√T) with z = Φ⁻¹(0.975).
+    app.segmented_control(key="pr_range").set_value("RN 95%").run()
+    x = _values(_chart(app, "pricing_profile")["data"][0]["x"])
+    F, sigma, T = 100.0 * math.exp(0.05), 0.20, 1.0
+    z = 1.959963984540054  # Φ⁻¹(0.975)
+    centre = F * math.exp(-0.5 * sigma**2 * T)
+    assert (x[0], x[-1]) == (pytest.approx(centre * math.exp(-z * sigma)), pytest.approx(centre * math.exp(z * sigma)))
 
 
 def _inputs_of(at: AppTest):
